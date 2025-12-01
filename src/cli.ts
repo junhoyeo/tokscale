@@ -18,6 +18,9 @@ import {
 import { readOpenCodeMessages, aggregateOpenCodeByModel } from "./opencode.js";
 import { readClaudeCodeSessions, readCodexSessions } from "./claudecode.js";
 import { readGeminiSessions } from "./gemini.js";
+import { generateGraphData } from "./graph.js";
+import * as fs from "node:fs";
+import type { SourceType } from "./graph-types.js";
 
 interface UsageSummary {
   source: string;
@@ -66,6 +69,21 @@ async function main() {
     .option("--gemini", "Show only Gemini CLI usage")
     .action(async (options) => {
       await showModelReport(options);
+    });
+
+  program
+    .command("graph")
+    .description("Export contribution graph data as JSON")
+    .option("--output <file>", "Write to file instead of stdout")
+    .option("--opencode", "Include only OpenCode data")
+    .option("--claude", "Include only Claude Code data")
+    .option("--codex", "Include only Codex CLI data")
+    .option("--gemini", "Include only Gemini CLI data")
+    .option("--since <date>", "Start date (YYYY-MM-DD)")
+    .option("--until <date>", "End date (YYYY-MM-DD)")
+    .option("--year <year>", "Filter to specific year")
+    .action(async (options) => {
+      await handleGraphCommand(options);
     });
 
   // Default command with options
@@ -395,6 +413,52 @@ async function showMonthlyReport(options: FilterOptions) {
 
   console.log(table.toString());
   console.log(pc.gray(`\n  Total Cost: ${pc.green(formatCurrency(totalCost))}\n`));
+}
+
+interface GraphCommandOptions {
+  output?: string;
+  opencode?: boolean;
+  claude?: boolean;
+  codex?: boolean;
+  gemini?: boolean;
+  since?: string;
+  until?: string;
+  year?: string;
+}
+
+async function handleGraphCommand(options: GraphCommandOptions) {
+  // Determine which sources to include
+  const sources: SourceType[] = [];
+  const hasSourceFilter = options.opencode || options.claude || options.codex || options.gemini;
+
+  if (!hasSourceFilter) {
+    sources.push("opencode", "claude", "codex", "gemini");
+  } else {
+    if (options.opencode) sources.push("opencode");
+    if (options.claude) sources.push("claude");
+    if (options.codex) sources.push("codex");
+    if (options.gemini) sources.push("gemini");
+  }
+
+  // Generate graph data
+  const data = await generateGraphData({
+    sources,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  });
+
+  const jsonOutput = JSON.stringify(data, null, 2);
+
+  // Output to file or stdout
+  if (options.output) {
+    fs.writeFileSync(options.output, jsonOutput, "utf-8");
+    console.error(pc.green(`✓ Graph data written to ${options.output}`));
+    console.error(pc.gray(`  ${data.contributions.length} days, ${data.summary.sources.length} sources, ${data.summary.models.length} models`));
+    console.error(pc.gray(`  Total: ${formatCurrency(data.summary.totalCost)}`));
+  } else {
+    console.log(jsonOutput);
+  }
 }
 
 main().catch(console.error);
