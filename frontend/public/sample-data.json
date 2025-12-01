@@ -1,0 +1,1314 @@
+{
+  "meta": {
+    "generatedAt": "2025-12-01T14:42:08.173Z",
+    "version": "1.0.0",
+    "dateRange": {
+      "start": "2025-11-06",
+      "end": "2025-12-01"
+    }
+  },
+  "summary": {
+    "totalTokens": 1415779246,
+    "totalCost": 2417.0899293499997,
+    "totalDays": 18,
+    "activeDays": 17,
+    "averagePerDay": 142.18176054999998,
+    "maxCostInSingleDay": 522.1466327000019,
+    "sources": [
+      "claude",
+      "gemini",
+      "opencode"
+    ],
+    "models": [
+      "claude-opus-4-1-20250805",
+      "claude-haiku-4-5-20251001",
+      "claude-sonnet-4-5-20250929",
+      "<synthetic>",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "claude-opus-4-5",
+      "big-pickle",
+      "claude-haiku-4-5",
+      "claude-sonnet-4-5",
+      "claude-opus-4-5-20251101",
+      "claude-opus-4-20250514",
+      "claude-3-5-sonnet-20241022",
+      "claude-opus-4-5-high"
+    ]
+  },
+  "years": [
+    {
+      "year": "2025",
+      "totalTokens": 1415779246,
+      "totalCost": 2417.0899293499997,
+      "range": {
+        "start": "2025-11-06",
+        "end": "2025-12-01"
+      }
+    }
+  ],
+  "contributions": [
+    {
+      "date": "2025-11-06",
+      "totals": {
+        "tokens": 101364770,
+        "cost": 183.2395713500006,
+        "messages": 1595
+      },
+      "intensity": 2,
+      "tokenBreakdown": {
+        "input": 152926,
+        "output": 253944,
+        "cacheRead": 97450677,
+        "cacheWrite": 3507223,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 3421,
+            "output": 91902,
+            "cacheRead": 85042999,
+            "cacheWrite": 2404368,
+            "reasoning": 0
+          },
+          "cost": 179.5903635000003,
+          "messages": 1244
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 145871,
+            "output": 161178,
+            "cacheRead": 12397274,
+            "cacheWrite": 1081988,
+            "reasoning": 0
+          },
+          "cost": 3.5439733999999947,
+          "messages": 337
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 3634,
+            "output": 864,
+            "cacheRead": 10404,
+            "cacheWrite": 20867,
+            "reasoning": 0
+          },
+          "cost": 0.10523445000000001,
+          "messages": 9
+        },
+        {
+          "source": "claude",
+          "modelId": "<synthetic>",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 5
+        }
+      ]
+    },
+    {
+      "date": "2025-11-07",
+      "totals": {
+        "tokens": 23335085,
+        "cost": 51.686662749999925,
+        "messages": 429
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 4450,
+        "output": 18810,
+        "cacheRead": 22361086,
+        "cacheWrite": 950739,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1496,
+            "output": 17225,
+            "cacheRead": 22361086,
+            "cacheWrite": 888164,
+            "reasoning": 0
+          },
+          "cost": 51.50901899999993,
+          "messages": 419
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1488,
+            "output": 731,
+            "cacheRead": 0,
+            "cacheWrite": 31304,
+            "reasoning": 0
+          },
+          "cost": 0.13281900000000002,
+          "messages": 5
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1466,
+            "output": 854,
+            "cacheRead": 0,
+            "cacheWrite": 31271,
+            "reasoning": 0
+          },
+          "cost": 0.044824750000000003,
+          "messages": 5
+        }
+      ]
+    },
+    {
+      "date": "2025-11-09",
+      "totals": {
+        "tokens": 5576967,
+        "cost": 12.284587850000005,
+        "messages": 128
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 10057,
+        "output": 41868,
+        "cacheRead": 5109173,
+        "cacheWrite": 415869,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 183,
+            "output": 27367,
+            "cacheRead": 3809012,
+            "cacheWrite": 215911,
+            "reasoning": 0
+          },
+          "cost": 11.817119250000003,
+          "messages": 80
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 8626,
+            "output": 14238,
+            "cacheRead": 1300161,
+            "cacheWrite": 199958,
+            "reasoning": 0
+          },
+          "cost": 0.45977959999999995,
+          "messages": 46
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1248,
+            "output": 263,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.007689,
+          "messages": 2
+        }
+      ]
+    },
+    {
+      "date": "2025-11-10",
+      "totals": {
+        "tokens": 4003403,
+        "cost": 10.821553750000001,
+        "messages": 110
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 3012,
+        "output": 22772,
+        "cacheRead": 3794058,
+        "cacheWrite": 183561,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "<synthetic>",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 2
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 604,
+            "output": 22264,
+            "cacheRead": 3794058,
+            "cacheWrite": 183561,
+            "reasoning": 0
+          },
+          "cost": 10.811715750000003,
+          "messages": 104
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1215,
+            "output": 246,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.007335,
+          "messages": 2
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1193,
+            "output": 262,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.002503,
+          "messages": 2
+        }
+      ]
+    },
+    {
+      "date": "2025-11-12",
+      "totals": {
+        "tokens": 5962376,
+        "cost": 7.7746181,
+        "messages": 150
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 94921,
+        "output": 98313,
+        "cacheRead": 5046034,
+        "cacheWrite": 723108,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 93536,
+            "output": 73069,
+            "cacheRead": 3935241,
+            "cacheWrite": 581951,
+            "reasoning": 0
+          },
+          "cost": 1.5798438500000007,
+          "messages": 108
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1107,
+            "output": 315,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.008046,
+          "messages": 2
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 278,
+            "output": 24929,
+            "cacheRead": 1110793,
+            "cacheWrite": 141157,
+            "reasoning": 0
+          },
+          "cost": 6.186728249999998,
+          "messages": 40
+        }
+      ]
+    },
+    {
+      "date": "2025-11-13",
+      "totals": {
+        "tokens": 123294927,
+        "cost": 329.2745696499992,
+        "messages": 2093
+      },
+      "intensity": 3,
+      "tokenBreakdown": {
+        "input": 62657,
+        "output": 911963,
+        "cacheRead": 115583052,
+        "cacheWrite": 6737255,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 17778,
+            "output": 746980,
+            "cacheRead": 107847863,
+            "cacheWrite": 5772971,
+            "reasoning": 0
+          },
+          "cost": 326.3051707499994,
+          "messages": 1841
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 38406,
+            "output": 162038,
+            "cacheRead": 7735189,
+            "cacheWrite": 932950,
+            "reasoning": 0
+          },
+          "cost": 2.7883024,
+          "messages": 239
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 6473,
+            "output": 2945,
+            "cacheRead": 0,
+            "cacheWrite": 31334,
+            "reasoning": 0
+          },
+          "cost": 0.18109650000000002,
+          "messages": 11
+        },
+        {
+          "source": "claude",
+          "modelId": "<synthetic>",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 2
+        }
+      ]
+    },
+    {
+      "date": "2025-11-14",
+      "totals": {
+        "tokens": 158320988,
+        "cost": 442.4522324999994,
+        "messages": 2105
+      },
+      "intensity": 4,
+      "tokenBreakdown": {
+        "input": 64665,
+        "output": 784648,
+        "cacheRead": 148284513,
+        "cacheWrite": 9187162,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "<synthetic>",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 24
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 17748,
+            "output": 748872,
+            "cacheRead": 145251983,
+            "cacheWrite": 8920833,
+            "reasoning": 0
+          },
+          "cost": 441.5752132499993,
+          "messages": 1969
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 43258,
+            "output": 35002,
+            "cacheRead": 3032530,
+            "cacheWrite": 266329,
+            "reasoning": 0
+          },
+          "cost": 0.8544322500000001,
+          "messages": 106
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 3659,
+            "output": 774,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.022587,
+          "messages": 6
+        }
+      ]
+    },
+    {
+      "date": "2025-11-17",
+      "totals": {
+        "tokens": 112144721,
+        "cost": 188.35397904999974,
+        "messages": 1456
+      },
+      "intensity": 2,
+      "tokenBreakdown": {
+        "input": 23840,
+        "output": 614532,
+        "cacheRead": 102567858,
+        "cacheWrite": 8938491,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-1-20250805",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 7514,
+            "output": 258302,
+            "cacheRead": 41299347,
+            "cacheWrite": 3309292,
+            "reasoning": 0
+          },
+          "cost": 143.48360549999984,
+          "messages": 655
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 13284,
+            "output": 355628,
+            "cacheRead": 61268511,
+            "cacheWrite": 5629199,
+            "reasoning": 0
+          },
+          "cost": 44.864321549999985,
+          "messages": 797
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 3042,
+            "output": 602,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.006052,
+          "messages": 4
+        }
+      ]
+    },
+    {
+      "date": "2025-11-18",
+      "totals": {
+        "tokens": 179337792,
+        "cost": 108.85438469999976,
+        "messages": 1166
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 17362,
+        "output": 451813,
+        "cacheRead": 166864781,
+        "cacheWrite": 12003836,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 15271,
+            "output": 450880,
+            "cacheRead": 166864781,
+            "cacheWrite": 12003836,
+            "reasoning": 0
+          },
+          "cost": 108.84762869999976,
+          "messages": 1163
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 2091,
+            "output": 933,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.006756,
+          "messages": 3
+        }
+      ]
+    },
+    {
+      "date": "2025-11-19",
+      "totals": {
+        "tokens": 11698442,
+        "cost": 11.000558449999989,
+        "messages": 120
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 4242,
+        "output": 33798,
+        "cacheRead": 9800651,
+        "cacheWrite": 1859751,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 2785,
+            "output": 33000,
+            "cacheRead": 9800651,
+            "cacheWrite": 1859751,
+            "reasoning": 0
+          },
+          "cost": 10.995111449999989,
+          "messages": 118
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1457,
+            "output": 798,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.0054470000000000005,
+          "messages": 2
+        }
+      ]
+    },
+    {
+      "date": "2025-11-21",
+      "totals": {
+        "tokens": 0,
+        "cost": 0,
+        "messages": 3
+      },
+      "intensity": 0,
+      "tokenBreakdown": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "claude",
+          "modelId": "<synthetic>",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 3
+        }
+      ]
+    },
+    {
+      "date": "2025-11-24",
+      "totals": {
+        "tokens": 5693658,
+        "cost": 2.9833136500000004,
+        "messages": 86
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 3145809,
+        "output": 28432,
+        "cacheRead": 2505118,
+        "cacheWrite": 0,
+        "reasoning": 14299
+      },
+      "sources": [
+        {
+          "source": "gemini",
+          "modelId": "gemini-2.5-pro",
+          "providerId": "google",
+          "tokens": {
+            "input": 1750801,
+            "output": 24731,
+            "cacheRead": 1371280,
+            "cacheWrite": 0,
+            "reasoning": 11200
+          },
+          "cost": 2.5478112500000005,
+          "messages": 62
+        },
+        {
+          "source": "gemini",
+          "modelId": "gemini-2.5-flash",
+          "providerId": "google",
+          "tokens": {
+            "input": 1395008,
+            "output": 3701,
+            "cacheRead": 1133838,
+            "cacheWrite": 0,
+            "reasoning": 3099
+          },
+          "cost": 0.4355024,
+          "messages": 24
+        }
+      ]
+    },
+    {
+      "date": "2025-11-25",
+      "totals": {
+        "tokens": 5244254,
+        "cost": 2.99043875,
+        "messages": 40
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 2901747,
+        "output": 10533,
+        "cacheRead": 2329918,
+        "cacheWrite": 0,
+        "reasoning": 2056
+      },
+      "sources": [
+        {
+          "source": "gemini",
+          "modelId": "gemini-2.5-flash",
+          "providerId": "google",
+          "tokens": {
+            "input": 792850,
+            "output": 1066,
+            "cacheRead": 635636,
+            "cacheWrite": 0,
+            "reasoning": 191
+          },
+          "cost": 0.2409975,
+          "messages": 12
+        },
+        {
+          "source": "gemini",
+          "modelId": "gemini-2.5-pro",
+          "providerId": "google",
+          "tokens": {
+            "input": 2108897,
+            "output": 9467,
+            "cacheRead": 1694282,
+            "cacheWrite": 0,
+            "reasoning": 1865
+          },
+          "cost": 2.7494412500000003,
+          "messages": 28
+        }
+      ]
+    },
+    {
+      "date": "2025-11-27",
+      "totals": {
+        "tokens": 3609776,
+        "cost": 1.6470974999999999,
+        "messages": 127
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 499898,
+        "output": 33479,
+        "cacheRead": 2951697,
+        "cacheWrite": 124702,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 30,
+            "output": 14451,
+            "cacheRead": 1012570,
+            "cacheWrite": 124702,
+            "reasoning": 0
+          },
+          "cost": 1.6470974999999999,
+          "messages": 34
+        },
+        {
+          "source": "opencode",
+          "modelId": "big-pickle",
+          "providerId": "opencode",
+          "tokens": {
+            "input": 499868,
+            "output": 19028,
+            "cacheRead": 1939127,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 92
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-haiku-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 1
+        }
+      ]
+    },
+    {
+      "date": "2025-11-28",
+      "totals": {
+        "tokens": 155874881,
+        "cost": 133.79964564999986,
+        "messages": 2352
+      },
+      "intensity": 2,
+      "tokenBreakdown": {
+        "input": 237073,
+        "output": 565988,
+        "cacheRead": 142931093,
+        "cacheWrite": 12140727,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "opencode",
+          "modelId": "claude-sonnet-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1443,
+            "output": 162737,
+            "cacheRead": 20702978,
+            "cacheWrite": 1522264,
+            "reasoning": 0
+          },
+          "cost": 14.364767399999998,
+          "messages": 422
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-haiku-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 527,
+            "output": 86472,
+            "cacheRead": 9768706,
+            "cacheWrite": 891958,
+            "reasoning": 0
+          },
+          "cost": 2.5247051000000003,
+          "messages": 233
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 31,
+            "output": 21168,
+            "cacheRead": 4092595,
+            "cacheWrite": 184387,
+            "reasoning": 0
+          },
+          "cost": 3.72807125,
+          "messages": 70
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-5-20251101",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 140143,
+            "output": 218358,
+            "cacheRead": 91079721,
+            "cacheWrite": 7653128,
+            "reasoning": 0
+          },
+          "cost": 99.5315754999999,
+          "messages": 1230
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 30153,
+            "output": 259,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.031448,
+          "messages": 18
+        },
+        {
+          "source": "claude",
+          "modelId": "<synthetic>",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 14
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 64776,
+            "output": 76994,
+            "cacheRead": 17287093,
+            "cacheWrite": 1888990,
+            "reasoning": 0
+          },
+          "cost": 13.619078399999989,
+          "messages": 365
+        }
+      ]
+    },
+    {
+      "date": "2025-11-29",
+      "totals": {
+        "tokens": 86299460,
+        "cost": 111.13713889999991,
+        "messages": 1191
+      },
+      "intensity": 1,
+      "tokenBreakdown": {
+        "input": 1966,
+        "output": 542462,
+        "cacheRead": 73943150,
+        "cacheWrite": 11811882,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5-20251101",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1051,
+            "output": 385565,
+            "cacheRead": 62321972,
+            "cacheWrite": 10019431,
+            "reasoning": 0
+          },
+          "cost": 103.42680975000003,
+          "messages": 890
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-haiku-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 645,
+            "output": 81179,
+            "cacheRead": 5962405,
+            "cacheWrite": 1240737,
+            "reasoning": 0
+          },
+          "cost": 2.5537017499999974,
+          "messages": 208
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-20250514",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 15,
+            "output": 617,
+            "cacheRead": 23665,
+            "cacheWrite": 12526,
+            "reasoning": 0
+          },
+          "cost": 0.31686,
+          "messages": 4
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-3-5-sonnet-20241022",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 2
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-sonnet-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 255,
+            "output": 75101,
+            "cacheRead": 5635108,
+            "cacheWrite": 539188,
+            "reasoning": 0
+          },
+          "cost": 4.839767399999999,
+          "messages": 87
+        }
+      ]
+    },
+    {
+      "date": "2025-11-30",
+      "totals": {
+        "tokens": 186945537,
+        "cost": 296.64294405,
+        "messages": 2228
+      },
+      "intensity": 3,
+      "tokenBreakdown": {
+        "input": 19249,
+        "output": 900416,
+        "cacheRead": 171573531,
+        "cacheWrite": 14452341,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "opencode",
+          "modelId": "claude-sonnet-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 1
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5-high",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 6243,
+            "output": 289608,
+            "cacheRead": 71019995,
+            "cacheWrite": 3879322,
+            "reasoning": 0
+          },
+          "cost": 201.08152500000023,
+          "messages": 757
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5-20251101",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 772,
+            "output": 353831,
+            "cacheRead": 57363087,
+            "cacheWrite": 5223332,
+            "reasoning": 0
+          },
+          "cost": 70.17700349999994,
+          "messages": 715
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 42,
+            "output": 48357,
+            "cacheRead": 6611263,
+            "cacheWrite": 1530362,
+            "reasoning": 0
+          },
+          "cost": 14.079528999999996,
+          "messages": 93
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-haiku-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1439,
+            "output": 202254,
+            "cacheRead": 33908986,
+            "cacheWrite": 3492497,
+            "reasoning": 0
+          },
+          "cost": 8.769228850000003,
+          "messages": 561
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-3-5-sonnet-20241022",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0,
+          "messages": 1
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-sonnet-4-5-20250929",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 7076,
+            "output": 2517,
+            "cacheRead": 1749554,
+            "cacheWrite": 263091,
+            "reasoning": 0
+          },
+          "cost": 1.5704404500000002,
+          "messages": 59
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 1318,
+            "output": 140,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 0.002018,
+          "messages": 2
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-5-20251101",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 2359,
+            "output": 3709,
+            "cacheRead": 920646,
+            "cacheWrite": 63737,
+            "reasoning": 0
+          },
+          "cost": 0.9631992499999998,
+          "messages": 39
+        }
+      ]
+    },
+    {
+      "date": "2025-12-01",
+      "totals": {
+        "tokens": 247072209,
+        "cost": 522.1466327000019,
+        "messages": 2865
+      },
+      "intensity": 4,
+      "tokenBreakdown": {
+        "input": 374493,
+        "output": 1035821,
+        "cacheRead": 226461121,
+        "cacheWrite": 19200774,
+        "reasoning": 0
+      },
+      "sources": [
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5-high",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 8180,
+            "output": 660496,
+            "cacheRead": 113297372,
+            "cacheWrite": 10315743,
+            "reasoning": 0
+          },
+          "cost": 413.02613925000077,
+          "messages": 1203
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-opus-4-5-20251101",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 69,
+            "output": 19601,
+            "cacheRead": 3451337,
+            "cacheWrite": 533552,
+            "reasoning": 0
+          },
+          "cost": 5.550738499999999,
+          "messages": 67
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-haiku-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 430,
+            "output": 69280,
+            "cacheRead": 8511694,
+            "cacheWrite": 627918,
+            "reasoning": 0
+          },
+          "cost": 1.9828969000000005,
+          "messages": 168
+        },
+        {
+          "source": "opencode",
+          "modelId": "claude-sonnet-4-5",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 49,
+            "output": 2611,
+            "cacheRead": 191239,
+            "cacheWrite": 49232,
+            "reasoning": 0
+          },
+          "cost": 0.2813037,
+          "messages": 9
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-haiku-4-5-20251001",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 231479,
+            "output": 10375,
+            "cacheRead": 3766276,
+            "cacheWrite": 689693,
+            "reasoning": 0
+          },
+          "cost": 1.5220978500000029,
+          "messages": 168
+        },
+        {
+          "source": "claude",
+          "modelId": "claude-opus-4-5-20251101",
+          "providerId": "anthropic",
+          "tokens": {
+            "input": 134286,
+            "output": 273458,
+            "cacheRead": 97243203,
+            "cacheWrite": 6984636,
+            "reasoning": 0
+          },
+          "cost": 99.78345649999999,
+          "messages": 1250
+        }
+      ]
+    }
+  ]
+}
