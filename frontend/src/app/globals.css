@@ -1,0 +1,141 @@
+@import "tailwindcss";
+
+/**
+ * GitHub Primer Design System Colors
+ * https://primer.style/product/foundations/color
+ * 
+ * UI colors follow system preference (prefers-color-scheme)
+ * Graph cell colors are controlled by color palette selection
+ */
+
+:root {
+  /* Canvas (backgrounds) */
+  --color-canvas-default: #ffffff;
+  --color-canvas-subtle: #f6f8fa;
+  --color-canvas-inset: #f6f8fa;
+  
+  /* Foreground (text) */
+  --color-fg-default: #1f2328;
+  --color-fg-muted: #656d76;
+  --color-fg-subtle: #6e7781;
+  
+  /* Border */
+  --color-border-default: #d0d7de;
+  --color-border-muted: #d8dee4;
+  --color-border-subtle: rgba(31, 35, 40, 0.15);
+  
+  /* Accent (green for highlights) */
+  --color-accent-fg: #1a7f37;
+  --color-accent-emphasis: #1f883d;
+  
+  /* Graph-specific */
+  --color-graph-empty: #ebedf0;
+  --color-graph-canvas: #ffffff;
+  
+  /* Card/Panel */
+  --color-card-bg: #ffffff;
+  --color-card-border: #d0d7de;
+  
+  /* Button */
+  --color-btn-bg: #f6f8fa;
+  --color-btn-border: rgba(31, 35, 40, 0.15);
+  --color-btn-hover-bg: #f3f4f6;
+  --color-btn-active-bg: #ebecf0;
+  --color-btn-selected-bg: #ffffff;
+  
+  /* Badge/Tag */
+  --color-badge-bg: #ddf4ff;
+  --color-badge-text: #0969da;
+  
+  /* Legacy */
+  --background: var(--color-canvas-default);
+  --foreground: var(--color-fg-default);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Canvas (backgrounds) - GitHub Dark */
+    --color-canvas-default: #0d1117;
+    --color-canvas-subtle: #161b22;
+    --color-canvas-inset: #010409;
+    
+    /* Foreground (text) */
+    --color-fg-default: #e6edf3;
+    --color-fg-muted: #7d8590;
+    --color-fg-subtle: #6e7681;
+    
+    /* Border */
+    --color-border-default: #30363d;
+    --color-border-muted: #21262d;
+    --color-border-subtle: rgba(240, 246, 252, 0.1);
+    
+    /* Accent */
+    --color-accent-fg: #3fb950;
+    --color-accent-emphasis: #238636;
+    
+    /* Graph-specific */
+    --color-graph-empty: #161b22;
+    --color-graph-canvas: #0d1117;
+    
+    /* Card/Panel */
+    --color-card-bg: #161b22;
+    --color-card-border: #30363d;
+    
+    /* Button */
+    --color-btn-bg: #21262d;
+    --color-btn-border: rgba(240, 246, 252, 0.1);
+    --color-btn-hover-bg: #30363d;
+    --color-btn-active-bg: #282e33;
+    --color-btn-selected-bg: #0d1117;
+    
+    /* Badge/Tag */
+    --color-badge-bg: rgba(56, 139, 253, 0.15);
+    --color-badge-text: #58a6ff;
+    
+    /* Legacy */
+    --background: var(--color-canvas-default);
+    --foreground: var(--color-fg-default);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+}
+
+/* Utility classes for system theme */
+.bg-canvas {
+  background-color: var(--color-canvas-default);
+}
+
+.bg-canvas-subtle {
+  background-color: var(--color-canvas-subtle);
+}
+
+.bg-card {
+  background-color: var(--color-card-bg);
+}
+
+.text-fg {
+  color: var(--color-fg-default);
+}
+
+.text-fg-muted {
+  color: var(--color-fg-muted);
+}
+
+.border-default {
+  border-color: var(--color-border-default);
+}
+
+.border-subtle {
+  border-color: var(--color-border-subtle);
+}
