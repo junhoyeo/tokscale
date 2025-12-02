@@ -77,17 +77,15 @@ jobs:
       fail-fast: false
       matrix:
         settings:
-          - host: macos-13
+          - host: macos-14
             target: x86_64-apple-darwin
             build: |
-              source $HOME/.cargo/env
               cd core
-              yarn build
+              yarn build --target x86_64-apple-darwin
               strip -x *.node
           - host: macos-14
             target: aarch64-apple-darwin
             build: |
-              source $HOME/.cargo/env
               cd core
               yarn build
               strip -x *.node
