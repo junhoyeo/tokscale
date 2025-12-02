@@ -4,27 +4,15 @@ import { motion } from "framer-motion";
 import { Monitor, Moon, Sun } from "lucide-react";
 import type { ThemePreference } from "@/lib/useSettings";
 
-/**
- * Size constants for consistent styling
- */
 const SIZES = {
-  /** Size of each button (square for circle) */
   buttonSize: 28,
-  /** Padding inside the container */
   containerPadding: 3,
-  /** Icon size */
   iconSize: 14,
 } as const;
 
-/** Calculate total container width: 3 buttons + padding */
 const CONTAINER_WIDTH = SIZES.buttonSize * 3 + SIZES.containerPadding * 2;
-
-/** Calculate container height: button size + padding */
 const CONTAINER_HEIGHT = SIZES.buttonSize + SIZES.containerPadding * 2;
 
-/**
- * Theme options configuration
- */
 const themes = [
   { value: "light" as const, label: "Light theme", icon: Sun },
   { value: "dark" as const, label: "Dark theme", icon: Moon },
@@ -37,17 +25,10 @@ interface ThemeToggleProps {
   mounted: boolean;
 }
 
-/**
- * 3-state theme toggle with sliding indicator.
- * Supports Light / Dark / System modes.
- */
 export function ThemeToggle({ theme, onThemeChange, mounted }: ThemeToggleProps) {
   const activeIndex = themes.findIndex((t) => t.value === theme);
-
-  // Calculate indicator position based on active index
   const indicatorX = SIZES.containerPadding + activeIndex * SIZES.buttonSize;
 
-  // Skeleton loader for SSR hydration
   if (!mounted) {
     return (
       <div
@@ -76,7 +57,6 @@ export function ThemeToggle({ theme, onThemeChange, mounted }: ThemeToggleProps)
         border: "1px solid var(--color-border-subtle)",
       }}
     >
-      {/* Animated sliding indicator */}
       <motion.div
         className="absolute rounded-full"
         style={{
@@ -106,12 +86,10 @@ export function ThemeToggle({ theme, onThemeChange, mounted }: ThemeToggleProps)
             onKeyDown={(e) => {
               if (e.key === "ArrowRight" || e.key === "ArrowDown") {
                 e.preventDefault();
-                const nextIndex = (activeIndex + 1) % themes.length;
-                onThemeChange(themes[nextIndex].value);
+                onThemeChange(themes[(activeIndex + 1) % themes.length].value);
               } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
                 e.preventDefault();
-                const prevIndex = (activeIndex - 1 + themes.length) % themes.length;
-                onThemeChange(themes[prevIndex].value);
+                onThemeChange(themes[(activeIndex - 1 + themes.length) % themes.length].value);
               }
             }}
             className="relative z-10 flex items-center justify-center rounded-full transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
@@ -121,11 +99,7 @@ export function ThemeToggle({ theme, onThemeChange, mounted }: ThemeToggleProps)
               color: isActive ? "var(--color-fg-default)" : "var(--color-fg-muted)",
             }}
           >
-            <Icon
-              size={SIZES.iconSize}
-              strokeWidth={isActive ? 2.5 : 2}
-              className="transition-all duration-200"
-            />
+            <Icon size={SIZES.iconSize} strokeWidth={isActive ? 2.5 : 2} className="transition-all duration-200" />
           </button>
         );
       })}

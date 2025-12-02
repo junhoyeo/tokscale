@@ -37,24 +37,14 @@ export function GraphControls({
 
   const handleSourceToggle = (source: SourceType) => {
     if (sourceFilter.includes(source)) {
-      const newFilter = sourceFilter.filter((s) => s !== source);
-      onSourceFilterChange(newFilter);
+      onSourceFilterChange(sourceFilter.filter((s) => s !== source));
     } else {
       onSourceFilterChange([...sourceFilter, source]);
     }
   };
 
-  const handleSelectAllSources = () => {
-    onSourceFilterChange([...availableSources]);
-  };
-
-  const handleClearSources = () => {
-    onSourceFilterChange([]);
-  };
-
   return (
     <div className="relative mb-4">
-      {/* GitHub-style 2D/3D Toggle - Top Right */}
       <div className="float-right mt-1 ml-4 relative top-0 flex">
         <button
           onClick={() => onViewChange("2d")}
@@ -80,7 +70,6 @@ export function GraphControls({
         </button>
       </div>
 
-      {/* Palette dropdown - floating right */}
       <div className="float-right mt-1 ml-3">
         <select
           value={paletteName}
@@ -93,18 +82,13 @@ export function GraphControls({
           }}
         >
           {paletteNames.map((name) => (
-            <option key={name} value={name}>
-              {colorPalettes[name].name}
-            </option>
+            <option key={name} value={name}>{colorPalettes[name].name}</option>
           ))}
         </select>
       </div>
 
-      {/* Main Title - GitHub style */}
       <h2 className="text-lg font-medium mb-3" style={{ color: "var(--color-fg-default)" }}>
-        <span className="font-bold" style={{ color: palette.grade4 }}>
-          {totalContributions.toLocaleString()}
-        </span>
+        <span className="font-bold" style={{ color: palette.grade4 }}>{totalContributions.toLocaleString()}</span>
         {" "}token usage entries
         {selectedYear && (
           <>
@@ -114,15 +98,10 @@ export function GraphControls({
                 value={selectedYear}
                 onChange={(e) => onYearChange(e.target.value)}
                 className="font-bold border-none cursor-pointer underline decoration-dotted decoration-2 underline-offset-4"
-                style={{ 
-                  color: "var(--color-fg-default)",
-                  backgroundColor: "transparent",
-                }}
+                style={{ color: "var(--color-fg-default)", backgroundColor: "transparent" }}
               >
                 {availableYears.map((year) => (
-                  <option key={year} value={year} style={{ backgroundColor: "var(--color-canvas-default)" }}>
-                    {year}
-                  </option>
+                  <option key={year} value={year} style={{ backgroundColor: "var(--color-canvas-default)" }}>{year}</option>
                 ))}
               </select>
             ) : (
@@ -134,23 +113,17 @@ export function GraphControls({
 
       <div className="clear-both" />
 
-      {/* Source Filter Pills & Legend */}
       <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
-        {/* Source Filter */}
         {availableSources.length > 1 && (
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-semibold" style={{ color: "var(--color-fg-muted)" }}>
-              Filter:
-            </span>
+            <span className="text-xs font-semibold" style={{ color: "var(--color-fg-muted)" }}>Filter:</span>
             {availableSources.map((source) => {
               const isSelected = sourceFilter.length === 0 || sourceFilter.includes(source);
               return (
                 <button
                   key={source}
                   onClick={() => handleSourceToggle(source)}
-                  className={`px-3 py-1 text-xs rounded-full transition-all duration-200 hover:scale-105 ${
-                    isSelected ? "font-semibold" : "opacity-50"
-                  }`}
+                  className={`px-3 py-1 text-xs rounded-full transition-all duration-200 hover:scale-105 ${isSelected ? "font-semibold" : "opacity-50"}`}
                   style={{
                     backgroundColor: isSelected ? `${palette.grade3}30` : "transparent",
                     color: "var(--color-fg-default)",
@@ -163,7 +136,7 @@ export function GraphControls({
             })}
             {sourceFilter.length > 0 && sourceFilter.length < availableSources.length && (
               <button
-                onClick={handleSelectAllSources}
+                onClick={() => onSourceFilterChange([...availableSources])}
                 className="px-3 py-1 text-xs font-medium rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
                 style={{ color: "var(--color-fg-muted)" }}
               >
@@ -172,7 +145,7 @@ export function GraphControls({
             )}
             {sourceFilter.length === availableSources.length && (
               <button
-                onClick={handleClearSources}
+                onClick={() => onSourceFilterChange([])}
                 className="px-3 py-1 text-xs font-medium rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
                 style={{ color: "var(--color-fg-muted)" }}
               >
@@ -182,23 +155,16 @@ export function GraphControls({
           </div>
         )}
 
-        {/* Legend */}
         <div className="flex items-center gap-2 ml-auto">
-          <span className="text-xs font-medium" style={{ color: "var(--color-fg-muted)" }}>
-            Less
-          </span>
+          <span className="text-xs font-medium" style={{ color: "var(--color-fg-muted)" }}>Less</span>
           {[0, 1, 2, 3, 4].map((level) => (
             <div
               key={level}
               className="w-3 h-3 rounded-md transition-transform hover:scale-110"
-              style={{
-                backgroundColor: palette[`grade${level}` as keyof GraphColorPalette] as string,
-              }}
+              style={{ backgroundColor: palette[`grade${level}` as keyof GraphColorPalette] as string }}
             />
           ))}
-          <span className="text-xs font-medium" style={{ color: "var(--color-fg-muted)" }}>
-            More
-          </span>
+          <span className="text-xs font-medium" style={{ color: "var(--color-fg-muted)" }}>More</span>
         </div>
       </div>
     </div>

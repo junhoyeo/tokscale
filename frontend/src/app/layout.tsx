@@ -19,20 +19,15 @@ export const metadata: Metadata = {
   description: "Visualize your AI token usage",
 };
 
-/**
- * Inline script to prevent Flash of Unstyled Content (FOUC)
- * Runs before React hydrates to apply the correct theme class
- */
+// Prevents FOUC by applying theme before React hydrates
 const themeScript = `
 (function() {
   try {
     var stored = localStorage.getItem('token-tracker-settings');
     var theme = stored ? JSON.parse(stored).theme : 'system';
-    var dark = theme === 'dark' || 
-      (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var dark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     document.documentElement.classList.add(dark ? 'dark' : 'light');
   } catch (e) {
-    // Fallback to system preference if localStorage fails
     if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
       document.documentElement.classList.add('dark');
     } else {
@@ -42,21 +37,13 @@ const themeScript = `
 })();
 `;
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <script
-          dangerouslySetInnerHTML={{ __html: themeScript }}
-        />
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body
-        className={`${inter.variable} ${jetbrainsMono.variable} antialiased`}
-      >
+      <body className={`${inter.variable} ${jetbrainsMono.variable} antialiased`}>
         {children}
       </body>
     </html>
