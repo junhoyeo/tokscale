@@ -115,12 +115,16 @@ fn bench_json_parsing(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(json_bytes.len() as u64));
 
         // Benchmark serde_json
-        group.bench_with_input(BenchmarkId::new("serde_json", size), &json_str, |b, json| {
-            b.iter(|| {
-                let result: BenchSession = serde_json::from_str(black_box(json)).unwrap();
-                black_box(result.messages.len())
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("serde_json", size),
+            &json_str,
+            |b, json| {
+                b.iter(|| {
+                    let result: BenchSession = serde_json::from_str(black_box(json)).unwrap();
+                    black_box(result.messages.len())
+                })
+            },
+        );
 
         // Benchmark simd-json
         group.bench_with_input(BenchmarkId::new("simd_json", size), &json_str, |b, json| {
@@ -170,7 +174,8 @@ fn bench_jsonl_parsing(c: &mut Criterion) {
                     let mut count = 0;
                     for line in content.lines() {
                         let mut bytes = line.as_bytes().to_vec();
-                        if let Ok(msg) = simd_json::from_slice::<ClaudeMessage>(black_box(&mut bytes))
+                        if let Ok(msg) =
+                            simd_json::from_slice::<ClaudeMessage>(black_box(&mut bytes))
                         {
                             count += 1;
                             black_box(&msg);

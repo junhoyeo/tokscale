@@ -2,10 +2,10 @@
 //!
 //! Each source has its own parser that converts to a unified message format.
 
-pub mod opencode;
 pub mod claudecode;
 pub mod codex;
 pub mod gemini;
+pub mod opencode;
 
 use crate::TokenBreakdown;
 
@@ -47,7 +47,7 @@ impl UnifiedMessage {
 /// Convert Unix milliseconds timestamp to YYYY-MM-DD date string
 fn timestamp_to_date(timestamp_ms: i64) -> String {
     use chrono::{TimeZone, Utc};
-    
+
     let datetime = Utc.timestamp_millis_opt(timestamp_ms);
     match datetime {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
@@ -92,7 +92,7 @@ mod tests {
             cache_write: 0,
             reasoning: 0,
         };
-        
+
         let msg = UnifiedMessage::new(
             "opencode",
             "claude-3-5-sonnet",
@@ -101,7 +101,7 @@ mod tests {
             tokens,
             0.05,
         );
-        
+
         assert_eq!(msg.source, "opencode");
         assert_eq!(msg.model_id, "claude-3-5-sonnet");
         assert_eq!(msg.date, "2024-12-01");

@@ -2,16 +2,15 @@
 //!
 //! Uses simd-json for fast JSON parsing with SIMD instructions.
 
-use std::path::Path;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 /// Parse a JSON file using SIMD-accelerated parsing
 pub fn parse_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ParseError> {
     let mut data = fs::read(path).map_err(|e| ParseError::IoError(e.to_string()))?;
-    
-    simd_json::from_slice(&mut data)
-        .map_err(|e| ParseError::JsonError(e.to_string()))
+
+    simd_json::from_slice(&mut data).map_err(|e| ParseError::JsonError(e.to_string()))
 }
 
 /// Parse a JSONL file (one JSON object per line)
@@ -22,21 +21,21 @@ where
 {
     let file = fs::File::open(path).map_err(|e| ParseError::IoError(e.to_string()))?;
     let reader = BufReader::new(file);
-    
+
     for line in reader.lines() {
         let line = line.map_err(|e| ParseError::IoError(e.to_string()))?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        
+
         let mut bytes = trimmed.as_bytes().to_vec();
         match simd_json::from_slice::<T>(&mut bytes) {
             Ok(value) => process(value),
             Err(_) => continue, // Skip malformed lines (match TypeScript behavior)
         }
     }
-    
+
     Ok(())
 }
 
@@ -45,7 +44,7 @@ where
 pub enum ParseError {
     #[error("IO error: {0}")]
     IoError(String),
-    
+
     #[error("JSON parse error: {0}")]
     JsonError(String),
 }
@@ -95,7 +94,8 @@ mod tests {
         let file_path = dir.path().join("nested.json");
 
         let mut file = File::create(&file_path).unwrap();
-        file.write_all(br#"{"id": "session-001", "data": {"tokens": 1000, "cost": 0.05}}"#).unwrap();
+        file.write_all(br#"{"id": "session-001", "data": {"tokens": 1000, "cost": 0.05}}"#)
+            .unwrap();
 
         let result: NestedStruct = parse_json_file(&file_path).unwrap();
         assert_eq!(result.id, "session-001");
@@ -109,7 +109,8 @@ mod tests {
         let file_path = dir.path().join("unicode.json");
 
         let mut file = File::create(&file_path).unwrap();
-        file.write_all(r#"{"name": "테스트", "value": 100}"#.as_bytes()).unwrap();
+        file.write_all(r#"{"name": "테스트", "value": 100}"#.as_bytes())
+            .unwrap();
 
         let result: TestStruct = parse_json_file(&file_path).unwrap();
         assert_eq!(result.name, "테스트");
@@ -158,7 +159,8 @@ mod tests {
         let mut results: Vec<TestStruct> = Vec::new();
         parse_jsonl_file(&file_path, |item: TestStruct| {
             results.push(item);
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].name, "first");
@@ -180,7 +182,8 @@ mod tests {
         let mut results: Vec<TestStruct> = Vec::new();
         parse_jsonl_file(&file_path, |item: TestStruct| {
             results.push(item);
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].name, "a");
@@ -201,7 +204,8 @@ mod tests {
         let mut results: Vec<TestStruct> = Vec::new();
         parse_jsonl_file(&file_path, |item: TestStruct| {
             results.push(item);
-        }).unwrap();
+        })
+        .unwrap();
 
         // Only valid lines should be parsed
         assert_eq!(results.len(), 2);
@@ -219,7 +223,8 @@ mod tests {
         let mut count = 0;
         parse_jsonl_file(&file_path, |_: TestStruct| {
             count += 1;
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(count, 0);
     }
@@ -243,7 +248,8 @@ mod tests {
         let mut count = 0;
         parse_jsonl_file(&file_path, |_: TestStruct| {
             count += 1;
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(count, 1000);
     }

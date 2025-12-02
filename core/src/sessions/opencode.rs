@@ -2,13 +2,14 @@
 //!
 //! Parses individual JSON files from ~/.local/share/opencode/storage/message/
 
-use std::path::Path;
-use serde::Deserialize;
-use crate::TokenBreakdown;
 use super::UnifiedMessage;
+use crate::TokenBreakdown;
+use serde::Deserialize;
+use std::path::Path;
 
 /// OpenCode message structure (from JSON files)
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct OpenCodeMessage {
     pub id: String,
     #[serde(rename = "sessionID")]
@@ -38,6 +39,7 @@ pub struct OpenCodeCache {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct OpenCodeTime {
     pub created: f64, // Unix timestamp in milliseconds (as float)
     pub completed: Option<f64>,
@@ -47,17 +49,17 @@ pub struct OpenCodeTime {
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let data = std::fs::read(path).ok()?;
     let mut bytes = data;
-    
+
     let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).ok()?;
-    
+
     // Only process assistant messages with tokens
     if msg.role != "assistant" {
         return None;
     }
-    
+
     let tokens = msg.tokens?;
     let model_id = msg.model_id?;
-    
+
     Some(UnifiedMessage::new(
         "opencode",
         model_id,
@@ -98,7 +100,7 @@ mod tests {
 
         let mut bytes = json.as_bytes().to_vec();
         let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).unwrap();
-        
+
         assert_eq!(msg.model_id, Some("claude-sonnet-4".to_string()));
         assert_eq!(msg.tokens.unwrap().input, 1000);
     }

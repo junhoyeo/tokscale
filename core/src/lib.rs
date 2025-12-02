@@ -7,14 +7,14 @@
 
 use napi_derive::napi;
 
-mod scanner;
-mod parser;
 mod aggregator;
+mod parser;
+mod scanner;
 mod sessions;
 
-pub use scanner::*;
-pub use parser::*;
 pub use aggregator::*;
+pub use parser::*;
+pub use scanner::*;
 
 /// Version of the native module
 #[napi]
@@ -144,7 +144,7 @@ use sessions::UnifiedMessage;
 use std::time::Instant;
 
 /// Generate graph data from all session sources
-/// 
+///
 /// This is the main entry point that orchestrates:
 /// 1. Parallel file scanning
 /// 2. Parallel session parsing
@@ -153,12 +153,14 @@ use std::time::Instant;
 #[napi]
 pub fn generate_graph(options: GraphOptions) -> napi::Result<GraphResult> {
     let start = Instant::now();
-    
+
     // Get home directory
-    let home_dir = options.home_dir.clone()
+    let home_dir = options
+        .home_dir
+        .clone()
         .or_else(|| std::env::var("HOME").ok())
         .unwrap_or_else(|| "/".to_string());
-    
+
     // Get sources to scan
     let sources = options.sources.clone().unwrap_or_else(|| {
         vec![
@@ -168,7 +170,7 @@ pub fn generate_graph(options: GraphOptions) -> napi::Result<GraphResult> {
             "gemini".to_string(),
         ]
     });
-    
+
     // Configure thread pool if specified
     if let Some(threads) = options.threads {
         rayon::ThreadPoolBuilder::new()
@@ -176,83 +178,78 @@ pub fn generate_graph(options: GraphOptions) -> napi::Result<GraphResult> {
             .build_global()
             .ok();
     }
-    
+
     // 1. Parallel file scanning
     let scan_result = scanner::scan_all_sources(&home_dir, &sources);
-    
+
     // 2. Parallel session parsing
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
-    
+
     // Parse OpenCode files in parallel
-    let opencode_messages: Vec<UnifiedMessage> = scan_result.opencode_files
+    let opencode_messages: Vec<UnifiedMessage> = scan_result
+        .opencode_files
         .par_iter()
         .filter_map(|path| sessions::opencode::parse_opencode_file(path))
         .collect();
     all_messages.extend(opencode_messages);
-    
+
     // Parse Claude files in parallel
-    let claude_messages: Vec<UnifiedMessage> = scan_result.claude_files
+    let claude_messages: Vec<UnifiedMessage> = scan_result
+        .claude_files
         .par_iter()
         .flat_map(|path| sessions::claudecode::parse_claude_file(path))
         .collect();
     all_messages.extend(claude_messages);
-    
+
     // Parse Codex files in parallel
-    let codex_messages: Vec<UnifiedMessage> = scan_result.codex_files
+    let codex_messages: Vec<UnifiedMessage> = scan_result
+        .codex_files
         .par_iter()
         .flat_map(|path| sessions::codex::parse_codex_file(path))
         .collect();
     all_messages.extend(codex_messages);
-    
+
     // Parse Gemini files in parallel
-    let gemini_messages: Vec<UnifiedMessage> = scan_result.gemini_files
+    let gemini_messages: Vec<UnifiedMessage> = scan_result
+        .gemini_files
         .par_iter()
         .flat_map(|path| sessions::gemini::parse_gemini_file(path))
         .collect();
     all_messages.extend(gemini_messages);
-    
+
     // 3. Apply date filters
     let filtered_messages = filter_messages(all_messages, &options);
-    
+
     // 4. Parallel aggregation
     let contributions = aggregator::aggregate_by_date(filtered_messages);
-    
+
     // 5. Generate result
     let processing_time_ms = start.elapsed().as_millis() as u32;
     let result = aggregator::generate_graph_result(contributions, processing_time_ms);
-    
+
     Ok(result)
 }
 
 /// Filter messages by date range options
 fn filter_messages(messages: Vec<UnifiedMessage>, options: &GraphOptions) -> Vec<UnifiedMessage> {
     let mut filtered = messages;
-    
+
     // Filter by year
     if let Some(year) = &options.year {
         let year_prefix = format!("{}-", year);
-        filtered = filtered
-            .into_iter()
-            .filter(|m| m.date.starts_with(&year_prefix))
-            .collect();
+        filtered.retain(|m| m.date.starts_with(&year_prefix));
     }
-    
+
     // Filter by since date
     if let Some(since) = &options.since {
-        filtered = filtered
-            .into_iter()
-            .filter(|m| m.date.as_str() >= since.as_str())
-            .collect();
+        filtered.retain(|m| m.date.as_str() >= since.as_str());
     }
-    
+
     // Filter by until date
     if let Some(until) = &options.until {
-        filtered = filtered
-            .into_iter()
-            .filter(|m| m.date.as_str() <= until.as_str())
-            .collect();
+        filtered.retain(|m| m.date.as_str() <= until.as_str());
     }
-    
+
     filtered
 }
 
@@ -272,7 +269,7 @@ pub fn scan_sessions(home_dir: Option<String>, sources: Option<Vec<String>>) -> 
     let home = home_dir
         .or_else(|| std::env::var("HOME").ok())
         .unwrap_or_else(|| "/".to_string());
-    
+
     let srcs = sources.unwrap_or_else(|| {
         vec![
             "opencode".to_string(),
@@ -281,9 +278,9 @@ pub fn scan_sessions(home_dir: Option<String>, sources: Option<Vec<String>>) -> 
             "gemini".to_string(),
         ]
     });
-    
+
     let result = scanner::scan_all_sources(&home, &srcs);
-    
+
     ScanStats {
         opencode_files: result.opencode_files.len() as i32,
         claude_files: result.claude_files.len() as i32,

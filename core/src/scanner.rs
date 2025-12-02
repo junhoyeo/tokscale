@@ -2,8 +2,8 @@
 //!
 //! Uses walkdir with rayon for parallel directory traversal.
 
-use std::path::PathBuf;
 use rayon::prelude::*;
+use std::path::PathBuf;
 use walkdir::WalkDir;
 
 /// Session source type
@@ -36,7 +36,7 @@ impl ScanResult {
     /// Get all files as a single vector
     pub fn all_files(&self) -> Vec<(SessionType, PathBuf)> {
         let mut result = Vec::with_capacity(self.total_files());
-        
+
         for path in &self.opencode_files {
             result.push((SessionType::OpenCode, path.clone()));
         }
@@ -49,7 +49,7 @@ impl ScanResult {
         for path in &self.gemini_files {
             result.push((SessionType::Gemini, path.clone()));
         }
-        
+
         result
     }
 }
@@ -69,13 +69,15 @@ fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
             if !path.is_file() {
                 return false;
             }
-            
+
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            
+
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
-                "session-*.json" => file_name.starts_with("session-") && file_name.ends_with(".json"),
+                "session-*.json" => {
+                    file_name.starts_with("session-") && file_name.ends_with(".json")
+                }
                 _ => false,
             }
         })
@@ -86,7 +88,7 @@ fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
 /// Scan all session source directories in parallel
 pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
     let mut result = ScanResult::default();
-    
+
     let include_all = sources.is_empty();
     let include_opencode = include_all || sources.iter().any(|s| s == "opencode");
     let include_claude = include_all || sources.iter().any(|s| s == "claude");
@@ -98,8 +100,8 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
 
     if include_opencode {
         // OpenCode: ~/.local/share/opencode/storage/message/*/*.json
-        let xdg_data = std::env::var("XDG_DATA_HOME")
-            .unwrap_or_else(|_| format!("{}/.local/share", home_dir));
+        let xdg_data =
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir));
         let opencode_path = format!("{}/opencode/storage/message", xdg_data);
         tasks.push((SessionType::OpenCode, opencode_path, "*.json"));
     }
@@ -112,8 +114,8 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
 
     if include_codex {
         // Codex: ~/.codex/sessions/**/*.jsonl
-        let codex_home = std::env::var("CODEX_HOME")
-            .unwrap_or_else(|_| format!("{}/.codex", home_dir));
+        let codex_home =
+            std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir));
         let codex_path = format!("{}/sessions", codex_home);
         tasks.push((SessionType::Codex, codex_path, "*.jsonl"));
     }
@@ -172,7 +174,7 @@ mod tests {
             codex_files: vec![PathBuf::from("c.jsonl")],
             gemini_files: vec![PathBuf::from("d.json")],
         };
-        
+
         let all = result.all_files();
         assert_eq!(all.len(), 4);
         assert_eq!(all[0], (SessionType::OpenCode, PathBuf::from("a.json")));
@@ -221,7 +223,9 @@ mod tests {
 
         let jsonl_files = scan_directory(path.to_str().unwrap(), "*.jsonl");
         assert_eq!(jsonl_files.len(), 2);
-        assert!(jsonl_files.iter().all(|p| p.extension().unwrap() == "jsonl"));
+        assert!(jsonl_files
+            .iter()
+            .all(|p| p.extension().unwrap() == "jsonl"));
     }
 
     #[test]
@@ -344,7 +348,7 @@ mod tests {
     fn test_scan_all_sources_multiple() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
-        
+
         setup_mock_claude_dir(home);
         setup_mock_gemini_dir(home);
 
@@ -352,7 +356,7 @@ mod tests {
             home.to_str().unwrap(),
             &["claude".to_string(), "gemini".to_string()],
         );
-        
+
         assert_eq!(result.claude_files.len(), 1);
         assert_eq!(result.gemini_files.len(), 1);
         assert!(result.opencode_files.is_empty());

@@ -2,13 +2,13 @@
 //!
 //! Uses rayon for parallel map-reduce operations.
 
-use std::collections::HashMap;
-use rayon::prelude::*;
-use crate::{
-    DailyContribution, DailyTotals, TokenBreakdown, SourceContribution,
-    DataSummary, YearSummary, GraphResult, GraphMeta,
-};
 use crate::sessions::UnifiedMessage;
+use crate::{
+    DailyContribution, DailyTotals, DataSummary, GraphMeta, GraphResult, SourceContribution,
+    TokenBreakdown, YearSummary,
+};
+use rayon::prelude::*;
+use std::collections::HashMap;
 
 /// Aggregate messages into daily contributions
 pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
@@ -27,15 +27,12 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
                 acc
             },
         )
-        .reduce(
-            HashMap::new,
-            |mut a, b| {
-                for (date, acc) in b {
-                    a.entry(date).or_default().merge(acc);
-                }
-                a
-            },
-        );
+        .reduce(HashMap::new, |mut a, b| {
+            for (date, acc) in b {
+                a.entry(date).or_default().merge(acc);
+            }
+            a
+        });
 
     // Convert to sorted vector
     let mut contributions: Vec<DailyContribution> = daily_map
@@ -98,7 +95,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         let entry = years_map.entry(year.to_string()).or_default();
         entry.tokens += c.totals.tokens;
         entry.cost += c.totals.cost;
-        
+
         if entry.start.is_empty() || c.date < entry.start {
             entry.start = c.date.clone();
         }
@@ -130,8 +127,14 @@ pub fn generate_graph_result(
     let summary = calculate_summary(&contributions);
     let years = calculate_years(&contributions);
 
-    let date_range_start = contributions.first().map(|c| c.date.clone()).unwrap_or_default();
-    let date_range_end = contributions.last().map(|c| c.date.clone()).unwrap_or_default();
+    let date_range_start = contributions
+        .first()
+        .map(|c| c.date.clone())
+        .unwrap_or_default();
+    let date_range_end = contributions
+        .last()
+        .map(|c| c.date.clone())
+        .unwrap_or_default();
 
     GraphResult {
         meta: GraphMeta {
@@ -180,14 +183,17 @@ impl DayAccumulator {
 
         // Update source contribution
         let key = format!("{}:{}", msg.source, msg.model_id);
-        let source = self.sources.entry(key).or_insert_with(|| SourceContribution {
-            source: msg.source.clone(),
-            model_id: msg.model_id.clone(),
-            provider_id: msg.provider_id.clone(),
-            tokens: TokenBreakdown::default(),
-            cost: 0.0,
-            messages: 0,
-        });
+        let source = self
+            .sources
+            .entry(key)
+            .or_insert_with(|| SourceContribution {
+                source: msg.source.clone(),
+                model_id: msg.model_id.clone(),
+                provider_id: msg.provider_id.clone(),
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                messages: 0,
+            });
 
         source.tokens.input += msg.tokens.input;
         source.tokens.output += msg.tokens.output;
@@ -210,14 +216,17 @@ impl DayAccumulator {
         self.token_breakdown.reasoning += other.token_breakdown.reasoning;
 
         for (key, source) in other.sources {
-            let entry = self.sources.entry(key).or_insert_with(|| SourceContribution {
-                source: source.source.clone(),
-                model_id: source.model_id.clone(),
-                provider_id: source.provider_id.clone(),
-                tokens: TokenBreakdown::default(),
-                cost: 0.0,
-                messages: 0,
-            });
+            let entry = self
+                .sources
+                .entry(key)
+                .or_insert_with(|| SourceContribution {
+                    source: source.source.clone(),
+                    model_id: source.model_id.clone(),
+                    provider_id: source.provider_id.clone(),
+                    tokens: TokenBreakdown::default(),
+                    cost: 0.0,
+                    messages: 0,
+                });
 
             entry.tokens.input += source.tokens.input;
             entry.tokens.output += source.tokens.output;
