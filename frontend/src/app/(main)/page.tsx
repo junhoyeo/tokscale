@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { SegmentedControl, Pagination, Avatar } from "@primer/react";
 import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
@@ -120,23 +121,25 @@ export default function LeaderboardPage() {
         </div>
 
         {/* Period Filter */}
-        <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2">
-          {(["all", "month", "week"] as Period[]).map((p) => (
-            <button
-              key={p}
-              onClick={() => {
-                setPeriod(p);
-                setPage(1);
-              }}
-              className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                period === p
-                  ? "bg-green-600 text-white"
-                  : "bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700"
-              }`}
-            >
-              {p === "all" ? "All Time" : p === "month" ? "This Month" : "This Week"}
-            </button>
-          ))}
+        <div className="mb-6">
+          <SegmentedControl 
+            aria-label="Period filter"
+            onChange={(index) => {
+              const periods: Period[] = ["all", "month", "week"];
+              setPeriod(periods[index]);
+              setPage(1);
+            }}
+          >
+            <SegmentedControl.Button selected={period === "all"}>
+              All Time
+            </SegmentedControl.Button>
+            <SegmentedControl.Button selected={period === "month"}>
+              This Month
+            </SegmentedControl.Button>
+            <SegmentedControl.Button selected={period === "week"}>
+              This Week
+            </SegmentedControl.Button>
+          </SegmentedControl>
         </div>
 
         {/* Leaderboard Table */}
@@ -205,17 +208,11 @@ export default function LeaderboardPage() {
                             href={`/u/${user.username}`}
                             className="flex items-center gap-2 sm:gap-3 group"
                           >
-                            {user.avatarUrl ? (
-                              <img
-                                src={user.avatarUrl}
-                                alt={user.username}
-                                className="w-8 h-8 sm:w-10 sm:h-10 rounded-full"
-                              />
-                            ) : (
-                              <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-green-400 to-emerald-600 flex items-center justify-center text-white font-medium text-sm sm:text-base">
-                                {user.username[0].toUpperCase()}
-                              </div>
-                            )}
+                            <Avatar
+                              src={user.avatarUrl || `https://github.com/${user.username}.png`}
+                              alt={user.username}
+                              size={40}
+                            />
                             <div className="min-w-0">
                               <p className="font-medium text-sm sm:text-base text-gray-900 dark:text-white group-hover:text-green-600 dark:group-hover:text-green-400 transition-colors truncate max-w-[120px] sm:max-w-none">
                                 {user.displayName || user.username}
@@ -257,25 +254,12 @@ export default function LeaderboardPage() {
                     )}{" "}
                     of {data.pagination.totalUsers}
                   </p>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setPage(page - 1)}
-                      disabled={!data.pagination.hasPrev}
-                      className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      Prev
-                    </button>
-                    <span className="px-3 py-1.5 text-sm text-gray-500 dark:text-gray-400">
-                      {data.pagination.page}/{data.pagination.totalPages}
-                    </span>
-                    <button
-                      onClick={() => setPage(page + 1)}
-                      disabled={!data.pagination.hasNext}
-                      className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      Next
-                    </button>
-                  </div>
+                  <Pagination
+                    pageCount={data.pagination.totalPages}
+                    currentPage={data.pagination.page}
+                    onPageChange={(e, pageNum) => setPage(pageNum)}
+                    showPages={{ narrow: false, regular: true, wide: true }}
+                  />
                 </div>
               )}
             </>

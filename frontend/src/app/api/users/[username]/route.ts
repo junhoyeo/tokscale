@@ -57,7 +57,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       .limit(1);
 
     // Get user rank
-    const rankResult = await db.execute(sql`
+    const rankResult = await db.execute<{ rank: number }>(sql`
       WITH user_totals AS (
         SELECT 
           user_id,
@@ -73,7 +73,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       )
       SELECT rank FROM ranked WHERE user_id = ${user.id}
     `);
-    const rank = rankResult.rows[0]?.rank || null;
+    const rank = (rankResult as unknown as { rank: number }[])[0]?.rank || null;
 
     // Get daily breakdown data for graph (last 365 days)
     const oneYearAgo = new Date();

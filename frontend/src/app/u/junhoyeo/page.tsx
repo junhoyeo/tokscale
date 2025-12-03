@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
+import { Avatar, Label } from "@primer/react";
+import { StarIcon } from "@primer/octicons-react";
 import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
 import { GraphContainer } from "@/components/GraphContainer";
@@ -131,34 +133,31 @@ export default function JunhoyeoMockupPage() {
         {/* User Header */}
         <div className="mb-6 sm:mb-8">
           <div className="flex items-start gap-4 sm:gap-6 mb-6">
-            <img
+            <Avatar
               src={MOCK_USER.avatarUrl}
               alt={MOCK_USER.username}
-              className="w-20 h-20 sm:w-28 sm:h-28 rounded-2xl sm:rounded-3xl ring-4 ring-gray-200 dark:ring-gray-700 shadow-xl"
+              size={96}
+              square
+              className="ring-4 ring-gray-200 dark:ring-gray-700 shadow-xl"
             />
             <div className="flex-1 min-w-0">
               <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-1">
                 <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">
                   {MOCK_USER.displayName}
                 </h1>
-                <span className="px-3 py-1 text-sm font-bold bg-gradient-to-r from-yellow-400 to-amber-500 text-white rounded-full shadow-lg shadow-yellow-500/25 flex items-center gap-1">
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-                  </svg>
-                  #1
-                </span>
+                <Label variant="attention" size="large">
+                  <StarIcon size={14} />
+                  <span className="ml-1">#1</span>
+                </Label>
               </div>
               <p className="text-base sm:text-lg text-gray-500 dark:text-gray-400 mb-3">
                 @{MOCK_USER.username}
               </p>
               <div className="flex flex-wrap gap-2">
                 {data.summary.sources.map((source) => (
-                  <span
-                    key={source}
-                    className="px-3 py-1 text-xs font-semibold bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded-full capitalize"
-                  >
+                  <Label key={source} variant="secondary">
                     {source}
-                  </span>
+                  </Label>
                 ))}
               </div>
             </div>
@@ -211,25 +210,33 @@ export default function JunhoyeoMockupPage() {
           
           {/* Visual breakdown bar */}
           <div className="mb-6">
-            <div className="h-4 rounded-full overflow-hidden flex bg-gray-100 dark:bg-gray-800">
+            <div className="h-2 rounded-full overflow-hidden flex bg-gray-100 dark:bg-gray-800">
               <div 
-                className="bg-blue-500" 
-                style={{ width: `${(stats.inputTokens / stats.totalTokens) * 100}%` }}
+                style={{ 
+                  width: `${(stats.inputTokens / stats.totalTokens) * 100}%`,
+                  backgroundColor: 'var(--data-blue-color-emphasis, #006edb)'
+                }}
                 title={`Input: ${formatNumber(stats.inputTokens)}`}
               />
               <div 
-                className="bg-purple-500" 
-                style={{ width: `${(stats.outputTokens / stats.totalTokens) * 100}%` }}
+                style={{ 
+                  width: `${(stats.outputTokens / stats.totalTokens) * 100}%`,
+                  backgroundColor: 'var(--data-purple-color-emphasis, #894ceb)'
+                }}
                 title={`Output: ${formatNumber(stats.outputTokens)}`}
               />
               <div 
-                className="bg-green-500" 
-                style={{ width: `${(stats.cacheReadTokens / stats.totalTokens) * 100}%` }}
+                style={{ 
+                  width: `${(stats.cacheReadTokens / stats.totalTokens) * 100}%`,
+                  backgroundColor: 'var(--data-green-color-emphasis, #30a147)'
+                }}
                 title={`Cache Read: ${formatNumber(stats.cacheReadTokens)}`}
               />
               <div 
-                className="bg-amber-500" 
-                style={{ width: `${(stats.cacheWriteTokens / stats.totalTokens) * 100}%` }}
+                style={{ 
+                  width: `${(stats.cacheWriteTokens / stats.totalTokens) * 100}%`,
+                  backgroundColor: 'var(--data-orange-color-emphasis, #eb670f)'
+                }}
                 title={`Cache Write: ${formatNumber(stats.cacheWriteTokens)}`}
               />
             </div>
@@ -237,7 +244,7 @@ export default function JunhoyeoMockupPage() {
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="flex items-center gap-3">
-              <div className="w-3 h-3 rounded-full bg-blue-500" />
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: 'var(--data-blue-color-emphasis, #006edb)' }} />
               <div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">Input</p>
                 <p className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
@@ -246,7 +253,7 @@ export default function JunhoyeoMockupPage() {
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <div className="w-3 h-3 rounded-full bg-purple-500" />
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: 'var(--data-purple-color-emphasis, #894ceb)' }} />
               <div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">Output</p>
                 <p className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
@@ -255,7 +262,7 @@ export default function JunhoyeoMockupPage() {
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <div className="w-3 h-3 rounded-full bg-green-500" />
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: 'var(--data-green-color-emphasis, #30a147)' }} />
               <div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">Cache Read</p>
                 <p className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
@@ -264,7 +271,7 @@ export default function JunhoyeoMockupPage() {
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <div className="w-3 h-3 rounded-full bg-amber-500" />
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: 'var(--data-orange-color-emphasis, #eb670f)' }} />
               <div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">Cache Write</p>
                 <p className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
@@ -281,13 +288,10 @@ export default function JunhoyeoMockupPage() {
             Models Used
           </h2>
           <div className="flex flex-wrap gap-2">
-            {data.summary.models.filter(m => m !== '<synthetic>').map((model) => (
-              <span
-                key={model}
-                className="px-3 py-1.5 text-sm font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded-lg"
-              >
+            {data.summary.models.filter((m: string) => m !== '<synthetic>').map((model: string) => (
+              <Label key={model} variant="secondary" size="large">
                 {model}
-              </span>
+              </Label>
             ))}
           </div>
         </div>

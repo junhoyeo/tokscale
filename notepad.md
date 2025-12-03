@@ -259,3 +259,55 @@ CLI tool to track token usage across OpenCode, Claude Code, Codex, and Gemini se
 - Native module size: 904KB (debug), expect smaller with release + strip
 
 소요 시간: ~15 minutes
+
+---
+
+[2025-12-03] - Primer Design System Integration
+
+### DISCOVERED ISSUES
+- `styled-components@5` requires SSR registry for Next.js App Router
+- Primer's `ProgressBar.Item` doesn't support `sx` prop (use inline styles)
+- Need `react-is` package for styled-components compatibility
+
+### IMPLEMENTATION DECISIONS
+- Selective Primer adoption (not full migration) to preserve existing design
+- Created provider stack: `StyledComponentsRegistry` → `PrimerProvider`
+- Components migrated:
+  - **SegmentedControl**: Period filter on leaderboard
+  - **Pagination**: Page navigation
+  - **Avatar**: User avatars throughout
+  - **ActionMenu + ActionList**: User dropdown menu
+  - **Label**: Badges for rank, sources, models
+- Kept custom components: Contribution graph, stat cards, token breakdown bar
+
+### FILES CREATED
+- `frontend/src/lib/providers/StyledComponentsRegistry.tsx` - SSR support
+- `frontend/src/lib/providers/PrimerProvider.tsx` - Theme integration
+- `frontend/src/lib/providers/Providers.tsx` - Combined provider
+- `frontend/src/lib/providers/index.ts` - Exports
+
+### PACKAGES ADDED
+```json
+{
+  "@primer/react": "^38.3.0",
+  "@primer/primitives": "^11.3.1",
+  "styled-components": "^5.3.11",
+  "react-is": "^19.2.0",
+  "@types/styled-components": "^5.1.36"
+}
+```
+
+### VERIFICATION RESULTS
+- TypeScript: ✅ No errors
+- Build: ✅ All 18 pages generated successfully
+- ESLint: Minor warnings (pre-existing, not from Primer)
+
+### LEARNINGS
+- Primer's `colorMode` values: `'day' | 'night' | 'auto'`
+- Use `preventSSRMismatch` on ThemeProvider for hydration
+- `ActionMenu` is self-contained (manages its own open state)
+- Primer CSS imports: `@primer/primitives/dist/css/functional/themes/*.css`
+- Data visualization colors: `--data-{color}-color-emphasis` CSS variables
+
+소요 시간: ~20 minutes
+

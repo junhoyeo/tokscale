@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
+    "@primer/primitives": "^11.3.1",
+    "@primer/react": "^38.3.0",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.38.3",
     "framer-motion": "^12.23.25",
@@ -20,8 +22,11 @@
     "lucide-react": "^0.555.0",
     "next": "16.0.6",
     "obelisk.js": "^1.2.2",
+    "postgres": "^3.4.7",
     "react": "19.2.0",
     "react-dom": "19.2.0",
+    "react-is": "^19.2.0",
+    "styled-components": "5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -30,6 +35,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/styled-components": "^5.1.36",
     "drizzle-kit": "^0.30.1",
     "eslint": "^9",
     "eslint-config-next": "16.0.6",
