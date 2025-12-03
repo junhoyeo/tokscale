@@ -520,7 +520,8 @@ fn parse_all_messages_with_pricing(
     all_messages.extend(gemini_messages);
 
     // Parse Cursor files in parallel
-    // Cursor CSV already contains cost, but we recalculate for consistency
+    // Calculate cost using our pricing data for consistency with other providers
+    // Fall back to CSV cost only if no pricing is found
     let cursor_messages: Vec<UnifiedMessage> = scan_result
         .cursor_files
         .par_iter()
@@ -528,8 +529,8 @@ fn parse_all_messages_with_pricing(
             sessions::cursor::parse_cursor_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    // Cursor provides cost in CSV, but recalculate for pricing consistency
-                    let recalc_cost = pricing_data.calculate_cost(
+                    let csv_cost = msg.cost; // Store original CSV cost
+                    let calculated_cost = pricing_data.calculate_cost(
                         &msg.model_id,
                         msg.tokens.input,
                         msg.tokens.output,
@@ -537,10 +538,12 @@ fn parse_all_messages_with_pricing(
                         msg.tokens.cache_write,
                         msg.tokens.reasoning,
                     );
-                    // Use recalculated cost if available, otherwise keep original
-                    if recalc_cost > 0.0 {
-                        msg.cost = recalc_cost;
-                    }
+                    // Use calculated cost if available, otherwise keep CSV cost
+                    msg.cost = if calculated_cost > 0.0 {
+                        calculated_cost
+                    } else {
+                        csv_cost
+                    };
                     msg
                 })
                 .collect::<Vec<_>>()

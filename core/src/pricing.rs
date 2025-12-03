@@ -47,15 +47,95 @@ impl PricingData {
             }
         }
 
-        // Fuzzy matching - check if model_id is contained in any key or vice versa
-        let lower_model = model_id.to_lowercase();
-        for (key, pricing) in &self.models {
-            let lower_key = key.to_lowercase();
-            if lower_key.contains(&lower_model) || lower_model.contains(&lower_key) {
+        // Normalize model name for Cursor-style names
+        // e.g., "claude-4-sonnet" → "sonnet-4", "4-opus" → "opus-4"
+        let normalized = Self::normalize_cursor_model_name(model_id);
+        if let Some(ref norm) = normalized {
+            if let Some(pricing) = self.models.get(norm) {
                 return Some(pricing);
+            }
+            // Try with prefixes on normalized name
+            for prefix in prefixes {
+                let key = format!("{}{}", prefix, norm);
+                if let Some(pricing) = self.models.get(&key) {
+                    return Some(pricing);
+                }
             }
         }
 
+        // Fuzzy matching - check if model_id is contained in any key or vice versa
+        let lower_model = model_id.to_lowercase();
+        let lower_normalized = normalized.as_ref().map(|s| s.to_lowercase());
+        
+        for (key, pricing) in &self.models {
+            let lower_key = key.to_lowercase();
+            
+            // Check original model name
+            if lower_key.contains(&lower_model) || lower_model.contains(&lower_key) {
+                return Some(pricing);
+            }
+            
+            // Check normalized name
+            if let Some(ref ln) = lower_normalized {
+                if lower_key.contains(ln) || ln.contains(&lower_key) {
+                    return Some(pricing);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Normalize Cursor-style model names to standard format
+    /// e.g., "claude-4-sonnet" → "sonnet-4", "claude-4-opus-thinking" → "opus-4"
+    fn normalize_cursor_model_name(model_id: &str) -> Option<String> {
+        let lower = model_id.to_lowercase();
+        
+        // Map Cursor model patterns to standard names
+        // Claude models: claude-X-{model} or X-{model} → {model}-X
+        if lower.contains("opus") {
+            if lower.contains("4.5") || lower.contains("4-5") {
+                return Some("opus-4-5".to_string());
+            } else if lower.contains("4") {
+                return Some("opus-4".to_string());
+            }
+        }
+        if lower.contains("sonnet") {
+            if lower.contains("4.5") || lower.contains("4-5") {
+                return Some("sonnet-4-5".to_string());
+            } else if lower.contains("4") {
+                return Some("sonnet-4".to_string());
+            } else if lower.contains("3.7") || lower.contains("3-7") {
+                return Some("sonnet-3-7".to_string());
+            } else if lower.contains("3.5") || lower.contains("3-5") {
+                return Some("sonnet-3-5".to_string());
+            }
+        }
+        if lower.contains("haiku") {
+            if lower.contains("4.5") || lower.contains("4-5") {
+                return Some("haiku-4-5".to_string());
+            }
+        }
+        
+        // OpenAI models
+        if lower == "o3" {
+            return Some("o3".to_string());
+        }
+        if lower.starts_with("gpt-4o") || lower == "gpt-4o" {
+            return Some("gpt-4o".to_string());
+        }
+        if lower.starts_with("gpt-4.1") || lower.contains("gpt-4.1") {
+            return Some("gpt-4.1".to_string());
+        }
+        
+        // Gemini models
+        if lower.contains("gemini-2.5-pro") {
+            return Some("gemini-2.5-pro".to_string());
+        }
+        if lower.contains("gemini-2.5-flash") {
+            return Some("gemini-2.5-flash".to_string());
+        }
+        
         None
     }
 
