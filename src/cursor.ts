@@ -193,8 +193,10 @@ export async function fetchCursorUsageCsv(sessionToken: string): Promise<string>
 
   const text = await response.text();
 
-  // Validate it's actually CSV
-  if (!text.includes("Date,Model")) {
+  // Validate it's actually CSV (handle both old and new formats)
+  // Old: "Date,Model,..."
+  // New: "Date,Kind,Model,..."
+  if (!text.startsWith("Date,")) {
     throw new Error("Invalid response from Cursor API - expected CSV format");
   }
 

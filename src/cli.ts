@@ -60,6 +60,17 @@ interface DateFilterOptions {
   month?: boolean;
 }
 
+interface CursorSyncResult {
+  /** Whether a sync was attempted (true if credentials exist) */
+  attempted: boolean;
+  /** Whether the sync succeeded */
+  synced: boolean;
+  /** Number of usage events fetched */
+  rows: number;
+  /** Error message if sync failed */
+  error?: string;
+}
+
 // =============================================================================
 // Date Helpers
 // =============================================================================
@@ -316,36 +327,44 @@ async function ensureNativeModule(): Promise<void> {
   }
 }
 
-async function fetchPricingWithCache(spinner?: ReturnType<typeof createSpinner>): Promise<PricingFetcher> {
+async function fetchPricingData(): Promise<PricingFetcher> {
   const fetcher = new PricingFetcher();
-  if (spinner) {
-    spinner.update(pc.gray("Fetching pricing data..."));
-  }
   await fetcher.fetchPricing();
   return fetcher;
 }
 
 /**
- * Sync Cursor data from API to local cache if authenticated
- * This is called before reports to ensure Rust has access to Cursor data
+ * Sync Cursor usage data from API to local cache.
+ * Only attempts sync if user is authenticated with Cursor.
  */
-async function syncCursorIfAuthenticated(spinner?: ReturnType<typeof createSpinner>): Promise<void> {
+async function syncCursorData(): Promise<CursorSyncResult> {
   const credentials = loadCursorCredentials();
   if (!credentials) {
-    return; // Not logged in to Cursor
-  }
-
-  if (spinner) {
-    spinner.update(pc.gray("Syncing Cursor usage data..."));
+    return { attempted: false, synced: false, rows: 0 };
   }
 
   const result = await syncCursorCache();
-  if (!result.synced) {
-    // Don't fail the whole command, just log a warning
-    if (spinner) {
-      spinner.update(pc.yellow(`Cursor sync failed: ${result.error}`));
-    }
-  }
+  return {
+    attempted: true,
+    synced: result.synced,
+    rows: result.rows,
+    error: result.error,
+  };
+}
+
+/**
+ * Load pricing data and sync Cursor cache in parallel.
+ * These operations are independent and can run concurrently.
+ */
+async function loadDataSources(): Promise<{
+  fetcher: PricingFetcher;
+  cursorSync: CursorSyncResult;
+}> {
+  const [cursorSync, fetcher] = await Promise.all([
+    syncCursorData(),
+    fetchPricingData(),
+  ]);
+  return { fetcher, cursorSync };
 }
 
 async function showModelReport(options: FilterOptions & DateFilterOptions & { benchmark?: boolean }) {
@@ -364,12 +383,10 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
 
   // Start spinner for loading phase
   const spinner = createSpinner({ color: "cyan" });
-  spinner.start(pc.gray("Syncing data sources..."));
+  spinner.start(pc.gray("Loading data sources..."));
 
-  // Sync Cursor data if authenticated
-  await syncCursorIfAuthenticated(spinner);
-
-  const fetcher = await fetchPricingWithCache(spinner);
+  // Load pricing and sync Cursor data in parallel
+  const { fetcher, cursorSync } = await loadDataSources();
   const pricingEntries = fetcher.toPricingEntries();
 
   spinner.update(pc.gray("Processing session data..."));
@@ -443,6 +460,13 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
 
   if (options.benchmark) {
     console.log(pc.gray(`  Processing time: ${processingTime.toFixed(0)}ms (Rust) + ${report.processingTimeMs}ms (parsing)`));
+    if (cursorSync.attempted) {
+      if (cursorSync.synced) {
+        console.log(pc.gray(`  Cursor: ${cursorSync.rows} usage events synced (full lifetime data)`));
+      } else {
+        console.log(pc.yellow(`  Cursor: sync failed - ${cursorSync.error}`));
+      }
+    }
   }
 
   console.log();
@@ -464,12 +488,10 @@ async function showMonthlyReport(options: FilterOptions & DateFilterOptions & { 
 
   // Start spinner for loading phase
   const spinner = createSpinner({ color: "cyan" });
-  spinner.start(pc.gray("Syncing data sources..."));
+  spinner.start(pc.gray("Loading data sources..."));
 
-  // Sync Cursor data if authenticated
-  await syncCursorIfAuthenticated(spinner);
-
-  const fetcher = await fetchPricingWithCache(spinner);
+  // Load pricing and sync Cursor data in parallel
+  const { fetcher, cursorSync } = await loadDataSources();
   const pricingEntries = fetcher.toPricingEntries();
 
   spinner.update(pc.gray("Processing session data..."));
@@ -531,6 +553,13 @@ async function showMonthlyReport(options: FilterOptions & DateFilterOptions & { 
 
   if (options.benchmark) {
     console.log(pc.gray(`  Processing time: ${processingTime.toFixed(0)}ms (Rust) + ${report.processingTimeMs}ms (parsing)`));
+    if (cursorSync.attempted) {
+      if (cursorSync.synced) {
+        console.log(pc.gray(`  Cursor: ${cursorSync.rows} usage events synced (full lifetime data)`));
+      } else {
+        console.log(pc.yellow(`  Cursor: sync failed - ${cursorSync.error}`));
+      }
+    }
   }
 
   console.log();
@@ -546,12 +575,10 @@ async function handleGraphCommand(options: GraphCommandOptions) {
 
   // Start spinner for loading phase (only if outputting to file, not stdout)
   const spinner = options.output ? createSpinner({ color: "cyan" }) : null;
-  spinner?.start(pc.gray("Syncing data sources..."));
+  spinner?.start(pc.gray("Loading data sources..."));
 
-  // Sync Cursor data if authenticated
-  await syncCursorIfAuthenticated(spinner ?? undefined);
-
-  const fetcher = await fetchPricingWithCache(spinner ?? undefined);
+  // Load pricing and sync Cursor data in parallel
+  const { fetcher, cursorSync } = await loadDataSources();
   const pricingEntries = fetcher.toPricingEntries();
 
   spinner?.update(pc.gray("Generating graph data..."));
@@ -587,6 +614,13 @@ async function handleGraphCommand(options: GraphCommandOptions) {
     console.error(pc.gray(`  Total: ${formatCurrency(data.summary.totalCost)}`));
     if (options.benchmark) {
       console.error(pc.gray(`  Processing time: ${processingTime.toFixed(0)}ms (Rust native)`));
+      if (cursorSync.attempted) {
+        if (cursorSync.synced) {
+          console.error(pc.gray(`  Cursor: ${cursorSync.rows} usage events synced (full lifetime data)`));
+        } else {
+          console.error(pc.yellow(`  Cursor: sync failed - ${cursorSync.error}`));
+        }
+      }
     }
   } else {
     console.log(jsonOutput);
