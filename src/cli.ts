@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Token Tracker CLI
- * Display OpenCode, Claude Code, Codex, and Gemini usage with dynamic width tables
+ * Display OpenCode, Claude Code, Codex, Gemini, and Cursor usage with dynamic width tables
  * 
  * All heavy computation is done in the native Rust module.
  */
@@ -11,6 +11,16 @@ import pc from "picocolors";
 import { login, logout, whoami } from "./auth.js";
 import { submit } from "./submit.js";
 import { PricingFetcher } from "./pricing.js";
+import {
+  loadCursorCredentials,
+  saveCursorCredentials,
+  clearCursorCredentials,
+  validateCursorSession,
+  readCursorUsage,
+  getCursorCredentialsPath,
+  syncCursorCache,
+  getCursorCacheStatus,
+} from "./cursor.js";
 import {
   createUsageTable,
   formatUsageRow,
@@ -38,6 +48,7 @@ interface FilterOptions {
   claude?: boolean;
   codex?: boolean;
   gemini?: boolean;
+  cursor?: boolean;
 }
 
 interface DateFilterOptions {
@@ -119,6 +130,7 @@ async function main() {
     .option("--claude", "Show only Claude Code usage")
     .option("--codex", "Show only Codex CLI usage")
     .option("--gemini", "Show only Gemini CLI usage")
+    .option("--cursor", "Show only Cursor IDE usage")
     .option("--today", "Show only today's usage")
     .option("--week", "Show last 7 days")
     .option("--month", "Show current month")
@@ -137,6 +149,7 @@ async function main() {
     .option("--claude", "Show only Claude Code usage")
     .option("--codex", "Show only Codex CLI usage")
     .option("--gemini", "Show only Gemini CLI usage")
+    .option("--cursor", "Show only Cursor IDE usage")
     .option("--today", "Show only today's usage")
     .option("--week", "Show last 7 days")
     .option("--month", "Show current month")
@@ -156,6 +169,7 @@ async function main() {
     .option("--claude", "Include only Claude Code data")
     .option("--codex", "Include only Codex CLI data")
     .option("--gemini", "Include only Gemini CLI data")
+    .option("--cursor", "Include only Cursor IDE data")
     .option("--today", "Show only today's usage")
     .option("--week", "Show last 7 days")
     .option("--month", "Show current month")
@@ -203,6 +217,7 @@ async function main() {
     .option("--claude", "Include only Claude Code data")
     .option("--codex", "Include only Codex CLI data")
     .option("--gemini", "Include only Gemini CLI data")
+    .option("--cursor", "Include only Cursor IDE data")
     .option("--since <date>", "Start date (YYYY-MM-DD)")
     .option("--until <date>", "End date (YYYY-MM-DD)")
     .option("--year <year>", "Filter to specific year")
@@ -213,6 +228,7 @@ async function main() {
         claude: options.claude,
         codex: options.codex,
         gemini: options.gemini,
+        cursor: options.cursor,
         since: options.since,
         until: options.until,
         year: options.year,
@@ -220,28 +236,61 @@ async function main() {
       });
     });
 
-  // Default command with options
-  program
-    .option("--opencode", "Show only OpenCode usage")
-    .option("--claude", "Show only Claude Code usage")
-    .option("--codex", "Show only Codex CLI usage")
-    .option("--gemini", "Show only Gemini CLI usage")
-    .option("--today", "Show only today's usage")
-    .option("--week", "Show last 7 days")
-    .option("--month", "Show current month")
-    .option("--since <date>", "Start date (YYYY-MM-DD)")
-    .option("--until <date>", "End date (YYYY-MM-DD)")
-    .option("--year <year>", "Filter to specific year")
-    .option("--benchmark", "Show processing time")
-    .action(async (options) => {
-      await showModelReport(options);
+  // =========================================================================
+  // Cursor IDE Authentication Commands
+  // =========================================================================
+
+  const cursorCommand = program
+    .command("cursor")
+    .description("Cursor IDE integration commands");
+
+  cursorCommand
+    .command("login")
+    .description("Login to Cursor (paste your session token)")
+    .action(async () => {
+      await cursorLogin();
+    });
+
+  cursorCommand
+    .command("logout")
+    .description("Logout from Cursor")
+    .action(async () => {
+      await cursorLogout();
+    });
+
+  cursorCommand
+    .command("status")
+    .description("Check Cursor authentication status")
+    .action(async () => {
+      await cursorStatus();
     });
 
   await program.parseAsync();
+  
+  // If no subcommand was provided, run models report by default
+  if (process.argv.length <= 2 || (process.argv[2] && process.argv[2].startsWith('-'))) {
+    // Re-parse with models-like behavior for default action
+    const defaultProgram = new Command();
+    defaultProgram
+      .option("--opencode", "Show only OpenCode usage")
+      .option("--claude", "Show only Claude Code usage")
+      .option("--codex", "Show only Codex CLI usage")
+      .option("--gemini", "Show only Gemini CLI usage")
+      .option("--cursor", "Show only Cursor IDE usage")
+      .option("--today", "Show only today's usage")
+      .option("--week", "Show last 7 days")
+      .option("--month", "Show current month")
+      .option("--since <date>", "Start date (YYYY-MM-DD)")
+      .option("--until <date>", "End date (YYYY-MM-DD)")
+      .option("--year <year>", "Filter to specific year")
+      .option("--benchmark", "Show processing time")
+      .parse();
+    await showModelReport(defaultProgram.opts());
+  }
 }
 
 function getEnabledSources(options: FilterOptions): SourceType[] | undefined {
-  const hasFilter = options.opencode || options.claude || options.codex || options.gemini;
+  const hasFilter = options.opencode || options.claude || options.codex || options.gemini || options.cursor;
   if (!hasFilter) return undefined; // All sources
 
   const sources: SourceType[] = [];
@@ -249,6 +298,7 @@ function getEnabledSources(options: FilterOptions): SourceType[] | undefined {
   if (options.claude) sources.push("claude");
   if (options.codex) sources.push("codex");
   if (options.gemini) sources.push("gemini");
+  if (options.cursor) sources.push("cursor");
   return sources;
 }
 
@@ -269,6 +319,29 @@ async function fetchPricingWithCache(spinner?: ReturnType<typeof createSpinner>)
   return fetcher;
 }
 
+/**
+ * Sync Cursor data from API to local cache if authenticated
+ * This is called before reports to ensure Rust has access to Cursor data
+ */
+async function syncCursorIfAuthenticated(spinner?: ReturnType<typeof createSpinner>): Promise<void> {
+  const credentials = loadCursorCredentials();
+  if (!credentials) {
+    return; // Not logged in to Cursor
+  }
+
+  if (spinner) {
+    spinner.update(pc.gray("Syncing Cursor usage data..."));
+  }
+
+  const result = await syncCursorCache();
+  if (!result.synced) {
+    // Don't fail the whole command, just log a warning
+    if (spinner) {
+      spinner.update(pc.yellow(`Cursor sync failed: ${result.error}`));
+    }
+  }
+}
+
 async function showModelReport(options: FilterOptions & DateFilterOptions & { benchmark?: boolean }) {
   await ensureNativeModule();
 
@@ -285,7 +358,10 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
 
   // Start spinner for loading phase
   const spinner = createSpinner({ color: "cyan" });
-  spinner.start(pc.gray("Fetching pricing data..."));
+  spinner.start(pc.gray("Syncing data sources..."));
+
+  // Sync Cursor data if authenticated
+  await syncCursorIfAuthenticated(spinner);
 
   const fetcher = await fetchPricingWithCache(spinner);
   const pricingEntries = fetcher.toPricingEntries();
@@ -294,11 +370,12 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
   const startTime = performance.now();
 
   const dateFilters = getDateFilters(options);
+  const enabledSources = getEnabledSources(options);
   
   let report: ModelReport;
   try {
     report = getModelReportNative({
-      sources: getEnabledSources(options),
+      sources: enabledSources,
       pricing: pricingEntries,
       since: dateFilters.since,
       until: dateFilters.until,
@@ -381,7 +458,10 @@ async function showMonthlyReport(options: FilterOptions & DateFilterOptions & { 
 
   // Start spinner for loading phase
   const spinner = createSpinner({ color: "cyan" });
-  spinner.start(pc.gray("Fetching pricing data..."));
+  spinner.start(pc.gray("Syncing data sources..."));
+
+  // Sync Cursor data if authenticated
+  await syncCursorIfAuthenticated(spinner);
 
   const fetcher = await fetchPricingWithCache(spinner);
   const pricingEntries = fetcher.toPricingEntries();
@@ -460,7 +540,10 @@ async function handleGraphCommand(options: GraphCommandOptions) {
 
   // Start spinner for loading phase (only if outputting to file, not stdout)
   const spinner = options.output ? createSpinner({ color: "cyan" }) : null;
-  spinner?.start(pc.gray("Fetching pricing data..."));
+  spinner?.start(pc.gray("Syncing data sources..."));
+
+  // Sync Cursor data if authenticated
+  await syncCursorIfAuthenticated(spinner ?? undefined);
 
   const fetcher = await fetchPricingWithCache(spinner ?? undefined);
   const pricingEntries = fetcher.toPricingEntries();
@@ -514,9 +597,130 @@ function getSourceLabel(source: string): string {
       return "Codex";
     case "gemini":
       return "Gemini";
+    case "cursor":
+      return "Cursor";
     default:
       return source;
   }
+}
+
+// =============================================================================
+// Cursor IDE Authentication
+// =============================================================================
+
+async function cursorLogin(): Promise<void> {
+  const credentials = loadCursorCredentials();
+  if (credentials) {
+    console.log(pc.yellow("\n  Already logged in to Cursor."));
+    console.log(pc.gray("  Run 'token-tracker cursor logout' to sign out first.\n"));
+    return;
+  }
+
+  console.log(pc.cyan("\n  Cursor IDE - Login\n"));
+  console.log(pc.white("  To get your session token:"));
+  console.log(pc.gray("  1. Open https://www.cursor.com/settings in your browser"));
+  console.log(pc.gray("  2. Open Developer Tools (F12) > Network tab"));
+  console.log(pc.gray("  3. Find any request to cursor.com/api"));
+  console.log(pc.gray("  4. Copy the 'WorkosCursorSessionToken' cookie value"));
+  console.log();
+
+  // Read token from stdin
+  const readline = await import("node:readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const token = await new Promise<string>((resolve) => {
+    rl.question(pc.white("  Paste your session token: "), (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+
+  if (!token) {
+    console.log(pc.red("\n  No token provided. Login cancelled.\n"));
+    return;
+  }
+
+  // Validate the token
+  console.log(pc.gray("\n  Validating token..."));
+  const validation = await validateCursorSession(token);
+
+  if (!validation.valid) {
+    console.log(pc.red(`\n  Invalid token: ${validation.error}`));
+    console.log(pc.gray("  Please try again with a valid session token.\n"));
+    return;
+  }
+
+  // Save credentials
+  saveCursorCredentials({
+    sessionToken: token,
+    createdAt: new Date().toISOString(),
+  });
+
+  console.log(pc.green("\n  Success! Logged in to Cursor."));
+  if (validation.membershipType) {
+    console.log(pc.gray(`  Membership: ${validation.membershipType}`));
+  }
+  console.log(pc.gray("  Your usage data will now be included in reports.\n"));
+}
+
+async function cursorLogout(): Promise<void> {
+  const credentials = loadCursorCredentials();
+
+  if (!credentials) {
+    console.log(pc.yellow("\n  Not logged in to Cursor.\n"));
+    return;
+  }
+
+  const cleared = clearCursorCredentials();
+
+  if (cleared) {
+    console.log(pc.green("\n  Logged out from Cursor.\n"));
+  } else {
+    console.error(pc.red("\n  Failed to clear Cursor credentials.\n"));
+    process.exit(1);
+  }
+}
+
+async function cursorStatus(): Promise<void> {
+  const credentials = loadCursorCredentials();
+
+  if (!credentials) {
+    console.log(pc.yellow("\n  Not logged in to Cursor."));
+    console.log(pc.gray("  Run 'token-tracker cursor login' to authenticate.\n"));
+    return;
+  }
+
+  console.log(pc.cyan("\n  Cursor IDE - Status\n"));
+  console.log(pc.gray("  Checking session validity..."));
+
+  const validation = await validateCursorSession(credentials.sessionToken);
+
+  if (validation.valid) {
+    console.log(pc.green("  ✓ Session is valid"));
+    if (validation.membershipType) {
+      console.log(pc.white(`  Membership: ${validation.membershipType}`));
+    }
+    console.log(pc.gray(`  Logged in: ${new Date(credentials.createdAt).toLocaleDateString()}`));
+
+    // Try to fetch usage to show summary
+    try {
+      const usage = await readCursorUsage();
+      const totalCost = usage.byModel.reduce((sum, m) => sum + m.cost, 0);
+      console.log(pc.gray(`  Models used: ${usage.byModel.length}`));
+      console.log(pc.gray(`  Total usage events: ${usage.rows.length}`));
+      console.log(pc.gray(`  Total cost: $${totalCost.toFixed(2)}`));
+    } catch (e) {
+      // Ignore fetch errors for status check
+    }
+  } else {
+    console.log(pc.red(`  ✗ Session invalid: ${validation.error}`));
+    console.log(pc.gray("  Run 'token-tracker cursor login' to re-authenticate."));
+  }
+
+  console.log(pc.gray(`\n  Credentials: ${getCursorCredentialsPath()}\n`));
 }
 
 main().catch(console.error);

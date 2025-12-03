@@ -13,6 +13,7 @@ pub enum SessionType {
     Claude,
     Codex,
     Gemini,
+    Cursor,
 }
 
 /// Result of scanning all session directories
@@ -22,6 +23,7 @@ pub struct ScanResult {
     pub claude_files: Vec<PathBuf>,
     pub codex_files: Vec<PathBuf>,
     pub gemini_files: Vec<PathBuf>,
+    pub cursor_files: Vec<PathBuf>,
 }
 
 impl ScanResult {
@@ -31,6 +33,7 @@ impl ScanResult {
             + self.claude_files.len()
             + self.codex_files.len()
             + self.gemini_files.len()
+            + self.cursor_files.len()
     }
 
     /// Get all files as a single vector
@@ -48,6 +51,9 @@ impl ScanResult {
         }
         for path in &self.gemini_files {
             result.push((SessionType::Gemini, path.clone()));
+        }
+        for path in &self.cursor_files {
+            result.push((SessionType::Cursor, path.clone()));
         }
 
         result
@@ -75,6 +81,7 @@ fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "*.csv" => file_name.ends_with(".csv"),
                 "session-*.json" => {
                     file_name.starts_with("session-") && file_name.ends_with(".json")
                 }
@@ -94,6 +101,7 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
     let include_claude = include_all || sources.iter().any(|s| s == "claude");
     let include_codex = include_all || sources.iter().any(|s| s == "codex");
     let include_gemini = include_all || sources.iter().any(|s| s == "gemini");
+    let include_cursor = include_all || sources.iter().any(|s| s == "cursor");
 
     // Define scan tasks
     let mut tasks: Vec<(SessionType, String, &str)> = Vec::new();
@@ -126,6 +134,12 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
         tasks.push((SessionType::Gemini, gemini_path, "session-*.json"));
     }
 
+    if include_cursor {
+        // Cursor: ~/.token-tracker/cursor-cache/*.csv
+        let cursor_path = format!("{}/.token-tracker/cursor-cache", home_dir);
+        tasks.push((SessionType::Cursor, cursor_path, "*.csv"));
+    }
+
     // Execute scans in parallel
     let scan_results: Vec<(SessionType, Vec<PathBuf>)> = tasks
         .into_par_iter()
@@ -142,6 +156,7 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
             SessionType::Claude => result.claude_files = files,
             SessionType::Codex => result.codex_files = files,
             SessionType::Gemini => result.gemini_files = files,
+            SessionType::Cursor => result.cursor_files = files,
         }
     }
 
@@ -162,6 +177,7 @@ mod tests {
             claude_files: vec![PathBuf::from("c.jsonl")],
             codex_files: vec![],
             gemini_files: vec![PathBuf::from("d.json")],
+            cursor_files: vec![],
         };
         assert_eq!(result.total_files(), 4);
     }
@@ -173,14 +189,16 @@ mod tests {
             claude_files: vec![PathBuf::from("b.jsonl")],
             codex_files: vec![PathBuf::from("c.jsonl")],
             gemini_files: vec![PathBuf::from("d.json")],
+            cursor_files: vec![PathBuf::from("e.csv")],
         };
 
         let all = result.all_files();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 5);
         assert_eq!(all[0], (SessionType::OpenCode, PathBuf::from("a.json")));
         assert_eq!(all[1], (SessionType::Claude, PathBuf::from("b.jsonl")));
         assert_eq!(all[2], (SessionType::Codex, PathBuf::from("c.jsonl")));
         assert_eq!(all[3], (SessionType::Gemini, PathBuf::from("d.json")));
+        assert_eq!(all[4], (SessionType::Cursor, PathBuf::from("e.csv")));
     }
 
     #[test]
@@ -263,6 +281,20 @@ mod tests {
 
         let files = scan_directory(path.to_str().unwrap(), "*.json");
         assert_eq!(files.len(), 3);
+    }
+
+    #[test]
+    fn test_scan_directory_csv_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("usage.csv")).unwrap();
+        File::create(path.join("data.csv")).unwrap();
+        File::create(path.join("other.json")).unwrap();
+
+        let csv_files = scan_directory(path.to_str().unwrap(), "*.csv");
+        assert_eq!(csv_files.len(), 2);
+        assert!(csv_files.iter().all(|p| p.extension().unwrap() == "csv"));
     }
 
     #[test]

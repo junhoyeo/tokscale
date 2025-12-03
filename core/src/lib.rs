@@ -170,6 +170,7 @@ pub fn generate_graph(options: GraphOptions) -> napi::Result<GraphResult> {
             "claude".to_string(),
             "codex".to_string(),
             "gemini".to_string(),
+            "cursor".to_string(),
         ]
     });
 
@@ -219,6 +220,14 @@ pub fn generate_graph(options: GraphOptions) -> napi::Result<GraphResult> {
         .collect();
     all_messages.extend(gemini_messages);
 
+    // Parse Cursor files in parallel
+    let cursor_messages: Vec<UnifiedMessage> = scan_result
+        .cursor_files
+        .par_iter()
+        .flat_map(|path| sessions::cursor::parse_cursor_file(path))
+        .collect();
+    all_messages.extend(cursor_messages);
+
     // 3. Apply date filters
     let filtered_messages = filter_messages(all_messages, &options);
 
@@ -262,6 +271,7 @@ pub struct ScanStats {
     pub claude_files: i32,
     pub codex_files: i32,
     pub gemini_files: i32,
+    pub cursor_files: i32,
     pub total_files: i32,
 }
 
@@ -278,6 +288,7 @@ pub fn scan_sessions(home_dir: Option<String>, sources: Option<Vec<String>>) -> 
             "claude".to_string(),
             "codex".to_string(),
             "gemini".to_string(),
+            "cursor".to_string(),
         ]
     });
 
@@ -288,6 +299,7 @@ pub fn scan_sessions(home_dir: Option<String>, sources: Option<Vec<String>>) -> 
         claude_files: result.claude_files.len() as i32,
         codex_files: result.codex_files.len() as i32,
         gemini_files: result.gemini_files.len() as i32,
+        cursor_files: result.cursor_files.len() as i32,
         total_files: result.total_files() as i32,
     }
 }
@@ -507,6 +519,35 @@ fn parse_all_messages_with_pricing(
         .collect();
     all_messages.extend(gemini_messages);
 
+    // Parse Cursor files in parallel
+    // Cursor CSV already contains cost, but we recalculate for consistency
+    let cursor_messages: Vec<UnifiedMessage> = scan_result
+        .cursor_files
+        .par_iter()
+        .flat_map(|path| {
+            sessions::cursor::parse_cursor_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    // Cursor provides cost in CSV, but recalculate for pricing consistency
+                    let recalc_cost = pricing_data.calculate_cost(
+                        &msg.model_id,
+                        msg.tokens.input,
+                        msg.tokens.output,
+                        msg.tokens.cache_read,
+                        msg.tokens.cache_write,
+                        msg.tokens.reasoning,
+                    );
+                    // Use recalculated cost if available, otherwise keep original
+                    if recalc_cost > 0.0 {
+                        msg.cost = recalc_cost;
+                    }
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(cursor_messages);
+
     all_messages
 }
 
@@ -527,6 +568,7 @@ pub fn get_model_report(options: ReportOptions) -> napi::Result<ModelReport> {
             "claude".to_string(),
             "codex".to_string(),
             "gemini".to_string(),
+            "cursor".to_string(),
         ]
     });
 
@@ -565,11 +607,15 @@ pub fn get_model_report(options: ReportOptions) -> napi::Result<ModelReport> {
     }
 
     let mut entries: Vec<ModelUsage> = model_map.into_values().collect();
-    // Sort by cost descending
+    // Sort by cost descending (NaN values sorted to the end)
     entries.sort_by(|a, b| {
-        b.cost
-            .partial_cmp(&a.cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        // Handle NaN: treat as smallest value so they sort to the end in descending order
+        match (a.cost.is_nan(), b.cost.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater, // NaN sorts after valid values
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal),
+        }
     });
 
     let total_input: i64 = entries.iter().map(|e| e.input).sum();
@@ -620,6 +666,7 @@ pub fn get_monthly_report(options: ReportOptions) -> napi::Result<MonthlyReport>
             "claude".to_string(),
             "codex".to_string(),
             "gemini".to_string(),
+            "cursor".to_string(),
         ]
     });
 
@@ -695,6 +742,7 @@ pub fn generate_graph_with_pricing(options: ReportOptions) -> napi::Result<Graph
             "claude".to_string(),
             "codex".to_string(),
             "gemini".to_string(),
+            "cursor".to_string(),
         ]
     });
 
