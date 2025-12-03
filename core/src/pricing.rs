@@ -64,21 +64,41 @@ impl PricingData {
         }
 
         // Fuzzy matching - check if model_id is contained in any key or vice versa
+        // Sort keys for deterministic results (HashMap iteration is random)
         let lower_model = model_id.to_lowercase();
         let lower_normalized = normalized.as_ref().map(|s| s.to_lowercase());
         
-        for (key, pricing) in &self.models {
+        let mut sorted_keys: Vec<&String> = self.models.keys().collect();
+        sorted_keys.sort();
+        
+        // First pass: prefer keys that contain the model name (more specific)
+        for key in &sorted_keys {
             let lower_key = key.to_lowercase();
             
             // Check original model name
-            if lower_key.contains(&lower_model) || lower_model.contains(&lower_key) {
-                return Some(pricing);
+            if lower_key.contains(&lower_model) {
+                return self.models.get(*key);
             }
             
             // Check normalized name
             if let Some(ref ln) = lower_normalized {
-                if lower_key.contains(ln) || ln.contains(&lower_key) {
-                    return Some(pricing);
+                if lower_key.contains(ln) {
+                    return self.models.get(*key);
+                }
+            }
+        }
+        
+        // Second pass: check if model name contains the key (less specific)
+        for key in &sorted_keys {
+            let lower_key = key.to_lowercase();
+            
+            if lower_model.contains(&lower_key) {
+                return self.models.get(*key);
+            }
+            
+            if let Some(ref ln) = lower_normalized {
+                if ln.contains(&lower_key) {
+                    return self.models.get(*key);
                 }
             }
         }
