@@ -58,7 +58,6 @@ export default function LeaderboardPage() {
   const [page, setPage] = useState(1);
 
   useEffect(() => {
-    setIsLoading(true);
     fetch(`/api/leaderboard?period=${period}&page=${page}&limit=25`)
       .then((res) => res.json())
       .then((result) => {
@@ -81,7 +80,7 @@ export default function LeaderboardPage() {
             Leaderboard
           </h1>
           <p className="text-gray-500 dark:text-gray-400 mb-6">
-            See who's using the most AI tokens
+            See who&apos;s using the most AI tokens
           </p>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
