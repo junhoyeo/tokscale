@@ -8,6 +8,8 @@
 
 import { Command } from "commander";
 import pc from "picocolors";
+import { login, logout, whoami } from "./auth.js";
+import { submit } from "./submit.js";
 import { PricingFetcher } from "./pricing.js";
 import {
   createUsageTable,
@@ -83,6 +85,59 @@ async function main() {
     .option("--benchmark", "Show processing time")
     .action(async (options) => {
       await handleGraphCommand(options);
+    });
+
+  // =========================================================================
+  // Authentication Commands
+  // =========================================================================
+
+  program
+    .command("login")
+    .description("Login to Token Tracker (opens browser for GitHub auth)")
+    .action(async () => {
+      await login();
+    });
+
+  program
+    .command("logout")
+    .description("Logout from Token Tracker")
+    .action(async () => {
+      await logout();
+    });
+
+  program
+    .command("whoami")
+    .description("Show current logged in user")
+    .action(async () => {
+      await whoami();
+    });
+
+  // =========================================================================
+  // Submit Command
+  // =========================================================================
+
+  program
+    .command("submit")
+    .description("Submit your usage data to Token Tracker")
+    .option("--opencode", "Include only OpenCode data")
+    .option("--claude", "Include only Claude Code data")
+    .option("--codex", "Include only Codex CLI data")
+    .option("--gemini", "Include only Gemini CLI data")
+    .option("--since <date>", "Start date (YYYY-MM-DD)")
+    .option("--until <date>", "End date (YYYY-MM-DD)")
+    .option("--year <year>", "Filter to specific year")
+    .option("--dry-run", "Show what would be submitted without actually submitting")
+    .action(async (options) => {
+      await submit({
+        opencode: options.opencode,
+        claude: options.claude,
+        codex: options.codex,
+        gemini: options.gemini,
+        since: options.since,
+        until: options.until,
+        year: options.year,
+        dryRun: options.dryRun,
+      });
     });
 
   // Default command with options
