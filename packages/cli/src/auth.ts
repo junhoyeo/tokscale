@@ -4,6 +4,7 @@
  */
 
 import pc from "picocolors";
+import * as os from "node:os";
 import {
   saveCredentials,
   loadCredentials,
@@ -172,8 +173,7 @@ export async function whoami(): Promise<void> {
  * Get a device name for the token
  */
 function getDeviceName(): string {
-  const hostname = require("node:os").hostname();
-  return `CLI on ${hostname}`;
+  return `CLI on ${os.hostname()}`;
 }
 
 /**
