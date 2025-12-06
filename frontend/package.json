@@ -20,7 +20,7 @@
     "framer-motion": "^12.23.25",
     "lodash-es": "^4.17.21",
     "lucide-react": "^0.555.0",
-    "next": "16.0.6",
+    "next": "16.0.7",
     "obelisk.js": "^1.2.2",
     "postgres": "^3.4.7",
     "react": "19.2.0",

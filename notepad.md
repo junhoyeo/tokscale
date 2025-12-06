@@ -311,3 +311,117 @@ CLI tool to track token usage across OpenCode, Claude Code, Codex, and Gemini se
 
 소요 시간: ~20 minutes
 
+---
+
+[2025-12-04 02:36] - Task 1: Push database schema to PostgreSQL
+
+### DISCOVERED ISSUES
+- drizzle-kit doesn't automatically load .env.local files
+- Need to source environment variables before running drizzle-kit push
+
+### IMPLEMENTATION DECISIONS
+- Used `source .env.local` to load environment variables before running drizzle-kit
+- Database schema was already synced (previous work), so "No changes detected"
+
+### PROBLEMS FOR NEXT TASKS
+- None
+
+### VERIFICATION RESULTS
+- Ran: `set -a && source .env.local && set +a && npx drizzle-kit push`
+- Output: "[✓] Pulling schema from database... [i] No changes detected"
+- All 6 tables already exist: users, sessions, api_tokens, device_codes, submissions, daily_breakdown
+
+### LEARNINGS
+- Correct command: `set -a && source .env.local && set +a && npx drizzle-kit push`
+- drizzle-kit reads environment variables from process.env, not from .env files automatically
+- Alternative: install `dotenv-cli` and use `npx dotenv -e .env.local -- npx drizzle-kit push`
+
+소요 시간: ~2 minutes
+
+---
+
+[2025-12-04 02:45] - Task 7: Update credentials path with migration and cleanup
+
+### DISCOVERED ISSUES
+- None - clean implementation
+
+### IMPLEMENTATION DECISIONS
+- Updated both `src/credentials.ts` and `src/cursor.ts` to use XDG-compliant path:
+  - Old: `~/.token-tracker/`
+  - New: `~/.config/token-tracker/`
+- Added automatic migration from old path to new path
+- Migration logic:
+  1. Check if new file doesn't exist AND old file exists
+  2. Copy old file to new location with secure permissions (0o600)
+  3. Delete old file
+  4. Try to remove old directory (silently fails if not empty)
+- Both files attempt to remove `OLD_CONFIG_DIR` - intentional redundancy for cleanup
+- Migration called on `loadCredentials()` and `loadCursorCredentials()` (read operations)
+- Cache migration called on `syncCursorCache()` (when cache is actually used)
+
+### PROBLEMS FOR NEXT TASKS
+- None - Task 8 (Final verification) is next
+
+### VERIFICATION RESULTS
+- Ran: `yarn dev --help` - CLI runs without errors
+- Ran: `yarn dev whoami` - Shows "Not logged in" (expected - fresh migration)
+- Commit: `refactor(cli): migrate credentials to XDG path (~/.config/token-tracker)` (7d5b810)
+
+### LEARNINGS
+- XDG Base Directory Spec: config should be in `~/.config/<app>/` on Unix systems
+- Node.js `fs.cpSync()` and `fs.rmSync()` available for recursive directory operations
+- Using try-catch to silently handle migration failures is good practice - CLI shouldn't crash
+- `fs.rmdirSync()` only works on empty directories - perfect for cleanup
+
+소요 시간: ~5 minutes
+
+---
+
+[2025-12-04 02:52] - Task 8: Run full build and lint verification (FINAL TASK)
+
+### DISCOVERED ISSUES
+- None - all checks passed
+
+### IMPLEMENTATION DECISIONS
+- Ran all verification commands in sequence
+- Verified all 6 commits are in place with correct messages
+
+### PROBLEMS FOR NEXT TASKS
+- None - ALL TASKS COMPLETED
+
+### VERIFICATION RESULTS
+- `yarn lint`: ✅ Passed with exit code 0 (no errors, no warnings)
+- `yarn build`: ✅ "Compiled successfully in 2.1s", 18 pages generated
+- `yarn dev --help`: ✅ Shows help message
+- `yarn dev whoami`: ✅ Shows "Not logged in" (expected)
+- Cursor source: ✅ 3 matches in types.ts and submission.ts
+
+### LEARNINGS
+- Next.js 16 with Turbopack builds very fast (~8 seconds total)
+- API routes are correctly marked as dynamic (ƒ)
+- Static pages are correctly prerendered (○)
+
+소요 시간: ~3 minutes
+
+---
+
+## 🎉 ALL TASKS COMPLETED 🎉
+
+**Summary of all work done:**
+
+| Task | Description | Commit |
+|------|-------------|--------|
+| 1 | Push database schema | (db operation) |
+| 2 | Add "cursor" source type | d5de61c |
+| 3 | Fix leaderboard ESLint | 5427e6f |
+| 4 | Fix profile ESLint | c81545b |
+| 5 | Fix useSettings ESLint | 6b77e8c |
+| 6 | Fix TokenGraph warnings | 603d5f8 |
+| 7 | Migrate credentials path | 7d5b810 |
+| 8 | Final verification | (no commit) |
+
+**Total commits:** 6
+**Build status:** ✅ Passing
+**Lint status:** ✅ Passing
+**CLI status:** ✅ Working
+
