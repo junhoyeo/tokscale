@@ -112,7 +112,7 @@ export function isLoggedIn(): boolean {
  * Get the API base URL
  */
 export function getApiBaseUrl(): string {
-  return process.env.TOKEN_TRACKER_API_URL || "https://tokens.junho.io";
+  return process.env.TOKEN_TRACKER_API_URL || "https://tokens.inevitable.team";
 }
 
 /**
