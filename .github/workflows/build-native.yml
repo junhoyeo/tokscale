@@ -1,18 +1,10 @@
-name: Build Native Module
+name: Build and Publish Core
 
 on:
   push:
     branches: [main]
-    tags:
-      - "v*"
     paths:
-      - "core/**"
-      - ".github/workflows/build-native.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "core/**"
-      - ".github/workflows/build-native.yml"
+      - "core/package.json"
   workflow_dispatch:
 
 env:
@@ -20,75 +12,37 @@ env:
   APP_NAME: token-tracker-core
   MACOSX_DEPLOYMENT_TARGET: "10.13"
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  # Lint Rust code
-  lint:
-    name: Lint
+  check-version:
+    name: Check Version Change
     runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.check.outputs.version_changed }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: yarn
-          cache-dependency-path: core/yarn.lock
+          fetch-depth: 2
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: Check if version changed
+        id: check
+        run: |
+          if git diff HEAD~1 HEAD -- core/package.json | grep -E '^[+-]\s*"version"'; then
+            echo "Version changed"
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version not changed"
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
-        working-directory: core
-
-      - name: Cargo fmt
-        working-directory: core
-        run: cargo fmt -- --check
-
-      - name: Clippy
-        working-directory: core
-        run: cargo clippy --features noop -- -D warnings
-
-  # Run Rust unit tests
-  test-rust:
-    name: Rust Unit Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            core/target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('core/Cargo.lock') }}
-
-      - name: Run Rust tests
-        working-directory: core
-        run: cargo test --features noop
-
-  # Build native modules for all platforms
   build:
     name: Build - ${{ matrix.settings.target }}
-    needs: [lint, test-rust]
+    needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true'
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
       matrix:
         settings:
-          # macOS builds - cross-compile from macos-latest (ARM)
           - host: macos-latest
             target: x86_64-apple-darwin
             build: |
@@ -101,7 +55,6 @@ jobs:
               cd core
               yarn build:platform --target aarch64-apple-darwin
               strip -x *.node
-          # Linux builds using napi-cross for glibc compatibility
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: |
@@ -151,7 +104,6 @@ jobs:
             core/target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('core/Cargo.lock') }}
 
-      # Install zig for musl builds
       - uses: mlugg/setup-zig@v2
         if: ${{ contains(matrix.settings.target, 'musl') }}
         with:
@@ -180,182 +132,10 @@ jobs:
           path: core/*.node
           if-no-files-found: error
 
-  # Test macOS and Windows bindings
-  test-macos-windows:
-    name: Test ${{ matrix.settings.target }} - node@${{ matrix.node }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        settings:
-          - host: windows-latest
-            target: x86_64-pc-windows-msvc
-            architecture: x64
-          - host: macos-latest
-            target: aarch64-apple-darwin
-            architecture: arm64
-          - host: macos-latest
-            target: x86_64-apple-darwin
-            architecture: x64
-        node: ["20", "22"]
-    runs-on: ${{ matrix.settings.host }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: yarn
-          cache-dependency-path: core/yarn.lock
-          architecture: ${{ matrix.settings.architecture }}
-
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
-        working-directory: core
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: bindings-${{ matrix.settings.target }}
-          path: core/
-
-      - name: List files
-        run: ls -la core/
-        shell: bash
-
-      - name: Test native module
-        run: |
-          node -e "const core = require('./index.js'); console.log('Version:', core.version()); console.log('Health:', core.healthCheck());"
-        working-directory: core
-
-      - name: Run integration tests
-        run: yarn test
-        working-directory: core
-
-  # Test Linux bindings in Docker containers
-  test-linux:
-    name: Test ${{ matrix.target }} - node@${{ matrix.node }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-        node: ["20", "22"]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: yarn
-          cache-dependency-path: core/yarn.lock
-
-      - name: Determine Docker image
-        id: docker
-        run: |
-          if [[ "${{ matrix.target }}" == *"-musl" ]]; then
-            echo "IMAGE=node:${{ matrix.node }}-alpine" >> $GITHUB_OUTPUT
-          else
-            echo "IMAGE=node:${{ matrix.node }}-slim" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
-        working-directory: core
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: bindings-${{ matrix.target }}
-          path: core/
-
-      - name: List files
-        run: ls -la core/
-        shell: bash
-
-      - name: Test bindings in Docker
-        uses: addnab/docker-run-action@v3
-        with:
-          image: ${{ steps.docker.outputs.IMAGE }}
-          options: -v ${{ github.workspace }}:/workspace -w /workspace/core
-          run: |
-            node -e "const core = require('./index.js'); console.log('Version:', core.version()); console.log('Health:', core.healthCheck());"
-            yarn test
-
-  # Benchmark comparison
-  benchmark:
-    name: Benchmark
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: yarn
-          cache-dependency-path: yarn.lock
-
-      - name: Install dependencies (root)
-        run: yarn install --frozen-lockfile
-
-      - name: Install dependencies (core)
-        run: yarn install --frozen-lockfile
-        working-directory: core
-
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: bindings-x86_64-unknown-linux-gnu
-          path: core/
-
-      - name: List files
-        run: ls -la core/
-
-      - name: Test native module loads
-        run: |
-          node -e "const core = require('./index.js'); console.log('Version:', core.version());"
-        working-directory: core
-
-      - name: Generate synthetic data
-        run: yarn bench:generate
-
-      - name: Run TypeScript benchmark
-        run: yarn bench:ts:synthetic
-
-      - name: Run Rust benchmark in Docker
-        uses: addnab/docker-run-action@v3
-        with:
-          image: node:20-slim
-          options: -v ${{ github.workspace }}:/workspace -w /workspace
-          run: |
-            yarn bench:rust:synthetic
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: benchmark-results
-          path: benchmarks/results/*.json
-          if-no-files-found: ignore
-
-  # Publish core package to GitHub npm registry (only on version tags)
   publish-core:
-    name: Publish Core to GitHub
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish Core
+    needs: build
     runs-on: ubuntu-latest
-    needs:
-      - lint
-      - test-rust
-      - build
-      - test-macos-windows
-      - test-linux
     permissions:
       contents: read
       packages: write
@@ -393,4 +173,32 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  publish-cli:
+    name: Publish CLI
+    needs: publish-core
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@0xinevitable"
+
+      - name: Install dependencies
+        run: yarn install
+
+      - name: Build CLI
+        run: yarn workspace @0xinevitable/token-tracker build
+
+      - name: Publish CLI
+        working-directory: packages/cli
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

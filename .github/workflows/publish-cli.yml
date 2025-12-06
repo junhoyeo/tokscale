@@ -2,10 +2,10 @@ name: Publish CLI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - packages/cli/package.json
+      - "packages/cli/package.json"
+  workflow_dispatch:
 
 jobs:
   publish-cli:
@@ -34,17 +34,17 @@ jobs:
         with:
           node-version: 20
           registry-url: https://npm.pkg.github.com/
-          scope: '@0xinevitable'
+          scope: "@0xinevitable"
 
       - name: Install dependencies
         if: steps.version-check.outputs.version_changed == 'true'
         run: yarn install
 
-      - name: Build core
+      - name: Build CLI
         if: steps.version-check.outputs.version_changed == 'true'
-        run: yarn build:core
+        run: yarn workspace @0xinevitable/token-tracker build
 
-      - name: Publish CLI to GitHub Packages
+      - name: Publish CLI
         if: steps.version-check.outputs.version_changed == 'true'
         working-directory: packages/cli
         run: npm publish
