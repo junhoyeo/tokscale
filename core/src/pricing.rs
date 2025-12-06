@@ -229,10 +229,10 @@ impl PricingData {
                 return Some("sonnet-3-5".to_string());
             }
         }
-        if lower.contains("haiku") {
-            if lower.contains("4.5") || lower.contains("4-5") {
-                return Some("haiku-4-5".to_string());
-            }
+        if lower.contains("haiku")
+            && (lower.contains("4.5") || lower.contains("4-5"))
+        {
+            return Some("haiku-4-5".to_string());
         }
 
         // OpenAI models
