@@ -201,6 +201,18 @@ use rayon::prelude::*;
 use sessions::UnifiedMessage;
 use std::time::Instant;
 
+/// Get home directory from options or environment, returning error if not available
+fn get_home_dir(home_dir_option: &Option<String>) -> napi::Result<String> {
+    home_dir_option
+        .clone()
+        .or_else(|| std::env::var("HOME").ok())
+        .ok_or_else(|| {
+            napi::Error::from_reason(
+                "HOME directory not specified and HOME environment variable not set",
+            )
+        })
+}
+
 /// Generate graph data from all session sources
 ///
 /// This is the main entry point that orchestrates:
@@ -212,12 +224,7 @@ use std::time::Instant;
 pub fn generate_graph(options: GraphOptions) -> napi::Result<GraphResult> {
     let start = Instant::now();
 
-    // Get home directory
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     // Get sources to scan
     let sources = options.sources.clone().unwrap_or_else(|| {
@@ -333,10 +340,8 @@ pub struct ScanStats {
 
 /// Scan for session files (for debugging/testing)
 #[napi]
-pub fn scan_sessions(home_dir: Option<String>, sources: Option<Vec<String>>) -> ScanStats {
-    let home = home_dir
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+pub fn scan_sessions(home_dir: Option<String>, sources: Option<Vec<String>>) -> napi::Result<ScanStats> {
+    let home = get_home_dir(&home_dir)?;
 
     let srcs = sources.unwrap_or_else(|| {
         vec![
@@ -350,14 +355,14 @@ pub fn scan_sessions(home_dir: Option<String>, sources: Option<Vec<String>>) -> 
 
     let result = scanner::scan_all_sources(&home, &srcs);
 
-    ScanStats {
+    Ok(ScanStats {
         opencode_files: result.opencode_files.len() as i32,
         claude_files: result.claude_files.len() as i32,
         codex_files: result.codex_files.len() as i32,
         gemini_files: result.gemini_files.len() as i32,
         cursor_files: result.cursor_files.len() as i32,
         total_files: result.total_files() as i32,
-    }
+    })
 }
 
 // =============================================================================
@@ -617,11 +622,7 @@ fn parse_all_messages_with_pricing(
 pub fn get_model_report(options: ReportOptions) -> napi::Result<ModelReport> {
     let start = Instant::now();
 
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     let sources = options.sources.clone().unwrap_or_else(|| {
         vec![
@@ -718,11 +719,7 @@ struct MonthAggregator {
 pub fn get_monthly_report(options: ReportOptions) -> napi::Result<MonthlyReport> {
     let start = Instant::now();
 
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     let sources = options.sources.clone().unwrap_or_else(|| {
         vec![
@@ -794,11 +791,7 @@ pub fn get_monthly_report(options: ReportOptions) -> napi::Result<MonthlyReport>
 pub fn generate_graph_with_pricing(options: ReportOptions) -> napi::Result<GraphResult> {
     let start = Instant::now();
 
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     let sources = options.sources.clone().unwrap_or_else(|| {
         vec![
@@ -862,11 +855,7 @@ fn filter_messages_for_report(
 pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMessages> {
     let start = Instant::now();
 
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     // Default to local sources only (no cursor)
     let sources = options.sources.clone().unwrap_or_else(|| {
@@ -1015,11 +1004,7 @@ fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 pub fn finalize_report(options: FinalizeReportOptions) -> napi::Result<ModelReport> {
     let start = Instant::now();
 
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     let pricing_data = build_pricing_data(&options.pricing);
 
@@ -1165,11 +1150,7 @@ pub struct FinalizeMonthlyOptions {
 pub fn finalize_monthly_report(options: FinalizeMonthlyOptions) -> napi::Result<MonthlyReport> {
     let start = Instant::now();
 
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     let pricing_data = build_pricing_data(&options.pricing);
 
@@ -1300,11 +1281,7 @@ pub struct FinalizeGraphOptions {
 pub fn finalize_graph(options: FinalizeGraphOptions) -> napi::Result<GraphResult> {
     let start = Instant::now();
 
-    let home_dir = options
-        .home_dir
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+    let home_dir = get_home_dir(&options.home_dir)?;
 
     let pricing_data = build_pricing_data(&options.pricing);
 

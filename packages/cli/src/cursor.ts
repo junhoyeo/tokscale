@@ -289,13 +289,16 @@ export function parseCursorCsv(csvText: string): CursorUsageRow[] {
       .map((record) => {
         const dateStr = record["Date"] || "";
         const date = new Date(dateStr);
-        const dateOnly = isNaN(date.getTime())
-          ? dateStr.slice(0, 10)
-          : date.toISOString().slice(0, 10);
+        const isValidDate = !isNaN(date.getTime());
+        const dateOnly = isValidDate
+          ? date.toISOString().slice(0, 10)
+          : dateStr.length >= 10
+            ? dateStr.slice(0, 10)
+            : dateStr;
 
         return {
           date: dateOnly,
-          timestamp: isNaN(date.getTime()) ? Date.now() : date.getTime(),
+          timestamp: isValidDate ? date.getTime() : 0,
           model: (record["Model"] || "").trim(),
           inputWithCacheWrite: parseInt(record["Input (w/ Cache Write)"] || "0", 10),
           inputWithoutCacheWrite: parseInt(record["Input (w/o Cache Write)"] || "0", 10),

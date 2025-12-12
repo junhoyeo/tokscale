@@ -21,6 +21,22 @@ struct IndexedKey {
     lowercase: String,
 }
 
+fn is_word_boundary_match(haystack: &str, needle: &str) -> bool {
+    if let Some(pos) = haystack.find(needle) {
+        let before_ok = pos == 0 || {
+            let ch = haystack[..pos].chars().last().unwrap();
+            !ch.is_alphanumeric()
+        };
+        let after_ok = pos + needle.len() == haystack.len() || {
+            let ch = haystack[pos + needle.len()..].chars().next().unwrap();
+            !ch.is_alphanumeric()
+        };
+        before_ok && after_ok
+    } else {
+        false
+    }
+}
+
 /// Pricing dataset containing all model pricing
 /// Optimized with pre-computed indices for fast lookups
 #[derive(Debug, Clone, Default)]
@@ -101,25 +117,23 @@ impl PricingData {
         let lower_model = model_id.to_lowercase();
         let lower_normalized = normalized.as_ref().map(|s| s.to_lowercase());
 
-        // First pass: prefer keys that contain the model name (more specific)
         for indexed in &self.sorted_keys {
-            if indexed.lowercase.contains(&lower_model) {
+            if is_word_boundary_match(&indexed.lowercase, &lower_model) {
                 return self.models.get(&indexed.original);
             }
             if let Some(ref ln) = lower_normalized {
-                if indexed.lowercase.contains(ln) {
+                if is_word_boundary_match(&indexed.lowercase, ln) {
                     return self.models.get(&indexed.original);
                 }
             }
         }
 
-        // Second pass: check if model name contains the key (less specific)
         for indexed in &self.sorted_keys {
-            if lower_model.contains(&indexed.lowercase) {
+            if is_word_boundary_match(&lower_model, &indexed.lowercase) {
                 return self.models.get(&indexed.original);
             }
             if let Some(ref ln) = lower_normalized {
-                if ln.contains(&indexed.lowercase) {
+                if is_word_boundary_match(ln, &indexed.lowercase) {
                     return self.models.get(&indexed.original);
                 }
             }
@@ -179,25 +193,23 @@ impl PricingData {
         let lower_model = model_id.to_lowercase();
         let lower_normalized = normalized.as_ref().map(|s| s.to_lowercase());
 
-        // First pass: keys that contain the model name
         for indexed in &self.sorted_keys {
-            if indexed.lowercase.contains(&lower_model) {
+            if is_word_boundary_match(&indexed.lowercase, &lower_model) {
                 return Some(indexed.original.clone());
             }
             if let Some(ref ln) = lower_normalized {
-                if indexed.lowercase.contains(ln) {
+                if is_word_boundary_match(&indexed.lowercase, ln) {
                     return Some(indexed.original.clone());
                 }
             }
         }
 
-        // Second pass: model name contains the key
         for indexed in &self.sorted_keys {
-            if lower_model.contains(&indexed.lowercase) {
+            if is_word_boundary_match(&lower_model, &indexed.lowercase) {
                 return Some(indexed.original.clone());
             }
             if let Some(ref ln) = lower_normalized {
-                if ln.contains(&indexed.lowercase) {
+                if is_word_boundary_match(ln, &indexed.lowercase) {
                     return Some(indexed.original.clone());
                 }
             }
