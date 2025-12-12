@@ -1,5 +1,17 @@
 import { createSignal, createEffect, on, type Accessor } from "solid-js";
-import type { SourceType } from "../types/index.js";
+import type {
+  SourceType,
+  SortType,
+  ModelEntry,
+  DailyEntry,
+  ContributionDay,
+  Stats,
+  ModelWithPercentage,
+  GridCell,
+  TotalBreakdown,
+  TUIData,
+  ChartDataPoint,
+} from "../types/index.js";
 import {
   isNativeAvailable,
   parseLocalSourcesNative,
@@ -10,88 +22,23 @@ import {
 import { PricingFetcher } from "../../pricing.js";
 import { syncCursorCache, loadCursorCredentials } from "../../cursor.js";
 import { getModelColor } from "../utils/colors.js";
-import type { ChartDataPoint } from "../components/BarChart.js";
 
-export type { SortType } from "../types/index.js";
+export type {
+  SortType,
+  ModelEntry,
+  DailyEntry,
+  ContributionDay,
+  Stats,
+  ModelWithPercentage,
+  GridCell,
+  TotalBreakdown,
+  TUIData,
+};
 
 export interface DateFilters {
   since?: string;
   until?: string;
   year?: string;
-}
-
-export interface ModelEntry {
-  source: string;
-  model: string;
-  input: number;
-  output: number;
-  cacheWrite: number;
-  cacheRead: number;
-  total: number;
-  cost: number;
-}
-
-export interface DailyEntry {
-  date: string;
-  input: number;
-  output: number;
-  cache: number;
-  total: number;
-  cost: number;
-}
-
-export interface ContributionDay {
-  date: string;
-  cost: number;
-  level: number;
-}
-
-export interface Stats {
-  favoriteModel: string;
-  totalTokens: number;
-  sessions: number;
-  longestSession: string;
-  currentStreak: number;
-  longestStreak: number;
-  activeDays: number;
-  totalDays: number;
-  peakHour: string;
-}
-
-export interface ModelWithPercentage {
-  modelId: string;
-  percentage: number;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  cost: number;
-}
-
-export interface GridCell {
-  date: string | null;
-  level: number;
-}
-
-export interface TotalBreakdown {
-  input: number;
-  output: number;
-  cacheWrite: number;
-  cacheRead: number;
-  total: number;
-  cost: number;
-}
-
-export interface TUIData {
-  modelEntries: ModelEntry[];
-  dailyEntries: DailyEntry[];
-  contributions: ContributionDay[];
-  contributionGrid: GridCell[][];
-  stats: Stats;
-  totalCost: number;
-  totals: TotalBreakdown;
-  modelCount: number;
-  chartData: ChartDataPoint[];
-  topModels: ModelWithPercentage[];
 }
 
 function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
