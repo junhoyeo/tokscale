@@ -32,12 +32,14 @@
     "@0xinevitable/token-tracker-core": "^0.1.1",
     "@opentui/core": "0.1.60",
     "@opentui/react": "^0.1.60",
+    "@opentui/solid": "^0.1.60",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.2",
     "csv-parse": "^5.6.0",
     "date-fns": "^4.1.0",
     "picocolors": "^1.1.1",
     "react": "^19.2.3",
+    "solid-js": "1.9.9",
     "string-width": "^8.1.0"
   },
   "devDependencies": {

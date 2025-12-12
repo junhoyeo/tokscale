@@ -15,24 +15,18 @@ function formatTokens(n: number): string {
   return n.toString();
 }
 
-export function ModelListItem({
-  modelId,
-  percentage,
-  inputTokens,
-  outputTokens,
-  isSelected,
-}: ModelListItemProps) {
-  const color = getModelColor(modelId);
-  const bgColor = isSelected ? "blue" : undefined;
+export function ModelListItem(props: ModelListItemProps) {
+  const color = () => getModelColor(props.modelId);
+  const bgColor = () => props.isSelected ? "blue" : undefined;
 
   return (
     <box flexDirection="column">
-      <box backgroundColor={bgColor}>
-        <text fg={color}>●</text>
-        <text fg={isSelected ? "white" : undefined}>{` ${modelId} `}</text>
-        <text dim>{`(${percentage.toFixed(1)}%)`}</text>
+      <box flexDirection="row" backgroundColor={bgColor()}>
+        <text fg={color()}>●</text>
+        <text fg={props.isSelected ? "white" : undefined}>{` ${props.modelId} `}</text>
+        <text dim>{`(${props.percentage.toFixed(1)}%)`}</text>
       </box>
-      <text dim>{`  In: ${formatTokens(inputTokens)} · Out: ${formatTokens(outputTokens)}`}</text>
+      <text dim>{`  In: ${formatTokens(props.inputTokens)} · Out: ${formatTokens(props.outputTokens)}`}</text>
     </box>
   );
 }

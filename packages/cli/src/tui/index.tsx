@@ -1,10 +1,12 @@
-import { createCliRenderer } from "@opentui/core";
-import { createRoot } from "@opentui/react";
+import { render } from "@opentui/solid";
 import { App } from "./App.js";
 
 export async function launchTUI() {
-  const renderer = await createCliRenderer({
+  await render(() => <App />, {
     exitOnCtrlC: false,
-  });
-  createRoot(renderer).render(<App />);
+    useAlternateScreen: true,
+    useMouse: false,
+    targetFps: 60,
+    useKittyKeyboard: {},
+  } as any);
 }

@@ -1,25 +1,26 @@
+import { For } from "solid-js";
 import type { TUIData, SortType } from "../hooks/useData.js";
 
 interface ModelViewProps {
-  data: TUIData | null;
+  data: TUIData;
   sortBy: SortType;
   sortDesc: boolean;
   selectedIndex: number;
   height: number;
 }
 
-export function ModelView({ data, sortBy, sortDesc, selectedIndex, height }: ModelViewProps) {
-  if (!data) return null;
+export function ModelView(props: ModelViewProps) {
+  const sortedEntries = () => {
+    return [...props.data.modelEntries].sort((a, b) => {
+      let cmp = 0;
+      if (props.sortBy === "cost") cmp = a.cost - b.cost;
+      else if (props.sortBy === "tokens") cmp = a.total - b.total;
+      else cmp = a.model.localeCompare(b.model);
+      return props.sortDesc ? -cmp : cmp;
+    });
+  };
 
-  const sortedEntries = [...data.modelEntries].sort((a, b) => {
-    let cmp = 0;
-    if (sortBy === "cost") cmp = a.cost - b.cost;
-    else if (sortBy === "tokens") cmp = a.total - b.total;
-    else cmp = a.model.localeCompare(b.model);
-    return sortDesc ? -cmp : cmp;
-  });
-
-  const visibleEntries = sortedEntries.slice(0, height - 3);
+  const visibleEntries = () => sortedEntries().slice(0, props.height - 3);
 
   const formatNum = (n: number) => {
     if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
@@ -32,7 +33,7 @@ export function ModelView({ data, sortBy, sortDesc, selectedIndex, height }: Mod
 
   return (
     <box flexDirection="column">
-      <box>
+      <box flexDirection="row">
         <text fg="cyan" bold>
           {"  Source/Model".padEnd(24)}
           {"Input".padStart(12)}
@@ -43,33 +44,35 @@ export function ModelView({ data, sortBy, sortDesc, selectedIndex, height }: Mod
         </text>
       </box>
       <box borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderBottom borderColor="gray" />
-      
-      {visibleEntries.map((entry, i) => {
-        const isSelected = i === selectedIndex;
-        const sourceLabel = entry.source.charAt(0).toUpperCase() + entry.source.slice(1);
-        const displayName = `${sourceLabel} ${entry.model}`.slice(0, 22);
-        
-        return (
-          <box key={`${entry.source}-${entry.model}`}>
-            <text 
-              backgroundColor={isSelected ? "blue" : undefined}
-              fg={isSelected ? "white" : undefined}
-            >
-              {displayName.padEnd(24)}
-              {formatNum(entry.input).padStart(12)}
-              {formatNum(entry.output).padStart(12)}
-              {formatNum(entry.cacheRead).padStart(12)}
-              {formatNum(entry.total).padStart(14)}
-            </text>
-            <text 
-              fg="green" 
-              backgroundColor={isSelected ? "blue" : undefined}
-            >
-              {formatCost(entry.cost).padStart(12)}
-            </text>
-          </box>
-        );
-      })}
+
+      <For each={visibleEntries()}>
+        {(entry, i) => {
+          const isSelected = () => i() === props.selectedIndex;
+          const sourceLabel = entry.source.charAt(0).toUpperCase() + entry.source.slice(1);
+          const displayName = `${sourceLabel} ${entry.model}`.slice(0, 22);
+
+          return (
+            <box flexDirection="row">
+              <text
+                backgroundColor={isSelected() ? "blue" : undefined}
+                fg={isSelected() ? "white" : undefined}
+              >
+                {displayName.padEnd(24)}
+                {formatNum(entry.input).padStart(12)}
+                {formatNum(entry.output).padStart(12)}
+                {formatNum(entry.cacheRead).padStart(12)}
+                {formatNum(entry.total).padStart(14)}
+              </text>
+              <text
+                fg="green"
+                backgroundColor={isSelected() ? "blue" : undefined}
+              >
+                {formatCost(entry.cost).padStart(12)}
+              </text>
+            </box>
+          );
+        }}
+      </For>
     </box>
   );
 }

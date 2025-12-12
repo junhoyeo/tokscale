@@ -1,30 +1,30 @@
+import { Show } from "solid-js";
 import type { TabType } from "../App.js";
 
 interface HeaderProps {
   activeTab: TabType;
 }
 
-export function Header({ activeTab }: HeaderProps) {
+export function Header(props: HeaderProps) {
   return (
-    <box paddingX={1} paddingY={0} justifyContent="space-between">
-      <box gap={2}>
-        <Tab name="Overview" active={activeTab === "overview"} />
-        <Tab name="Models" active={activeTab === "model"} />
-        <Tab name="Daily" active={activeTab === "daily"} />
-        <Tab name="Stats" active={activeTab === "stats"} />
+    <box flexDirection="row" paddingX={1} paddingY={0} justifyContent="space-between">
+      <box flexDirection="row" gap={2}>
+        <Tab name="Overview" active={props.activeTab === "overview"} />
+        <Tab name="Models" active={props.activeTab === "model"} />
+        <Tab name="Daily" active={props.activeTab === "daily"} />
+        <Tab name="Stats" active={props.activeTab === "stats"} />
       </box>
       <text fg="cyan" bold>Token Usage Tracker</text>
     </box>
   );
 }
 
-function Tab({ name, active }: { name: string; active: boolean }) {
-  if (active) {
-    return (
+function Tab(props: { name: string; active: boolean }) {
+  return (
+    <Show when={props.active} fallback={<text dim>{props.name}</text>}>
       <box>
-        <text backgroundColor="cyan" fg="black" bold>{` ${name} `}</text>
+        <text backgroundColor="cyan" fg="black" bold>{` ${props.name} `}</text>
       </box>
-    );
-  }
-  return <text dim>{name}</text>;
+    </Show>
+  );
 }

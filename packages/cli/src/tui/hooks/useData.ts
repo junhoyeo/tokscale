@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { createSignal, createEffect, on, type Accessor } from "solid-js";
 import type { SourceType } from "../App.js";
 import {
   isNativeAvailable,
@@ -268,23 +268,27 @@ async function loadData(enabledSources: Set<SourceType>): Promise<TUIData> {
   };
 }
 
-export function useData(enabledSources: Set<SourceType>) {
-  const [data, setData] = useState<TUIData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export function useData(enabledSources: Accessor<Set<SourceType>>) {
+  const [data, setData] = createSignal<TUIData | null>(null);
+  const [loading, setLoading] = createSignal(true);
+  const [error, setError] = createSignal<string | null>(null);
+  const [refreshTrigger, setRefreshTrigger] = createSignal(0);
 
-  const refresh = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    loadData(enabledSources)
-      .then(setData)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [enabledSources]);
+  const refresh = () => {
+    setRefreshTrigger(prev => prev + 1);
+  };
 
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
+  createEffect(on(
+    () => [enabledSources(), refreshTrigger()] as const,
+    ([sources]) => {
+      setLoading(true);
+      setError(null);
+      loadData(sources)
+        .then(setData)
+        .catch((e) => setError(e.message))
+        .finally(() => setLoading(false));
+    }
+  ));
 
   return { data, loading, error, refresh };
 }
