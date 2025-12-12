@@ -11,12 +11,10 @@ import { useData, type DateFilters } from "./hooks/useData.js";
 import type { ColorPaletteName } from "./config/themes.js";
 import { DEFAULT_PALETTE, getPaletteNames } from "./config/themes.js";
 import { loadSettings, saveSettings } from "./config/settings.js";
-import type { TUIOptions, TabType, SortType, SourceType } from "./types/index.js";
+import { TABS, ALL_SOURCES, type TUIOptions, type TabType, type SortType, type SourceType } from "./types/index.js";
 
 export type AppProps = TUIOptions;
 
-const TABS: readonly TabType[] = ["overview", "model", "daily", "stats"] as const;
-const ALL_SOURCES: readonly SourceType[] = ["opencode", "claude", "codex", "cursor", "gemini"] as const;
 const PALETTE_NAMES = getPaletteNames();
 
 function cycleTabForward(current: TabType): TabType {
