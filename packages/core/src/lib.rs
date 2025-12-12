@@ -1043,7 +1043,7 @@ pub fn finalize_report(options: FinalizeReportOptions) -> napi::Result<ModelRepo
 
     // Add Cursor messages if enabled
     if options.include_cursor {
-        let cursor_cache_dir = format!("{}/.token-tracker/cursor-cache", home_dir);
+        let cursor_cache_dir = format!("{}/.config/token-tracker/cursor-cache", home_dir);
         let cursor_files = scanner::scan_directory(&cursor_cache_dir, "*.csv");
 
         let cursor_messages: Vec<UnifiedMessage> = cursor_files
@@ -1193,7 +1193,7 @@ pub fn finalize_monthly_report(options: FinalizeMonthlyOptions) -> napi::Result<
 
     // Add Cursor messages if enabled
     if options.include_cursor {
-        let cursor_cache_dir = format!("{}/.token-tracker/cursor-cache", home_dir);
+        let cursor_cache_dir = format!("{}/.config/token-tracker/cursor-cache", home_dir);
         let cursor_files = scanner::scan_directory(&cursor_cache_dir, "*.csv");
 
         let cursor_messages: Vec<UnifiedMessage> = cursor_files
@@ -1328,7 +1328,7 @@ pub fn finalize_graph(options: FinalizeGraphOptions) -> napi::Result<GraphResult
 
     // Add Cursor messages if enabled
     if options.include_cursor {
-        let cursor_cache_dir = format!("{}/.token-tracker/cursor-cache", home_dir);
+        let cursor_cache_dir = format!("{}/.config/token-tracker/cursor-cache", home_dir);
         let cursor_files = scanner::scan_directory(&cursor_cache_dir, "*.csv");
 
         let cursor_messages: Vec<UnifiedMessage> = cursor_files

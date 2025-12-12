@@ -249,6 +249,18 @@ async function main() {
     });
 
   // =========================================================================
+  // Interactive TUI Command
+  // =========================================================================
+
+  program
+    .command("tui")
+    .description("Launch interactive terminal UI")
+    .action(async () => {
+      const { launchTUI } = await import("./tui/index.js");
+      await launchTUI();
+    });
+
+  // =========================================================================
   // Cursor IDE Authentication Commands
   // =========================================================================
 
@@ -280,7 +292,7 @@ async function main() {
   // Check if a subcommand was provided
   const args = process.argv.slice(2);
   const hasSubcommand = args.length > 0 && !args[0].startsWith('-');
-  const knownCommands = ['monthly', 'models', 'graph', 'login', 'logout', 'whoami', 'submit', 'cursor', 'help'];
+  const knownCommands = ['monthly', 'models', 'graph', 'login', 'logout', 'whoami', 'submit', 'cursor', 'tui', 'help'];
   const isKnownCommand = hasSubcommand && knownCommands.includes(args[0]);
 
   if (isKnownCommand) {
@@ -371,17 +383,22 @@ async function loadDataSourcesParallel(
   localSources: SourceType[],
   dateFilters: { since?: string; until?: string; year?: string }
 ): Promise<LoadedDataSources> {
+  // Skip local parsing if no local sources requested (e.g., cursor-only mode)
+  const shouldParseLocal = localSources.length > 0;
+
   // Use Promise.allSettled for graceful degradation
   const [cursorResult, pricingResult, localResult] = await Promise.allSettled([
     syncCursorData(),
     fetchPricingData(),
-    // Parse local sources in parallel (excludes Cursor)
-    Promise.resolve().then(() => parseLocalSourcesNative({
-      sources: localSources.filter(s => s !== 'cursor'),
-      since: dateFilters.since,
-      until: dateFilters.until,
-      year: dateFilters.year,
-    })),
+    // Parse local sources in parallel (excludes Cursor) - skip if empty
+    shouldParseLocal
+      ? Promise.resolve().then(() => parseLocalSourcesNative({
+          sources: localSources.filter(s => s !== 'cursor'),
+          since: dateFilters.since,
+          until: dateFilters.until,
+          year: dateFilters.year,
+        }))
+      : Promise.resolve(null),
   ]);
 
   // Handle partial failures gracefully
@@ -403,6 +420,21 @@ async function loadDataSourcesParallel(
 async function showModelReport(options: FilterOptions & DateFilterOptions & { benchmark?: boolean }) {
   await ensureNativeModule();
 
+  const dateFilters = getDateFilters(options);
+  const enabledSources = getEnabledSources(options);
+  const onlyCursor = enabledSources?.length === 1 && enabledSources[0] === 'cursor';
+  const includeCursor = !enabledSources || enabledSources.includes('cursor');
+
+  // Check cursor auth early if cursor-only mode
+  if (onlyCursor) {
+    const credentials = loadCursorCredentials();
+    if (!credentials) {
+      console.log(pc.red("\n  Error: Cursor authentication required."));
+      console.log(pc.gray("  Run 'token-tracker cursor login' to authenticate with Cursor.\n"));
+      process.exit(1);
+    }
+  }
+
   const dateRange = getDateRangeLabel(options);
   const title = dateRange 
     ? `Token Usage Report by Model (${dateRange})`
@@ -418,17 +450,18 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
   const spinner = createSpinner({ color: "cyan" });
   spinner.start(pc.gray("Loading data sources..."));
 
-  const dateFilters = getDateFilters(options);
-  const enabledSources = getEnabledSources(options);
   // Filter out cursor for local parsing (it's synced separately via network)
   const localSources: SourceType[] = (enabledSources || ['opencode', 'claude', 'codex', 'gemini', 'cursor'])
     .filter(s => s !== 'cursor');
-  const includeCursor = !enabledSources || enabledSources.includes('cursor');
 
   // Two-phase parallel loading: network (Cursor + pricing) overlaps with local file parsing
-  const { fetcher, cursorSync, localMessages } = await loadDataSourcesParallel(localSources, dateFilters);
+  // If cursor-only, skip local parsing entirely
+  const { fetcher, cursorSync, localMessages } = await loadDataSourcesParallel(
+    onlyCursor ? [] : localSources,
+    dateFilters
+  );
   
-  if (!localMessages) {
+  if (!localMessages && !onlyCursor) {
     spinner.error('Failed to parse local session files');
     process.exit(1);
   }
@@ -438,8 +471,9 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
 
   let report: ModelReport;
   try {
+    const emptyMessages: ParsedMessages = { messages: [], opencodeCount: 0, claudeCount: 0, codexCount: 0, geminiCount: 0, processingTimeMs: 0 };
     report = finalizeReportNative({
-      localMessages,
+      localMessages: localMessages || emptyMessages,
       pricing: fetcher.toPricingEntries(),
       includeCursor: includeCursor && cursorSync.synced,
       since: dateFilters.since,
@@ -455,7 +489,6 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
   spinner.stop();
 
   if (report.entries.length === 0) {
-    const onlyCursor = enabledSources?.length === 1 && enabledSources[0] === 'cursor';
     if (onlyCursor && !cursorSync.synced) {
       console.log(pc.yellow("  No Cursor data available."));
       console.log(pc.gray("  Run 'token-tracker cursor login' to authenticate with Cursor.\n"));

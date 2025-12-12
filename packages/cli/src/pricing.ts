@@ -7,6 +7,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 const LITELLM_PRICING_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
@@ -164,11 +168,26 @@ export class PricingFetcher {
       }
     }
 
-    // Fuzzy matching
+    // Fuzzy matching - more strict to avoid false positives
+    // e.g., "gpt-4" should NOT match "gpt-4o"
     const lowerModelID = modelID.toLowerCase();
+    
+    // First pass: exact match after normalizing (removing provider prefix)
     for (const [key, pricing] of Object.entries(this.pricingData)) {
       const lowerKey = key.toLowerCase();
-      if (lowerKey.includes(lowerModelID) || lowerModelID.includes(lowerKey)) {
+      const normalizedKey = lowerKey.replace(/^(anthropic|openai|google|bedrock|vertex_ai)\//, "");
+      if (normalizedKey === lowerModelID) {
+        return pricing;
+      }
+    }
+    
+    // Second pass: match model ID as a complete segment (word boundary)
+    // This prevents "gpt-4" from matching "gpt-4o" but allows "gpt-4-turbo" to match "gpt-4"
+    for (const [key, pricing] of Object.entries(this.pricingData)) {
+      const lowerKey = key.toLowerCase();
+      // Check if modelID matches as a prefix followed by a version/variant separator
+      const regex = new RegExp(`(^|/)${escapeRegex(lowerModelID)}(-\\d|$|@|:)`, "i");
+      if (regex.test(lowerKey)) {
         return pricing;
       }
     }

@@ -135,8 +135,8 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
     }
 
     if include_cursor {
-        // Cursor: ~/.token-tracker/cursor-cache/*.csv
-        let cursor_path = format!("{}/.token-tracker/cursor-cache", home_dir);
+        // Cursor: ~/.config/token-tracker/cursor-cache/*.csv (migrated from ~/.token-tracker)
+        let cursor_path = format!("{}/.config/token-tracker/cursor-cache", home_dir);
         tasks.push((SessionType::Cursor, cursor_path, "*.csv"));
     }
 
