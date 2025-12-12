@@ -34,7 +34,7 @@
     "prepublishOnly": "napi prepublish -t npm",
     "test": "ava",
     "test:rust": "cargo test --features noop",
-    "test:all": "yarn test:rust && yarn test",
+    "test:all": "bun run test:rust && bun run test",
     "bench": "cargo bench --features noop",
     "universal": "napi universal",
     "version": "napi version"

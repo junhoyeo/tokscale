@@ -10,12 +10,12 @@
     "benchmarks"
   ],
   "scripts": {
-    "postinstall": "yarn build:core",
-    "build": "yarn build:core && yarn build:cli",
-    "build:cli": "yarn workspace @0xinevitable/token-tracker build",
-    "build:core": "yarn workspace @0xinevitable/token-tracker-core build",
-    "cli": "yarn workspace @0xinevitable/token-tracker dev",
-    "dev:frontend": "yarn workspace @token-tracker/frontend dev"
+    "postinstall": "bun run build:core",
+    "build": "bun run build:core && bun run build:cli",
+    "build:cli": "bun --filter @0xinevitable/token-tracker run build",
+    "build:core": "bun --filter @0xinevitable/token-tracker-core run build",
+    "cli": "bun --filter @0xinevitable/token-tracker run dev",
+    "dev:frontend": "bun --filter @token-tracker/frontend run dev"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.4.1",

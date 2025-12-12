@@ -26,7 +26,7 @@
     "dev:node": "tsx src/cli.ts",
     "tui": "bun src/cli.ts tui",
     "start": "node dist/cli.js",
-    "prepublishOnly": "yarn build"
+    "prepublishOnly": "bun run build"
   },
   "dependencies": {
     "@0xinevitable/token-tracker-core": "^0.1.1",

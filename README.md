@@ -48,11 +48,14 @@ Get real-time pricing calculations using [LiteLLM's pricing data](https://github
 git clone https://github.com/wakeru-ai/token-usage-tracker.git
 cd token-tracker
 
+# Install Bun (if not already installed)
+curl -fsSL https://bun.sh/install | bash
+
 # Install dependencies
-yarn install
+bun install
 
 # Run the CLI
-yarn dev
+bun run cli
 ```
 
 ### Building the Native Module (Optional)
@@ -61,10 +64,10 @@ The native Rust module provides ~10x faster processing through parallel file sca
 
 ```bash
 # Build the native core
-yarn build:core
+bun run build:core
 
 # Verify installation
-yarn dev graph --benchmark
+bun run cli graph --benchmark
 ```
 
 ## Usage
@@ -303,14 +306,11 @@ The native module also provides ~45% memory reduction through:
 ### Running Benchmarks
 
 ```bash
-# Run benchmarks with real data
-yarn bench:ts                    # TypeScript implementation
-yarn bench:rust                  # Rust implementation
+# Generate synthetic data
+cd benchmarks && bun run generate
 
-# Run with synthetic data
-yarn bench:generate              # Generate synthetic data first
-yarn bench:ts:synthetic          # Benchmark with synthetic data
-yarn bench:rust:synthetic
+# Run Rust benchmarks
+cd packages/core && bun run bench
 ```
 
 ## Frontend Visualization
@@ -405,14 +405,14 @@ cargo --version
 ### Setup
 
 ```bash
-# Install dependencies
-yarn install
-
-# Install Bun (required for TUI development)
+# Install Bun (if not already installed)
 curl -fsSL https://bun.sh/install | bash
 
+# Install dependencies
+bun install
+
 # Build native module (optional but recommended)
-cd packages/core && yarn build && cd ../..
+bun run build:core
 
 # Run in development mode (launches TUI)
 cd packages/cli && bun src/cli.ts
@@ -425,40 +425,41 @@ cd packages/cli && bun src/cli.ts --light
 
 | Script | Description |
 |--------|-------------|
-| `yarn dev` | Run CLI in development mode (TUI with Bun) |
-| `yarn dev:node` | Run CLI with Node.js (tsx) |
-| `yarn tui` | Launch TUI explicitly |
-| `yarn build:core` | Build native Rust module (release) |
-| `yarn build:core:debug` | Build native module (debug) |
-| `yarn bench:generate` | Generate synthetic benchmark data |
-| `yarn bench:ts` | Run TypeScript benchmarks |
-| `yarn bench:rust` | Run Rust native benchmarks |
+| `bun run cli` | Run CLI in development mode (TUI with Bun) |
+| `bun run build:core` | Build native Rust module (release) |
+| `bun run build:cli` | Build CLI TypeScript to dist/ |
+| `bun run build` | Build both core and CLI |
+| `bun run dev:frontend` | Run frontend development server |
 
-**Note**: TUI development requires Bun runtime due to OpenTUI's native modules (top-level await, tree-sitter).
+**Package-specific scripts** (from within package directories):
+- `packages/cli`: `bun run dev`, `bun run dev:node`, `bun run tui`
+- `packages/core`: `bun run build:debug`, `bun run test`, `bun run bench`
+
+**Note**: This project uses **Bun** as the package manager and runtime. TUI requires Bun due to OpenTUI's native modules.
 
 ### Testing
 
 ```bash
 # Test native module (Rust)
-cd core
-yarn test:rust      # Cargo tests
-yarn test           # Node.js integration tests
-yarn test:all       # Both
+cd packages/core
+bun run test:rust      # Cargo tests
+bun run test           # Node.js integration tests
+bun run test:all       # Both
 ```
 
 ### Native Module Development
 
 ```bash
-cd core
+cd packages/core
 
 # Build in debug mode (faster compilation)
-yarn build:debug
+bun run build:debug
 
 # Build in release mode (optimized)
-yarn build
+bun run build
 
 # Run Rust benchmarks
-yarn bench
+bun run bench
 ```
 
 ## Supported Platforms
@@ -621,7 +622,7 @@ Contributions are welcome! Please follow these steps:
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Run tests (`cd core && yarn test:all`)
+4. Run tests (`cd packages/core && bun run test:all`)
 5. Commit your changes (`git commit -m 'Add amazing feature'`)
 6. Push to the branch (`git push origin feature/amazing-feature`)
 7. Open a Pull Request
