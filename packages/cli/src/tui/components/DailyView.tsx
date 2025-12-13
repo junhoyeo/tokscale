@@ -53,7 +53,7 @@ export function DailyView(props: DailyViewProps) {
           return (
             <box flexDirection="row">
               <text
-                backgroundColor={rowBg()}
+                bg={rowBg()}
                 fg={isActive() ? "white" : undefined}
               >
                 {entry.date.padEnd(14)}
@@ -64,7 +64,7 @@ export function DailyView(props: DailyViewProps) {
               </text>
               <text
                 fg="green"
-                backgroundColor={rowBg()}
+                bg={rowBg()}
               >
                 {formatCostFull(entry.cost).padStart(12)}
               </text>

@@ -101,10 +101,10 @@ export function ModelView(props: ModelViewProps) {
             <box flexDirection="row">
               <text 
                 fg={getModelColor(row.entry.model)} 
-                backgroundColor={rowBg()}
+                bg={rowBg()}
               >●</text>
               <text
-                backgroundColor={rowBg()}
+                bg={rowBg()}
                 fg={isActive() ? "white" : undefined}
               >
                 {row.displayName.padEnd(row.nameWidth)}
@@ -115,7 +115,7 @@ export function ModelView(props: ModelViewProps) {
               </text>
               <text
                 fg="green"
-                backgroundColor={rowBg()}
+                bg={rowBg()}
               >
                 {row.cost.padStart(COST_COL_WIDTH)}
               </text>
