@@ -612,13 +612,16 @@ function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
       stdio: ["pipe", "pipe", "pipe"],
     });
     
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     
-    proc.stdout.on("data", (data) => { stdout += data.toString(); });
-    proc.stderr.on("data", (data) => { stderr += data.toString(); });
+    proc.stdout.on("data", (data: Buffer) => { stdoutChunks.push(data); });
+    proc.stderr.on("data", (data: Buffer) => { stderrChunks.push(data); });
     
     proc.on("close", (code) => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+      
       if (code !== 0) {
         reject(new Error(`Subprocess failed: ${stderr || `exit code ${code}`}`));
         return;
@@ -626,7 +629,7 @@ function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
       try {
         resolve(JSON.parse(stdout) as T);
       } catch (e) {
-        reject(new Error(`Failed to parse output: ${(e as Error).message}`));
+        reject(new Error(`Failed to parse output: ${(e as Error).message}\nstdout: ${stdout.slice(0, 500)}`));
       }
     });
     

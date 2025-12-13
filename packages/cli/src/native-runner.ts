@@ -8,13 +8,13 @@ interface NativeRunnerRequest {
 }
 
 async function runNativeMethodFromStdin() {
-  let input = "";
-  const decoder = new TextDecoder();
+  const chunks: Buffer[] = [];
   
   for await (const chunk of process.stdin) {
-    input += decoder.decode(chunk as Buffer);
+    chunks.push(Buffer.from(chunk as ArrayBuffer));
   }
   
+  const input = Buffer.concat(chunks).toString("utf-8");
   const { method, args } = JSON.parse(input) as NativeRunnerRequest;
   
   let result: unknown;
@@ -36,10 +36,10 @@ async function runNativeMethodFromStdin() {
       throw new Error(`Unknown method: ${method}`);
   }
   
-  console.log(JSON.stringify(result));
+  process.stdout.write(JSON.stringify(result));
 }
 
 runNativeMethodFromStdin().catch((e) => {
-  console.error(JSON.stringify({ error: (e as Error).message }));
+  process.stderr.write(JSON.stringify({ error: (e as Error).message }));
   process.exit(1);
 });
