@@ -578,9 +578,6 @@ export function finalizeMonthlyReportNative(options: FinalizeOptions): MonthlyRe
   return nativeCore.finalizeMonthlyReport(nativeOptions);
 }
 
-/**
- * Finalize graph: apply pricing to local messages, add Cursor, aggregate
- */
 export function finalizeGraphNative(options: FinalizeOptions): TokenContributionData {
   if (!nativeCore) {
     throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
@@ -597,5 +594,133 @@ export function finalizeGraphNative(options: FinalizeOptions): TokenContribution
   };
 
   const result = nativeCore.finalizeGraph(nativeOptions);
+  return fromNativeResult(result);
+}
+
+// =============================================================================
+// Async Subprocess Wrappers (Non-blocking for UI)
+// =============================================================================
+
+import { spawn } from "bun";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes default
+const NATIVE_TIMEOUT_MS = parseInt(
+  process.env.TOKEN_TRACKER_NATIVE_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS),
+  10
+);
+
+async function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
+  const runnerPath = join(__dirname, "native-runner.ts");
+  const input = JSON.stringify({ method, args });
+
+  const proc = spawn({
+    cmd: ["bun", "run", runnerPath],
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: NATIVE_TIMEOUT_MS,
+    killSignal: "SIGTERM",
+  });
+
+  proc.stdin.write(input);
+  proc.stdin.end();
+
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+
+  if (exitCode !== 0) {
+    let errorMsg = stderr || `Process exited with code ${exitCode}`;
+    try {
+      const parsed = JSON.parse(stderr);
+      if (parsed.error) errorMsg = parsed.error;
+    } catch {}
+    throw new Error(`Subprocess '${method}' failed: ${errorMsg}`);
+  }
+
+  try {
+    return JSON.parse(stdout) as T;
+  } catch (e) {
+    throw new Error(
+      `Failed to parse subprocess output: ${(e as Error).message}\nstdout: ${stdout.slice(0, 500)}`
+    );
+  }
+}
+
+export async function parseLocalSourcesAsync(options: LocalParseOptions): Promise<ParsedMessages> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeLocalParseOptions = {
+    homeDir: undefined,
+    sources: options.sources,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  return runInSubprocess<ParsedMessages>("parseLocalSources", [nativeOptions]);
+}
+
+export async function finalizeReportAsync(options: FinalizeOptions): Promise<ModelReport> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  return runInSubprocess<ModelReport>("finalizeReport", [nativeOptions]);
+}
+
+export async function finalizeMonthlyReportAsync(options: FinalizeOptions): Promise<MonthlyReport> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  return runInSubprocess<MonthlyReport>("finalizeMonthlyReport", [nativeOptions]);
+}
+
+export async function finalizeGraphAsync(options: FinalizeOptions): Promise<TokenContributionData> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  const result = await runInSubprocess<NativeGraphResult>("finalizeGraph", [nativeOptions]);
   return fromNativeResult(result);
 }
