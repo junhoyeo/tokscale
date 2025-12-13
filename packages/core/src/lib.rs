@@ -70,6 +70,7 @@ pub struct ParsedMessage {
     pub source: String,
     pub model_id: String,
     pub provider_id: String,
+    pub session_id: String,
     pub timestamp: i64,
     pub date: String,
     pub input: i64,
@@ -947,6 +948,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         source: msg.source.clone(),
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
+        session_id: msg.session_id.clone(),
         timestamp: msg.timestamp,
         date: msg.date.clone(),
         input: msg.tokens.input,
@@ -986,6 +988,7 @@ fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         source: msg.source.clone(),
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
+        session_id: msg.session_id.clone(),
         timestamp: msg.timestamp,
         date: msg.date.clone(),
         tokens: TokenBreakdown {

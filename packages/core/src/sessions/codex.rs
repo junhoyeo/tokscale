@@ -50,6 +50,12 @@ pub fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
@@ -167,6 +173,7 @@ pub fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
             "codex",
             model,
             "openai",
+            session_id.clone(),
             timestamp,
             TokenBreakdown {
                 input,

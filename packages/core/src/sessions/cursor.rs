@@ -151,13 +151,14 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             "cursor",
             model,
             infer_provider(model),
+            date_str.to_string(),
             timestamp,
             TokenBreakdown {
                 input,
                 output: output_tokens,
                 cache_read,
                 cache_write,
-                reasoning: 0, // Cursor doesn't expose reasoning tokens
+                reasoning: 0,
             },
             cost,
         ));

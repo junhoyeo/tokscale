@@ -38,6 +38,12 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
@@ -92,6 +98,7 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
             "claude",
             model,
             "anthropic",
+            session_id.clone(),
             timestamp,
             TokenBreakdown {
                 input: usage.input_tokens.unwrap_or(0),

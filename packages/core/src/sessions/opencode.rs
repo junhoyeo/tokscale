@@ -64,6 +64,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
         "opencode",
         model_id,
         msg.provider_id.unwrap_or_else(|| "unknown".to_string()),
+        msg.session_id.clone(),
         msg.time.created as i64,
         TokenBreakdown {
             input: tokens.input,

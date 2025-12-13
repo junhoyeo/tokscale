@@ -16,6 +16,7 @@ pub struct UnifiedMessage {
     pub source: String,
     pub model_id: String,
     pub provider_id: String,
+    pub session_id: String,
     pub timestamp: i64, // Unix milliseconds
     pub date: String,   // YYYY-MM-DD
     pub tokens: TokenBreakdown,
@@ -28,6 +29,7 @@ impl UnifiedMessage {
         source: impl Into<String>,
         model_id: impl Into<String>,
         provider_id: impl Into<String>,
+        session_id: impl Into<String>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
@@ -37,6 +39,7 @@ impl UnifiedMessage {
             source: source.into(),
             model_id: model_id.into(),
             provider_id: provider_id.into(),
+            session_id: session_id.into(),
             timestamp,
             date,
             tokens,
@@ -98,6 +101,7 @@ mod tests {
             "opencode",
             "claude-3-5-sonnet",
             "anthropic",
+            "test-session-id",
             1733011200000,
             tokens,
             0.05,
@@ -105,6 +109,7 @@ mod tests {
 
         assert_eq!(msg.source, "opencode");
         assert_eq!(msg.model_id, "claude-3-5-sonnet");
+        assert_eq!(msg.session_id, "test-session-id");
         assert_eq!(msg.date, "2024-12-01");
         assert_eq!(msg.cost, 0.05);
     }

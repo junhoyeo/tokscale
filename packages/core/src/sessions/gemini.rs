@@ -61,6 +61,7 @@ pub fn parse_gemini_file(path: &Path) -> Vec<UnifiedMessage> {
     };
 
     let mut messages = Vec::new();
+    let session_id = session.session_id.clone();
 
     for msg in session.messages {
         // Only process gemini messages with token data
@@ -92,6 +93,7 @@ pub fn parse_gemini_file(path: &Path) -> Vec<UnifiedMessage> {
             "gemini",
             model,
             "google",
+            session_id.clone(),
             timestamp,
             TokenBreakdown {
                 input: tokens.input.unwrap_or(0),
