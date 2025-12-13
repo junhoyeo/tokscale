@@ -1,14 +1,14 @@
-import { Show, For } from "solid-js";
+import { Show, For, createMemo, type Accessor } from "solid-js";
 import { BarChart } from "./BarChart.js";
 import { Legend } from "./Legend.js";
-import { ModelListItem } from "./ModelListItem.js";
 import type { TUIData } from "../hooks/useData.js";
-import { formatCost } from "../utils/format.js";
+import { formatCost, formatTokens } from "../utils/format.js";
+import { getModelColor } from "../utils/colors.js";
 
 interface OverviewViewProps {
   data: TUIData;
-  selectedIndex: number;
-  scrollOffset: number;
+  selectedIndex: Accessor<number>;
+  scrollOffset: Accessor<number>;
   height: number;
   width: number;
 }
@@ -21,9 +21,9 @@ export function OverviewView(props: OverviewViewProps) {
 
   const topModelsForLegend = () => props.data.topModels.slice(0, 5).map(m => m.modelId);
 
-  const visibleModels = () => props.data.topModels.slice(props.scrollOffset, props.scrollOffset + itemsPerPage());
+  const visibleModels = () => props.data.topModels.slice(props.scrollOffset(), props.scrollOffset() + itemsPerPage());
   const totalModels = () => props.data.topModels.length;
-  const endIndex = () => Math.min(props.scrollOffset + visibleModels().length, totalModels());
+  const endIndex = () => Math.min(props.scrollOffset() + visibleModels().length, totalModels());
 
   return (
     <box flexDirection="column" gap={1}>
@@ -43,20 +43,27 @@ export function OverviewView(props: OverviewViewProps) {
 
         <box flexDirection="column">
           <For each={visibleModels()}>
-            {(model, i) => (
-              <ModelListItem
-                modelId={model.modelId}
-                percentage={model.percentage}
-                inputTokens={model.inputTokens}
-                outputTokens={model.outputTokens}
-                isSelected={props.scrollOffset + i() === props.selectedIndex}
-              />
-            )}
+            {(model, i) => {
+              const isActive = createMemo(() => i() === props.selectedIndex());
+              const bgColor = createMemo(() => isActive() ? "blue" : undefined);
+              const color = () => getModelColor(model.modelId);
+              
+              return (
+                <box flexDirection="column">
+                  <box flexDirection="row" backgroundColor={bgColor()}>
+                    <text fg={color()} bg={bgColor()}>●</text>
+                    <text fg={isActive() ? "white" : undefined} bg={bgColor()}>{` ${model.modelId} `}</text>
+                    <text dim bg={bgColor()}>{`(${model.percentage.toFixed(1)}%)`}</text>
+                  </box>
+                  <text dim>{`  In: ${formatTokens(model.inputTokens)} · Out: ${formatTokens(model.outputTokens)}`}</text>
+                </box>
+              );
+            }}
           </For>
         </box>
 
         <Show when={totalModels() > visibleModels().length}>
-          <text dim>{`↓ ${props.scrollOffset + 1}-${endIndex()} of ${totalModels()} models (↑↓ to scroll)`}</text>
+          <text dim>{`↓ ${props.scrollOffset() + 1}-${endIndex()} of ${totalModels()} models (↑↓ to scroll)`}</text>
         </Show>
       </box>
     </box>

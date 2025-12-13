@@ -33,11 +33,6 @@ function getRepeatedString(char: string, count: number): string {
   return cached;
 }
 
-function getDominantColor(models: { modelId: string; tokens: number; color: string }[]): string {
-  if (models.length === 0) return "white";
-  return models.reduce((max, m) => (m.tokens > max.tokens ? m : max), models[0]).color;
-}
-
 export function BarChart(props: BarChartProps) {
   const data = () => props.data;
   const width = () => props.width;
@@ -59,6 +54,17 @@ export function BarChart(props: BarChartProps) {
   const barWidth = () => Math.max(1, Math.floor(chartWidth() / Math.min(data().length, 52)));
   const visibleBars = () => Math.min(data().length, Math.floor(chartWidth() / barWidth()));
   const visibleData = createMemo(() => data().slice(-visibleBars()));
+
+  const sortedModelsMap = createMemo(() => {
+    const vd = visibleData();
+    const map = new Map<string, { modelId: string; tokens: number; color: string }[]>();
+    for (const point of vd) {
+      const models = point.models ?? [];
+      const sorted = [...models].sort((a, b) => a.modelId.localeCompare(b.modelId));
+      map.set(point.date, sorted);
+    }
+    return map;
+  });
 
   const rowIndices = createMemo(() => {
     const sh = safeHeight();
@@ -108,7 +114,32 @@ export function BarChart(props: BarChartProps) {
       return { char: getRepeatedString(" ", bw), color: "dim" };
     }
 
-    const color = getDominantColor(point.models);
+    const sortedModels = sortedModelsMap().get(point.date) ?? [];
+    if (sortedModels.length === 0) {
+      return { char: getRepeatedString(" ", bw), color: "dim" };
+    }
+
+    let currentHeight = 0;
+    let maxOverlap = 0;
+    let color = sortedModels[0].color;
+
+    const rowStart = prevThreshold;
+    const rowEnd = rowThreshold;
+
+    for (const m of sortedModels) {
+      const mStart = currentHeight;
+      const mEnd = currentHeight + m.tokens;
+      currentHeight += m.tokens;
+
+      const overlapStart = Math.max(mStart, rowStart);
+      const overlapEnd = Math.min(mEnd, rowEnd);
+      const overlap = Math.max(0, overlapEnd - overlapStart);
+
+      if (overlap > maxOverlap) {
+        maxOverlap = overlap;
+        color = m.color;
+      }
+    }
 
     if (point.total >= rowThreshold) {
       return { char: getRepeatedString("█", bw), color };

@@ -15,6 +15,7 @@ interface FooterProps {
   scrollEnd?: number;
   totalItems?: number;
   colorPalette: ColorPaletteName;
+  statusMessage?: string | null;
   onSourceToggle?: (source: SourceType) => void;
   onSortChange?: (sort: SortType) => void;
   onPaletteChange?: () => void;
@@ -64,14 +65,20 @@ export function Footer(props: FooterProps) {
         </box>
       </box>
       <box flexDirection="row" gap={1}>
-        <text dim>↑↓ scroll • ←→/tab view •</text>
-        <box onMouseDown={props.onPaletteChange}>
-          <text fg="magenta">{`[p:${palette().name}]`}</text>
-        </box>
-        <box onMouseDown={props.onRefresh}>
-          <text fg="yellow">[r:refresh]</text>
-        </box>
-        <text dim>• q quit</text>
+        <Show when={props.statusMessage} fallback={
+          <>
+            <text dim>↑↓ scroll • ←→/tab view • y copy •</text>
+            <box onMouseDown={props.onPaletteChange}>
+              <text fg="magenta">{`[p:${palette().name}]`}</text>
+            </box>
+            <box onMouseDown={props.onRefresh}>
+              <text fg="yellow">[r:refresh]</text>
+            </box>
+            <text dim>• e export • q quit</text>
+          </>
+        }>
+          <text fg="green" bold>{props.statusMessage}</text>
+        </Show>
       </box>
     </box>
   );

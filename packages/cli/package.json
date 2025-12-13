@@ -34,6 +34,7 @@
     "@opentui/react": "^0.1.60",
     "@opentui/solid": "^0.1.60",
     "cli-table3": "^0.6.5",
+    "clipboardy": "^5.0.2",
     "commander": "^14.0.2",
     "csv-parse": "^5.6.0",
     "date-fns": "^4.1.0",

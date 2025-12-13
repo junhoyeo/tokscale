@@ -1,5 +1,6 @@
-import { createSignal, Switch, Match } from "solid-js";
+import { createSignal, Switch, Match, onCleanup } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
+import clipboardy from "clipboardy";
 import { Header } from "./components/Header.js";
 import { Footer } from "./components/Footer.js";
 import { ModelView } from "./components/ModelView.js";
@@ -52,6 +53,19 @@ export function App(props: AppProps) {
   };
 
   const { data, loading, error, refresh } = useData(() => enabledSources(), dateFilters);
+
+  const [statusMessage, setStatusMessage] = createSignal<string | null>(null);
+  let statusTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  const showStatus = (msg: string, duration = 2000) => {
+    if (statusTimeout) clearTimeout(statusTimeout);
+    setStatusMessage(msg);
+    statusTimeout = setTimeout(() => setStatusMessage(null), duration);
+  };
+
+  onCleanup(() => {
+    if (statusTimeout) clearTimeout(statusTimeout);
+  });
 
   const contentHeight = () => Math.max(rows() - 6, 12);
   const overviewChartHeight = () => Math.max(5, Math.floor(contentHeight() * 0.35));
@@ -107,9 +121,51 @@ export function App(props: AppProps) {
       return;
     }
 
-    if (key.name === "c") {
+    if (key.name === "c" && !key.meta && !key.ctrl) {
       setSortBy("cost");
       setSortDesc(true);
+      return;
+    }
+
+    if (key.name === "y") {
+      const d = data();
+      if (!d) return;
+      
+      let textToCopy = "";
+      const tab = activeTab();
+      
+      if (tab === "model") {
+        const sorted = [...d.modelEntries].sort((a, b) => {
+          if (sortBy() === "cost") return sortDesc() ? b.cost - a.cost : a.cost - b.cost;
+          if (sortBy() === "tokens") return sortDesc() ? b.total - a.total : a.total - b.total;
+          return sortDesc() ? b.model.localeCompare(a.model) : a.model.localeCompare(b.model);
+        });
+        const entry = sorted[selectedIndex()];
+        if (entry) {
+          textToCopy = `${entry.source} ${entry.model}: ${entry.total.toLocaleString()} tokens, $${entry.cost.toFixed(2)}`;
+        }
+      } else if (tab === "daily") {
+        const sorted = [...d.dailyEntries].sort((a, b) => {
+          if (sortBy() === "cost") return sortDesc() ? b.cost - a.cost : a.cost - b.cost;
+          if (sortBy() === "tokens") return sortDesc() ? b.total - a.total : a.total - b.total;
+          return sortDesc() ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date);
+        });
+        const entry = sorted[selectedIndex()];
+        if (entry) {
+          textToCopy = `${entry.date}: ${entry.total.toLocaleString()} tokens, $${entry.cost.toFixed(2)}`;
+        }
+      } else if (tab === "overview") {
+        const model = d.topModels[scrollOffset() + selectedIndex()];
+        if (model) {
+          textToCopy = `${model.modelId}: ${model.totalTokens.toLocaleString()} tokens, $${model.cost.toFixed(2)}`;
+        }
+      }
+      
+      if (textToCopy) {
+        clipboardy.write(textToCopy)
+          .then(() => showStatus("Copied to clipboard"))
+          .catch(() => showStatus("Failed to copy"));
+      }
       return;
     }
     if (key.name === "n") {
@@ -135,8 +191,12 @@ export function App(props: AppProps) {
     if (key.name === "5") { handleSourceToggle("gemini"); return; }
 
     if (key.name === "up") {
-      if (activeTab() === "overview" && scrollOffset() > 0) {
-        setScrollOffset(scrollOffset() - 1);
+      if (activeTab() === "overview") {
+        if (selectedIndex() > 0) {
+          setSelectedIndex(selectedIndex() - 1);
+        } else if (scrollOffset() > 0) {
+          setScrollOffset(scrollOffset() - 1);
+        }
       } else {
         setSelectedIndex(Math.max(0, selectedIndex() - 1));
       }
@@ -145,8 +205,13 @@ export function App(props: AppProps) {
 
     if (key.name === "down") {
       if (activeTab() === "overview") {
+        const maxVisible = Math.min(overviewItemsPerPage(), (data()?.topModels.length ?? 0) - scrollOffset());
         const maxOffset = Math.max(0, (data()?.topModels.length ?? 0) - overviewItemsPerPage());
-        setScrollOffset(Math.min(maxOffset, scrollOffset() + 1));
+        if (selectedIndex() < maxVisible - 1) {
+          setSelectedIndex(selectedIndex() + 1);
+        } else if (scrollOffset() < maxOffset) {
+          setScrollOffset(scrollOffset() + 1);
+        }
       } else {
         const d = data();
         const maxIndex = activeTab() === "model" 
@@ -173,8 +238,9 @@ export function App(props: AppProps) {
       import("node:fs")
         .then((fs) => {
           fs.writeFileSync(filename, JSON.stringify(exportData, null, 2));
+          showStatus(`Exported to ${filename}`);
         })
-        .catch(() => {});
+        .catch(() => showStatus("Export failed"));
       return;
     }
   });
@@ -204,8 +270,8 @@ export function App(props: AppProps) {
               <Match when={activeTab() === "overview"}>
                 <OverviewView
                   data={data()!}
-                  selectedIndex={selectedIndex()}
-                  scrollOffset={scrollOffset()}
+                  selectedIndex={selectedIndex}
+                  scrollOffset={scrollOffset}
                   height={contentHeight()}
                   width={columns()}
                 />
@@ -215,8 +281,9 @@ export function App(props: AppProps) {
                   data={data()!}
                   sortBy={sortBy()}
                   sortDesc={sortDesc()}
-                  selectedIndex={selectedIndex()}
+                  selectedIndex={selectedIndex}
                   height={contentHeight()}
+                  width={columns()}
                 />
               </Match>
               <Match when={activeTab() === "daily"}>
@@ -224,7 +291,7 @@ export function App(props: AppProps) {
                   data={data()!}
                   sortBy={sortBy()}
                   sortDesc={sortDesc()}
-                  selectedIndex={selectedIndex()}
+                  selectedIndex={selectedIndex}
                   height={contentHeight()}
                 />
               </Match>
@@ -250,6 +317,7 @@ export function App(props: AppProps) {
         scrollEnd={Math.min(scrollOffset() + overviewItemsPerPage(), data()?.topModels.length ?? 0)}
         totalItems={data()?.topModels.length}
         colorPalette={colorPalette()}
+        statusMessage={statusMessage()}
         onSourceToggle={handleSourceToggle}
         onSortChange={handleSortChange}
         onPaletteChange={handlePaletteChange}

@@ -26,6 +26,10 @@ declare module "@opentui/core" {
     name: string;
     eventType: "press" | "release";
     repeated?: boolean;
+    ctrl?: boolean;
+    meta?: boolean;
+    shift?: boolean;
+    super?: boolean;
   }
 }
 

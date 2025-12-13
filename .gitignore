@@ -9,3 +9,11 @@ benchmarks/synthetic-data/
 
 target/
 *.node
+
+# Debug logs
+*.log
+ffi_otui_debug_*.log
+
+# Temporary files and archives
+opencodetmp/
+*.zip

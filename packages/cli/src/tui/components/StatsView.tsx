@@ -21,13 +21,6 @@ export function StatsView(props: StatsViewProps) {
 
   return (
     <box flexDirection="column" gap={1}>
-      <box flexDirection="row" gap={2}>
-        <box flexDirection="row" backgroundColor="gray" paddingX={1}>
-          <text fg="white" bold>Models</text>
-        </box>
-        <text dim>(tab to cycle)</text>
-      </box>
-
       <box flexDirection="column">
         <box flexDirection="row" gap={1} marginLeft={4}>
           <For each={MONTHS}>
