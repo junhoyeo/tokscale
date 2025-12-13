@@ -68,6 +68,31 @@ function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
   return grid;
 }
 
+function calculatePeakHour(messages: Array<{ timestamp: number }>): string {
+  if (messages.length === 0) return "N/A";
+  
+  const hourCounts = new Array(24).fill(0);
+  for (const msg of messages) {
+    const hour = new Date(msg.timestamp).getHours();
+    hourCounts[hour]++;
+  }
+  
+  let maxCount = 0;
+  let peakHour = 0;
+  for (let h = 0; h < 24; h++) {
+    if (hourCounts[h] > maxCount) {
+      maxCount = hourCounts[h];
+      peakHour = h;
+    }
+  }
+  
+  if (maxCount === 0) return "N/A";
+  
+  const suffix = peakHour >= 12 ? "pm" : "am";
+  const displayHour = peakHour === 0 ? 12 : peakHour > 12 ? peakHour - 12 : peakHour;
+  return `${displayHour}${suffix}`;
+}
+
 async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilters): Promise<TUIData> {
   if (!isNativeAvailable()) {
     throw new Error("Native module not available");
@@ -232,8 +257,8 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     currentStreak,
     longestStreak,
     activeDays: dailyEntries.length,
-    totalDays: 365,
-    peakHour: "N/A",
+    totalDays: graph.summary.totalDays,
+    peakHour: calculatePeakHour(localMessages?.messages || []),
   };
 
   const dailyModelMap = new Map<string, Map<string, number>>();
