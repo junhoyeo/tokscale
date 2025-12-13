@@ -599,3 +599,137 @@ export function finalizeGraphNative(options: FinalizeOptions): TokenContribution
   const result = nativeCore.finalizeGraph(nativeOptions);
   return fromNativeResult(result);
 }
+
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+async function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
+  const scriptPath = join(__dirname, "native-runner.ts");
+  const outputFile = join(tmpdir(), `token-tracker-out-${randomUUID()}.json`);
+  const input = JSON.stringify({ method, args });
+
+  const proc = Bun.spawn([process.execPath, "run", scriptPath, outputFile], {
+    stdin: new Blob([input]),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const timeoutMs = 60000;
+  let timeoutId: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      proc.kill();
+      reject(new Error(`Subprocess '${method}' timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    // Drain stdout to prevent deadlock, wait for stderr and exit
+    const [_stdout, stderr, exitCode] = await Promise.race([
+      Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]),
+      timeoutPromise,
+    ]);
+    
+    clearTimeout(timeoutId!);
+
+    if (exitCode !== 0) {
+      let errorMsg = stderr || `exit code ${exitCode}`;
+      try {
+        const parsed = JSON.parse(stderr);
+        if (parsed.error) {
+          errorMsg = parsed.error;
+        }
+      } catch {}
+      throw new Error(`Subprocess '${method}' failed: ${errorMsg}`);
+    }
+
+    const output = await Bun.file(outputFile).text();
+    unlinkSync(outputFile);
+    return JSON.parse(output) as T;
+  } catch (e) {
+    clearTimeout(timeoutId!);
+    try { unlinkSync(outputFile); } catch {}
+    throw e;
+  }
+}
+
+export async function parseLocalSourcesAsync(options: LocalParseOptions): Promise<ParsedMessages> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeLocalParseOptions = {
+    homeDir: undefined,
+    sources: options.sources,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  return runInSubprocess<ParsedMessages>("parseLocalSources", [nativeOptions]);
+}
+
+export async function finalizeReportAsync(options: FinalizeOptions): Promise<ModelReport> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  return runInSubprocess<ModelReport>("finalizeReport", [nativeOptions]);
+}
+
+export async function finalizeMonthlyReportAsync(options: FinalizeOptions): Promise<MonthlyReport> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  return runInSubprocess<MonthlyReport>("finalizeMonthlyReport", [nativeOptions]);
+}
+
+export async function finalizeGraphAsync(options: FinalizeOptions): Promise<TokenContributionData> {
+  if (!isNativeAvailable()) {
+    throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
+  }
+
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  const result = await runInSubprocess<NativeGraphResult>("finalizeGraph", [nativeOptions]);
+  return fromNativeResult(result);
+}

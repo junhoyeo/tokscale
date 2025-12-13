@@ -44,6 +44,7 @@
     "string-width": "^8.1.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.16",
     "@types/node": "^20.0.0",
     "@types/react": "^19.2.7",
     "tsx": "^4.0.0",

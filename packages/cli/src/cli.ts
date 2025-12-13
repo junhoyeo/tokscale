@@ -31,10 +31,10 @@ import {
 import {
   isNativeAvailable,
   getNativeVersion,
-  parseLocalSourcesNative,
-  finalizeReportNative,
-  finalizeMonthlyReportNative,
-  finalizeGraphNative,
+  parseLocalSourcesAsync,
+  finalizeReportAsync,
+  finalizeMonthlyReportAsync,
+  finalizeGraphAsync,
   type ModelReport,
   type MonthlyReport,
   type ParsedMessages,
@@ -422,44 +422,32 @@ interface LoadedDataSources {
   localMessages: ParsedMessages | null;
 }
 
-/**
- * Load all data sources in parallel (two-phase optimization):
- * - Cursor API sync (network)
- * - Pricing fetch (network)
- * - Local file parsing (CPU/IO) - OpenCode, Claude, Codex, Gemini
- * 
- * This overlaps network I/O with local file parsing for better performance.
- */
 async function loadDataSourcesParallel(
   localSources: SourceType[],
   dateFilters: { since?: string; until?: string; year?: string }
 ): Promise<LoadedDataSources> {
-  // Skip local parsing if no local sources requested (e.g., cursor-only mode)
   const shouldParseLocal = localSources.length > 0;
 
-  // Use Promise.allSettled for graceful degradation
   const [cursorResult, pricingResult, localResult] = await Promise.allSettled([
     syncCursorData(),
     fetchPricingData(),
-    // Parse local sources in parallel (excludes Cursor) - skip if empty
     shouldParseLocal
-      ? Promise.resolve().then(() => parseLocalSourcesNative({
+      ? parseLocalSourcesAsync({
           sources: localSources.filter(s => s !== 'cursor'),
           since: dateFilters.since,
           until: dateFilters.until,
           year: dateFilters.year,
-        }))
+        })
       : Promise.resolve(null),
   ]);
 
-  // Handle partial failures gracefully
   const cursorSync: CursorSyncResult = cursorResult.status === 'fulfilled'
     ? cursorResult.value
     : { attempted: true, synced: false, rows: 0, error: 'Cursor sync failed' };
 
   const fetcher: PricingFetcher = pricingResult.status === 'fulfilled'
     ? pricingResult.value
-    : new PricingFetcher(); // Empty pricing → costs = 0
+    : new PricingFetcher();
 
   const localMessages: ParsedMessages | null = localResult.status === 'fulfilled'
     ? localResult.value
@@ -523,7 +511,7 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
   let report: ModelReport;
   try {
     const emptyMessages: ParsedMessages = { messages: [], opencodeCount: 0, claudeCount: 0, codexCount: 0, geminiCount: 0, processingTimeMs: 0 };
-    report = finalizeReportNative({
+    report = await finalizeReportAsync({
       localMessages: localMessages || emptyMessages,
       pricing: fetcher.toPricingEntries(),
       includeCursor: includeCursor && cursorSync.synced,
@@ -642,7 +630,7 @@ async function showMonthlyReport(options: FilterOptions & DateFilterOptions & { 
 
   let report: MonthlyReport;
   try {
-    report = finalizeMonthlyReportNative({
+    report = await finalizeMonthlyReportAsync({
       localMessages,
       pricing: fetcher.toPricingEntries(),
       includeCursor: includeCursor && cursorSync.synced,
@@ -737,8 +725,7 @@ async function handleGraphCommand(options: GraphCommandOptions) {
   spinner?.update(pc.gray("Generating graph data..."));
   const startTime = performance.now();
 
-  // Generate graph data using native module
-  const data = finalizeGraphNative({
+  const data = await finalizeGraphAsync({
     localMessages,
     pricing: fetcher.toPricingEntries(),
     includeCursor: includeCursor && cursorSync.synced,
