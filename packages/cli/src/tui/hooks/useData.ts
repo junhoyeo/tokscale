@@ -14,9 +14,9 @@ import type {
 } from "../types/index.js";
 import {
   isNativeAvailable,
-  parseLocalSourcesNative,
-  finalizeReportNative,
-  finalizeGraphNative,
+  parseLocalSourcesNativeAsync,
+  finalizeReportNativeAsync,
+  finalizeGraphNativeAsync,
   type ParsedMessages,
 } from "../../native.js";
 import { PricingFetcher } from "../../pricing.js";
@@ -147,7 +147,7 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     pricingFetcher.fetchPricing(),
     includeCursor && loadCursorCredentials() ? syncCursorCache() : Promise.resolve({ synced: false, rows: 0 }),
     localSources.length > 0
-      ? parseLocalSourcesNative({ sources: localSources as ("opencode" | "claude" | "codex" | "gemini")[], since, until, year })
+      ? parseLocalSourcesNativeAsync({ sources: localSources as ("opencode" | "claude" | "codex" | "gemini")[], since, until, year })
       : Promise.resolve({ messages: [], opencodeCount: 0, claudeCount: 0, codexCount: 0, geminiCount: 0, processingTimeMs: 0 } as ParsedMessages),
   ]);
 
@@ -160,7 +160,7 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     processingTimeMs: 0,
   };
 
-  const report = finalizeReportNative({
+  const report = await finalizeReportNativeAsync({
     localMessages: localMessages || emptyMessages,
     pricing: pricingFetcher.toPricingEntries(),
     includeCursor: includeCursor && cursorSync.synced,
@@ -169,7 +169,7 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     year,
   });
 
-  const graph = finalizeGraphNative({
+  const graph = await finalizeGraphNativeAsync({
     localMessages: localMessages || emptyMessages,
     pricing: pricingFetcher.toPricingEntries(),
     includeCursor: includeCursor && cursorSync.synced,

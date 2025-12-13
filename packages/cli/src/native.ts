@@ -578,9 +578,6 @@ export function finalizeMonthlyReportNative(options: FinalizeOptions): MonthlyRe
   return nativeCore.finalizeMonthlyReport(nativeOptions);
 }
 
-/**
- * Finalize graph: apply pricing to local messages, add Cursor, aggregate
- */
 export function finalizeGraphNative(options: FinalizeOptions): TokenContributionData {
   if (!nativeCore) {
     throw new Error("Native module not available: " + (loadError?.message || "unknown error"));
@@ -597,5 +594,96 @@ export function finalizeGraphNative(options: FinalizeOptions): TokenContribution
   };
 
   const result = nativeCore.finalizeGraph(nativeOptions);
+  return fromNativeResult(result);
+}
+
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const runnerPath = join(__dirname, "native-runner.ts");
+    
+    const proc = spawn("bun", ["run", runnerPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    
+    let stdout = "";
+    let stderr = "";
+    
+    proc.stdout.on("data", (data) => { stdout += data.toString(); });
+    proc.stderr.on("data", (data) => { stderr += data.toString(); });
+    
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Subprocess failed: ${stderr || `exit code ${code}`}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as T);
+      } catch (e) {
+        reject(new Error(`Failed to parse output: ${(e as Error).message}`));
+      }
+    });
+    
+    proc.on("error", reject);
+    
+    proc.stdin.write(JSON.stringify({ method, args }));
+    proc.stdin.end();
+  });
+}
+
+export async function parseLocalSourcesNativeAsync(options: LocalParseOptions): Promise<ParsedMessages> {
+  const nativeOptions: NativeLocalParseOptions = {
+    homeDir: undefined,
+    sources: options.sources,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+  return runInSubprocess<ParsedMessages>("parseLocalSources", [nativeOptions]);
+}
+
+export async function finalizeReportNativeAsync(options: FinalizeOptions): Promise<ModelReport> {
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+  return runInSubprocess<ModelReport>("finalizeReport", [nativeOptions]);
+}
+
+export async function finalizeMonthlyReportNativeAsync(options: FinalizeOptions): Promise<MonthlyReport> {
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+  return runInSubprocess<MonthlyReport>("finalizeMonthlyReport", [nativeOptions]);
+}
+
+export async function finalizeGraphNativeAsync(options: FinalizeOptions): Promise<TokenContributionData> {
+  const nativeOptions: NativeFinalizeReportOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    includeCursor: options.includeCursor,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+  const result = await runInSubprocess<NativeGraphResult>("finalizeGraph", [nativeOptions]);
   return fromNativeResult(result);
 }
