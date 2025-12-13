@@ -54,52 +54,75 @@ export function ModelView(props: ModelViewProps) {
 
   const widths = () => nameColumnWidths();
 
+  const formattedRows = createMemo(() => {
+    const nameWidth = widths().text;
+    return visibleEntries().map((entry) => {
+      const sourceLabel = entry.source.charAt(0).toUpperCase() + entry.source.slice(1);
+      const fullName = `${sourceLabel} ${entry.model}`;
+      let displayName = fullName;
+      if (fullName.length > nameWidth) {
+        displayName = nameWidth > 1 ? `${fullName.slice(0, nameWidth - 1)}…` : fullName.slice(0, 1);
+      }
+
+      return {
+        entry,
+        displayName,
+        nameWidth,
+        input: formatTokensCompact(entry.input),
+        output: formatTokensCompact(entry.output),
+        cache: formatTokensCompact(entry.cacheRead),
+        total: formatTokensCompact(entry.total),
+        cost: formatCostFull(entry.cost),
+      };
+    });
+  });
+
+  const sortArrow = () => (props.sortDesc ? "▼" : "▲");
+  const nameHeader = () => ` Source/Model${props.sortBy === "name" ? " " + sortArrow() : ""}`;
+  const inputHeader = () => (props.sortBy === "tokens" ? "Input" : "Input");
+  const outputHeader = () => (props.sortBy === "tokens" ? "Output" : "Output");
+  const cacheHeader = () => (props.sortBy === "tokens" ? "Cache" : "Cache");
+  const totalHeader = () => `${props.sortBy === "tokens" ? sortArrow() + " Total" : "Total"}`;
+  const costHeader = () => `${props.sortBy === "cost" ? sortArrow() + " Cost" : "Cost"}`;
+
   return (
     <box flexDirection="column">
       <box flexDirection="row">
         <text fg="cyan" bold>
-          {" Source/Model".padEnd(widths().column)}
-          {"Input".padStart(INPUT_COL_WIDTH)}
-          {"Output".padStart(OUTPUT_COL_WIDTH)}
-          {"Cache".padStart(CACHE_COL_WIDTH)}
-          {"Total".padStart(TOTAL_COL_WIDTH)}
-          {"Cost".padStart(COST_COL_WIDTH)}
+          {nameHeader().padEnd(widths().column)}
+          {inputHeader().padStart(INPUT_COL_WIDTH)}
+          {outputHeader().padStart(OUTPUT_COL_WIDTH)}
+          {cacheHeader().padStart(CACHE_COL_WIDTH)}
+          {totalHeader().padStart(TOTAL_COL_WIDTH)}
+          {costHeader().padStart(COST_COL_WIDTH)}
         </text>
       </box>
       <box borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderBottom borderColor="brightBlack" />
 
-      <For each={visibleEntries()}>
-        {(entry, i) => {
+      <For each={formattedRows()}>
+        {(row, i) => {
           const isSelected = () => i() === props.selectedIndex;
           const stripe = () => (i() % 2 === 0 ? "brightBlack" : undefined);
           const rowBg = () => (isSelected() ? "blue" : stripe());
-          const sourceLabel = entry.source.charAt(0).toUpperCase() + entry.source.slice(1);
-          const fullName = `${sourceLabel} ${entry.model}`;
-          const nameWidth = widths().text;
-          let displayName = fullName;
-
-          if (fullName.length > nameWidth) {
-            displayName = nameWidth > 1 ? `${fullName.slice(0, nameWidth - 1)}…` : fullName.slice(0, 1);
-          }
 
           return (
             <box flexDirection="row">
-              <text fg={getModelColor(entry.model)} backgroundColor={rowBg()}>●</text>
+              <text fg={getModelColor(row.entry.model)} backgroundColor={rowBg()}>●</text>
               <text
                 backgroundColor={rowBg()}
                 fg={isSelected() ? "white" : undefined}
               >
-                {displayName.padEnd(nameWidth)}
-                {formatTokensCompact(entry.input).padStart(INPUT_COL_WIDTH)}
-                {formatTokensCompact(entry.output).padStart(OUTPUT_COL_WIDTH)}
-                {formatTokensCompact(entry.cacheRead).padStart(CACHE_COL_WIDTH)}
-                {formatTokensCompact(entry.total).padStart(TOTAL_COL_WIDTH)}
+                {row.displayName.padEnd(row.nameWidth)}
+                {row.input.padStart(INPUT_COL_WIDTH)}
+                {row.output.padStart(OUTPUT_COL_WIDTH)}
+                {row.cache.padStart(CACHE_COL_WIDTH)}
+                {row.total.padStart(TOTAL_COL_WIDTH)}
               </text>
               <text
                 fg="green"
                 backgroundColor={rowBg()}
               >
-                {formatCostFull(entry.cost).padStart(COST_COL_WIDTH)}
+                {row.cost.padStart(COST_COL_WIDTH)}
               </text>
             </box>
           );
