@@ -94,7 +94,7 @@ export function App(props: AppProps) {
 
   const handleSortChange = (sort: SortType) => {
     setSortBy(sort);
-    setSortDesc(sort !== "name");
+    setSortDesc(true);
   };
 
   useKeyboard((key) => {
@@ -166,11 +166,6 @@ export function App(props: AppProps) {
           .then(() => showStatus("Copied to clipboard"))
           .catch(() => showStatus("Failed to copy"));
       }
-      return;
-    }
-    if (key.name === "n") {
-      setSortBy("name");
-      setSortDesc(false);
       return;
     }
     if (key.name === "t") {
@@ -270,6 +265,8 @@ export function App(props: AppProps) {
               <Match when={activeTab() === "overview"}>
                 <OverviewView
                   data={data()!}
+                  sortBy={sortBy()}
+                  sortDesc={sortDesc()}
                   selectedIndex={selectedIndex}
                   scrollOffset={scrollOffset}
                   height={contentHeight()}

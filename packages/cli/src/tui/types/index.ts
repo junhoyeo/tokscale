@@ -1,7 +1,7 @@
 import type { ColorPaletteName } from "../config/themes.js";
 
 export type TabType = "overview" | "model" | "daily" | "stats";
-export type SortType = "cost" | "name" | "tokens";
+export type SortType = "cost" | "tokens";
 export type SourceType = "opencode" | "claude" | "codex" | "cursor" | "gemini";
 
 export type { ColorPaletteName };
@@ -65,6 +65,8 @@ export interface ModelWithPercentage {
   percentage: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalTokens: number;
   cost: number;
 }

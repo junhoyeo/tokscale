@@ -49,7 +49,6 @@ export function Footer(props: FooterProps) {
           <Show when={!isVeryNarrowTerminal()}>
             <text dim>|</text>
             <SortButton label="Cost" sortType="cost" active={props.sortBy === "cost"} onClick={props.onSortChange} />
-            <SortButton label="Name" sortType="name" active={props.sortBy === "name"} onClick={props.onSortChange} />
             <SortButton label="Tokens" sortType="tokens" active={props.sortBy === "tokens"} onClick={props.onSortChange} />
           </Show>
           <Show when={showScrollInfo() && !isVeryNarrowTerminal()}>

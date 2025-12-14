@@ -1,13 +1,15 @@
 import { Show, For, createMemo, type Accessor } from "solid-js";
 import { BarChart } from "./BarChart.js";
 import { Legend } from "./Legend.js";
-import type { TUIData } from "../hooks/useData.js";
+import type { TUIData, SortType } from "../hooks/useData.js";
 import { formatCost, formatTokens, formatTokensCompact } from "../utils/format.js";
 import { getModelColor } from "../utils/colors.js";
 import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 
 interface OverviewViewProps {
   data: TUIData;
+  sortBy: SortType;
+  sortDesc: boolean;
   selectedIndex: Accessor<number>;
   scrollOffset: Accessor<number>;
   height: number;
@@ -32,8 +34,33 @@ export function OverviewView(props: OverviewViewProps) {
     return name.length > max ? name.slice(0, max - 1) + "…" : name;
   };
 
-  const visibleModels = () => props.data.topModels.slice(props.scrollOffset(), props.scrollOffset() + itemsPerPage());
-  const totalModels = () => props.data.topModels.length;
+  const sortedModels = createMemo(() => {
+    const models = [...props.data.topModels];
+    return models.sort((a, b) => {
+      let cmp = 0;
+      if (props.sortBy === "cost") cmp = a.cost - b.cost;
+      else if (props.sortBy === "tokens") cmp = a.totalTokens - b.totalTokens;
+      return props.sortDesc ? -cmp : cmp;
+    });
+  });
+
+  const totalForPercentage = createMemo(() => {
+    const models = props.data.topModels;
+    if (props.sortBy === "tokens") {
+      return models.reduce((sum, m) => sum + m.totalTokens, 0) || 1;
+    }
+    return models.reduce((sum, m) => sum + m.cost, 0) || 1;
+  });
+
+  const getPercentage = (model: typeof props.data.topModels[0]) => {
+    if (props.sortBy === "tokens") {
+      return (model.totalTokens / totalForPercentage()) * 100;
+    }
+    return (model.cost / totalForPercentage()) * 100;
+  };
+
+  const visibleModels = () => sortedModels().slice(props.scrollOffset(), props.scrollOffset() + itemsPerPage());
+  const totalModels = () => sortedModels().length;
   const endIndex = () => Math.min(props.scrollOffset() + visibleModels().length, totalModels());
 
   return (
@@ -45,7 +72,7 @@ export function OverviewView(props: OverviewViewProps) {
 
       <box flexDirection="column">
         <box flexDirection="row" justifyContent="space-between" marginBottom={0}>
-          <text bold>{isVeryNarrowTerminal() ? "Top Models" : "Models by Cost"}</text>
+          <text bold>{isVeryNarrowTerminal() ? "Top Models" : `Models by ${props.sortBy === "tokens" ? "Tokens" : "Cost"}`}</text>
           <box flexDirection="row">
             <text dim>{isVeryNarrowTerminal() ? "" : "Total: "}</text>
             <text fg="green">{formatCost(props.data.totalCost)}</text>
@@ -64,11 +91,27 @@ export function OverviewView(props: OverviewViewProps) {
                   <box flexDirection="row" backgroundColor={bgColor()}>
                     <text fg={color()} bg={bgColor()}>●</text>
                     <text fg={isActive() ? "white" : undefined} bg={bgColor()}>{` ${truncateModelName(model.modelId)} `}</text>
-                    <text dim bg={bgColor()}>{`(${model.percentage.toFixed(1)}%)`}</text>
+                    <text dim bg={bgColor()}>{`(${getPercentage(model).toFixed(1)}%)`}</text>
                   </box>
-                  <text dim>{isVeryNarrowTerminal() 
-                    ? `  ${formatTokensCompact(model.inputTokens)}/${formatTokensCompact(model.outputTokens)}`
-                    : `  In: ${formatTokens(model.inputTokens)} · Out: ${formatTokens(model.outputTokens)}`}</text>
+                  <box flexDirection="row">
+                    <Show when={isVeryNarrowTerminal()} fallback={
+                      <>
+                        <text fg="#666666">{"  In: "}</text><text fg="#AAAAAA">{formatTokens(model.inputTokens)}</text>
+                        <text fg="#666666">{" · Out: "}</text><text fg="#AAAAAA">{formatTokens(model.outputTokens)}</text>
+                        <text fg="#666666">{" · CR: "}</text><text fg="#AAAAAA">{formatTokens(model.cacheReadTokens)}</text>
+                        <text fg="#666666">{" · CW: "}</text><text fg="#AAAAAA">{formatTokens(model.cacheWriteTokens)}</text>
+                      </>
+                    }>
+                      <text fg="#666666">{"  "}</text>
+                      <text fg="#AAAAAA">{formatTokensCompact(model.inputTokens)}</text>
+                      <text fg="#666666">{"/"}</text>
+                      <text fg="#AAAAAA">{formatTokensCompact(model.outputTokens)}</text>
+                      <text fg="#666666">{"/"}</text>
+                      <text fg="#AAAAAA">{formatTokensCompact(model.cacheReadTokens)}</text>
+                      <text fg="#666666">{"/"}</text>
+                      <text fg="#AAAAAA">{formatTokensCompact(model.cacheWriteTokens)}</text>
+                    </Show>
+                  </box>
                 </box>
               );
             }}

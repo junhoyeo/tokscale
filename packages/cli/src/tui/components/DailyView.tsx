@@ -34,7 +34,7 @@ export function DailyView(props: DailyViewProps) {
   const visibleEntries = createMemo(() => sortedEntries().slice(0, props.height - 3));
 
   const sortArrow = () => (props.sortDesc ? "▼" : "▲");
-  const dateHeader = () => (props.sortBy === "name" ? `${sortArrow()} Date` : "Date");
+  const dateHeader = () => "Date";
   const totalHeader = () => (props.sortBy === "tokens" ? `${sortArrow()} Total` : "Total");
   const costHeader = () => (props.sortBy === "cost" ? `${sortArrow()} Cost` : "Cost");
 

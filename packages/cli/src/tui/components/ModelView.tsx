@@ -86,8 +86,8 @@ export function ModelView(props: ModelViewProps) {
 
   const sortArrow = () => (props.sortDesc ? "▼" : "▲");
   const nameHeader = () => isVeryNarrowTerminal() 
-    ? ` Model${props.sortBy === "name" ? sortArrow() : ""}`
-    : ` Source/Model${props.sortBy === "name" ? " " + sortArrow() : ""}`;
+    ? ` Model`
+    : ` Source/Model`;
   const totalHeader = () => (props.sortBy === "tokens" ? `${sortArrow()} Total` : "Total");
   const costHeader = () => (props.sortBy === "cost" ? `${sortArrow()} Cost` : "Cost");
 

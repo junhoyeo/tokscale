@@ -347,12 +347,14 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     })
     .sort((a, b) => a.date.localeCompare(b.date));
 
-  const modelTokensMap = new Map<string, { input: number; output: number; cost: number }>();
+  const modelTokensMap = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }>();
   for (const e of modelEntries) {
-    const existing = modelTokensMap.get(e.model) || { input: 0, output: 0, cost: 0 };
+    const existing = modelTokensMap.get(e.model) || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
     modelTokensMap.set(e.model, {
       input: existing.input + e.input,
       output: existing.output + e.output,
+      cacheRead: existing.cacheRead + e.cacheRead,
+      cacheWrite: existing.cacheWrite + e.cacheWrite,
       cost: existing.cost + e.cost,
     });
   }
@@ -360,12 +362,14 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
   const totalCostSum = report.totalCost || 1;
   const topModels: ModelWithPercentage[] = Array.from(modelTokensMap.entries())
     .map(([modelId, data]) => {
-      const totalTokens = data.input + data.output;
+      const totalTokens = data.input + data.output + data.cacheRead + data.cacheWrite;
       return {
         modelId,
         percentage: (data.cost / totalCostSum) * 100,
         inputTokens: data.input,
         outputTokens: data.output,
+        cacheReadTokens: data.cacheRead,
+        cacheWriteTokens: data.cacheWrite,
         totalTokens,
         cost: data.cost,
       };
