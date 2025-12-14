@@ -1,4 +1,6 @@
 import { For, Show, createMemo } from "solid-js";
+import { formatTokensCompact } from "../utils/format.js";
+import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 
 export interface ChartDataPoint {
   date: string;
@@ -11,8 +13,6 @@ interface BarChartProps {
   width: number;
   height: number;
 }
-
-import { formatTokensCompact } from "../utils/format.js";
 
 const BLOCKS = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -37,6 +37,9 @@ export function BarChart(props: BarChartProps) {
   const data = () => props.data;
   const width = () => props.width;
   const height = () => props.height;
+
+  const isNarrowTerminal = () => isNarrow(width());
+  const isVeryNarrowTerminal = () => isVeryNarrow(width());
 
   const safeHeight = () => Math.max(height(), 1);
   
@@ -79,7 +82,7 @@ export function BarChart(props: BarChartProps) {
     const vd = visibleData();
     if (vd.length === 0) return [];
     
-    const labelInterval = Math.max(1, Math.floor(vd.length / 3));
+    const labelInterval = Math.max(1, Math.floor(vd.length / (isVeryNarrowTerminal() ? 2 : 3)));
     const labels: string[] = [];
     
     for (let i = 0; i < vd.length; i += labelInterval) {
@@ -88,7 +91,7 @@ export function BarChart(props: BarChartProps) {
       if (parts.length === 3) {
         const month = parseInt(parts[1], 10);
         const day = parseInt(parts[2], 10);
-        labels.push(`${MONTH_NAMES[month - 1]} ${day}`);
+        labels.push(isVeryNarrowTerminal() ? `${month}/${day}` : `${MONTH_NAMES[month - 1]} ${day}`);
       } else {
         labels.push(dateStr.slice(5));
       }
@@ -101,6 +104,8 @@ export function BarChart(props: BarChartProps) {
     const labels = dateLabels();
     return labels.length > 0 ? Math.floor(axisWidth() / labels.length) : 0;
   };
+
+  const chartTitle = () => isVeryNarrowTerminal() ? "Tokens" : "Tokens per Day";
 
   const getBarContent = (point: ChartDataPoint, row: number): { char: string; color: string } => {
     const mt = maxTotal();
@@ -153,10 +158,13 @@ export function BarChart(props: BarChartProps) {
   return (
     <Show when={data().length > 0} fallback={<text dim>No chart data</text>}>
       <box flexDirection="column">
-        <text bold>Tokens per Day</text>
+        <text bold>{chartTitle()}</text>
         <For each={rowIndices()}>
           {(row) => {
-            const yLabel = row === safeHeight() - 1 ? formatTokensCompact(maxTotal()).padStart(6) : "      ";
+            const yLabelWidth = isVeryNarrowTerminal() ? 5 : 6;
+            const yLabel = row === safeHeight() - 1 
+              ? formatTokensCompact(maxTotal()).padStart(yLabelWidth) 
+              : " ".repeat(yLabelWidth);
             return (
               <box flexDirection="row">
                 <text dim>{yLabel}│</text>
@@ -173,12 +181,12 @@ export function BarChart(props: BarChartProps) {
           }}
         </For>
         <box flexDirection="row">
-          <text dim>{"     0│"}</text>
+          <text dim>{isVeryNarrowTerminal() ? "    0│" : "     0│"}</text>
           <text dim>{getRepeatedString("─", axisWidth())}</text>
         </box>
         <Show when={dateLabels().length > 0}>
           <box flexDirection="row">
-            <text dim>{"       "}</text>
+            <text dim>{isVeryNarrowTerminal() ? "      " : "       "}</text>
             <text dim>
               {dateLabels().map((l) => l.padEnd(labelPadding())).join("")}
             </text>
