@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Token Tracker CLI
+ * Tokscale CLI
  * Display OpenCode, Claude Code, Codex, Gemini, and Cursor usage with dynamic width tables
  * 
  * All heavy computation is done in the native Rust module.
@@ -148,7 +148,7 @@ async function main() {
   const program = new Command();
 
   program
-    .name("token-tracker")
+    .name("tokscale")
     .description("Token Usage Leaderboard CLI - Track AI coding costs across OpenCode, Claude Code, Codex, Gemini, and Cursor")
     .version("1.0.2");
 
@@ -234,14 +234,14 @@ async function main() {
 
   program
     .command("login")
-    .description("Login to Token Tracker (opens browser for GitHub auth)")
+    .description("Login to Tokscale (opens browser for GitHub auth)")
     .action(async () => {
       await login();
     });
 
   program
     .command("logout")
-    .description("Logout from Token Tracker")
+    .description("Logout from Tokscale")
     .action(async () => {
       await logout();
     });
@@ -259,7 +259,7 @@ async function main() {
 
   program
     .command("submit")
-    .description("Submit your usage data to Token Tracker")
+    .description("Submit your usage data to Tokscale")
     .option("--opencode", "Include only OpenCode data")
     .option("--claude", "Include only Claude Code data")
     .option("--codex", "Include only Codex CLI data")
@@ -490,7 +490,7 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
     const credentials = loadCursorCredentials();
     if (!credentials) {
       console.log(pc.red("\n  Error: Cursor authentication required."));
-      console.log(pc.gray("  Run 'token-tracker cursor login' to authenticate with Cursor.\n"));
+      console.log(pc.gray("  Run 'tokscale cursor login' to authenticate with Cursor.\n"));
       process.exit(1);
     }
   }
@@ -551,7 +551,7 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
   if (report.entries.length === 0) {
     if (onlyCursor && !cursorSync.synced) {
       console.log(pc.yellow("  No Cursor data available."));
-      console.log(pc.gray("  Run 'token-tracker cursor login' to authenticate with Cursor.\n"));
+      console.log(pc.gray("  Run 'tokscale cursor login' to authenticate with Cursor.\n"));
     } else {
       console.log(pc.yellow("  No usage data found.\n"));
     }
@@ -860,7 +860,7 @@ async function cursorLogin(): Promise<void> {
   const credentials = loadCursorCredentials();
   if (credentials) {
     console.log(pc.yellow("\n  Already logged in to Cursor."));
-    console.log(pc.gray("  Run 'token-tracker cursor logout' to sign out first.\n"));
+    console.log(pc.gray("  Run 'tokscale cursor logout' to sign out first.\n"));
     return;
   }
 
@@ -937,7 +937,7 @@ async function cursorStatus(): Promise<void> {
 
   if (!credentials) {
     console.log(pc.yellow("\n  Not logged in to Cursor."));
-    console.log(pc.gray("  Run 'token-tracker cursor login' to authenticate.\n"));
+    console.log(pc.gray("  Run 'tokscale cursor login' to authenticate.\n"));
     return;
   }
 
@@ -965,7 +965,7 @@ async function cursorStatus(): Promise<void> {
     }
   } else {
     console.log(pc.red(`  ✗ Session invalid: ${validation.error}`));
-    console.log(pc.gray("  Run 'token-tracker cursor login' to re-authenticate."));
+    console.log(pc.gray("  Run 'tokscale cursor login' to re-authenticate."));
   }
 
   console.log(pc.gray(`\n  Credentials: ${getCursorCredentialsPath()}\n`));

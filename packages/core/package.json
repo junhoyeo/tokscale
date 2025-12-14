@@ -1,11 +1,11 @@
 {
-  "name": "@0xinevitable/token-tracker-core",
+  "name": "tokscale-core",
   "version": "0.1.1",
-  "description": "Native Rust core for token-tracker CLI - high-performance session parsing",
+  "description": "Native Rust core for tokscale CLI - high-performance session parsing",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
-    "binaryName": "token-tracker-core",
+    "binaryName": "tokscale-core",
     "targets": [
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
@@ -56,13 +56,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/0xinevitable/token-usage-tracker.git",
+    "url": "https://github.com/junhoyeo/tokscale.git",
     "directory": "packages/core"
   },
   "keywords": [
     "napi-rs",
     "rust",
-    "token-tracker",
+    "tokscale",
     "performance",
     "native"
   ]

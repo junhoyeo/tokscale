@@ -67,7 +67,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
             className="px-2 py-1 rounded-lg text-sm font-mono"
             style={{ backgroundColor: "#262627" }}
           >
-            token-tracker graph
+            tokscale graph
           </code>{" "}
           command, or load sample data.
         </p>
@@ -190,7 +190,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
               className="px-2 py-1 rounded-lg text-xs font-mono"
               style={{ backgroundColor: "#262627" }}
             >
-              token-tracker graph
+              tokscale graph
             </code>
           </li>
           <li className="leading-relaxed">Copy the JSON output and paste it above</li>

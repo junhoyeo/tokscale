@@ -1,9 +1,9 @@
 [package]
-name = "token-tracker-core"
+name = "tokscale-core"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Native Rust core for token-tracker CLI - high-performance session parsing"
+description = "Native Rust core for tokscale CLI - high-performance session parsing"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

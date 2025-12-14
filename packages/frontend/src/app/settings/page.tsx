@@ -140,7 +140,7 @@ export default function SettingsPage() {
               className="px-1 py-0.5 rounded text-xs"
               style={{ backgroundColor: "#262627" }}
             >
-              token-tracker login
+              tokscale login
             </code>{" "}
             from the CLI.
           </p>
@@ -155,7 +155,7 @@ export default function SettingsPage() {
                   className="px-1 py-0.5 rounded text-xs"
                   style={{ backgroundColor: "#262627" }}
                 >
-                  token-tracker login
+                  tokscale login
                 </code>{" "}
                 to create one.
               </p>

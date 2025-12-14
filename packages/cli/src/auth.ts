@@ -1,5 +1,5 @@
 /**
- * Token Tracker CLI Authentication Commands
+ * Tokscale CLI Authentication Commands
  * Handles login, logout, and whoami commands
  */
 
@@ -39,13 +39,13 @@ export async function login(): Promise<void> {
   const credentials = loadCredentials();
   if (credentials) {
     console.log(pc.yellow(`\n  Already logged in as ${pc.bold(credentials.username)}`));
-    console.log(pc.gray("  Run 'token-tracker logout' to sign out first.\n"));
+    console.log(pc.gray("  Run 'tokscale logout' to sign out first.\n"));
     return;
   }
 
   const baseUrl = getApiBaseUrl();
 
-  console.log(pc.cyan("\n  Token Tracker - Login\n"));
+  console.log(pc.cyan("\n  Tokscale - Login\n"));
 
   // Step 1: Request device code
   console.log(pc.gray("  Requesting authorization code..."));
@@ -108,7 +108,7 @@ export async function login(): Promise<void> {
         });
 
         console.log(pc.green(`\n  Success! Logged in as ${pc.bold(data.user.username)}`));
-        console.log(pc.gray("  You can now use 'token-tracker submit' to share your usage.\n"));
+        console.log(pc.gray("  You can now use 'tokscale submit' to share your usage.\n"));
         return;
       }
 
@@ -159,11 +159,11 @@ export async function whoami(): Promise<void> {
 
   if (!credentials) {
     console.log(pc.yellow("\n  Not logged in."));
-    console.log(pc.gray("  Run 'token-tracker login' to authenticate.\n"));
+    console.log(pc.gray("  Run 'tokscale login' to authenticate.\n"));
     return;
   }
 
-  console.log(pc.cyan("\n  Token Tracker - Account Info\n"));
+  console.log(pc.cyan("\n  Tokscale - Account Info\n"));
   console.log(pc.white(`  Username:  ${pc.bold(credentials.username)}`));
   console.log(pc.gray(`  Logged in: ${new Date(credentials.createdAt).toLocaleDateString()}`));
   console.log();

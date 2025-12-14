@@ -16,7 +16,7 @@ const DEFAULT_SETTINGS: Settings = {
   paletteName: DEFAULT_PALETTE,
 };
 
-const STORAGE_KEY = "token-tracker-settings";
+const STORAGE_KEY = "tokscale-settings";
 
 function getStoredSettings(): Settings {
   if (typeof window === "undefined") return DEFAULT_SETTINGS;

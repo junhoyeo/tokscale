@@ -1,11 +1,13 @@
 name: Publish CLI
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - "packages/cli/package.json"
-  workflow_dispatch:
+# DISABLED - Re-enable after migration to junhoyeo/tokscale
+# on:
+#   push:
+#     branches: [main]
+#     paths:
+#       - "packages/cli/package.json"
+#   workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   publish-cli:

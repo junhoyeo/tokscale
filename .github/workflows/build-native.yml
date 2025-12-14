@@ -1,15 +1,17 @@
 name: Build and Publish Core
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - "packages/core/package.json"
-  workflow_dispatch:
+# DISABLED - Re-enable after migration to junhoyeo/tokscale
+# on:
+#   push:
+#     branches: [main]
+#     paths:
+#       - "packages/core/package.json"
+#   workflow_dispatch:
+on: workflow_dispatch
 
 env:
   DEBUG: napi:*
-  APP_NAME: token-tracker-core
+  APP_NAME: tokscale-core
   MACOSX_DEPLOYMENT_TARGET: "10.13"
 
 jobs:

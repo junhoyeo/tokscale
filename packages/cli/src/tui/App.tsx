@@ -229,7 +229,7 @@ export function App(props: AppProps) {
         daily: d.dailyEntries,
         stats: d.stats,
       };
-      const filename = `token-usage-export-${new Date().toISOString().split("T")[0]}.json`;
+      const filename = `tokscale-export-${new Date().toISOString().split("T")[0]}.json`;
       import("node:fs")
         .then((fs) => {
           fs.writeFileSync(filename, JSON.stringify(exportData, null, 2));

@@ -1,12 +1,12 @@
 {
-  "name": "@0xinevitable/token-tracker",
+  "name": "tokscale",
   "version": "1.0.2",
   "description": "Calculate token prices from OpenCode, Claude Code, Codex, Gemini, and Cursor sessions",
   "license": "MIT",
   "type": "module",
   "main": "./dist/cli.js",
   "bin": {
-    "token-tracker": "./dist/cli.js"
+    "tokscale": "./dist/cli.js"
   },
   "files": [
     "dist/**/*"
@@ -17,7 +17,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/0xinevitable/token-usage-tracker.git",
+    "url": "https://github.com/junhoyeo/tokscale.git",
     "directory": "packages/cli"
   },
   "scripts": {
@@ -29,7 +29,7 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@0xinevitable/token-tracker-core": "^0.1.1",
+    "tokscale-core": "^0.1.1",
     "@opentui/core": "0.1.60",
     "@opentui/react": "^0.1.60",
     "@opentui/solid": "^0.1.60",
@@ -53,7 +53,7 @@
     "node": ">= 18"
   },
   "keywords": [
-    "token-tracker",
+    "tokscale",
     "opencode",
     "claude-code",
     "cursor",

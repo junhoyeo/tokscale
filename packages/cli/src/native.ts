@@ -223,7 +223,7 @@ let nativeCore: NativeCore | null = null;
 let loadError: Error | null = null;
 
 try {
-  nativeCore = await import("@0xinevitable/token-tracker-core").then((m) => m.default || m);
+  nativeCore = await import("tokscale-core").then((m) => m.default || m);
 } catch (e) {
   loadError = e as Error;
 }
@@ -462,7 +462,7 @@ const __dirname = dirname(__filename);
 
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes default
 const NATIVE_TIMEOUT_MS = parseInt(
-  process.env.TOKEN_TRACKER_NATIVE_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS),
+  process.env.TOKSCALE_NATIVE_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS),
   10
 );
 

@@ -1,8 +1,8 @@
 {
-  "name": "@token-tracker/benchmarks",
+  "name": "@tokscale/benchmarks",
   "version": "0.1.0",
   "private": true,
-  "description": "Benchmark scripts for token-tracker CLI",
+  "description": "Benchmark scripts for tokscale CLI",
   "type": "module",
   "scripts": {
     "generate": "tsx generate.ts",

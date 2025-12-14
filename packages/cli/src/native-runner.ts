@@ -9,7 +9,7 @@
  * No temp files needed - pure Unix IPC pattern.
  */
 
-import nativeCore from "@0xinevitable/token-tracker-core";
+import nativeCore from "tokscale-core";
 
 const MAX_INPUT_SIZE = 50 * 1024 * 1024; // 50MB
 const STDIN_TIMEOUT_MS = 30_000; // 30s

@@ -1,5 +1,5 @@
 /**
- * Token Tracker CLI Credentials Manager
+ * Tokscale CLI Credentials Manager
  * Stores and retrieves API tokens for authenticated CLI operations
  */
 
@@ -14,8 +14,8 @@ export interface Credentials {
   createdAt: string;
 }
 
-const OLD_CONFIG_DIR = path.join(os.homedir(), ".token-tracker");
-const CONFIG_DIR = path.join(os.homedir(), ".config", "token-tracker");
+const OLD_CONFIG_DIR = path.join(os.homedir(), ".tokscale");
+const CONFIG_DIR = path.join(os.homedir(), ".config", "tokscale");
 const OLD_CREDENTIALS_FILE = path.join(OLD_CONFIG_DIR, "credentials.json");
 const CREDENTIALS_FILE = path.join(CONFIG_DIR, "credentials.json");
 
@@ -112,7 +112,7 @@ export function isLoggedIn(): boolean {
  * Get the API base URL
  */
 export function getApiBaseUrl(): string {
-  return process.env.TOKEN_TRACKER_API_URL || "https://tokens.inevitable.team";
+  return process.env.TOKSCALE_API_URL || "https://tokens.inevitable.team";
 }
 
 /**

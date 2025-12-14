@@ -1,13 +1,11 @@
 {
-  "name": "token-tracker-monorepo",
+  "name": "tokscale-monorepo",
   "version": "1.0.0",
   "private": true,
   "description": "Token Usage Leaderboard - The Kardashev Scale for AI Devs",
   "type": "module",
   "workspaces": [
-    "packages/*",
-    "frontend",
-    "benchmarks"
+    "packages/*"
   ],
   "scripts": {
     "postinstall": "bun run build:core",
@@ -15,7 +13,8 @@
     "build:cli": "bun run --cwd packages/cli build",
     "build:core": "bun run --cwd packages/core build",
     "cli": "bun run --cwd packages/cli dev",
-    "dev:frontend": "bun run --cwd frontend dev"
+    "dev:frontend": "bun run --cwd packages/frontend dev",
+    "dev:benchmarks": "bun run --cwd packages/benchmarks run"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.4.1",

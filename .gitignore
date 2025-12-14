@@ -3,6 +3,10 @@ node_modules
 dist/
 
 # Benchmark results (except .gitkeep)
+packages/benchmarks/results/*
+!packages/benchmarks/results/.gitkeep
+packages/benchmarks/synthetic-data/
+# Legacy paths (keep for safety)
 benchmarks/results/*
 !benchmarks/results/.gitkeep
 benchmarks/synthetic-data/

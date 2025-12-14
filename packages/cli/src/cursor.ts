@@ -68,8 +68,8 @@ export interface CursorMessageWithTimestamp {
 // Credential Management
 // ============================================================================
 
-const OLD_CONFIG_DIR = path.join(os.homedir(), ".token-tracker");
-const CONFIG_DIR = path.join(os.homedir(), ".config", "token-tracker");
+const OLD_CONFIG_DIR = path.join(os.homedir(), ".tokscale");
+const CONFIG_DIR = path.join(os.homedir(), ".config", "tokscale");
 const OLD_CURSOR_CREDENTIALS_FILE = path.join(OLD_CONFIG_DIR, "cursor-credentials.json");
 const CURSOR_CREDENTIALS_FILE = path.join(CONFIG_DIR, "cursor-credentials.json");
 
@@ -214,7 +214,7 @@ export async function fetchCursorUsageCsv(sessionToken: string): Promise<string>
   });
 
   if (response.status === 401 || response.status === 403) {
-    throw new Error("Cursor session expired. Please run 'token-tracker cursor login' to re-authenticate.");
+    throw new Error("Cursor session expired. Please run 'tokscale cursor login' to re-authenticate.");
   }
 
   if (!response.ok) {
@@ -401,7 +401,7 @@ export async function readCursorUsage(): Promise<{
 }> {
   const credentials = loadCursorCredentials();
   if (!credentials) {
-    throw new Error("Cursor not authenticated. Run 'token-tracker cursor login' first.");
+    throw new Error("Cursor not authenticated. Run 'tokscale cursor login' first.");
   }
 
   const csvText = await fetchCursorUsageCsv(credentials.sessionToken);
@@ -423,7 +423,7 @@ export function getCursorCredentialsPath(): string {
 // Cache Management (for Rust integration)
 // ============================================================================
 
-const OLD_CURSOR_CACHE_DIR = path.join(os.homedir(), ".token-tracker", "cursor-cache");
+const OLD_CURSOR_CACHE_DIR = path.join(os.homedir(), ".tokscale", "cursor-cache");
 const CURSOR_CACHE_DIR = path.join(CONFIG_DIR, "cursor-cache");
 const CURSOR_CACHE_FILE = path.join(CURSOR_CACHE_DIR, "usage.csv");
 

@@ -50,7 +50,7 @@ export interface PricingEntry {
 
 function getCacheDir(): string {
   const cacheHome = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
-  return path.join(cacheHome, "token-tracker");
+  return path.join(cacheHome, "tokscale");
 }
 
 function getCachePath(): string {

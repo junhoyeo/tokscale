@@ -977,7 +977,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "token-tracker-core"
+name = "tokio"
+version = "1.48.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
+dependencies = [
+ "pin-project-lite",
+]
+
+[[package]]
+name = "tokscale-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -994,15 +1003,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "walkdir",
-]
-
-[[package]]
-name = "tokio"
-version = "1.48.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
-dependencies = [
- "pin-project-lite",
 ]
 
 [[package]]

@@ -1,10 +1,10 @@
-# Token Tracker
+# Tokscale
 
 A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.
 
 ## Overview
 
-**Token Tracker** helps you monitor and analyze your token consumption from:
+**Tokscale** helps you monitor and analyze your token consumption from:
 
 | Platform | Data Location | Supported |
 |----------|---------------|-----------|
@@ -12,6 +12,7 @@ A high-performance CLI tool and visualization dashboard for tracking AI coding a
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` | Yes |
 | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | Yes |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/*/chats/` | Yes |
+| [Cursor IDE](https://cursor.com/) | API sync via `~/.config/tokscale/cursor-cache/` | Yes |
 
 Get real-time pricing calculations using [LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
 
@@ -45,8 +46,8 @@ Get real-time pricing calculations using [LiteLLM's pricing data](https://github
 
 ```bash
 # Clone the repository
-git clone https://github.com/wakeru-ai/token-usage-tracker.git
-cd token-tracker
+git clone https://github.com/junhoyeo/tokscale.git
+cd tokscale
 
 # Install Bun (if not already installed)
 curl -fsSL https://bun.sh/install | bash
@@ -76,21 +77,21 @@ bun run cli graph --benchmark
 
 ```bash
 # Launch interactive TUI (default)
-token-tracker
+tokscale
 
 # Launch TUI with specific tab
-token-tracker models    # Models tab
-token-tracker monthly   # Daily tab
+tokscale models    # Models tab
+tokscale monthly   # Daily tab
 
 # Use legacy CLI table output
-token-tracker --light
-token-tracker models --light
+tokscale --light
+tokscale models --light
 
 # Launch TUI explicitly
-token-tracker tui
+tokscale tui
 
 # Export contribution graph data as JSON
-token-tracker graph --output data.json
+tokscale graph --output data.json
 ```
 
 ### TUI Features
@@ -109,66 +110,66 @@ The interactive TUI mode provides:
   - `q`: Quit
 - **Mouse Support**: Click tabs, buttons, and filters
 - **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu
-- **Settings Persistence**: Theme preference saved to `~/.config/token-tracker/tui-settings.json`
+- **Settings Persistence**: Theme preference saved to `~/.config/tokscale/tui-settings.json`
 
 ### Filtering by Platform
 
 ```bash
 # Show only OpenCode usage
-token-tracker --opencode
+tokscale --opencode
 
 # Show only Claude Code usage
-token-tracker --claude
+tokscale --claude
 
 # Show only Codex CLI usage
-token-tracker --codex
+tokscale --codex
 
 # Show only Gemini CLI usage
-token-tracker --gemini
+tokscale --gemini
 
 # Combine filters
-token-tracker --opencode --claude
+tokscale --opencode --claude
 ```
 
 ### Graph Command Options
 
 ```bash
 # Export graph data to file
-token-tracker graph --output usage-data.json
+tokscale graph --output usage-data.json
 
 # Filter by date range
-token-tracker graph --since 2024-01-01 --until 2024-12-31
+tokscale graph --since 2024-01-01 --until 2024-12-31
 
 # Filter by year
-token-tracker graph --year 2024
+tokscale graph --year 2024
 
 # Filter by platform
-token-tracker graph --opencode --claude
+tokscale graph --opencode --claude
 
 # Show processing time benchmark
-token-tracker graph --output data.json --benchmark
+tokscale graph --output data.json --benchmark
 ```
 
 ### Social Platform Commands
 
 ```bash
-# Login to Token Tracker (opens browser for GitHub auth)
-token-tracker login
+# Login to Tokscale (opens browser for GitHub auth)
+tokscale login
 
 # Check who you're logged in as
-token-tracker whoami
+tokscale whoami
 
 # Submit your usage data to the leaderboard
-token-tracker submit
+tokscale submit
 
 # Submit with filters
-token-tracker submit --opencode --claude --since 2024-01-01
+tokscale submit --opencode --claude --since 2024-01-01
 
 # Preview what would be submitted (dry run)
-token-tracker submit --dry-run
+tokscale submit --dry-run
 
 # Logout
-token-tracker logout
+tokscale logout
 ```
 
 ### Example Output
@@ -192,57 +193,48 @@ token-tracker logout
 ## Architecture
 
 ```
-token-tracker/
-├── packages/cli/src/       # TypeScript CLI
-│   ├── cli.ts              # Commander.js entry point
-│   ├── tui/                # OpenTUI interactive interface
-│   │   ├── App.tsx         # Main TUI app (Solid.js)
-│   │   ├── components/     # TUI components
-│   │   ├── hooks/          # Data fetching & state
-│   │   ├── config/         # Themes & settings
-│   │   ├── utils/          # Formatting utilities
-│   │   └── types/          # TypeScript types
-│   ├── opencode.ts         # OpenCode session parser
-│   ├── claudecode.ts       # Claude Code & Codex parser
-│   ├── gemini.ts           # Gemini CLI parser
-│   ├── cursor.ts           # Cursor IDE integration
-│   ├── graph.ts            # Graph data generation
-│   ├── pricing.ts          # LiteLLM pricing fetcher
-│   ├── table.ts            # Terminal table rendering
-│   └── native.ts           # Native module loader
-│
-├── packages/core/          # Rust native module (napi-rs)
-│   ├── src/
-│   │   ├── lib.rs          # NAPI exports
-│   │   ├── scanner.rs      # Parallel file discovery
-│   │   ├── parser.rs       # SIMD JSON parsing
-│   │   ├── aggregator.rs   # Parallel aggregation
-│   │   ├── pricing.rs      # Cost calculation with LiteLLM data
-│   │   └── sessions/       # Platform-specific parsers
-│   │       ├── opencode.rs
-│   │       ├── claudecode.rs
-│   │       ├── codex.rs
-│   │       └── gemini.rs
-│   ├── Cargo.toml
-│   └── package.json
-│
-├── frontend/               # Next.js visualization
-│   └── src/
-│       ├── app/            # Next.js app router
-│       └── components/     # React components
-│           ├── TokenGraph2D.tsx
-│           ├── TokenGraph3D.tsx
-│           ├── GraphControls.tsx
-│           └── ...
-│
-└── benchmarks/             # Performance benchmarks
-    ├── runner.ts           # Benchmark harness
-    └── generate.ts         # Synthetic data generator
+tokscale/
+├── packages/
+│   ├── cli/src/            # TypeScript CLI
+│   │   ├── cli.ts          # Commander.js entry point
+│   │   ├── tui/            # OpenTUI interactive interface
+│   │   │   ├── App.tsx     # Main TUI app (Solid.js)
+│   │   │   ├── components/ # TUI components
+│   │   │   ├── hooks/      # Data fetching & state
+│   │   │   ├── config/     # Themes & settings
+│   │   │   └── utils/      # Formatting utilities
+│   │   ├── opencode.ts     # OpenCode session parser
+│   │   ├── claudecode.ts   # Claude Code & Codex parser
+│   │   ├── gemini.ts       # Gemini CLI parser
+│   │   ├── cursor.ts       # Cursor IDE integration
+│   │   ├── graph.ts        # Graph data generation
+│   │   ├── pricing.ts      # LiteLLM pricing fetcher
+│   │   └── native.ts       # Native module loader
+│   │
+│   ├── core/               # Rust native module (napi-rs)
+│   │   ├── src/
+│   │   │   ├── lib.rs      # NAPI exports
+│   │   │   ├── scanner.rs  # Parallel file discovery
+│   │   │   ├── parser.rs   # SIMD JSON parsing
+│   │   │   ├── aggregator.rs # Parallel aggregation
+│   │   │   ├── pricing.rs  # Cost calculation
+│   │   │   └── sessions/   # Platform-specific parsers
+│   │   ├── Cargo.toml
+│   │   └── package.json
+│   │
+│   ├── frontend/           # Next.js visualization & social platform
+│   │   └── src/
+│   │       ├── app/        # Next.js app router
+│   │       └── components/ # React components
+│   │
+│   └── benchmarks/         # Performance benchmarks
+│       ├── runner.ts       # Benchmark harness
+│       └── generate.ts     # Synthetic data generator
 ```
 
 ### Hybrid TypeScript + Rust Architecture
 
-Token Tracker uses a hybrid architecture for optimal performance:
+Tokscale uses a hybrid architecture for optimal performance:
 
 1. **TypeScript Layer**: CLI interface, pricing fetch (with disk cache), output formatting
 2. **Rust Native Core**: ALL parsing, cost calculation, and aggregation
@@ -307,7 +299,7 @@ The native module also provides ~45% memory reduction through:
 
 ```bash
 # Generate synthetic data
-cd benchmarks && bun run generate
+cd packages/benchmarks && bun run generate
 
 # Run Rust benchmarks
 cd packages/core && bun run bench
@@ -334,16 +326,16 @@ The frontend provides a GitHub-style contribution graph visualization:
 ### Running the Frontend
 
 ```bash
-cd frontend
-npm install
-npm run dev
+cd packages/frontend
+bun install
+bun run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to access the social platform.
 
 ## Social Platform
 
-Token Tracker includes a social platform where you can share your usage data and compete with other developers.
+Tokscale includes a social platform where you can share your usage data and compete with other developers.
 
 ### Features
 
@@ -355,8 +347,8 @@ Token Tracker includes a social platform where you can share your usage data and
 
 ### Getting Started
 
-1. **Login** - Run `token-tracker login` to authenticate via GitHub
-2. **Submit** - Run `token-tracker submit` to upload your usage data
+1. **Login** - Run `tokscale login` to authenticate via GitHub
+2. **Submit** - Run `tokscale submit` to upload your usage data
 3. **View** - Visit the web platform to see your profile and the leaderboard
 
 ### Data Validation
@@ -379,14 +371,14 @@ To run your own instance:
    GITHUB_CLIENT_SECRET=your_client_secret
    NEXT_PUBLIC_URL=https://your-domain.com
    ```
-3. Run database migrations: `cd frontend && npx drizzle-kit push`
+3. Run database migrations: `cd packages/frontend && npx drizzle-kit push`
 4. Deploy to Vercel or your preferred platform
 
 ### Generating Data for Frontend
 
 ```bash
 # Export data for visualization
-token-tracker graph --output frontend/public/my-data.json
+tokscale graph --output packages/frontend/public/my-data.json
 ```
 
 ## Development
@@ -603,9 +595,9 @@ Session files containing message arrays:
 
 ## Pricing
 
-Token Tracker fetches real-time pricing from [LiteLLM's pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
+Tokscale fetches real-time pricing from [LiteLLM's pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
 
-**Caching**: Pricing data is cached to disk at `~/.cache/token-tracker/pricing.json` with a 1-hour TTL. This ensures fast startup while keeping pricing data fresh.
+**Caching**: Pricing data is cached to disk at `~/.cache/tokscale/pricing.json` with a 1-hour TTL. This ensures fast startup while keeping pricing data fresh.
 
 Pricing includes:
 - Input tokens

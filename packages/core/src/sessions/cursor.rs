@@ -1,7 +1,7 @@
 //! Cursor IDE session parser
 //!
 //! Parses CSV files from the Cursor usage export API.
-//! CSV files are cached locally at ~/.config/token-tracker/cursor-cache/usage.csv
+//! CSV files are cached locally at ~/.config/tokscale/cursor-cache/usage.csv
 //!
 //! CSV Format (actual from API):
 //! Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost

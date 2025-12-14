@@ -1,5 +1,5 @@
 {
-  "name": "@token-tracker/frontend",
+  "name": "@tokscale/frontend",
   "version": "0.1.0",
   "private": true,
   "scripts": {

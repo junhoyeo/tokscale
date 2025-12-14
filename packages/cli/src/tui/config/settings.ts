@@ -2,7 +2,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 
-const CONFIG_DIR = join(homedir(), ".config", "token-tracker");
+const CONFIG_DIR = join(homedir(), ".config", "tokscale");
 const CONFIG_FILE = join(CONFIG_DIR, "tui-settings.json");
 
 interface TUISettings {

@@ -23,7 +23,7 @@ testFn("version returns semver string", (t) => {
 });
 
 testFn("healthCheck returns expected message", (t) => {
-  t.is(nativeModule.healthCheck(), "token-tracker-core is healthy!");
+  t.is(nativeModule.healthCheck(), "tokscale-core is healthy!");
 });
 
 testFn("scanSessions with empty directory returns zeros", (t) => {

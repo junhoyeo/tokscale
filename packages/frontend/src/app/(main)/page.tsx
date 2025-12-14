@@ -157,7 +157,7 @@ export default function LeaderboardPage() {
                     className="px-2 py-1 rounded"
                     style={{ backgroundColor: "#262627" }}
                   >
-                    token-tracker login && token-tracker submit
+                    tokscale login && tokscale submit
                   </code>
                 </p>
               </div>
@@ -310,14 +310,14 @@ export default function LeaderboardPage() {
             Join the Leaderboard
           </h2>
           <p className="mb-4" style={{ color: "#9CA3AF" }}>
-            Install Token Tracker CLI and submit your usage data:
+            Install Tokscale CLI and submit your usage data:
           </p>
           <div className="space-y-2 font-mono text-sm">
             <div className="p-3 rounded-lg" style={{ backgroundColor: "#1F1F20", color: "#9CA3AF" }}>
-              <span style={{ color: "#53d1f3" }}>$</span> npx token-tracker login
+              <span style={{ color: "#53d1f3" }}>$</span> npx tokscale login
             </div>
             <div className="p-3 rounded-lg" style={{ backgroundColor: "#1F1F20", color: "#9CA3AF" }}>
-              <span style={{ color: "#53d1f3" }}>$</span> npx token-tracker submit
+              <span style={{ color: "#53d1f3" }}>$</span> npx tokscale submit
             </div>
           </div>
         </div>
