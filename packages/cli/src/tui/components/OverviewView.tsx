@@ -2,8 +2,9 @@ import { Show, For, createMemo, type Accessor } from "solid-js";
 import { BarChart } from "./BarChart.js";
 import { Legend } from "./Legend.js";
 import type { TUIData } from "../hooks/useData.js";
-import { formatCost, formatTokens } from "../utils/format.js";
+import { formatCost, formatTokens, formatTokensCompact } from "../utils/format.js";
 import { getModelColor } from "../utils/colors.js";
+import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 
 interface OverviewViewProps {
   data: TUIData;
@@ -19,7 +20,17 @@ export function OverviewView(props: OverviewViewProps) {
   const listHeight = () => Math.max(4, safeHeight() - chartHeight() - 4);
   const itemsPerPage = () => Math.max(1, Math.floor(listHeight() / 2));
 
-  const topModelsForLegend = () => props.data.topModels.slice(0, 5).map(m => m.modelId);
+  const isNarrowTerminal = () => isNarrow(props.width);
+  const isVeryNarrowTerminal = () => isVeryNarrow(props.width);
+
+  const legendModelLimit = () => isVeryNarrowTerminal() ? 3 : 5;
+  const topModelsForLegend = () => props.data.topModels.slice(0, legendModelLimit()).map(m => m.modelId);
+
+  const maxModelNameWidth = () => isVeryNarrowTerminal() ? 20 : isNarrowTerminal() ? 30 : 50;
+  const truncateModelName = (name: string) => {
+    const max = maxModelNameWidth();
+    return name.length > max ? name.slice(0, max - 1) + "…" : name;
+  };
 
   const visibleModels = () => props.data.topModels.slice(props.scrollOffset(), props.scrollOffset() + itemsPerPage());
   const totalModels = () => props.data.topModels.length;
@@ -34,9 +45,9 @@ export function OverviewView(props: OverviewViewProps) {
 
       <box flexDirection="column">
         <box flexDirection="row" justifyContent="space-between" marginBottom={0}>
-          <text bold>Models by Cost</text>
+          <text bold>{isVeryNarrowTerminal() ? "Top Models" : "Models by Cost"}</text>
           <box flexDirection="row">
-            <text dim>Total: </text>
+            <text dim>{isVeryNarrowTerminal() ? "" : "Total: "}</text>
             <text fg="green">{formatCost(props.data.totalCost)}</text>
           </box>
         </box>
@@ -52,10 +63,12 @@ export function OverviewView(props: OverviewViewProps) {
                 <box flexDirection="column">
                   <box flexDirection="row" backgroundColor={bgColor()}>
                     <text fg={color()} bg={bgColor()}>●</text>
-                    <text fg={isActive() ? "white" : undefined} bg={bgColor()}>{` ${model.modelId} `}</text>
+                    <text fg={isActive() ? "white" : undefined} bg={bgColor()}>{` ${truncateModelName(model.modelId)} `}</text>
                     <text dim bg={bgColor()}>{`(${model.percentage.toFixed(1)}%)`}</text>
                   </box>
-                  <text dim>{`  In: ${formatTokens(model.inputTokens)} · Out: ${formatTokens(model.outputTokens)}`}</text>
+                  <text dim>{isVeryNarrowTerminal() 
+                    ? `  ${formatTokensCompact(model.inputTokens)}/${formatTokensCompact(model.outputTokens)}`
+                    : `  In: ${formatTokens(model.inputTokens)} · Out: ${formatTokens(model.outputTokens)}`}</text>
                 </box>
               );
             }}
