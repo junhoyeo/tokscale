@@ -1,9 +1,9 @@
 import { For, createMemo, type Accessor } from "solid-js";
 import type { TUIData, SortType } from "../hooks/useData.js";
 import { formatTokensCompact, formatCostFull } from "../utils/format.js";
+import { isNarrow } from "../utils/responsive.js";
 
 const STRIPE_BG = "#232328";
-const NARROW_TERMINAL_WIDTH = 80;
 
 interface DailyViewProps {
   data: TUIData;
@@ -15,7 +15,7 @@ interface DailyViewProps {
 }
 
 export function DailyView(props: DailyViewProps) {
-  const isNarrowTerminal = () => (props.width ?? 100) < NARROW_TERMINAL_WIDTH;
+  const isNarrowTerminal = () => isNarrow(props.width);
   
   const sortedEntries = createMemo(() => {
     const entries = props.data.dailyEntries;

@@ -1,8 +1,6 @@
 import { Show } from "solid-js";
 import type { TabType } from "../types/index.js";
-
-const NARROW_TERMINAL_WIDTH = 80;
-const VERY_NARROW_TERMINAL_WIDTH = 60;
+import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 
 interface HeaderProps {
   activeTab: TabType;
@@ -11,8 +9,8 @@ interface HeaderProps {
 }
 
 export function Header(props: HeaderProps) {
-  const isNarrowTerminal = () => (props.width ?? 100) < NARROW_TERMINAL_WIDTH;
-  const isVeryNarrowTerminal = () => (props.width ?? 100) < VERY_NARROW_TERMINAL_WIDTH;
+  const isNarrowTerminal = () => isNarrow(props.width);
+  const isVeryNarrowTerminal = () => isVeryNarrow(props.width);
 
   const getTabName = (fullName: string, shortName: string) => 
     isVeryNarrowTerminal() ? shortName : fullName;

@@ -4,8 +4,7 @@ import type { ColorPaletteName } from "../config/themes.js";
 import { getPalette, getGradeColor } from "../config/themes.js";
 import { getModelColor } from "../utils/colors.js";
 import { formatTokens } from "../utils/format.js";
-
-const NARROW_TERMINAL_WIDTH = 80;
+import { isNarrow } from "../utils/responsive.js";
 
 interface StatsViewProps {
   data: TUIData;
@@ -20,7 +19,7 @@ const DAYS = ["", "Mon", "", "Wed", "", "Fri", ""];
 
 export function StatsView(props: StatsViewProps) {
   const palette = () => getPalette(props.colorPalette);
-  const isNarrowTerminal = () => (props.width ?? 100) < NARROW_TERMINAL_WIDTH;
+  const isNarrowTerminal = () => isNarrow(props.width);
 
   const grid = () => props.data.contributionGrid;
   const monthLabels = () => isNarrowTerminal() ? MONTHS_SHORT : MONTHS;

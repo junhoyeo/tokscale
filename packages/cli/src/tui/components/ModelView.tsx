@@ -2,11 +2,9 @@ import { For, createMemo, type Accessor } from "solid-js";
 import type { TUIData, SortType } from "../hooks/useData.js";
 import { getModelColor } from "../utils/colors.js";
 import { formatTokensCompact, formatCostFull } from "../utils/format.js";
+import { NARROW_TERMINAL_WIDTH, VERY_NARROW_TERMINAL_WIDTH } from "../utils/responsive.js";
 
 const STRIPE_BG = "#232328";
-
-const NARROW_TERMINAL_WIDTH = 80;
-const VERY_NARROW_TERMINAL_WIDTH = 60;
 
 const INPUT_COL_WIDTH = 12;
 const OUTPUT_COL_WIDTH = 12;

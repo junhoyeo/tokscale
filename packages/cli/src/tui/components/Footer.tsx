@@ -4,9 +4,7 @@ import type { ColorPaletteName } from "../config/themes.js";
 import type { TotalBreakdown } from "../hooks/useData.js";
 import { getPalette } from "../config/themes.js";
 import { formatTokens } from "../utils/format.js";
-
-const NARROW_TERMINAL_WIDTH = 80;
-const VERY_NARROW_TERMINAL_WIDTH = 60;
+import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 
 interface FooterProps {
   enabledSources: Set<SourceType>;
@@ -28,8 +26,8 @@ interface FooterProps {
 
 export function Footer(props: FooterProps) {
   const palette = () => getPalette(props.colorPalette);
-  const isNarrowTerminal = () => (props.width ?? 100) < NARROW_TERMINAL_WIDTH;
-  const isVeryNarrowTerminal = () => (props.width ?? 100) < VERY_NARROW_TERMINAL_WIDTH;
+  const isNarrowTerminal = () => isNarrow(props.width);
+  const isVeryNarrowTerminal = () => isVeryNarrow(props.width);
   
   const showScrollInfo = () => 
     props.activeTab === "overview" && 
