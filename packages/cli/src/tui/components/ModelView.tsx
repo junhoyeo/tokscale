@@ -2,7 +2,7 @@ import { For, createMemo, type Accessor } from "solid-js";
 import type { TUIData, SortType } from "../hooks/useData.js";
 import { getModelColor } from "../utils/colors.js";
 import { formatTokensCompact, formatCostFull } from "../utils/format.js";
-import { NARROW_TERMINAL_WIDTH, VERY_NARROW_TERMINAL_WIDTH } from "../utils/responsive.js";
+import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 
 const STRIPE_BG = "#232328";
 
@@ -41,8 +41,8 @@ export function ModelView(props: ModelViewProps) {
     });
   });
 
-  const isNarrowTerminal = () => props.width < NARROW_TERMINAL_WIDTH;
-  const isVeryNarrowTerminal = () => props.width < VERY_NARROW_TERMINAL_WIDTH;
+  const isNarrowTerminal = () => isNarrow(props.width);
+  const isVeryNarrowTerminal = () => isVeryNarrow(props.width);
   
   const nameColumnWidths = createMemo(() => {
     const metricWidth = isNarrowTerminal() ? METRIC_COLUMNS_WIDTH_NARROW : METRIC_COLUMNS_WIDTH_FULL;
