@@ -356,13 +356,13 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     });
   }
 
-  const totalTokensSum = stats.totalTokens || 1;
+  const totalCostSum = report.totalCost || 1;
   const topModels: ModelWithPercentage[] = Array.from(modelTokensMap.entries())
     .map(([modelId, data]) => {
       const totalTokens = data.input + data.output;
       return {
         modelId,
-        percentage: (totalTokens / totalTokensSum) * 100,
+        percentage: (data.cost / totalCostSum) * 100,
         inputTokens: data.input,
         outputTokens: data.output,
         totalTokens,
