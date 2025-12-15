@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { For, Show, createMemo } from "solid-js";
 import type { TUIData } from "../hooks/useData.js";
 import type { ColorPaletteName } from "../config/themes.js";
 import { getPalette, getGradeColor } from "../config/themes.js";
@@ -17,32 +17,75 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const MONTHS_SHORT = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
 const DAYS = ["", "Mon", "", "Wed", "", "Fri", ""];
 
+interface MonthLabel {
+  month: string;
+  weekIndex: number;
+}
+
 export function StatsView(props: StatsViewProps) {
   const palette = () => getPalette(props.colorPalette);
   const isNarrowTerminal = () => isNarrow(props.width);
-
   const grid = () => props.data.contributionGrid;
-  const monthLabels = () => isNarrowTerminal() ? MONTHS_SHORT : MONTHS;
+  const cellWidth = 2;
+  
+  const monthPositions = createMemo(() => {
+    const sundayRow = grid()[0] || [];
+    if (sundayRow.length === 0) return [];
+    
+    const positions: MonthLabel[] = [];
+    let lastMonth = -1;
+    const monthNames = isNarrowTerminal() ? MONTHS_SHORT : MONTHS;
+    
+    for (let weekIdx = 0; weekIdx < sundayRow.length; weekIdx++) {
+      const cell = sundayRow[weekIdx];
+      if (!cell.date) continue;
+      const month = new Date(cell.date).getMonth();
+      if (month !== lastMonth) {
+        positions.push({ month: monthNames[month], weekIndex: weekIdx });
+        lastMonth = month;
+      }
+    }
+    return positions;
+  });
+
+  const totalWeeks = createMemo(() => (grid()[0] || []).length);
+
+  const monthLabelRow = createMemo(() => {
+    const weeks = totalWeeks();
+    const positions = monthPositions();
+    const chars: string[] = new Array(weeks * cellWidth).fill(" ");
+    
+    for (const pos of positions) {
+      const startIdx = pos.weekIndex * cellWidth;
+      const monthChars = pos.month.split("");
+      for (let i = 0; i < monthChars.length && startIdx + i < chars.length; i++) {
+        chars[startIdx + i] = monthChars[i];
+      }
+    }
+    
+    return chars.join("");
+  });
+
+  const dayLabelWidth = () => isNarrowTerminal() ? 2 : 4;
 
   return (
     <box flexDirection="column" gap={1}>
       <box flexDirection="column">
-        <box flexDirection="row" gap={isNarrowTerminal() ? 0 : 1} marginLeft={4}>
-          <For each={monthLabels()}>
-            {(month) => <text dim>{isNarrowTerminal() ? month.padEnd(3) : month.padEnd(4)}</text>}
-          </For>
+        <box flexDirection="row">
+          <text dim>{" ".repeat(dayLabelWidth())}</text>
+          <text dim>{monthLabelRow()}</text>
         </box>
 
         <For each={DAYS}>
           {(day, dayIndex) => (
             <box flexDirection="row">
-              <text dim>{isNarrowTerminal() ? " " : day.padStart(3) + " "}</text>
+              <text dim>{isNarrowTerminal() ? "  " : day.padStart(3) + " "}</text>
               <For each={grid()[dayIndex()] || []}>
                 {(cell) => (
                   <text
                     fg={cell.level === 0 ? "gray" : getGradeColor(palette(), cell.level as 0 | 1 | 2 | 3 | 4)}
                   >
-                    {cell.level === 0 ? "·" : "█"}
+                    {cell.level === 0 ? "· " : "██"}
                   </text>
                 )}
               </For>
@@ -59,7 +102,7 @@ export function StatsView(props: StatsViewProps) {
               <text
                 fg={level === 0 ? "gray" : getGradeColor(palette(), level as 0 | 1 | 2 | 3 | 4)}
               >
-                {level === 0 ? "·" : "█"}
+                {level === 0 ? "· " : "██"}
               </text>
             )}
           </For>
