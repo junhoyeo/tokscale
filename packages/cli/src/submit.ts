@@ -58,11 +58,10 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // Step 2: Check native module
+  // Step 2: Log native module status (TS fallback available)
   if (!isNativeAvailable()) {
-    console.error(pc.red("\n  Error: Native module not available."));
-    console.error(pc.gray("  Run 'yarn build:core' to build the native module.\n"));
-    process.exit(1);
+    console.log(pc.yellow("\n  Note: Using TypeScript fallback (native module not available)"));
+    console.log(pc.gray("  Run 'bun run build:core' for faster processing.\n"));
   }
 
   console.log(pc.cyan("\n  Tokscale - Submit Usage Data\n"));

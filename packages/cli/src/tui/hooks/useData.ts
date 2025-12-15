@@ -13,7 +13,6 @@ import type {
   ChartDataPoint,
 } from "../types/index.js";
 import {
-  isNativeAvailable,
   parseLocalSourcesAsync,
   finalizeReportAsync,
   finalizeGraphAsync,
@@ -132,10 +131,6 @@ function calculateLongestSession(messages: Array<{ sessionId: string; timestamp:
 }
 
 async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilters): Promise<TUIData> {
-  if (!isNativeAvailable()) {
-    throw new Error("Native module not available");
-  }
-
   const sources = Array.from(enabledSources);
   const localSources = sources.filter(s => s !== "cursor");
   const includeCursor = sources.includes("cursor");
