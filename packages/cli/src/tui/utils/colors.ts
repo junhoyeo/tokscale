@@ -10,6 +10,36 @@ export const PROVIDER_COLORS = {
   unknown: "#FFFFFF",
 } as const;
 
+export const TOKEN_TYPE_COLORS = {
+  input: '#0077BB',
+  output: '#EE7733',
+  cacheRead: '#009988',
+  cacheWrite: '#CC3311',
+  reasoning: '#AA4499',
+} as const;
+
+export const TOKEN_TYPE_LABELS = {
+  input: 'In',
+  output: 'Out',
+  cacheRead: 'CR',
+  cacheWrite: 'CW',
+  reasoning: 'R',
+} as const;
+
+export const TOKEN_TYPE_FULL_LABELS = {
+  input: 'Input',
+  output: 'Output',
+  cacheRead: 'Cache Read',
+  cacheWrite: 'Cache Write',
+  reasoning: 'Reasoning',
+} as const;
+
+export const TOKEN_TYPE_ORDER: (keyof typeof TOKEN_TYPE_COLORS)[] = [
+  'input', 'output', 'cacheRead', 'cacheWrite', 'reasoning'
+];
+
+export type TokenType = keyof typeof TOKEN_TYPE_COLORS;
+
 export type ProviderType = keyof typeof PROVIDER_COLORS;
 
 const PROVIDER_PATTERNS: readonly [RegExp, ProviderType][] = [

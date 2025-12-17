@@ -6,6 +6,8 @@ export { DailyView } from "./DailyView.js";
 export { StatsView } from "./StatsView.js";
 export { BarChart } from "./BarChart.js";
 export type { ChartDataPoint } from "./BarChart.js";
+export { IntervalChart } from "./IntervalChart.js";
+export type { IntervalChartProps } from "./IntervalChart.js";
 export { Legend } from "./Legend.js";
 export { LoadingSpinner } from "./LoadingSpinner.js";
 export { ModelRow } from "./ModelRow.js";
