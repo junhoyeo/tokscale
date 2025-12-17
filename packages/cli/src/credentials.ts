@@ -112,7 +112,7 @@ export function isLoggedIn(): boolean {
  * Get the API base URL
  */
 export function getApiBaseUrl(): string {
-  return process.env.TOKSCALE_API_URL || "https://tokens.inevitable.team";
+  return process.env.TOKSCALE_API_URL || "https://tokscale.ai";
 }
 
 /**

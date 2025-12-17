@@ -38,12 +38,18 @@ export function Navigation() {
       style={{ borderColor: "#262627", backgroundColor: "rgba(20, 20, 21, 0.8)" }}
     >
       <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-        <Link href="/" className="group">
-          <img
-            src="/token-usage-logo.svg"
-            alt="Token Usage"
-            className="h-8 group-hover:opacity-80 transition-opacity"
-          />
+        <Link
+          href="/"
+          className="group hover:opacity-80 transition-opacity"
+          style={{
+            textDecoration: 'none',
+            fontSize: '20px',
+            fontWeight: 700,
+            color: '#53d1f3',
+            letterSpacing: '-0.5px',
+          }}
+        >
+          tokscale
         </Link>
 
         <nav className="hidden md:flex items-center gap-1">
