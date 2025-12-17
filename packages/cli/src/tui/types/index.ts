@@ -83,6 +83,20 @@ export interface ChartDataPoint {
   total: number;
 }
 
+export interface ParsedMessageForInterval {
+  source: string;
+  modelId: string;
+  providerId: string;
+  sessionId: string;
+  timestamp: number;
+  date: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+}
+
 export interface TUIData {
   modelEntries: ModelEntry[];
   dailyEntries: DailyEntry[];
@@ -95,6 +109,7 @@ export interface TUIData {
   chartData: ChartDataPoint[];
   topModels: ModelWithPercentage[];
   dailyBreakdowns: Map<string, DailyModelBreakdown>;
+  messagesForInterval: ParsedMessageForInterval[];
 }
 
 export type LoadingPhase = 
