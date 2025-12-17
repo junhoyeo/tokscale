@@ -1,4 +1,4 @@
-import { createSignal, Switch, Match, onCleanup } from "solid-js";
+import { createSignal, createMemo, Switch, Match, onCleanup } from "solid-js";
 import { useKeyboard, useTerminalDimensions, useRenderer } from "@opentui/solid";
 import clipboardy from "clipboardy";
 import { Header } from "./components/Header.js";
@@ -8,11 +8,11 @@ import { DailyView } from "./components/DailyView.js";
 import { StatsView } from "./components/StatsView.js";
 import { OverviewView } from "./components/OverviewView.js";
 import { LoadingSpinner } from "./components/LoadingSpinner.js";
-import { useData, type DateFilters } from "./hooks/useData.js";
+import { useData, getIntervalData, type DateFilters } from "./hooks/useData.js";
 import type { ColorPaletteName } from "./config/themes.js";
 import { DEFAULT_PALETTE, getPaletteNames } from "./config/themes.js";
 import { loadSettings, saveSettings, getCacheTimestamp } from "./config/settings.js";
-import { TABS, ALL_SOURCES, type TUIOptions, type TabType, type SortType, type SourceType } from "./types/index.js";
+import { TABS, ALL_SOURCES, type TUIOptions, type TabType, type SortType, type SourceType, type ChartMode, type Resolution } from "./types/index.js";
 
 export type AppProps = TUIOptions;
 
@@ -47,6 +47,11 @@ export function App(props: AppProps) {
     props.colorPalette ?? (settings.colorPalette as ColorPaletteName) ?? DEFAULT_PALETTE
   );
 
+  const [chartMode, setChartMode] = createSignal<ChartMode>(settings.chartMode ?? 'bar');
+  const [chartResolution, setChartResolution] = createSignal<Resolution>(settings.chartResolution ?? '1d');
+  const [showRateWhiskers, setShowRateWhiskers] = createSignal(settings.showRateWhiskers ?? false);
+  const [selectedIntervalIndex, setSelectedIntervalIndex] = createSignal(0);
+
   const dateFilters: DateFilters = {
     since: props.since,
     until: props.until,
@@ -56,6 +61,14 @@ export function App(props: AppProps) {
   const { data, loading, error, refresh, loadingPhase, isRefreshing } = useData(() => enabledSources(), dateFilters);
   
   const cacheTimestamp = () => !isRefreshing() && !loading() ? getCacheTimestamp() : null;
+
+  const intervalBuckets = createMemo(() => {
+    const resolution = chartResolution();
+    if (resolution === '1d') return [];
+    const d = data();
+    if (!d) return [];
+    return getIntervalData(d.chartData, resolution, 0);
+  });
   
   const [selectedDate, setSelectedDate] = createSignal<string | null>(null);
 
@@ -93,7 +106,8 @@ export function App(props: AppProps) {
     const currentIdx = PALETTE_NAMES.indexOf(colorPalette());
     const nextIdx = (currentIdx + 1) % PALETTE_NAMES.length;
     const newPalette = PALETTE_NAMES[nextIdx];
-    saveSettings({ colorPalette: newPalette });
+    const currentSettings = loadSettings();
+    saveSettings({ ...currentSettings, colorPalette: newPalette });
     setColorPalette(newPalette);
   };
 
@@ -191,6 +205,61 @@ export function App(props: AppProps) {
     if (key.name === "4") { handleSourceToggle("cursor"); return; }
     if (key.name === "5") { handleSourceToggle("gemini"); return; }
 
+    if (key.name === "m") {
+      const modes: ChartMode[] = ['bar', 'candle', 'hybrid'];
+      const currentIdx = modes.indexOf(chartMode());
+      const nextMode = modes[(currentIdx + 1) % modes.length];
+      setChartMode(nextMode);
+      const currentSettings = loadSettings();
+      saveSettings({ ...currentSettings, chartMode: nextMode });
+      return;
+    }
+
+    if (key.name === "z") {
+      const resolutions: Resolution[] = ['15m', '1h', '4h', '1d'];
+      const currentIdx = resolutions.indexOf(chartResolution());
+      const nextResolution = resolutions[(currentIdx + 1) % resolutions.length];
+      setChartResolution(nextResolution);
+      setSelectedIntervalIndex(0);
+      const currentSettings = loadSettings();
+      saveSettings({ ...currentSettings, chartResolution: nextResolution });
+      return;
+    }
+
+    if (key.name === "w") {
+      const newValue = !showRateWhiskers();
+      setShowRateWhiskers(newValue);
+      const currentSettings = loadSettings();
+      saveSettings({ ...currentSettings, showRateWhiskers: newValue });
+      return;
+    }
+
+    if (key.name === "[") {
+      const resolutions: Resolution[] = ['15m', '1h', '4h', '1d'];
+      const currentIdx = resolutions.indexOf(chartResolution());
+      if (currentIdx < resolutions.length - 1) {
+        const nextResolution = resolutions[currentIdx + 1];
+        setChartResolution(nextResolution);
+        setSelectedIntervalIndex(0);
+        const currentSettings = loadSettings();
+        saveSettings({ ...currentSettings, chartResolution: nextResolution });
+      }
+      return;
+    }
+
+    if (key.name === "]") {
+      const resolutions: Resolution[] = ['15m', '1h', '4h', '1d'];
+      const currentIdx = resolutions.indexOf(chartResolution());
+      if (currentIdx > 0) {
+        const nextResolution = resolutions[currentIdx - 1];
+        setChartResolution(nextResolution);
+        setSelectedIntervalIndex(0);
+        const currentSettings = loadSettings();
+        saveSettings({ ...currentSettings, chartResolution: nextResolution });
+      }
+      return;
+    }
+
     if (key.name === "up") {
       if (activeTab() === "overview") {
         if (selectedIndex() > 0) {
@@ -278,6 +347,13 @@ export function App(props: AppProps) {
                   scrollOffset={scrollOffset}
                   height={contentHeight()}
                   width={columns()}
+                  chartMode={chartMode()}
+                  chartResolution={chartResolution()}
+                  showRateWhiskers={showRateWhiskers()}
+                  intervalBuckets={intervalBuckets()}
+                  selectedIntervalIndex={selectedIntervalIndex()}
+                  onIntervalSelect={setSelectedIntervalIndex}
+                  colorPalette={colorPalette()}
                 />
               </Match>
               <Match when={activeTab() === "model"}>

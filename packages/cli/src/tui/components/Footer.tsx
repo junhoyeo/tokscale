@@ -1,10 +1,10 @@
 import { Show, createSignal, createMemo, onMount, onCleanup } from "solid-js";
-import type { SourceType, SortType, TabType, LoadingPhase } from "../types/index.js";
+import type { SourceType, SortType, TabType, LoadingPhase, IntervalBucket, ChartMode, Resolution } from "../types/index.js";
 import type { ColorPaletteName } from "../config/themes.js";
 import type { TotalBreakdown } from "../hooks/useData.js";
 import { getPalette } from "../config/themes.js";
-import { formatTokens } from "../utils/format.js";
-import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
+import { formatTokens, formatCost } from "../utils/format.js";
+import { isNarrow, isVeryNarrow, isMicro } from "../utils/responsive.js";
 
 interface FooterProps {
   enabledSources: Set<SourceType>;
@@ -21,6 +21,10 @@ interface FooterProps {
   loadingPhase?: LoadingPhase;
   cacheTimestamp?: number | null;
   width?: number;
+  selectedBucket?: IntervalBucket;
+  chartMode?: ChartMode;
+  chartResolution?: Resolution;
+  showWhiskers?: boolean;
   onSourceToggle?: (source: SourceType) => void;
   onSortChange?: (sort: SortType) => void;
   onPaletteChange?: () => void;
@@ -38,10 +42,22 @@ function formatTimeAgo(timestamp: number): string {
   return `${days}d ago`;
 }
 
+function formatIntervalTimeUTC(ms: number): string {
+  const date = new Date(ms);
+  const hours = date.getUTCHours().toString().padStart(2, '0');
+  const minutes = date.getUTCMinutes().toString().padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+function formatChartModeLabel(mode: ChartMode): string {
+  return mode.charAt(0).toUpperCase() + mode.slice(1);
+}
+
 export function Footer(props: FooterProps) {
   const palette = () => getPalette(props.colorPalette);
   const isNarrowTerminal = () => isNarrow(props.width);
   const isVeryNarrowTerminal = () => isVeryNarrow(props.width);
+  const isMicroTerminal = () => isMicro(props.width);
   
   const showScrollInfo = () => 
     props.activeTab === "overview" && 
@@ -50,6 +66,9 @@ export function Footer(props: FooterProps) {
     props.scrollEnd !== undefined;
 
   const totals = () => props.totals || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0, cost: 0 };
+
+  const hasIntervalBucket = () => props.selectedBucket !== undefined;
+  const hasModeIndicators = () => props.chartMode !== undefined;
 
   return (
     <box flexDirection="column" paddingX={1}>
@@ -120,6 +139,20 @@ export function Footer(props: FooterProps) {
         <box flexDirection="row">
           <text dim>{`Last updated: ${formatTimeAgo(props.cacheTimestamp!)}`}</text>
         </box>
+      </Show>
+      <Show when={hasIntervalBucket()}>
+        <IntervalDetailLine
+          bucket={props.selectedBucket!}
+          width={props.width}
+        />
+      </Show>
+      <Show when={hasModeIndicators()}>
+        <ModeIndicators
+          chartMode={props.chartMode!}
+          resolution={props.chartResolution}
+          showWhiskers={props.showWhiskers}
+          width={props.width}
+        />
       </Show>
     </box>
   );
@@ -227,6 +260,132 @@ function LoadingStatusLine(props: LoadingStatusLineProps) {
         })}
       </box>
       <text dim>{message()}</text>
+    </box>
+  );
+}
+
+interface IntervalDetailLineProps {
+  bucket: IntervalBucket;
+  width?: number;
+}
+
+function IntervalDetailLine(props: IntervalDetailLineProps) {
+  const isNarrowTerminal = () => isNarrow(props.width);
+  const isVeryNarrowTerminal = () => isVeryNarrow(props.width);
+  const isMicroTerminal = () => isMicro(props.width);
+
+  const timeRange = () => {
+    const start = formatIntervalTimeUTC(props.bucket.startMs);
+    const end = formatIntervalTimeUTC(props.bucket.endMs);
+    return `${start}-${end} UTC`;
+  };
+
+  const bucketTotal = () => {
+    const t = props.bucket.totals;
+    return t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning;
+  };
+
+  if (isMicroTerminal()) {
+    return (
+      <box flexDirection="row" gap={1}>
+        <text fg="cyan">{timeRange()}</text>
+        <text dim>|</text>
+        <text fg="green">{formatCost(props.bucket.cost)}</text>
+      </box>
+    );
+  }
+
+  if (isVeryNarrowTerminal()) {
+    return (
+      <box flexDirection="row" gap={1}>
+        <text fg="cyan">{timeRange()}</text>
+        <text dim>|</text>
+        <text fg="white">{formatTokens(bucketTotal())}</text>
+        <text dim>|</text>
+        <text fg="green">{formatCost(props.bucket.cost)}</text>
+        <text dim>|</text>
+        <text dim>{props.bucket.messages} msgs</text>
+      </box>
+    );
+  }
+
+  if (isNarrowTerminal()) {
+    return (
+      <box flexDirection="row" gap={1}>
+        <text fg="cyan">{timeRange()}</text>
+        <text dim>|</text>
+        <text dim>In</text>
+        <text fg="white">{formatTokens(props.bucket.totals.input)}</text>
+        <text dim>Out</text>
+        <text fg="white">{formatTokens(props.bucket.totals.output)}</text>
+        <text dim>|</text>
+        <text fg="green">{formatCost(props.bucket.cost)}</text>
+        <text dim>|</text>
+        <text dim>{props.bucket.messages} msgs</text>
+      </box>
+    );
+  }
+
+  return (
+    <box flexDirection="row" gap={1}>
+      <text fg="cyan">{timeRange()}</text>
+      <text dim>|</text>
+      <text dim>In</text>
+      <text fg="white">{formatTokens(props.bucket.totals.input)}</text>
+      <text dim>Out</text>
+      <text fg="white">{formatTokens(props.bucket.totals.output)}</text>
+      <text dim>CR</text>
+      <text fg="white">{formatTokens(props.bucket.totals.cacheRead)}</text>
+      <text dim>|</text>
+      <text dim>Total</text>
+      <text fg="white">{formatTokens(bucketTotal())}</text>
+      <text dim>|</text>
+      <text fg="green">{formatCost(props.bucket.cost)}</text>
+      <text dim>|</text>
+      <text dim>{props.bucket.messages} msgs</text>
+    </box>
+  );
+}
+
+interface ModeIndicatorsProps {
+  chartMode: ChartMode;
+  resolution?: Resolution;
+  showWhiskers?: boolean;
+  width?: number;
+}
+
+function ModeIndicators(props: ModeIndicatorsProps) {
+  const isVeryNarrowTerminal = () => isVeryNarrow(props.width);
+  const isMicroTerminal = () => isMicro(props.width);
+
+  const modeLabel = () => formatChartModeLabel(props.chartMode);
+  const resolutionLabel = () => props.resolution || '1d';
+  const whiskersLabel = () => props.showWhiskers ? 'On' : 'Off';
+
+  if (isMicroTerminal()) {
+    return (
+      <box flexDirection="row" gap={1}>
+        <text fg="blue">{`[m:${modeLabel().charAt(0)}]`}</text>
+        <text fg="yellow">{`[z:${resolutionLabel()}]`}</text>
+      </box>
+    );
+  }
+
+  if (isVeryNarrowTerminal()) {
+    return (
+      <box flexDirection="row" gap={1}>
+        <text fg="blue">{`[m:${modeLabel()}]`}</text>
+        <text fg="yellow">{`[z:${resolutionLabel()}]`}</text>
+        <text fg="magenta">{`[w:${whiskersLabel().charAt(0)}]`}</text>
+      </box>
+    );
+  }
+
+  return (
+    <box flexDirection="row" gap={1}>
+      <text fg="blue">{`[m:${modeLabel()}]`}</text>
+      <text fg="yellow">{`[z:${resolutionLabel()}]`}</text>
+      <text fg="magenta">{`[w:${whiskersLabel()}]`}</text>
     </box>
   );
 }

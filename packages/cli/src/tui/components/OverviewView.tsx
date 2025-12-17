@@ -1,8 +1,11 @@
 import { Show, For, createMemo, type Accessor } from "solid-js";
 import { BarChart } from "./BarChart.js";
+import { IntervalChart } from "./IntervalChart.js";
 import { Legend } from "./Legend.js";
 import { ModelRow } from "./ModelRow.js";
 import type { TUIData, SortType } from "../hooks/useData.js";
+import type { ChartMode, Resolution, IntervalBucket } from "../types/index.js";
+import type { ColorPaletteName } from "../config/themes.js";
 import { formatCost } from "../utils/format.js";
 import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 
@@ -14,6 +17,13 @@ interface OverviewViewProps {
   scrollOffset: Accessor<number>;
   height: number;
   width: number;
+  chartMode?: ChartMode;
+  chartResolution?: Resolution;
+  showRateWhiskers?: boolean;
+  intervalBuckets?: IntervalBucket[];
+  selectedIntervalIndex?: number;
+  onIntervalSelect?: (index: number) => void;
+  colorPalette?: ColorPaletteName;
 }
 
 export function OverviewView(props: OverviewViewProps) {
@@ -59,11 +69,37 @@ export function OverviewView(props: OverviewViewProps) {
   const totalModels = () => sortedModels().length;
   const endIndex = () => Math.min(props.scrollOffset() + visibleModels().length, totalModels());
 
+  const showIntervalChart = () => 
+    props.chartResolution !== undefined && 
+    props.chartResolution !== '1d' && 
+    props.intervalBuckets !== undefined && 
+    props.intervalBuckets.length > 0;
+
+  const chartWidth = () => props.width - 4;
+
   return (
     <box flexDirection="column" gap={1}>
       <box flexDirection="column">
-        <BarChart data={props.data.chartData} width={props.width - 4} height={chartHeight()} />
-        <Legend models={topModelsForLegend()} width={props.width} />
+        <Show 
+          when={showIntervalChart()} 
+          fallback={
+            <>
+              <BarChart data={props.data.chartData} width={chartWidth()} height={chartHeight()} />
+              <Legend models={topModelsForLegend()} width={props.width} />
+            </>
+          }
+        >
+          <IntervalChart
+            data={props.intervalBuckets!}
+            mode={props.chartMode ?? 'bar'}
+            width={chartWidth()}
+            height={chartHeight()}
+            selectedIndex={props.selectedIntervalIndex ?? 0}
+            onSelect={props.onIntervalSelect ?? (() => {})}
+            showWhiskers={props.showRateWhiskers ?? false}
+            colorPalette={props.colorPalette ?? 'green'}
+          />
+        </Show>
       </box>
 
       <box flexDirection="column">
