@@ -15,6 +15,7 @@ import type {
   DailyModelBreakdown,
   IntervalBucket,
   Resolution,
+  ParsedMessageForInterval,
 } from "../types/index.js";
 import {
   parseLocalSourcesAsync,
@@ -487,6 +488,20 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     });
   }
 
+  const messagesForInterval: ParsedMessageForInterval[] = (localMessages?.messages || []).map(m => ({
+    source: m.source,
+    modelId: m.modelId,
+    providerId: m.providerId,
+    sessionId: m.sessionId,
+    timestamp: m.timestamp,
+    date: m.date,
+    input: m.input,
+    output: m.output,
+    cacheRead: m.cacheRead,
+    cacheWrite: m.cacheWrite,
+    reasoning: m.reasoning,
+  }));
+
   return {
     modelEntries,
     dailyEntries,
@@ -499,6 +514,7 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     chartData,
     topModels,
     dailyBreakdowns,
+    messagesForInterval,
   };
 }
 
