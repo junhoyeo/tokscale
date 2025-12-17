@@ -1,12 +1,11 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
 import type { TUIData } from "../hooks/useData.js";
 import type { ColorPaletteName } from "../config/themes.js";
-import type { DailyModelBreakdown } from "../types/index.js";
 import { getPalette, getGradeColor } from "../config/themes.js";
 import { getModelColor } from "../utils/colors.js";
-import { formatTokens, formatCost } from "../utils/format.js";
+import { formatTokens } from "../utils/format.js";
 import { isNarrow } from "../utils/responsive.js";
-import { ModelRow } from "./ModelRow.js";
+import { DateBreakdownPanel } from "./DateBreakdownPanel.js";
 
 interface StatsViewProps {
   data: TUIData;
@@ -19,22 +18,10 @@ interface StatsViewProps {
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTHS_SHORT = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
 const DAYS = ["", "Mon", "", "Wed", "", "Fri", ""];
-const SOURCE_COLORS: Record<string, string> = {
-  opencode: "#22c55e",
-  claude: "#f97316",
-  codex: "#3b82f6",
-  cursor: "#a855f7",
-  gemini: "#06b6d4",
-};
 
 interface MonthLabel {
   month: string;
   weekIndex: number;
-}
-
-function formatDateDisplay(dateStr: string): string {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 }
 
 export function StatsView(props: StatsViewProps) {
@@ -44,8 +31,6 @@ export function StatsView(props: StatsViewProps) {
   const cellWidth = 2;
   
   const [clickedCell, setClickedCell] = createSignal<string | null>(null);
-  // DEBUG: keep this for debugging mouse click coordinate mapping
-  const [debugInfo, setDebugInfo] = createSignal<string>("No click yet");
   
   const selectedBreakdown = createMemo(() => {
     const date = clickedCell();
@@ -66,7 +51,7 @@ export function StatsView(props: StatsViewProps) {
     for (let weekIdx = 0; weekIdx < sundayRow.length; weekIdx++) {
       const cell = sundayRow[weekIdx];
       if (!cell.date) continue;
-      const month = new Date(cell.date).getMonth();
+      const month = new Date(cell.date + "T00:00:00").getMonth();
       if (month !== lastMonth) {
         positions.push({ month: monthNames[month], weekIndex: weekIdx });
         lastMonth = month;
@@ -111,39 +96,31 @@ export function StatsView(props: StatsViewProps) {
           <text dim>{monthLabelRow()}</text>
         </box>
 
-        {/* DEBUG: onMouseDown handler for grid click - keep for coordinate debugging */}
         <box onMouseDown={(e: { x: number; y: number }) => {
           const labelW = dayLabelWidth();
           const col = Math.floor((e.x - labelW) / cellWidth);
           const row = e.y - 2;
           const gridRows = grid().length;
           
-          setDebugInfo(`y=${e.y} row=${row} (y-2) col=${col}`);
-          
           if (row < 0 || row >= gridRows) {
-            setDebugInfo(`y=${e.y} row=${row} OUT_OF_BOUNDS (0-6)`);
             return;
           }
           if (col < 0) {
-            setDebugInfo(`x=${e.x} col=${col} OUT_OF_BOUNDS (label area)`);
             return;
           }
           
           const rowData = grid()[row];
           if (!rowData || col >= rowData.length) {
-            setDebugInfo(`y=${e.y} row=${row} col=${col} NO_CELL`);
             return;
           }
           
           const cell = rowData[col];
           if (!cell?.date) {
-            setDebugInfo(`y=${e.y} row=${row} col=${col} EMPTY_CELL`);
             return;
           }
           
           const newDate = clickedCell() === cell.date ? null : cell.date;
           setClickedCell(newDate);
-          setDebugInfo(`y=${e.y} row=${row} col=${col} → ${newDate || 'deselected'}`);
         }}>
           <For each={DAYS}>
             {(day, dayIndex) => (
@@ -163,11 +140,6 @@ export function StatsView(props: StatsViewProps) {
             )}
           </For>
         </box>
-      </box>
-
-      {/* DEBUG: display click coordinates - keep for debugging */}
-      <box flexDirection="row" gap={2}>
-        <text fg="yellow">{`DEBUG: ${debugInfo()} | selected: ${clickedCell() || 'none'}`}</text>
       </box>
 
       <box flexDirection="row" gap={2} marginTop={1}>
@@ -248,68 +220,6 @@ export function StatsView(props: StatsViewProps) {
           </box>
         </Show>
       </Show>
-    </box>
-  );
-}
-
-interface DateBreakdownPanelProps {
-  breakdown: DailyModelBreakdown;
-  isNarrow: boolean;
-}
-
-function DateBreakdownPanel(props: DateBreakdownPanelProps) {
-  const groupedBySource = createMemo(() => {
-    if (!props.breakdown?.models) return new Map();
-    const groups = new Map<string, typeof props.breakdown.models>();
-    for (const model of props.breakdown.models) {
-      const existing = groups.get(model.source) || [];
-      existing.push(model);
-      groups.set(model.source, existing);
-    }
-    return groups;
-  });
-
-  return (
-    <box flexDirection="column" marginTop={1} paddingX={1}>
-      <box flexDirection="row" justifyContent="space-between">
-        <text bold fg="white">{formatDateDisplay(props.breakdown.date)}</text>
-        <box flexDirection="row" gap={2}>
-          <text fg="cyan">{formatTokens(props.breakdown.totalTokens)}</text>
-          <text fg="green" bold>{formatCost(props.breakdown.cost)}</text>
-        </box>
-      </box>
-      
-      <box flexDirection="column" marginTop={1}>
-        <For each={Array.from(groupedBySource().entries())}>
-          {([source, models]) => (
-            <box flexDirection="column">
-              <box flexDirection="row" gap={1}>
-                <text fg={SOURCE_COLORS[source] || "#888888"} bold>{`● ${source.toUpperCase()}`}</text>
-                <text dim>{`(${models.length} model${models.length > 1 ? "s" : ""})`}</text>
-              </box>
-              <For each={models}>
-                {(model) => (
-                  <ModelRow
-                    modelId={model.modelId}
-                    tokens={{
-                      input: model.tokens.input,
-                      output: model.tokens.output,
-                      cacheRead: model.tokens.cacheRead,
-                      cacheWrite: model.tokens.cacheWrite,
-                    }}
-                    compact={props.isNarrow}
-                    indent={2}
-                  />
-                )}
-              </For>
-            </box>
-          )}
-        </For>
-      </box>
-      
-      <box flexDirection="row" marginTop={1}>
-        <text dim>Click another day or same day to close</text>
-      </box>
     </box>
   );
 }

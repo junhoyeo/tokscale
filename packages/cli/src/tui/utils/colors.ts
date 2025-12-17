@@ -1,3 +1,5 @@
+import type { SourceType } from "../types/index.js";
+
 export const PROVIDER_COLORS = {
   anthropic: "#FF6B35",
   openai: "#10B981",
@@ -48,4 +50,16 @@ export function getModelColor(modelId: string): string {
   const color = PROVIDER_COLORS[getProviderFromModel(modelId)];
   colorCache.set(modelId, color);
   return color;
+}
+
+export const SOURCE_COLORS: Record<SourceType, string> = {
+  opencode: "#22c55e",
+  claude: "#f97316",
+  codex: "#3b82f6",
+  cursor: "#a855f7",
+  gemini: "#06b6d4",
+};
+
+export function getSourceColor(source: SourceType | string): string {
+  return SOURCE_COLORS[source as SourceType] || "#888888";
 }
