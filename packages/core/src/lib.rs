@@ -305,6 +305,22 @@ pub fn generate_graph(options: GraphOptions) -> napi::Result<GraphResult> {
     Ok(result)
 }
 
+// =============================================================================
+// Interval Aggregation NAPI Export
+// =============================================================================
+
+#[napi]
+pub fn aggregate_by_interval_native(
+    messages: Vec<ParsedMessage>,
+    interval_ms: u32,
+) -> Vec<aggregator::IntervalBucket> {
+    let unified: Vec<UnifiedMessage> = messages
+        .into_iter()
+        .map(|m| parsed_to_unified(&m, 0.0))
+        .collect();
+    aggregator::aggregate_by_interval(unified, interval_ms as u64)
+}
+
 /// Filter messages by date range options
 fn filter_messages(messages: Vec<UnifiedMessage>, options: &GraphOptions) -> Vec<UnifiedMessage> {
     let mut filtered = messages;

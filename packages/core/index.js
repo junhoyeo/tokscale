@@ -320,6 +320,8 @@ const {
   finalizeReport,
   finalizeMonthlyReport,
   finalizeGraph,
+  // Interval aggregation for candle chart
+  aggregateByIntervalNative,
 } = nativeBinding
 
 module.exports.version = version
@@ -334,3 +336,4 @@ module.exports.parseLocalSources = parseLocalSources
 module.exports.finalizeReport = finalizeReport
 module.exports.finalizeMonthlyReport = finalizeMonthlyReport
 module.exports.finalizeGraph = finalizeGraph
+module.exports.aggregateByIntervalNative = aggregateByIntervalNative
