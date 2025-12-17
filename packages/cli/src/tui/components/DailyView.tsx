@@ -5,6 +5,16 @@ import { isNarrow } from "../utils/responsive.js";
 
 const STRIPE_BG = "#232328";
 
+const INPUT_COL_WIDTH = 12;
+const OUTPUT_COL_WIDTH = 12;
+const CACHE_COL_WIDTH = 12;
+const TOTAL_COL_WIDTH = 14;
+const COST_COL_WIDTH = 12;
+const METRIC_COLUMNS_WIDTH_FULL = INPUT_COL_WIDTH + OUTPUT_COL_WIDTH + CACHE_COL_WIDTH + TOTAL_COL_WIDTH + COST_COL_WIDTH;
+const METRIC_COLUMNS_WIDTH_NARROW = TOTAL_COL_WIDTH + COST_COL_WIDTH;
+const SIDE_PADDING = 0;
+const MIN_DATE_COLUMN = 14;
+
 interface DailyViewProps {
   data: TUIData;
   sortBy: SortType;
@@ -16,6 +26,19 @@ interface DailyViewProps {
 
 export function DailyView(props: DailyViewProps) {
   const isNarrowTerminal = () => isNarrow(props.width);
+  const terminalWidth = () => props.width ?? process.stdout.columns ?? 80;
+  
+  const dateColumnWidths = createMemo(() => {
+    const metricWidth = isNarrowTerminal() ? METRIC_COLUMNS_WIDTH_NARROW : METRIC_COLUMNS_WIDTH_FULL;
+    const minDate = MIN_DATE_COLUMN;
+    const available = Math.max(terminalWidth() - SIDE_PADDING - metricWidth, minDate);
+    const dateColumn = Math.max(minDate, available);
+
+    return {
+      column: dateColumn,
+      text: dateColumn,
+    };
+  });
   
   const sortedEntries = createMemo(() => {
     const entries = props.data.dailyEntries;
@@ -39,17 +62,19 @@ export function DailyView(props: DailyViewProps) {
   const costHeader = () => (props.sortBy === "cost" ? `${sortArrow()} Cost` : "Cost");
 
   const renderHeader = () => {
+    const dateColWidth = dateColumnWidths().column;
     if (isNarrowTerminal()) {
-      return `${"Date".padEnd(12)}${totalHeader().padStart(14)}${costHeader().padStart(10)}`;
+      return `${"Date".padEnd(dateColWidth)}${totalHeader().padStart(TOTAL_COL_WIDTH)}${costHeader().padStart(COST_COL_WIDTH)}`;
     }
-    return `${"  " + dateHeader().padEnd(12)}${"Input".padStart(14)}${"Output".padStart(14)}${"Cache".padStart(14)}${totalHeader().padStart(16)}${costHeader().padStart(12)}`;
+    return `${("  " + dateHeader()).padEnd(dateColWidth)}${"Input".padStart(INPUT_COL_WIDTH)}${"Output".padStart(OUTPUT_COL_WIDTH)}${"Cache".padStart(CACHE_COL_WIDTH)}${totalHeader().padStart(TOTAL_COL_WIDTH)}${costHeader().padStart(COST_COL_WIDTH)}`;
   };
 
   const renderRow = (entry: typeof visibleEntries extends () => (infer T)[] ? T : never) => {
+    const dateColWidth = dateColumnWidths().column;
     if (isNarrowTerminal()) {
-      return `${entry.date.padEnd(12)}${formatTokensCompact(entry.total).padStart(14)}`;
+      return `${entry.date.padEnd(dateColWidth)}${formatTokensCompact(entry.total).padStart(TOTAL_COL_WIDTH)}`;
     }
-    return `${entry.date.padEnd(14)}${formatTokensCompact(entry.input).padStart(14)}${formatTokensCompact(entry.output).padStart(14)}${formatTokensCompact(entry.cache).padStart(14)}${formatTokensCompact(entry.total).padStart(16)}`;
+    return `${entry.date.padEnd(dateColWidth)}${formatTokensCompact(entry.input).padStart(INPUT_COL_WIDTH)}${formatTokensCompact(entry.output).padStart(OUTPUT_COL_WIDTH)}${formatTokensCompact(entry.cache).padStart(CACHE_COL_WIDTH)}${formatTokensCompact(entry.total).padStart(TOTAL_COL_WIDTH)}`;
   };
 
   return (
@@ -77,7 +102,7 @@ export function DailyView(props: DailyViewProps) {
                 fg="green"
                 bg={rowBg()}
               >
-                {formatCostFull(entry.cost).padStart(isNarrowTerminal() ? 10 : 12)}
+                {formatCostFull(entry.cost).padStart(COST_COL_WIDTH)}
               </text>
             </box>
           );

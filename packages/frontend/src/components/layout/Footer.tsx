@@ -2,38 +2,26 @@
 
 import styled from '@emotion/styled';
 
-const InevitableLogo: React.FC = () => (
-  <a href="https://beta.inevitable.team/en" target="_blank" rel="noopener noreferrer">
-    <img
-      src="/inevitable-logo.svg"
-      alt="Inevitable"
-      style={{ height: 24 }}
-    />
+const TokscaleLogo: React.FC = () => (
+  <a href="https://tokscale.ai" style={{ textDecoration: 'none' }}>
+    <LogoText>tokscale</LogoText>
   </a>
 );
 
-const InlineBlock = styled.span`
-  display: inline-block;
+const LogoText = styled.span`
+  font-size: 24px;
+  font-weight: 700;
+  color: #53d1f3;
+  letter-spacing: -0.5px;
 `;
 
 export function Footer() {
   return (
     <Container>
-      <InevitableLogo />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <CompanyInfo className="en">
-          © 2023-2025{' '}
-          <InlineBlock className="allow-select">
-            Strokecompany Co., Ltd.
-          </InlineBlock>{' '}
-          <InlineBlock>All rights reserved.</InlineBlock>
-        </CompanyInfo>
-        <CompanyInfo className="en">
-          <a href="mailto:hello@strokecompany.io" style={{ color: '#53d1f3' }}>
-            hello@strokecompany.io
-          </a>
-        </CompanyInfo>
-      </div>
+      <TokscaleLogo />
+      <CompanyInfo className="en">
+        © 2025 Tokscale. All rights reserved.
+      </CompanyInfo>
     </Container>
   );
 }
