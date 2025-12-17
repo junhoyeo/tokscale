@@ -13,6 +13,8 @@ import type {
   ChartDataPoint,
   LoadingPhase,
   DailyModelBreakdown,
+  IntervalBucket,
+  Resolution,
 } from "../types/index.js";
 import {
   parseLocalSourcesAsync,
@@ -24,6 +26,71 @@ import { PricingFetcher } from "../../pricing.js";
 import { syncCursorCache, loadCursorCredentials } from "../../cursor.js";
 import { getModelColor } from "../utils/colors.js";
 import { loadCachedData, saveCachedData, isCacheStale } from "../config/settings.js";
+
+const RESOLUTION_MS: Record<Resolution, number> = {
+  '15m': 15 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+  '4h': 4 * 60 * 60 * 1000,
+  '1d': 24 * 60 * 60 * 1000,
+};
+
+function convertIntervalBucket(native: any): IntervalBucket {
+  return {
+    startMs: native.startMs,
+    endMs: native.endMs,
+    totals: {
+      input: native.tokenBreakdown.input,
+      output: native.tokenBreakdown.output,
+      cacheRead: native.tokenBreakdown.cacheRead,
+      cacheWrite: native.tokenBreakdown.cacheWrite,
+      reasoning: native.tokenBreakdown.reasoning,
+    },
+    messages: native.messages,
+    cost: native.costMicros / 1_000_000,
+    rateStats: native.rateStats ? {
+      avgTokensPerMin: native.rateStats.avgTokensPerMin,
+      maxTokensPerMin: native.rateStats.maxTokensPerMin,
+      minTokensPerMin: native.rateStats.minTokensPerMin,
+    } : undefined,
+  };
+}
+
+const intervalCache = new Map<string, IntervalBucket[]>();
+
+export function getIntervalData(
+  messages: any[],
+  resolution: Resolution,
+  dataVersion: number = 0
+): IntervalBucket[] {
+  const cacheKey = `${resolution}:${dataVersion}:${messages.length}`;
+  
+  const cached = intervalCache.get(cacheKey);
+  if (cached) return cached;
+  
+  if (messages.length === 0) return [];
+  
+  try {
+    const { aggregateByIntervalNative } = require("tokscale-core");
+    const intervalMs = RESOLUTION_MS[resolution];
+    const nativeBuckets = aggregateByIntervalNative(messages, intervalMs);
+    const buckets = nativeBuckets.map(convertIntervalBucket);
+    
+    if (intervalCache.size > 10) {
+      const firstKey = intervalCache.keys().next().value;
+      if (firstKey) intervalCache.delete(firstKey);
+    }
+    intervalCache.set(cacheKey, buckets);
+    
+    return buckets;
+  } catch (error) {
+    console.error("Error computing interval data:", error);
+    return [];
+  }
+}
+
+export function clearIntervalCache(): void {
+  intervalCache.clear();
+}
 
 export type {
   SortType,

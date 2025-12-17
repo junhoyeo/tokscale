@@ -1,7 +1,7 @@
 import { homedir } from "os";
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import type { TUIData, DailyModelBreakdown } from "../types/index.js";
+import type { TUIData, DailyModelBreakdown, ChartMode, Resolution } from "../types/index.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "tokscale");
 const CACHE_DIR = join(homedir(), ".cache", "tokscale");
@@ -10,9 +10,19 @@ const CACHE_FILE = join(CACHE_DIR, "tui-data-cache.json");
 
 const CACHE_STALE_THRESHOLD_MS = 60 * 1000;
 
-interface TUISettings {
+export interface TUISettings {
   colorPalette: string;
+  chartMode: ChartMode;
+  chartResolution: Resolution;
+  showRateWhiskers: boolean;
 }
+
+const DEFAULT_SETTINGS: TUISettings = {
+  colorPalette: 'green',
+  chartMode: 'bar',
+  chartResolution: '1d',
+  showRateWhiskers: false,
+};
 
 interface CachedTUIData {
   timestamp: number;
@@ -25,11 +35,12 @@ interface CachedTUIData {
 export function loadSettings(): TUISettings {
   try {
     if (existsSync(CONFIG_FILE)) {
-      return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+      const loaded = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+      return { ...DEFAULT_SETTINGS, ...loaded };
     }
   } catch {
   }
-  return { colorPalette: "green" };
+  return DEFAULT_SETTINGS;
 }
 
 export function saveSettings(settings: TUISettings): void {

@@ -97,10 +97,6 @@ export interface TUIData {
   dailyBreakdowns: Map<string, DailyModelBreakdown>;
 }
 
-export interface TUISettings {
-  colorPalette: string;
-}
-
 export type LoadingPhase = 
   | "idle"
   | "loading-pricing"
@@ -139,7 +135,39 @@ export interface TUIOptions {
   colorPalette?: ColorPaletteName;
 }
 
+export type ChartMode = 'bar' | 'candle' | 'hybrid';
+export type Resolution = '15m' | '1h' | '4h' | '1d';
 
+export interface TokenTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+}
+
+export interface RateStats {
+  avgTokensPerMin: number;
+  maxTokensPerMin: number;
+  minTokensPerMin: number;
+}
+
+export interface IntervalBucket {
+  startMs: number;
+  endMs: number;
+  totals: TokenTotals;
+  messages: number;
+  cost: number;
+  rateStats?: RateStats;
+}
+
+export interface IntervalChartData {
+  buckets: IntervalBucket[];
+  resolution: Resolution;
+  rangeStart: number;
+  rangeEnd: number;
+  isEmpty: boolean;
+}
 
 export const LAYOUT = {
   HEADER_HEIGHT: 2,
