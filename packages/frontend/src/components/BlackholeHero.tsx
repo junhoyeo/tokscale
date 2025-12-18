@@ -96,7 +96,7 @@ export function BlackholeHero() {
                   letterSpacing: "-0.8px",
                 }}
               >
-                npx{" "}
+                npx&nbsp;
               </span>
               <span
                 style={{
