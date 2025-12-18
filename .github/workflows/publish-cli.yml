@@ -32,7 +32,20 @@ jobs:
 
       - name: Check which packages changed
         id: check
+        env:
+          IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
+          if [ "$IS_MANUAL" = "true" ]; then
+            echo "🚀 Manual trigger - publishing all packages"
+            echo "core-changed=true" >> $GITHUB_OUTPUT
+            echo "cli-changed=true" >> $GITHUB_OUTPUT
+            echo "alias-changed=true" >> $GITHUB_OUTPUT
+            echo "core-version=$(jq -r '.version' packages/core/package.json)" >> $GITHUB_OUTPUT
+            echo "cli-version=$(jq -r '.version' packages/cli/package.json)" >> $GITHUB_OUTPUT
+            echo "alias-version=$(jq -r '.version' packages/tokscale/package.json)" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
           check_version_change() {
             local pkg_path=$1
             local output_name=$2
