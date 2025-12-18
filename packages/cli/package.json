@@ -1,6 +1,6 @@
 {
-  "name": "tokscale",
-  "version": "1.0.2",
+  "name": "@tokscale/cli",
+  "version": "1.0.0",
   "description": "Calculate token prices from OpenCode, Claude Code, Codex, Gemini, and Cursor sessions",
   "license": "MIT",
   "type": "module",
@@ -12,8 +12,8 @@
     "dist/**/*"
   ],
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "repository": {
     "type": "git",
@@ -29,7 +29,7 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "tokscale-core": "^0.1.1",
+    "@tokscale/core": "^0.1.1",
     "@opentui/core": "0.1.60",
     "@opentui/react": "^0.1.60",
     "@opentui/solid": "^0.1.60",

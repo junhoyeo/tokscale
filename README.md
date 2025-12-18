@@ -68,9 +68,14 @@ Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://g
 # Install globally via npm
 npm install -g tokscale
 
+# Or use the scoped package name (same thing)
+npm install -g @tokscale/cli
+
 # Run the CLI
 tokscale
 ```
+
+> **Package Structure**: `tokscale` is an alias package (like [`swc`](https://www.npmjs.com/package/swc)) that installs `@tokscale/cli`. Both commands install the same CLI tool with the native Rust core (`@tokscale/core`) included as a dependency—similar to SWC's package structure.
 
 ### Development Setup
 

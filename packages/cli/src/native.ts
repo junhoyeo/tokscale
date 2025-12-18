@@ -235,7 +235,7 @@ let nativeCore: NativeCore | null = null;
 let loadError: Error | null = null;
 
 try {
-  nativeCore = await import("tokscale-core").then((m) => m.default || m);
+  nativeCore = await import("@tokscale/core").then((m) => m.default || m);
 } catch (e) {
   loadError = e as Error;
 }

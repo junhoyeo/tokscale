@@ -1,6 +1,6 @@
 {
-  "name": "tokscale-core",
-  "version": "0.1.1",
+  "name": "@tokscale/core",
+  "version": "1.0.0",
   "description": "Native Rust core for tokscale CLI - high-performance session parsing",
   "main": "index.js",
   "types": "index.d.ts",
@@ -19,8 +19,8 @@
   },
   "license": "MIT",
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.4.1",

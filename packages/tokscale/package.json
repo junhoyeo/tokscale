@@ -1,0 +1,40 @@
+{
+  "name": "tokscale",
+  "version": "1.0.2",
+  "description": "Alias for @tokscale/cli - Track your AI coding assistant token usage",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "tokscale": "./bin.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junhoyeo/tokscale.git"
+  },
+  "bugs": {
+    "url": "https://github.com/junhoyeo/tokscale/issues"
+  },
+  "homepage": "https://github.com/junhoyeo/tokscale#readme",
+  "keywords": [
+    "token",
+    "tracker",
+    "ai",
+    "claude",
+    "openai",
+    "gemini",
+    "cursor",
+    "cli"
+  ],
+  "dependencies": {
+    "@tokscale/cli": "^1.0.2"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "files": [
+    "index.js",
+    "bin.js"
+  ]
+}
