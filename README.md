@@ -269,6 +269,8 @@ tokscale submit --dry-run
 tokscale logout
 ```
 
+<img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
+
 ### Cursor IDE Commands
 
 Cursor IDE requires separate authentication via session token (different from the social platform login):
