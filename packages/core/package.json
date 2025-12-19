@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/core",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Native Rust core for tokscale CLI - high-performance session parsing",
   "main": "index.js",
   "types": "index.d.ts",
@@ -67,13 +67,13 @@
     "native"
   ],
   "optionalDependencies": {
-    "@tokscale/core-darwin-x64": "1.0.0",
-    "@tokscale/core-darwin-arm64": "1.0.0",
-    "@tokscale/core-linux-x64-gnu": "1.0.0",
-    "@tokscale/core-linux-arm64-gnu": "1.0.0",
-    "@tokscale/core-linux-x64-musl": "1.0.0",
-    "@tokscale/core-linux-arm64-musl": "1.0.0",
-    "@tokscale/core-win32-x64-msvc": "1.0.0",
-    "@tokscale/core-win32-arm64-msvc": "1.0.0"
+    "@tokscale/core-darwin-x64": "1.0.2",
+    "@tokscale/core-darwin-arm64": "1.0.2",
+    "@tokscale/core-linux-x64-gnu": "1.0.2",
+    "@tokscale/core-linux-arm64-gnu": "1.0.2",
+    "@tokscale/core-linux-x64-musl": "1.0.2",
+    "@tokscale/core-linux-arm64-musl": "1.0.2",
+    "@tokscale/core-win32-x64-msvc": "1.0.2",
+    "@tokscale/core-win32-arm64-msvc": "1.0.2"
   }
 }

@@ -19,59 +19,57 @@ jobs:
     name: Check version changes
     runs-on: ubuntu-latest
     outputs:
-      core-changed: ${{ steps.check.outputs.core-changed }}
-      cli-changed: ${{ steps.check.outputs.cli-changed }}
-      alias-changed: ${{ steps.check.outputs.alias-changed }}
-      core-version: ${{ steps.check.outputs.core-version }}
-      cli-version: ${{ steps.check.outputs.cli-version }}
-      alias-version: ${{ steps.check.outputs.alias-version }}
+      should-publish: ${{ steps.check.outputs.should-publish }}
+      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      - name: Check which packages changed
+      - name: Check version sync and changes
         id: check
         env:
           IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
+          CORE_VERSION=$(jq -r '.version' packages/core/package.json)
+          CLI_VERSION=$(jq -r '.version' packages/cli/package.json)
+          ALIAS_VERSION=$(jq -r '.version' packages/tokscale/package.json)
+          
+          echo "📦 Package versions:"
+          echo "  @tokscale/core:  $CORE_VERSION"
+          echo "  @tokscale/cli:   $CLI_VERSION"
+          echo "  tokscale:        $ALIAS_VERSION"
+          
+          # All versions must be in sync
+          if [ "$CORE_VERSION" != "$CLI_VERSION" ] || [ "$CLI_VERSION" != "$ALIAS_VERSION" ]; then
+            echo "❌ ERROR: Package versions are not in sync!"
+            echo "   All packages must have the same version."
+            exit 1
+          fi
+          
+          echo "version=$CORE_VERSION" >> $GITHUB_OUTPUT
+          
           if [ "$IS_MANUAL" = "true" ]; then
             echo "🚀 Manual trigger - publishing all packages"
-            echo "core-changed=true" >> $GITHUB_OUTPUT
-            echo "cli-changed=true" >> $GITHUB_OUTPUT
-            echo "alias-changed=true" >> $GITHUB_OUTPUT
-            echo "core-version=$(jq -r '.version' packages/core/package.json)" >> $GITHUB_OUTPUT
-            echo "cli-version=$(jq -r '.version' packages/cli/package.json)" >> $GITHUB_OUTPUT
-            echo "alias-version=$(jq -r '.version' packages/tokscale/package.json)" >> $GITHUB_OUTPUT
+            echo "should-publish=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          check_version_change() {
-            local pkg_path=$1
-            local output_name=$2
-            
-            local current_version=$(jq -r '.version' "$pkg_path")
-            local prev_version=$(git show HEAD~1:"$pkg_path" 2>/dev/null | jq -r '.version' 2>/dev/null || echo "")
-            
-            echo "${output_name}-version=$current_version" >> $GITHUB_OUTPUT
-            
-            if [ "$current_version" != "$prev_version" ]; then
-              echo "${output_name}-changed=true" >> $GITHUB_OUTPUT
-              echo "✅ $pkg_path: $prev_version → $current_version"
-            else
-              echo "${output_name}-changed=false" >> $GITHUB_OUTPUT
-              echo "⏭️ $pkg_path: no version change ($current_version)"
-            fi
-          }
+          # Check if version changed from previous commit
+          PREV_VERSION=$(git show HEAD~1:packages/core/package.json 2>/dev/null | jq -r '.version' 2>/dev/null || echo "")
           
-          check_version_change "packages/core/package.json" "core"
-          check_version_change "packages/cli/package.json" "cli"
-          check_version_change "packages/tokscale/package.json" "alias"
+          if [ "$CORE_VERSION" != "$PREV_VERSION" ]; then
+            echo "✅ Version changed: $PREV_VERSION → $CORE_VERSION"
+            echo "should-publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "⏭️ No version change ($CORE_VERSION)"
+            echo "should-publish=false" >> $GITHUB_OUTPUT
+          fi
 
   build:
     name: Build - ${{ matrix.settings.target }}
     needs: check-versions
-    if: needs.check-versions.outputs.core-changed == 'true'
+    if: needs.check-versions.outputs.should-publish == 'true'
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
@@ -181,7 +179,7 @@ jobs:
   publish-core:
     name: Publish @tokscale/core
     needs: [check-versions, build]
-    if: needs.check-versions.outputs.core-changed == 'true'
+    if: needs.check-versions.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -223,10 +221,7 @@ jobs:
   publish-cli:
     name: Publish @tokscale/cli
     needs: [check-versions, publish-core]
-    if: |
-      always() &&
-      needs.check-versions.outputs.cli-changed == 'true' &&
-      (needs.publish-core.result == 'success' || needs.publish-core.result == 'skipped')
+    if: needs.check-versions.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -261,10 +256,7 @@ jobs:
   publish-alias:
     name: Publish tokscale (alias)
     needs: [check-versions, publish-cli]
-    if: |
-      always() &&
-      needs.check-versions.outputs.alias-changed == 'true' &&
-      (needs.publish-cli.result == 'success' || needs.publish-cli.result == 'skipped')
+    if: needs.check-versions.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
 
     steps:
