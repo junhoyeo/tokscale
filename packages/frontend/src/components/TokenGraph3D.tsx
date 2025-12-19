@@ -188,25 +188,25 @@ export function TokenGraph3D({
           style={{ borderColor: isDark ? "#262627" : "#D0D7DE", backgroundColor: isDark ? "#1F1F20" : "#FFFFFF" }}
         >
           <div className="p-2">
-            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade4 }}>{formatCurrency(totalCost)}</span>
+            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade1 }}>{formatCurrency(totalCost)}</span>
             <span className="block text-xs font-bold" style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Total</span>
             <span className="hidden sm:block text-xs" style={{ color: isDark ? "#696969" : "#656D76" }}>{dateRange.start} → {dateRange.end}</span>
           </div>
           <div className="p-2 hidden xl:block">
-            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade4 }}>{formatTokenCount(totalTokens)}</span>
+            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade1 }}>{formatTokenCount(totalTokens)}</span>
             <span className="block text-xs font-bold" style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Tokens</span>
             <span className="hidden sm:block text-xs" style={{ color: isDark ? "#696969" : "#656D76" }}>{activeDays} active days</span>
           </div>
           {bestDay && (
             <div className="p-2">
-              <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade4 }}>{formatCurrency(bestDay.totals.cost)}</span>
+              <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade1 }}>{formatCurrency(bestDay.totals.cost)}</span>
               <span className="block text-xs font-bold" style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Best day</span>
               <span className="hidden sm:block text-xs" style={{ color: isDark ? "#696969" : "#656D76" }}>{formatDate(bestDay.date).split(",")[0]}</span>
             </div>
           )}
         </div>
         <p className="mt-1 text-right text-xs" style={{ color: isDark ? "#696969" : "#656D76" }}>
-          Average: <span className="font-bold" style={{ color: palette.grade4 }}>{formatCurrency(activeDays > 0 ? totalCost / activeDays : 0)}</span> / day
+          Average: <span className="font-bold" style={{ color: palette.grade1 }}>{formatCurrency(activeDays > 0 ? totalCost / activeDays : 0)}</span> / day
         </p>
       </div>
 
@@ -217,11 +217,11 @@ export function TokenGraph3D({
           style={{ borderColor: isDark ? "#262627" : "#D0D7DE", backgroundColor: isDark ? "#1F1F20" : "#FFFFFF" }}
         >
           <div className="p-2">
-            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade4 }}>{longestStreak} <span className="text-base">days</span></span>
+            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade1 }}>{longestStreak} <span className="text-base">days</span></span>
             <span className="block text-xs font-bold" style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Longest</span>
           </div>
           <div className="p-2">
-            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade4 }}>{currentStreak} <span className="text-base">days</span></span>
+            <span className="block text-2xl font-bold leading-tight" style={{ color: palette.grade1 }}>{currentStreak} <span className="text-base">days</span></span>
             <span className="block text-xs font-bold" style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Current</span>
           </div>
         </div>

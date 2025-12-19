@@ -94,7 +94,7 @@ export function GraphControls({
       </div>
 
       <h2 className="text-lg font-medium mb-3" style={{ color: "var(--color-fg-default)" }}>
-        <span className="font-bold" style={{ color: palette.grade4 }}>{formatTokenCount(totalTokens)}</span>
+        <span className="font-bold" style={{ color: palette.grade1 }}>{formatTokenCount(totalTokens)}</span>
         {" "}tokens used
         {selectedYear && (
           <>

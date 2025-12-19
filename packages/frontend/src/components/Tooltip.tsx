@@ -74,7 +74,7 @@ export function Tooltip({ day, position, visible, palette }: TooltipProps) {
           <span
             className="font-bold text-xl tracking-tight"
             style={{
-              color: day.intensity >= 3 ? palette.grade4 : day.intensity >= 2 ? palette.grade3 : "var(--color-fg-default)",
+              color: day.intensity >= 3 ? palette.grade1 : day.intensity >= 2 ? palette.grade2 : "var(--color-fg-default)",
             }}
           >
             {formatTokenCount(totals.tokens)}

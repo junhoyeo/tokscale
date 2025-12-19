@@ -138,7 +138,7 @@ function ModelRow({ source, isLast, palette }: ModelRowProps) {
               <ProviderLogo providerId={providerId} height={12} />
             </span>
           )}
-          <span className="font-bold text-sm" style={{ color: palette.grade4 }}>{formatCurrency(cost)}</span>
+          <span className="font-bold text-sm" style={{ color: palette.grade1 }}>{formatCurrency(cost)}</span>
         </div>
 
         <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-x-4 gap-y-2 text-xs">

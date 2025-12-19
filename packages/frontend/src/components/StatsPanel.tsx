@@ -34,7 +34,7 @@ export function StatsPanel({ data, palette }: StatsPanelProps) {
         </h3>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-6">
-        <StatItem label="Total Cost" value={formatCurrency(summary.totalCost)} highlightColor={palette.grade4} highlight />
+        <StatItem label="Total Cost" value={formatCurrency(summary.totalCost)} highlightColor={palette.grade1} highlight />
         <StatItem label="Total Tokens" value={formatTokenCount(summary.totalTokens)} />
         <StatItem label="Active Days" value={`${summary.activeDays} / ${summary.totalDays}`} />
         <StatItem label="Avg / Day" value={formatCurrency(summary.averagePerDay)} />
