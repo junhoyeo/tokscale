@@ -203,7 +203,7 @@ async function main() {
 
   program
     .name("tokscale")
-    .description("Token Usage Leaderboard CLI - Track AI coding costs across OpenCode, Claude Code, Codex, Gemini, and Cursor")
+    .description("Tokscale - Track AI coding costs across OpenCode, Claude Code, Codex, Gemini, and Cursor")
     .version(pkg.version);
 
   program
