@@ -103,7 +103,7 @@ export default function DeviceClient() {
               Authorize CLI
             </h1>
             <p className="mt-2" style={{ color: "var(--color-fg-muted)" }}>
-              Connect your terminal to Token Tracker
+              Connect your terminal to Tokscale
             </p>
           </div>
 

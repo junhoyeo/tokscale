@@ -1,6 +1,6 @@
 # Benchmark Infrastructure
 
-This directory contains tools for measuring and comparing the performance of the Token Tracker CLI.
+This directory contains tools for measuring and comparing the performance of the Tokscale CLI.
 
 ## Overview
 
@@ -12,16 +12,16 @@ The benchmark infrastructure measures:
 
 ```bash
 # Generate synthetic benchmark data
-yarn bench:generate
+bun run generate
 
 # Run benchmark with synthetic data (recommended for CI)
-yarn bench:ts:synthetic
+bun run run:synthetic
 
 # Run benchmark with your real session data
-yarn bench:ts
+bun run run
 
 # (Future) Run Rust implementation benchmark
-yarn bench:rust:synthetic
+bun run run:rust:synthetic
 ```
 
 ## Benchmark Tools
@@ -32,13 +32,13 @@ Generates reproducible test data that mimics real session files.
 
 ```bash
 # Generate default dataset (~6,000 messages)
-yarn bench:generate
+bun run generate
 
 # Generate larger dataset (2x scale)
-npx tsx benchmarks/generate.ts --scale 2
+bunx benchmarks/generate.ts --scale 2
 
 # Generate to custom directory
-npx tsx benchmarks/generate.ts --output /tmp/bench-data
+bunx benchmarks/generate.ts --output /tmp/bench-data
 ```
 
 **Default data volume:**
@@ -56,16 +56,16 @@ Measures performance of the `graph` command.
 
 ```bash
 # Run with defaults (3 iterations, 1 warmup)
-npx tsx benchmarks/runner.ts
+bunx benchmarks/runner.ts
 
 # Use synthetic data
-npx tsx benchmarks/runner.ts --synthetic
+bunx benchmarks/runner.ts --synthetic
 
 # More iterations for accuracy
-npx tsx benchmarks/runner.ts --iterations 10 --warmup 2
+bunx benchmarks/runner.ts --iterations 10 --warmup 2
 
 # Test Rust implementation (when available)
-npx tsx benchmarks/runner.ts --implementation rust
+bunx benchmarks/runner.ts --implementation rust
 ```
 
 **Options:**
@@ -154,9 +154,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-      - run: yarn install
-      - run: yarn bench:generate
-      - run: yarn bench:ts:synthetic
+      - run: bun install
+      - run: cd packages/benchmarks && bun run generate
+      - run: cd packages/benchmarks && bun run run:synthetic
       - uses: actions/upload-artifact@v4
         with:
           name: benchmark-results

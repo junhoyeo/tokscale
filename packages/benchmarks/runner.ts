@@ -1,6 +1,6 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env bun
 /**
- * Benchmark Runner for Token Tracker CLI
+ * Benchmark Runner for Tokscale CLI
  * 
  * Measures performance of the graph command with:
  * - Wall-clock time (primary metric)
@@ -9,10 +9,10 @@
  * Supports both real user data and synthetic benchmark data.
  * 
  * Usage:
- *   npx tsx benchmarks/runner.ts                    # Run with real data
- *   npx tsx benchmarks/runner.ts --synthetic        # Run with synthetic data
- *   npx tsx benchmarks/runner.ts --iterations 5     # Run 5 iterations
- *   npx tsx benchmarks/runner.ts --implementation rust  # Test Rust impl (future)
+ *   bunx benchmarks/runner.ts                    # Run with real data
+ *   bunx benchmarks/runner.ts --synthetic        # Run with synthetic data
+ *   bunx benchmarks/runner.ts --iterations 5     # Run 5 iterations
+ *   bunx benchmarks/runner.ts --implementation rust  # Test Rust impl (future)
  */
 
 import * as fs from "node:fs";
@@ -116,9 +116,9 @@ function parseArgs(): Partial<BenchmarkConfig> {
         break;
       case "--help":
         console.log(`
-Benchmark Runner for Token Tracker CLI
+Benchmark Runner for Tokscale CLI
 
-Usage: npx tsx benchmarks/runner.ts [options]
+Usage: bunx benchmarks/runner.ts [options]
 
 Options:
   --synthetic          Use synthetic benchmark data instead of real data
@@ -129,10 +129,10 @@ Options:
   --help               Show this help message
 
 Examples:
-  npx tsx benchmarks/runner.ts                        # Benchmark real data
-  npx tsx benchmarks/runner.ts --synthetic            # Benchmark synthetic data
-  npx tsx benchmarks/runner.ts --iterations 10        # 10 iterations
-  npx tsx benchmarks/runner.ts --implementation rust  # Test Rust implementation
+  bunx benchmarks/runner.ts                        # Benchmark real data
+  bunx benchmarks/runner.ts --synthetic            # Benchmark synthetic data
+  bunx benchmarks/runner.ts --iterations 10        # 10 iterations
+  bunx benchmarks/runner.ts --implementation rust  # Test Rust implementation
 `);
         process.exit(0);
     }
@@ -199,7 +199,7 @@ async function runGraphGenerationRust(syntheticPath?: string): Promise<{
   } = await import("../src/native.js");
   
   if (!isNativeAvailable()) {
-    throw new Error("Native Rust module not available. Run 'yarn build:core' first.");
+    throw new Error("Native Rust module not available. Run 'bun run build:core' first.");
   }
   
   // Two-phase approach: parse local files, then finalize with empty pricing (no network)
@@ -285,7 +285,7 @@ function calculateStats(values: number[]): {
 // =============================================================================
 
 async function runBenchmark(config: BenchmarkConfig): Promise<BenchmarkResult> {
-  console.log("\n📊 Token Tracker Benchmark Runner\n");
+  console.log("\n📊 Tokscale Benchmark Runner\n");
   console.log(`  Implementation: ${config.implementation}`);
   console.log(`  Data source: ${config.useSyntheticData ? "synthetic" : "real"}`);
   console.log(`  Iterations: ${config.iterations} (+ ${config.warmupIterations} warmup)`);
@@ -296,7 +296,7 @@ async function runBenchmark(config: BenchmarkConfig): Promise<BenchmarkResult> {
     const absPath = path.resolve(config.syntheticDataPath);
     if (!fs.existsSync(absPath)) {
       console.error(`❌ Synthetic data not found at: ${absPath}`);
-      console.error(`   Run: npx tsx benchmarks/generate.ts`);
+      console.error(`   Run: bunx benchmarks/generate.ts`);
       process.exit(1);
     }
     setupSyntheticDataPaths(config.syntheticDataPath);

@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env bun
 /**
  * Synthetic Data Generator for Benchmarks
  * 
@@ -8,7 +8,7 @@
  * - Codex CLI: JSONL files with token_count events
  * - Gemini CLI: JSON session files
  * 
- * Usage: npx tsx benchmarks/generate.ts [--output <dir>] [--scale <multiplier>]
+ * Usage: bunx benchmarks/generate.ts [--output <dir>] [--scale <multiplier>]
  */
 
 import * as fs from "node:fs";
@@ -524,7 +524,7 @@ function parseArgs(): Partial<GeneratorConfig> {
       console.log(`
 Synthetic Data Generator for Benchmarks
 
-Usage: npx tsx benchmarks/generate.ts [options]
+Usage: bunx benchmarks/generate.ts [options]
 
 Options:
   --output <dir>   Output directory (default: ./benchmarks/synthetic-data)
@@ -532,9 +532,9 @@ Options:
   --help           Show this help message
 
 Examples:
-  npx tsx benchmarks/generate.ts                    # Generate default dataset
-  npx tsx benchmarks/generate.ts --scale 2          # Generate 2x data
-  npx tsx benchmarks/generate.ts --output /tmp/data # Custom output directory
+  bunx benchmarks/generate.ts                    # Generate default dataset
+  bunx benchmarks/generate.ts --scale 2          # Generate 2x data
+  bunx benchmarks/generate.ts --output /tmp/data # Custom output directory
 `);
       process.exit(0);
     }

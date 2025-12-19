@@ -465,7 +465,6 @@ export interface FinalizeOptions {
 // Async Subprocess Wrappers (Non-blocking for UI)
 // =============================================================================
 
-import { spawn as nodeSpawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -484,9 +483,6 @@ const MAX_OUTPUT_BYTES = parseInt(
   process.env.TOKSCALE_MAX_OUTPUT_BYTES || String(DEFAULT_MAX_OUTPUT_BYTES),
   10
 );
-
-// Access Bun via globalThis to avoid @types/bun dependency (must work in Node.js too)
-const isBun = typeof (globalThis as Record<string, unknown>).Bun !== "undefined";
 
 interface BunSubprocess {
   stdin: { write: (data: string) => void; end: () => void };
@@ -514,7 +510,7 @@ function safeKill(proc: unknown, signal?: string): void {
   } catch {}
 }
 
-async function runInSubprocessBun<T>(method: string, args: unknown[]): Promise<T> {
+async function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
   const runnerPath = join(__dirname, "native-runner.js");
   const input = JSON.stringify({ method, args });
 
@@ -638,133 +634,6 @@ async function runInSubprocessBun<T>(method: string, args: unknown[]): Promise<T
   } finally {
     await cleanup();
   }
-}
-
-async function runInSubprocessNode<T>(method: string, args: unknown[]): Promise<T> {
-  const runnerPath = join(__dirname, "native-runner.js");
-  const input = JSON.stringify({ method, args });
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let weInitiatedKill = false;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let sigkillId: ReturnType<typeof setTimeout> | null = null;
-
-    const cleanup = () => {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (sigkillId) clearTimeout(sigkillId);
-    };
-
-    const settle = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      fn();
-    };
-
-    const proc = nodeSpawn(process.execPath, [runnerPath], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    proc.on("error", (err) => {
-      settle(() => reject(new Error(`Failed to spawn subprocess: ${err.message}`)));
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-
-    timeoutId = setTimeout(() => {
-      weInitiatedKill = true;
-      safeKill(proc, "SIGTERM");
-      sigkillId = setTimeout(() => {
-        safeKill(proc, "SIGKILL");
-        settle(() => reject(new Error(
-          `Subprocess '${method}' timed out after ${NATIVE_TIMEOUT_MS}ms (hard kill)`
-        )));
-      }, SIGKILL_GRACE_MS);
-    }, NATIVE_TIMEOUT_MS);
-
-    proc.stdout.setEncoding("utf8");
-    proc.stderr.setEncoding("utf8");
-
-    proc.stdin.on("error", (err) => {
-      if (err.message.includes("EPIPE")) return;
-      settle(() => reject(new Error(`Subprocess '${method}' stdin error: ${err.message}`)));
-    });
-
-    proc.stdout.on("data", (data: string) => {
-      stdoutBytes += Buffer.byteLength(data);
-      if (stdoutBytes > MAX_OUTPUT_BYTES) {
-        weInitiatedKill = true;
-        safeKill(proc, "SIGKILL");
-        settle(() => reject(new Error(`Subprocess '${method}' stdout exceeded ${MAX_OUTPUT_BYTES} bytes`)));
-        return;
-      }
-      stdout += data;
-    });
-
-    proc.stderr.on("data", (data: string) => {
-      stderrBytes += Buffer.byteLength(data);
-      if (stderrBytes > MAX_OUTPUT_BYTES) {
-        weInitiatedKill = true;
-        safeKill(proc, "SIGKILL");
-        settle(() => reject(new Error(`Subprocess '${method}' stderr exceeded ${MAX_OUTPUT_BYTES} bytes`)));
-        return;
-      }
-      stderr += data;
-    });
-
-    proc.stdout.on("error", (err) => {
-      settle(() => reject(new Error(`Subprocess '${method}' stdout error: ${err.message}`)));
-    });
-
-    proc.stderr.on("error", (err) => {
-      settle(() => reject(new Error(`Subprocess '${method}' stderr error: ${err.message}`)));
-    });
-
-    proc.on("close", (code, signal) => {
-      if (weInitiatedKill || signal) {
-        settle(() => reject(new Error(
-          `Subprocess '${method}' was killed (signal: ${signal || "SIGTERM"})`
-        )));
-        return;
-      }
-
-      if (code !== 0) {
-        let errorMsg = stderr || `Process exited with code ${code}`;
-        try {
-          const parsed = JSON.parse(stderr);
-          if (parsed.error) errorMsg = parsed.error;
-        } catch {}
-        settle(() => reject(new Error(`Subprocess '${method}' failed: ${errorMsg}`)));
-        return;
-      }
-
-      try {
-        settle(() => resolve(JSON.parse(stdout) as T));
-      } catch (e) {
-        settle(() => reject(new Error(
-          `Failed to parse subprocess output: ${(e as Error).message}\nstdout: ${stdout.slice(0, 500)}`
-        )));
-      }
-    });
-
-    try {
-      proc.stdin.write(input);
-      proc.stdin.end();
-    } catch (e) {
-      safeKill(proc, "SIGTERM");
-      settle(() => reject(new Error(`Failed to write to subprocess stdin: ${(e as Error).message}`)));
-    }
-  });
-}
-
-function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
-  return isBun
-    ? runInSubprocessBun<T>(method, args)
-    : runInSubprocessNode<T>(method, args);
 }
 
 export async function parseLocalSourcesAsync(options: LocalParseOptions): Promise<ParsedMessages> {

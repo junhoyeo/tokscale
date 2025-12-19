@@ -1,5 +1,5 @@
 import { Show } from "solid-js";
-import { exec } from "child_process";
+import { exec } from "node:child_process";
 import type { TabType } from "../types/index.js";
 import { isNarrow, isVeryNarrow } from "../utils/responsive.js";
 

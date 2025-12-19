@@ -176,12 +176,12 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
         </h3>
         <ol className="text-sm space-y-3 list-decimal list-inside" style={{ color: "var(--color-fg-muted)" }}>
           <li className="leading-relaxed">
-            Install token-tracker:{" "}
+            Install tokscale:{" "}
             <code
               className="px-2 py-1 rounded-lg text-xs font-mono"
               style={{ backgroundColor: "var(--color-bg-subtle)" }}
             >
-              npx tsx src/cli.ts graph
+              bunx tokscale
             </code>
           </li>
           <li className="leading-relaxed">

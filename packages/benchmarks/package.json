@@ -5,10 +5,10 @@
   "description": "Benchmark scripts for tokscale CLI",
   "type": "module",
   "scripts": {
-    "generate": "tsx generate.ts",
-    "run": "tsx runner.ts",
-    "run:synthetic": "tsx runner.ts --synthetic --iterations 5 --warmup 1",
-    "run:rust": "tsx runner.ts --implementation rust",
-    "run:rust:synthetic": "tsx runner.ts --implementation rust --synthetic --iterations 5 --warmup 1"
+    "generate": "bun generate.ts",
+    "run": "bun runner.ts",
+    "run:synthetic": "bun runner.ts --synthetic --iterations 5 --warmup 1",
+    "run:rust": "bun runner.ts --implementation rust",
+    "run:rust:synthetic": "bun runner.ts --implementation rust --synthetic --iterations 5 --warmup 1"
   }
 }

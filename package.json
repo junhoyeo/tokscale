@@ -19,7 +19,6 @@
   "devDependencies": {
     "@napi-rs/cli": "^3.4.1",
     "@types/node": "^20.0.0",
-    "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }
 }

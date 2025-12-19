@@ -1,13 +1,10 @@
 {
   "name": "@tokscale/cli",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/cli.js",
-  "bin": {
-    "tokscale": "./dist/cli.js"
-  },
   "files": [
     "dist/**/*",
     "src/**/*"
@@ -25,13 +22,12 @@
     "build": "tsc && bun run build:tui",
     "build:tui": "echo 'TUI bundling skipped - OpenTUI requires Bun runtime'",
     "dev": "bun src/cli.ts",
-    "dev:node": "tsx src/cli.ts",
     "tui": "bun src/cli.ts tui",
-    "start": "node dist/cli.js",
+    "start": "bun dist/cli.js",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@tokscale/core": "1.0.7",
+    "@tokscale/core": "1.0.8",
     "@opentui/core": "0.1.60",
     "@opentui/react": "^0.1.60",
     "@opentui/solid": "^0.1.60",
@@ -48,11 +44,10 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/react": "^19.2.7",
-    "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   },
   "engines": {
-    "node": ">= 18"
+    "bun": ">= 1.0"
   },
   "keywords": [
     "tokscale",

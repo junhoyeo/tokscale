@@ -65,43 +65,23 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 ### Quick Start
 
 ```bash
-# Run directly with bunx (recommended - full TUI support)
+# Install Bun (if not already installed)
+curl -fsSL https://bun.sh/install | bash
+
+# Run directly with bunx
 bunx tokscale
 ```
 
 That's it! This gives you the full interactive TUI experience with zero setup.
 
-> **Why Bun?** The interactive TUI requires [Bun](https://bun.sh/) runtime due to OpenTUI's native Zig modules for zero-flicker rendering.
-
-<details>
-<summary><b>Alternative: npm/npx Installation</b></summary>
-
-If you prefer npm or don't have Bun installed:
-
-```bash
-# Run with npx (TUI falls back to light mode)
-npx tokscale
-
-# Or install globally
-npm install -g tokscale
-
-# Or use the scoped package name
-npm install -g @tokscale/cli
-
-# Then run
-tokscale
-```
-
-> **Note**: When using `npx` or Node.js runtime, TUI commands automatically fall back to `--light` mode (legacy CLI tables). For the full TUI experience, use `bunx`.
+> **Requires [Bun](https://bun.sh/)**: The interactive TUI uses OpenTUI's native Zig modules for zero-flicker rendering, which requires the Bun runtime.
 
 > **Package Structure**: `tokscale` is an alias package (like [`swc`](https://www.npmjs.com/package/swc)) that installs `@tokscale/cli`. Both install the same CLI with the native Rust core (`@tokscale/core`) included.
 
-</details>
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) (recommended for full TUI support)
-- Node.js 18+ (for `--light` mode and non-TUI commands)
+- [Bun](https://bun.sh/) (required)
 - (Optional) Rust toolchain for building native module from source
 
 ### Development Setup
@@ -123,7 +103,7 @@ bun install
 bun run cli
 ```
 
-> **Note**: `bun run cli` is for local development. When installed globally via npm, the command is `tokscale`. The Usage section below shows the installed binary commands.
+> **Note**: `bun run cli` is for local development. When installed via `bunx tokscale`, the command runs directly. The Usage section below shows the installed binary commands.
 
 ### Building the Native Module (Optional)
 
@@ -420,7 +400,7 @@ All heavy computation is done in Rust when the native module is available. When 
 |-------|------------|---------|
 | CLI | [Commander.js](https://github.com/tj/commander.js) | Command-line parsing |
 | TUI | [OpenTUI](https://github.com/sst/opentui) + [Solid.js](https://www.solidjs.com/) | Interactive terminal UI (zero-flicker rendering) |
-| Runtime | [Bun](https://bun.sh/) | Fast JavaScript runtime (required for TUI dev mode) |
+| Runtime | [Bun](https://bun.sh/) | Fast JavaScript runtime (required) |
 | Tables | [cli-table3](https://github.com/cli-table/cli-table3) | Terminal table rendering (legacy CLI) |
 | Colors | [picocolors](https://github.com/alexeyraspopov/picocolors) | Terminal colors |
 | Native | [napi-rs](https://napi.rs/) | Node.js bindings for Rust |
@@ -526,7 +506,7 @@ To run your own instance:
    GITHUB_CLIENT_SECRET=your_client_secret
    NEXT_PUBLIC_URL=https://your-domain.com
    ```
-3. Run database migrations: `cd packages/frontend && npx drizzle-kit push`
+3. Run database migrations: `cd packages/frontend && bunx drizzle-kit push`
 4. Deploy to Vercel or your preferred platform
 
 ### Generating Data for Frontend
@@ -543,8 +523,8 @@ tokscale graph --output packages/frontend/public/my-data.json
 ### Prerequisites
 
 ```bash
-# Node.js 18+
-node --version
+# Bun (required)
+bun --version
 
 # Rust (for native module)
 rustc --version
@@ -577,7 +557,7 @@ cd packages/cli && bun src/cli.ts --light
 | `bun run dev:frontend` | Run frontend development server |
 
 **Package-specific scripts** (from within package directories):
-- `packages/cli`: `bun run dev`, `bun run dev:node`, `bun run tui`
+- `packages/cli`: `bun run dev`, `bun run tui`
 - `packages/core`: `bun run build:debug`, `bun run test`, `bun run bench`
 
 **Note**: This project uses **Bun** as the package manager and runtime. TUI requires Bun due to OpenTUI's native modules.

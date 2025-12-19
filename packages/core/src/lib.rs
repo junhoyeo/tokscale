@@ -1,4 +1,4 @@
-//! Token Tracker Core - Native Rust module for high-performance session parsing
+//! Tokscale Core - Native Rust module for high-performance session parsing
 //!
 //! This module provides parallel file scanning, SIMD JSON parsing, and efficient
 //! aggregation of token usage data from multiple AI coding assistant sessions.
