@@ -38,6 +38,7 @@ export function TokenGraph3D({
   onDayHover,
   onDayClick,
 }: TokenGraph3DProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [obeliskLoaded, setObeliskLoaded] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,8 +123,10 @@ export function TokenGraph3D({
       if (!canvas) return null;
 
       const rect = canvas.getBoundingClientRect();
-      const x = clientX - rect.left;
-      const y = clientY - rect.top;
+      const scaleX = ISO_CANVAS_WIDTH / rect.width;
+      const scaleY = ISO_CANVAS_HEIGHT / rect.height;
+      const x = (clientX - rect.left) * scaleX;
+      const y = (clientY - rect.top) * scaleY;
 
       const isoX = (x - 130) / (CUBE_SIZE * 0.7);
       const isoY = (y - 90) / (CUBE_SIZE * 0.35) - isoX;
@@ -162,8 +165,9 @@ export function TokenGraph3D({
   if (!obeliskLoaded) {
     return (
       <div
-        className="flex items-center justify-center"
-        style={{ width: ISO_CANVAS_WIDTH, height: ISO_CANVAS_HEIGHT, backgroundColor: isDark ? "#141415" : "#FFFFFF" }}
+        ref={containerRef}
+        className="flex items-center justify-center w-full"
+        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}`, maxWidth: ISO_CANVAS_WIDTH, backgroundColor: isDark ? "#141415" : "#FFFFFF" }}
       >
         <div className="animate-pulse" style={{ color: isDark ? "#696969" : "#656D76" }}>Loading 3D view...</div>
       </div>
@@ -171,14 +175,14 @@ export function TokenGraph3D({
   }
 
   return (
-    <div className="ic-contributions-wrapper relative overflow-x-auto">
+    <div ref={containerRef} className="ic-contributions-wrapper relative w-full" style={{ maxWidth: ISO_CANVAS_WIDTH }}>
       <canvas
         ref={canvasRef}
         onMouseMove={handleMouseMove}
         onMouseLeave={() => onDayHover(null, null)}
         onClick={handleClick}
-        className="cursor-pointer"
-        style={{ width: "100%", minWidth: ISO_CANVAS_WIDTH }}
+        className="cursor-pointer w-full h-auto"
+        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}` }}
       />
 
       <div className="absolute top-3 right-5">
