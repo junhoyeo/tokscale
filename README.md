@@ -58,17 +58,17 @@ Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://g
 
 ### Prerequisites
 
-- Node.js 18+
-- Bun (for TUI development mode)
-- (Optional) Rust toolchain for native module
+- Node.js 18+ (for `--light` mode and non-TUI commands)
+- [Bun](https://bun.sh/) (required for interactive TUI mode)
+- (Optional) Rust toolchain for building native module from source
 
 ### Quick Start
 
 ```bash
-# Run directly with bunx (no install required)
+# Run directly with bunx (recommended - full TUI support)
 bunx tokscale
 
-# Or with npx
+# Or with npx (TUI falls back to light mode)
 npx tokscale
 
 # Or install globally via npm
@@ -80,6 +80,8 @@ npm install -g @tokscale/cli
 # Run the CLI
 tokscale
 ```
+
+> **Runtime Note**: The interactive TUI requires [Bun](https://bun.sh/) runtime due to OpenTUI's native Zig modules. When using `npx` (Node.js), TUI commands automatically fall back to `--light` mode (legacy CLI tables). Use `bunx` for the full TUI experience.
 
 > **Package Structure**: `tokscale` is an alias package (like [`swc`](https://www.npmjs.com/package/swc)) that installs `@tokscale/cli`. Both commands install the same CLI tool with the native Rust core (`@tokscale/core`) included as a dependency—similar to SWC's package structure.
 
