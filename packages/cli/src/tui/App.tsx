@@ -72,7 +72,7 @@ export function App(props: AppProps) {
     if (statusTimeout) clearTimeout(statusTimeout);
   });
 
-  const contentHeight = () => Math.max(rows() - 6, 12);
+  const contentHeight = () => Math.max(rows() - 4, 12);
   const overviewChartHeight = () => Math.max(5, Math.floor(contentHeight() * 0.35));
   const overviewListHeight = () => Math.max(4, contentHeight() - overviewChartHeight() - 4);
   const overviewItemsPerPage = () => Math.max(1, Math.floor(overviewListHeight() / 2));
