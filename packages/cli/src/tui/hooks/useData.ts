@@ -225,7 +225,8 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
         date: dateStr,
         input: 0,
         output: 0,
-        cache: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
         total: 0,
         cost: 0,
       });
@@ -233,7 +234,8 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
     const entry = dailyMap.get(dateStr)!;
     entry.input += contrib.tokenBreakdown.input;
     entry.output += contrib.tokenBreakdown.output;
-    entry.cache += contrib.tokenBreakdown.cacheRead;
+    entry.cacheRead += contrib.tokenBreakdown.cacheRead;
+    entry.cacheWrite += contrib.tokenBreakdown.cacheWrite;
     entry.total += contrib.totals.tokens;
     entry.cost += contrib.totals.cost;
   }

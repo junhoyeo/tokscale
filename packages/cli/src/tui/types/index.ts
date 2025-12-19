@@ -22,7 +22,8 @@ export interface DailyEntry {
   date: string;
   input: number;
   output: number;
-  cache: number;
+  cacheRead: number;
+  cacheWrite: number;
   total: number;
   cost: number;
 }

@@ -8,10 +8,11 @@ const STRIPE_BG = "#232328";
 
 const INPUT_COL_WIDTH = 12;
 const OUTPUT_COL_WIDTH = 12;
-const CACHE_COL_WIDTH = 12;
+const CACHE_READ_COL_WIDTH = 10;
+const CACHE_WRITE_COL_WIDTH = 10;
 const TOTAL_COL_WIDTH = 14;
 const COST_COL_WIDTH = 12;
-const METRIC_COLUMNS_WIDTH_FULL = INPUT_COL_WIDTH + OUTPUT_COL_WIDTH + CACHE_COL_WIDTH + TOTAL_COL_WIDTH + COST_COL_WIDTH;
+const METRIC_COLUMNS_WIDTH_FULL = INPUT_COL_WIDTH + OUTPUT_COL_WIDTH + CACHE_READ_COL_WIDTH + CACHE_WRITE_COL_WIDTH + TOTAL_COL_WIDTH + COST_COL_WIDTH;
 const METRIC_COLUMNS_WIDTH_NARROW = TOTAL_COL_WIDTH + COST_COL_WIDTH;
 const SIDE_PADDING = 2;
 const MIN_NAME_COLUMN = 16;
@@ -77,7 +78,8 @@ export function ModelView(props: ModelViewProps) {
         nameWidth,
         input: formatTokensCompact(entry.input),
         output: formatTokensCompact(entry.output),
-        cache: formatTokensCompact(entry.cacheRead),
+        cacheRead: formatTokensCompact(entry.cacheRead),
+        cacheWrite: formatTokensCompact(entry.cacheWrite),
         total: formatTokensCompact(entry.total),
         cost: formatCostFull(entry.cost),
       };
@@ -95,14 +97,14 @@ export function ModelView(props: ModelViewProps) {
     if (isNarrowTerminal()) {
       return `${nameHeader().padEnd(nameColumnWidths().column)}${totalHeader().padStart(TOTAL_COL_WIDTH)}${costHeader().padStart(COST_COL_WIDTH)}`;
     }
-    return `${nameHeader().padEnd(nameColumnWidths().column)}${"Input".padStart(INPUT_COL_WIDTH)}${"Output".padStart(OUTPUT_COL_WIDTH)}${"Cache".padStart(CACHE_COL_WIDTH)}${totalHeader().padStart(TOTAL_COL_WIDTH)}${costHeader().padStart(COST_COL_WIDTH)}`;
+    return `${nameHeader().padEnd(nameColumnWidths().column)}${"Input".padStart(INPUT_COL_WIDTH)}${"Output".padStart(OUTPUT_COL_WIDTH)}${"C.Read".padStart(CACHE_READ_COL_WIDTH)}${"C.Write".padStart(CACHE_WRITE_COL_WIDTH)}${totalHeader().padStart(TOTAL_COL_WIDTH)}${costHeader().padStart(COST_COL_WIDTH)}`;
   };
 
   const renderRowData = (row: typeof formattedRows extends () => (infer T)[] ? T : never) => {
     if (isNarrowTerminal()) {
       return `${row.displayName.padEnd(row.nameWidth)}${row.total.padStart(TOTAL_COL_WIDTH)}`;
     }
-    return `${row.displayName.padEnd(row.nameWidth)}${row.input.padStart(INPUT_COL_WIDTH)}${row.output.padStart(OUTPUT_COL_WIDTH)}${row.cache.padStart(CACHE_COL_WIDTH)}${row.total.padStart(TOTAL_COL_WIDTH)}`;
+    return `${row.displayName.padEnd(row.nameWidth)}${row.input.padStart(INPUT_COL_WIDTH)}${row.output.padStart(OUTPUT_COL_WIDTH)}${row.cacheRead.padStart(CACHE_READ_COL_WIDTH)}${row.cacheWrite.padStart(CACHE_WRITE_COL_WIDTH)}${row.total.padStart(TOTAL_COL_WIDTH)}`;
   };
 
   return (
