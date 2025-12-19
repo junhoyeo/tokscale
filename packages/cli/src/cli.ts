@@ -73,7 +73,7 @@ function showTUIUnavailableMessage(): void {
   console.log();
   console.log(pc.white("  Options:"));
   console.log(pc.gray("  • Use 'bunx tokscale' instead of 'npx tokscale'"));
-  console.log(pc.gray("  • Use '--light' flag for legacy CLI table output"));
+  // console.log(pc.gray("  • Use '--light' flag for legacy CLI table output"));
   console.log(pc.gray("  • Use '--json' flag for JSON output"));
   console.log();
 }
