@@ -1,3 +1,8 @@
+declare module "@opentui/solid/preload" {
+  const preload: void;
+  export default preload;
+}
+
 declare module "@opentui/core" {
   export interface CliRendererConfig {
     exitOnCtrlC?: boolean;
@@ -58,80 +63,104 @@ declare module "@opentui/solid" {
   export function useOnResize(callback: (width: number, height: number) => void): void;
 }
 
-declare namespace JSX {
-  interface MouseEvent {
-    x: number;
-    y: number;
-    button: number;
-    type: "down" | "up" | "move" | "drag" | "scroll";
-  }
+// OpenTUI element types for JSX
+// Using `any` for children due to JSX.Element type mismatch between solid-js and solid-js/h/jsx-runtime
+type OpenTUIChildren = any;
 
-  interface MouseEventHandlers {
-    onMouse?: (event: MouseEvent) => void;
-    onMouseDown?: (event: MouseEvent) => void;
-    onMouseUp?: (event: MouseEvent) => void;
-    onMouseMove?: (event: MouseEvent) => void;
-    onMouseDrag?: (event: MouseEvent) => void;
-    onMouseOver?: (event: MouseEvent) => void;
-    onMouseOut?: (event: MouseEvent) => void;
-    onMouseScroll?: (event: MouseEvent) => void;
-  }
+interface OpenTUIMouseEvent {
+  x: number;
+  y: number;
+  button: number;
+  type: "down" | "up" | "move" | "drag" | "scroll";
+}
 
-  interface IntrinsicElements {
-    box: {
-      flexDirection?: "row" | "column";
-      flexGrow?: number;
-      flexShrink?: number;
-      flexWrap?: "wrap" | "nowrap";
-      justifyContent?: "flex-start" | "flex-end" | "center" | "space-between" | "space-around" | "space-evenly";
-      alignItems?: "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
-      alignSelf?: "auto" | "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
-      gap?: number;
-      width?: number | string;
-      height?: number | string;
-      minWidth?: number | string;
-      minHeight?: number | string;
-      maxWidth?: number | string;
-      maxHeight?: number | string;
-      padding?: number;
-      paddingX?: number;
-      paddingY?: number;
-      paddingTop?: number;
-      paddingRight?: number;
-      paddingBottom?: number;
-      paddingLeft?: number;
-      margin?: number;
-      marginTop?: number;
-      marginRight?: number;
-      marginBottom?: number;
-      marginLeft?: number;
-      position?: "relative" | "absolute";
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-      backgroundColor?: string;
-      borderStyle?: "single" | "double" | "round" | "bold" | "singleDouble" | "doubleSingle" | "classic";
-      borderColor?: string;
-      borderTop?: boolean;
-      borderRight?: boolean;
-      borderBottom?: boolean;
-      borderLeft?: boolean;
-      overflow?: "visible" | "hidden" | "scroll";
-      children?: unknown;
-    } & MouseEventHandlers;
-    text: {
-      fg?: string;
-      bg?: string;
-      backgroundColor?: string;
-      bold?: boolean;
-      dim?: boolean;
-      italic?: boolean;
-      underline?: boolean;
-      strikethrough?: boolean;
-      inverse?: boolean;
-      wrap?: "wrap" | "truncate" | "truncate-start" | "truncate-middle" | "truncate-end";
-      children?: unknown;
-    } & MouseEventHandlers;
+interface OpenTUIMouseEventHandlers {
+  onMouse?: (event: OpenTUIMouseEvent) => void;
+  onMouseDown?: (event: OpenTUIMouseEvent) => void;
+  onMouseUp?: (event: OpenTUIMouseEvent) => void;
+  onMouseMove?: (event: OpenTUIMouseEvent) => void;
+  onMouseDrag?: (event: OpenTUIMouseEvent) => void;
+  onMouseOver?: (event: OpenTUIMouseEvent) => void;
+  onMouseOut?: (event: OpenTUIMouseEvent) => void;
+  onMouseScroll?: (event: OpenTUIMouseEvent) => void;
+}
+
+interface OpenTUIBoxProps extends OpenTUIMouseEventHandlers {
+  flexDirection?: "row" | "column";
+  flexGrow?: number;
+  flexShrink?: number;
+  flexWrap?: "wrap" | "nowrap";
+  justifyContent?: "flex-start" | "flex-end" | "center" | "space-between" | "space-around" | "space-evenly";
+  alignItems?: "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
+  alignSelf?: "auto" | "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
+  gap?: number;
+  width?: number | string;
+  height?: number | string;
+  minWidth?: number | string;
+  minHeight?: number | string;
+  maxWidth?: number | string;
+  maxHeight?: number | string;
+  padding?: number;
+  paddingX?: number;
+  paddingY?: number;
+  paddingTop?: number;
+  paddingRight?: number;
+  paddingBottom?: number;
+  paddingLeft?: number;
+  margin?: number;
+  marginTop?: number;
+  marginRight?: number;
+  marginBottom?: number;
+  marginLeft?: number;
+  position?: "relative" | "absolute";
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+  backgroundColor?: string;
+  borderStyle?: "single" | "double" | "round" | "bold" | "singleDouble" | "doubleSingle" | "classic";
+  borderColor?: string;
+  borderTop?: boolean;
+  borderRight?: boolean;
+  borderBottom?: boolean;
+  borderLeft?: boolean;
+  overflow?: "visible" | "hidden" | "scroll";
+  children?: OpenTUIChildren;
+}
+
+interface OpenTUITextProps extends OpenTUIMouseEventHandlers {
+  fg?: string;
+  bg?: string;
+  backgroundColor?: string;
+  bold?: boolean;
+  dim?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  inverse?: boolean;
+  wrap?: "wrap" | "truncate" | "truncate-start" | "truncate-middle" | "truncate-end";
+  children?: OpenTUIChildren;
+}
+
+interface OpenTUISpanProps extends OpenTUIMouseEventHandlers {
+  fg?: string;
+  bg?: string;
+  bold?: boolean;
+  dim?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  inverse?: boolean;
+  children?: OpenTUIChildren;
+}
+
+// Module augmentation for solid-js/h/jsx-runtime
+declare module "solid-js/h/jsx-runtime" {
+  namespace JSX {
+    interface IntrinsicElements {
+      box: OpenTUIBoxProps;
+      text: OpenTUITextProps;
+      span: OpenTUISpanProps;
+    }
   }
 }

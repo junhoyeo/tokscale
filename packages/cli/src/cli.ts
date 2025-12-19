@@ -63,15 +63,20 @@ async function tryLoadTUI(): Promise<LaunchTUIFunction | null> {
     return null;
   }
   
-  const currentDir = new URL(".", import.meta.url).pathname;
-  const isDevMode = currentDir.includes("/src/");
-  // In dev mode: load TSX directly (bunfig.toml preloads Solid plugin)
-  // In prod mode: load pre-compiled JS from dist/tui/ (no preload needed)
-  const tuiPath = isDevMode
-    ? new URL("./tui/index.tsx", import.meta.url).href
-    : new URL("./tui/index.js", import.meta.url).href;
-  
   try {
+    // Load OpenTUI preload to register Babel transform for TSX
+    // This is needed for both dev mode (via bunfig.toml) and production
+    // Use variable to prevent TypeScript from analyzing the module
+    const preloadModule = "@opentui/solid/preload";
+    await import(preloadModule);
+    
+    // Always load from source TSX - OpenTUI only works with Bun + preload
+    // Calculate path to src/tui/index.tsx regardless of whether running from src or dist
+    const currentPath = new URL(".", import.meta.url).pathname;
+    const isFromDist = currentPath.includes("/dist/");
+    const tuiPath = isFromDist
+      ? new URL("../src/tui/index.tsx", import.meta.url).href
+      : new URL("./tui/index.tsx", import.meta.url).href;
     const tuiModule = await import(tuiPath) as { launchTUI: LaunchTUIFunction };
     cachedTUILoader = tuiModule.launchTUI;
     return cachedTUILoader;
