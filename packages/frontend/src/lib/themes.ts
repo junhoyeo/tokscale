@@ -95,7 +95,7 @@ export const colorPalettes: Record<ColorPaletteName, GraphColorPalette> = {
   },
 };
 
-export const DEFAULT_PALETTE: ColorPaletteName = "green";
+export const DEFAULT_PALETTE: ColorPaletteName = "blue";
 
 export const getPaletteNames = (): ColorPaletteName[] =>
   Object.keys(colorPalettes) as ColorPaletteName[];
