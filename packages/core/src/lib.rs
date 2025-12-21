@@ -78,6 +78,7 @@ pub struct ParsedMessage {
     pub cache_read: i64,
     pub cache_write: i64,
     pub reasoning: i64,
+    pub agent: Option<String>,
 }
 
 /// Result of parsing local sources (excludes Cursor - it's network-synced)
@@ -459,6 +460,34 @@ pub struct MonthlyReport {
     pub processing_time_ms: u32,
 }
 
+/// Agent usage summary for reports (OpenCode only)
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AgentUsage {
+    pub agent: String,
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub reasoning: i64,
+    pub message_count: i32,
+    pub cost: f64,
+}
+
+/// Agent report result
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AgentReport {
+    pub entries: Vec<AgentUsage>,
+    pub total_input: i64,
+    pub total_output: i64,
+    pub total_cache_read: i64,
+    pub total_cache_write: i64,
+    pub total_messages: i32,
+    pub total_cost: f64,
+    pub processing_time_ms: u32,
+}
+
 /// Convert pricing entries to internal PricingData
 fn build_pricing_data(entries: &[PricingEntry]) -> PricingData {
     let mut pricing_data = PricingData::new();
@@ -787,7 +816,93 @@ pub fn get_monthly_report(options: ReportOptions) -> napi::Result<MonthlyReport>
     })
 }
 
-/// Generate graph data with pricing calculation
+#[derive(Default)]
+struct AgentAggregator {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    message_count: i32,
+    cost: f64,
+}
+
+#[napi]
+pub fn get_agent_report(options: ReportOptions) -> napi::Result<AgentReport> {
+    let start = Instant::now();
+
+    let home_dir = get_home_dir(&options.home_dir)?;
+
+    let sources = options.sources.clone().unwrap_or_else(|| {
+        vec!["opencode".to_string()]
+    });
+
+    let pricing_data = build_pricing_data(&options.pricing);
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &sources, &pricing_data);
+
+    let filtered = filter_messages_for_report(all_messages, &options);
+
+    let mut agent_map: std::collections::HashMap<String, AgentAggregator> =
+        std::collections::HashMap::new();
+
+    for msg in filtered {
+        let agent = match &msg.agent {
+            Some(a) => a.clone(),
+            None => continue,
+        };
+
+        let entry = agent_map.entry(agent).or_default();
+        entry.input += msg.tokens.input;
+        entry.output += msg.tokens.output;
+        entry.cache_read += msg.tokens.cache_read;
+        entry.cache_write += msg.tokens.cache_write;
+        entry.reasoning += msg.tokens.reasoning;
+        entry.message_count += 1;
+        entry.cost += msg.cost;
+    }
+
+    let mut entries: Vec<AgentUsage> = agent_map
+        .into_iter()
+        .map(|(agent, agg)| AgentUsage {
+            agent,
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            reasoning: agg.reasoning,
+            message_count: agg.message_count,
+            cost: agg.cost,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        match (a.cost.is_nan(), b.cost.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    });
+
+    let total_input: i64 = entries.iter().map(|e| e.input).sum();
+    let total_output: i64 = entries.iter().map(|e| e.output).sum();
+    let total_cache_read: i64 = entries.iter().map(|e| e.cache_read).sum();
+    let total_cache_write: i64 = entries.iter().map(|e| e.cache_write).sum();
+    let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+
+    Ok(AgentReport {
+        entries,
+        total_input,
+        total_output,
+        total_cache_read,
+        total_cache_write,
+        total_messages,
+        total_cost,
+        processing_time_ms: start.elapsed().as_millis() as u32,
+    })
+}
+
 #[napi]
 pub fn generate_graph_with_pricing(options: ReportOptions) -> napi::Result<GraphResult> {
     let start = Instant::now();
@@ -942,7 +1057,6 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
     })
 }
 
-/// Convert UnifiedMessage to ParsedMessage (drops cost)
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
         source: msg.source.clone(),
@@ -956,6 +1070,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         cache_read: msg.tokens.cache_read,
         cache_write: msg.tokens.cache_write,
         reasoning: msg.tokens.reasoning,
+        agent: msg.agent.clone(),
     }
 }
 
@@ -982,7 +1097,6 @@ fn filter_parsed_messages(
     filtered
 }
 
-/// Convert ParsedMessage back to UnifiedMessage with cost
 fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
     UnifiedMessage {
         source: msg.source.clone(),
@@ -999,6 +1113,7 @@ fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
             reasoning: msg.reasoning,
         },
         cost,
+        agent: msg.agent.clone(),
     }
 }
 
@@ -1360,4 +1475,99 @@ pub fn finalize_graph(options: FinalizeGraphOptions) -> napi::Result<GraphResult
     let result = aggregator::generate_graph_result(contributions, processing_time_ms);
 
     Ok(result)
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct FinalizeAgentOptions {
+    pub home_dir: Option<String>,
+    pub local_messages: ParsedMessages,
+    pub pricing: Vec<PricingEntry>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub year: Option<String>,
+}
+
+#[napi]
+pub fn finalize_agent_report(options: FinalizeAgentOptions) -> napi::Result<AgentReport> {
+    let start = Instant::now();
+
+    let pricing_data = build_pricing_data(&options.pricing);
+
+    let all_messages: Vec<UnifiedMessage> = options
+        .local_messages
+        .messages
+        .iter()
+        .map(|msg| {
+            let cost = pricing_data.calculate_cost(
+                &msg.model_id,
+                msg.input,
+                msg.output,
+                msg.cache_read,
+                msg.cache_write,
+                msg.reasoning,
+            );
+            parsed_to_unified(msg, cost)
+        })
+        .collect();
+
+    let mut agent_map: std::collections::HashMap<String, AgentAggregator> =
+        std::collections::HashMap::new();
+
+    for msg in all_messages {
+        let agent = match &msg.agent {
+            Some(a) => a.clone(),
+            None => continue,
+        };
+
+        let entry = agent_map.entry(agent).or_default();
+        entry.input += msg.tokens.input;
+        entry.output += msg.tokens.output;
+        entry.cache_read += msg.tokens.cache_read;
+        entry.cache_write += msg.tokens.cache_write;
+        entry.reasoning += msg.tokens.reasoning;
+        entry.message_count += 1;
+        entry.cost += msg.cost;
+    }
+
+    let mut entries: Vec<AgentUsage> = agent_map
+        .into_iter()
+        .map(|(agent, agg)| AgentUsage {
+            agent,
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            reasoning: agg.reasoning,
+            message_count: agg.message_count,
+            cost: agg.cost,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        match (a.cost.is_nan(), b.cost.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    });
+
+    let total_input: i64 = entries.iter().map(|e| e.input).sum();
+    let total_output: i64 = entries.iter().map(|e| e.output).sum();
+    let total_cache_read: i64 = entries.iter().map(|e| e.cache_read).sum();
+    let total_cache_write: i64 = entries.iter().map(|e| e.cache_write).sum();
+    let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+
+    Ok(AgentReport {
+        entries,
+        total_input,
+        total_output,
+        total_cache_read,
+        total_cache_write,
+        total_messages,
+        total_cost,
+        processing_time_ms: start.elapsed().as_millis() as u32,
+    })
 }

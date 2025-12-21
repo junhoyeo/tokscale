@@ -3,6 +3,7 @@ import type {
   SourceType,
   SortType,
   ModelEntry,
+  AgentEntry,
   DailyEntry,
   ContributionDay,
   Stats,
@@ -18,7 +19,9 @@ import {
   parseLocalSourcesAsync,
   finalizeReportAsync,
   finalizeGraphAsync,
+  finalizeAgentReportAsync,
   type ParsedMessages,
+  type FinalizeAgentOptions,
 } from "../../native.js";
 import { PricingFetcher } from "../../pricing.js";
 import { syncCursorCache, loadCursorCredentials } from "../../cursor.js";
@@ -28,6 +31,7 @@ import { loadCachedData, saveCachedData, isCacheStale } from "../config/settings
 export type {
   SortType,
   ModelEntry,
+  AgentEntry,
   DailyEntry,
   ContributionDay,
   Stats,
@@ -204,6 +208,35 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
 
   const report = phase2Results[0].value;
   const graph = phase2Results[1].value;
+
+  // Fetch agent data if OpenCode is enabled (only OpenCode has agent metadata)
+  let agentEntries: AgentEntry[] | undefined;
+  const includeOpenCode = sources.includes("opencode");
+  if (includeOpenCode && localMessages) {
+    try {
+      const agentReport = await finalizeAgentReportAsync({
+        localMessages,
+        pricing: pricingFetcher.toPricingEntries(),
+        since,
+        until,
+        year,
+      });
+      agentEntries = agentReport.entries.map(e => ({
+        agent: e.agent,
+        input: e.input,
+        output: e.output,
+        cacheWrite: e.cacheWrite,
+        cacheRead: e.cacheRead,
+        reasoning: e.reasoning,
+        total: e.input + e.output + e.cacheWrite + e.cacheRead + e.reasoning,
+        cost: e.cost,
+        messageCount: e.messageCount,
+      }));
+    } catch {
+      // Agent data is optional - continue without it if fetching fails
+      agentEntries = undefined;
+    }
+  }
 
   const modelEntries: ModelEntry[] = report.entries.map(e => ({
     source: e.source,
@@ -424,6 +457,7 @@ async function loadData(enabledSources: Set<SourceType>, dateFilters?: DateFilte
 
   return {
     modelEntries,
+    agentEntries,
     dailyEntries,
     contributions,
     contributionGrid,

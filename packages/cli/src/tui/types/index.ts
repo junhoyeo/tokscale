@@ -1,6 +1,6 @@
 import type { ColorPaletteName } from "../config/themes.js";
 
-export type TabType = "overview" | "model" | "daily" | "stats";
+export type TabType = "overview" | "model" | "daily" | "stats" | "agent";
 export type SortType = "cost" | "tokens";
 export type SourceType = "opencode" | "claude" | "codex" | "cursor" | "gemini";
 
@@ -16,6 +16,18 @@ export interface ModelEntry {
   reasoning: number;
   total: number;
   cost: number;
+}
+
+export interface AgentEntry {
+  agent: string;
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+  reasoning: number;
+  total: number;
+  cost: number;
+  messageCount: number;
 }
 
 export interface DailyEntry {
@@ -86,6 +98,7 @@ export interface ChartDataPoint {
 
 export interface TUIData {
   modelEntries: ModelEntry[];
+  agentEntries?: AgentEntry[];
   dailyEntries: DailyEntry[];
   contributions: ContributionDay[];
   contributionGrid: GridCell[][];
@@ -162,5 +175,5 @@ export const SOURCE_LABELS: Record<SourceType, string> = {
   gemini: "GM",
 } as const;
 
-export const TABS: readonly TabType[] = ["overview", "model", "daily", "stats"] as const;
+export const TABS: readonly TabType[] = ["overview", "model", "daily", "stats", "agent"] as const;
 export const ALL_SOURCES: readonly SourceType[] = ["opencode", "claude", "codex", "cursor", "gemini"] as const;

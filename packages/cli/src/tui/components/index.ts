@@ -13,3 +13,4 @@ export { TokenBreakdown } from "./TokenBreakdown.js";
 export type { TokenBreakdownData } from "./TokenBreakdown.js";
 export { DateBreakdownPanel } from "./DateBreakdownPanel.js";
 export type { DateBreakdownPanelProps } from "./DateBreakdownPanel.js";
+export { AgentView } from "./AgentView.js";

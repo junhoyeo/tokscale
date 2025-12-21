@@ -30,6 +30,7 @@ export function Header(props: HeaderProps) {
         <Tab name={getTabName("Models", "Mod")} tabId="model" active={props.activeTab === "model"} onClick={props.onTabClick} />
         <Tab name={getTabName("Daily", "Day")} tabId="daily" active={props.activeTab === "daily"} onClick={props.onTabClick} />
         <Tab name={getTabName("Stats", "Sta")} tabId="stats" active={props.activeTab === "stats"} onClick={props.onTabClick} />
+        <Tab name={getTabName("Agent", "Agt")} tabId="agent" active={props.activeTab === "agent"} onClick={props.onTabClick} />
       </box>
       <Show when={!isNarrowTerminal()}>
         <box flexDirection="row" onMouseDown={() => openUrl(REPO_URL)}>

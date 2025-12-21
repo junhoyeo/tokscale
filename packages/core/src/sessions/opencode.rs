@@ -22,6 +22,7 @@ pub struct OpenCodeMessage {
     pub cost: Option<f64>,
     pub tokens: Option<OpenCodeTokens>,
     pub time: OpenCodeTime,
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,21 +61,24 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let tokens = msg.tokens?;
     let model_id = msg.model_id?;
 
-    Some(UnifiedMessage::new(
-        "opencode",
-        model_id,
-        msg.provider_id.unwrap_or_else(|| "unknown".to_string()),
-        msg.session_id.clone(),
-        msg.time.created as i64,
-        TokenBreakdown {
-            input: tokens.input,
-            output: tokens.output,
-            cache_read: tokens.cache.read,
-            cache_write: tokens.cache.write,
-            reasoning: tokens.reasoning.unwrap_or(0),
-        },
-        msg.cost.unwrap_or(0.0),
-    ))
+    Some(
+        UnifiedMessage::new(
+            "opencode",
+            model_id,
+            msg.provider_id.unwrap_or_else(|| "unknown".to_string()),
+            msg.session_id.clone(),
+            msg.time.created as i64,
+            TokenBreakdown {
+                input: tokens.input,
+                output: tokens.output,
+                cache_read: tokens.cache.read,
+                cache_write: tokens.cache.write,
+                reasoning: tokens.reasoning.unwrap_or(0),
+            },
+            msg.cost.unwrap_or(0.0),
+        )
+        .with_agent(msg.agent),
+    )
 }
 
 #[cfg(test)]
@@ -104,5 +108,31 @@ mod tests {
 
         assert_eq!(msg.model_id, Some("claude-sonnet-4".to_string()));
         assert_eq!(msg.tokens.unwrap().input, 1000);
+        assert_eq!(msg.agent, None);
+    }
+
+    #[test]
+    fn test_parse_opencode_with_agent() {
+        let json = r#"{
+            "id": "msg_123",
+            "sessionID": "ses_456",
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "agent": "Sisyphus",
+            "cost": 0.05,
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 100,
+                "cache": { "read": 200, "write": 50 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).unwrap();
+
+        assert_eq!(msg.agent, Some("Sisyphus".to_string()));
     }
 }

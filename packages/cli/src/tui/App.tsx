@@ -7,6 +7,7 @@ import { ModelView } from "./components/ModelView.js";
 import { DailyView } from "./components/DailyView.js";
 import { StatsView } from "./components/StatsView.js";
 import { OverviewView } from "./components/OverviewView.js";
+import { AgentView } from "./components/AgentView.js";
 import { LoadingSpinner } from "./components/LoadingSpinner.js";
 import { useData, type DateFilters } from "./hooks/useData.js";
 import type { ColorPaletteName } from "./config/themes.js";
@@ -165,6 +166,16 @@ export function App(props: AppProps) {
         if (model) {
           textToCopy = `${model.modelId}: ${model.totalTokens.toLocaleString()} tokens, $${model.cost.toFixed(2)}`;
         }
+      } else if (tab === "agent") {
+        const sorted = [...(d.agentEntries || [])].sort((a, b) => {
+          if (sortBy() === "cost") return sortDesc() ? b.cost - a.cost : a.cost - b.cost;
+          if (sortBy() === "tokens") return sortDesc() ? b.total - a.total : a.total - b.total;
+          return sortDesc() ? b.agent.localeCompare(a.agent) : a.agent.localeCompare(b.agent);
+        });
+        const entry = sorted[selectedIndex()];
+        if (entry) {
+          textToCopy = `${entry.agent}: ${entry.total.toLocaleString()} tokens, $${entry.cost.toFixed(2)}`;
+        }
       }
       
       if (textToCopy) {
@@ -217,7 +228,9 @@ export function App(props: AppProps) {
         const d = data();
         const maxIndex = activeTab() === "model" 
           ? (d?.modelEntries.length ?? 0)
-          : (d?.dailyEntries.length ?? 0);
+          : activeTab() === "agent"
+            ? (d?.agentEntries?.length ?? 0)
+            : (d?.dailyEntries.length ?? 0);
         if (maxIndex > 0) {
           setSelectedIndex(Math.min(selectedIndex() + 1, maxIndex - 1));
         }
@@ -233,6 +246,7 @@ export function App(props: AppProps) {
         modelCount: d.modelCount,
         models: d.modelEntries,
         daily: d.dailyEntries,
+        agents: d.agentEntries,
         stats: d.stats,
       };
       const filename = `tokscale-export-${new Date().toISOString().split("T")[0]}.json`;
@@ -307,6 +321,16 @@ export function App(props: AppProps) {
                   colorPalette={colorPalette()}
                   width={columns()}
                   selectedDate={selectedDate()}
+                />
+              </Match>
+              <Match when={activeTab() === "agent"}>
+                <AgentView
+                  data={data()!}
+                  sortBy={sortBy()}
+                  sortDesc={sortDesc()}
+                  selectedIndex={selectedIndex}
+                  height={contentHeight()}
+                  width={columns()}
                 />
               </Match>
             </Switch>

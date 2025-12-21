@@ -183,6 +183,38 @@ interface NativeParsedMessage {
   cacheWrite: number;
   reasoning: number;
   sessionId: string;
+  agent?: string;
+}
+
+interface NativeAgentUsage {
+  agent: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  messageCount: number;
+  cost: number;
+}
+
+interface NativeAgentReport {
+  entries: NativeAgentUsage[];
+  totalInput: number;
+  totalOutput: number;
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalMessages: number;
+  totalCost: number;
+  processingTimeMs: number;
+}
+
+interface NativeFinalizeAgentOptions {
+  homeDir?: string;
+  localMessages: NativeParsedMessages;
+  pricing: NativePricingEntry[];
+  since?: string;
+  until?: string;
+  year?: string;
 }
 
 interface NativeParsedMessages {
@@ -220,11 +252,12 @@ interface NativeCore {
   scanSessions(homeDir?: string, sources?: string[]): NativeScanStats;
   getModelReport(options: NativeReportOptions): NativeModelReport;
   getMonthlyReport(options: NativeReportOptions): NativeMonthlyReport;
-  // Two-phase processing (parallel optimization)
+  getAgentReport(options: NativeReportOptions): NativeAgentReport;
   parseLocalSources(options: NativeLocalParseOptions): NativeParsedMessages;
   finalizeReport(options: NativeFinalizeReportOptions): NativeModelReport;
   finalizeMonthlyReport(options: NativeFinalizeReportOptions): NativeMonthlyReport;
   finalizeGraph(options: NativeFinalizeReportOptions): NativeGraphResult;
+  finalizeAgentReport(options: NativeFinalizeAgentOptions): NativeAgentReport;
 }
 
 // =============================================================================
@@ -418,6 +451,28 @@ export interface MonthlyReport {
   processingTimeMs: number;
 }
 
+export interface AgentUsage {
+  agent: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  messageCount: number;
+  cost: number;
+}
+
+export interface AgentReport {
+  entries: AgentUsage[];
+  totalInput: number;
+  totalOutput: number;
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalMessages: number;
+  totalCost: number;
+  processingTimeMs: number;
+}
+
 // =============================================================================
 // Two-Phase Processing (Parallel Optimization)
 // =============================================================================
@@ -435,6 +490,7 @@ export interface ParsedMessages {
     cacheWrite: number;
     reasoning: number;
     sessionId: string;
+    agent?: string;
   }>;
   opencodeCount: number;
   claudeCount: number;
@@ -660,6 +716,7 @@ export async function parseLocalSourcesAsync(options: LocalParseOptions): Promis
         cacheWrite: msg.tokens.cacheWrite,
         reasoning: msg.tokens.reasoning,
         sessionId: msg.sessionId,
+        agent: msg.agent,
       })),
       opencodeCount: result.opencodeCount,
       claudeCount: result.claudeCount,
@@ -804,4 +861,70 @@ export async function generateGraphWithPricingAsync(
 
   const result = await runInSubprocess<NativeGraphResult>("generateGraphWithPricing", [nativeOptions]);
   return fromNativeResult(result);
+}
+
+export interface FinalizeAgentOptions {
+  localMessages: ParsedMessages;
+  pricing: PricingEntry[];
+  since?: string;
+  until?: string;
+  year?: string;
+}
+
+export async function finalizeAgentReportAsync(options: FinalizeAgentOptions): Promise<AgentReport> {
+  if (!isNativeAvailable()) {
+    const startTime = performance.now();
+    const messages = options.localMessages.messages;
+    
+    const agentMap = new Map<string, AgentUsage>();
+    
+    for (const msg of messages) {
+      if (!msg.agent) continue;
+      
+      const existing = agentMap.get(msg.agent);
+      if (existing) {
+        existing.input += msg.input;
+        existing.output += msg.output;
+        existing.cacheRead += msg.cacheRead;
+        existing.cacheWrite += msg.cacheWrite;
+        existing.reasoning += msg.reasoning;
+        existing.messageCount += 1;
+      } else {
+        agentMap.set(msg.agent, {
+          agent: msg.agent,
+          input: msg.input,
+          output: msg.output,
+          cacheRead: msg.cacheRead,
+          cacheWrite: msg.cacheWrite,
+          reasoning: msg.reasoning,
+          messageCount: 1,
+          cost: 0,
+        });
+      }
+    }
+    
+    const entries = Array.from(agentMap.values()).sort((a, b) => b.messageCount - a.messageCount);
+    
+    return {
+      entries,
+      totalInput: entries.reduce((sum, e) => sum + e.input, 0),
+      totalOutput: entries.reduce((sum, e) => sum + e.output, 0),
+      totalCacheRead: entries.reduce((sum, e) => sum + e.cacheRead, 0),
+      totalCacheWrite: entries.reduce((sum, e) => sum + e.cacheWrite, 0),
+      totalMessages: entries.reduce((sum, e) => sum + e.messageCount, 0),
+      totalCost: entries.reduce((sum, e) => sum + e.cost, 0),
+      processingTimeMs: Math.round(performance.now() - startTime),
+    };
+  }
+
+  const nativeOptions: NativeFinalizeAgentOptions = {
+    homeDir: undefined,
+    localMessages: options.localMessages,
+    pricing: options.pricing,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  };
+
+  return runInSubprocess<AgentReport>("finalizeAgentReport", [nativeOptions]);
 }

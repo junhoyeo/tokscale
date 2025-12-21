@@ -28,6 +28,14 @@ interface OpenCodeMessageFile {
     created: number;
     completed?: number;
   };
+  agent?: string;
+}
+
+function normalizeAgentName(agent: string): string {
+  if (agent === "Sisyphus" || agent === "OmO" || agent === "OmO-Plan") {
+    return "OmO";
+  }
+  return agent;
 }
 
 export function getOpenCodeStoragePath(): string {
@@ -69,6 +77,7 @@ export function parseOpenCodeMessages(): UnifiedMessage[] {
               reasoning: msg.tokens.reasoning || 0,
             };
 
+            const agent = msg.agent ? normalizeAgentName(msg.agent) : undefined;
             messages.push(
               createUnifiedMessage(
                 "opencode",
@@ -77,7 +86,8 @@ export function parseOpenCodeMessages(): UnifiedMessage[] {
                 sessionId,
                 msg.time.created,
                 tokens,
-                msg.cost || 0
+                msg.cost || 0,
+                agent
               )
             );
           }

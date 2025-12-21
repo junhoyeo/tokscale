@@ -320,6 +320,8 @@ const {
   finalizeReport,
   finalizeMonthlyReport,
   finalizeGraph,
+  finalizeAgentReport,
+  getAgentReport,
 } = nativeBinding
 
 module.exports.version = version
@@ -334,3 +336,5 @@ module.exports.parseLocalSources = parseLocalSources
 module.exports.finalizeReport = finalizeReport
 module.exports.finalizeMonthlyReport = finalizeMonthlyReport
 module.exports.finalizeGraph = finalizeGraph
+module.exports.finalizeAgentReport = finalizeAgentReport
+module.exports.getAgentReport = getAgentReport

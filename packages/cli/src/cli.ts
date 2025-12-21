@@ -38,8 +38,10 @@ import {
   finalizeReportAsync,
   finalizeMonthlyReportAsync,
   finalizeGraphAsync,
+  finalizeAgentReportAsync,
   type ModelReport,
   type MonthlyReport,
+  type AgentReport,
   type ParsedMessages,
 } from "./native.js";
 import { createSpinner } from "./spinner.js";
@@ -273,6 +275,25 @@ async function main() {
     });
 
   program
+    .command("agents")
+    .description("Show usage breakdown by agent (OpenCode only)")
+    .option("--json", "Output as JSON (for scripting)")
+    .option("--today", "Show only today's usage")
+    .option("--week", "Show last 7 days")
+    .option("--month", "Show current month")
+    .option("--since <date>", "Start date (YYYY-MM-DD)")
+    .option("--until <date>", "End date (YYYY-MM-DD)")
+    .option("--year <year>", "Filter to specific year")
+    .option("--benchmark", "Show processing time")
+    .action(async (options) => {
+      if (options.json) {
+        await outputJsonReport("agents", options);
+      } else {
+        await showAgentReport(options);
+      }
+    });
+
+  program
     .command("graph")
     .description("Export contribution graph data as JSON")
     .option("--output <file>", "Write to file instead of stdout")
@@ -410,7 +431,7 @@ async function main() {
   // Global flags should go to main program
   const isGlobalFlag = ['--help', '-h', '--version', '-V'].includes(firstArg);
   const hasSubcommand = args.length > 0 && !firstArg.startsWith('-');
-  const knownCommands = ['monthly', 'models', 'graph', 'login', 'logout', 'whoami', 'submit', 'cursor', 'tui', 'help'];
+  const knownCommands = ['monthly', 'models', 'agents', 'graph', 'login', 'logout', 'whoami', 'submit', 'cursor', 'tui', 'help'];
   const isKnownCommand = hasSubcommand && knownCommands.includes(firstArg);
 
   if (isKnownCommand || isGlobalFlag) {
@@ -789,7 +810,105 @@ async function showMonthlyReport(options: FilterOptions & DateFilterOptions & { 
   console.log();
 }
 
-type JsonReportType = "models" | "monthly";
+async function showAgentReport(options: DateFilterOptions & { benchmark?: boolean }) {
+  logNativeStatus();
+
+  const dateRange = getDateRangeLabel(options);
+  const title = dateRange 
+    ? `Agent Usage Report (${dateRange})`
+    : "Agent Usage Report (OpenCode only)";
+
+  console.log(pc.cyan(`\n  ${title}`));
+  if (options.benchmark) {
+    console.log(pc.gray(`  Using: Rust native module v${getNativeVersion()}`));
+  }
+  console.log();
+
+  const spinner = createSpinner({ color: "cyan" });
+  spinner.start(pc.gray("Loading OpenCode data..."));
+
+  const dateFilters = getDateFilters(options);
+
+  const { fetcher, localMessages } = await loadDataSourcesParallel(
+    ['opencode'],
+    dateFilters
+  );
+  
+  if (!localMessages) {
+    spinner.error('Failed to parse OpenCode session files');
+    process.exit(1);
+  }
+
+  spinner.update(pc.gray("Generating agent report..."));
+  const startTime = performance.now();
+
+  let report: AgentReport;
+  try {
+    report = await finalizeAgentReportAsync({
+      localMessages,
+      pricing: fetcher.toPricingEntries(),
+      since: dateFilters.since,
+      until: dateFilters.until,
+      year: dateFilters.year,
+    });
+  } catch (e) {
+    spinner.error(`Error: ${(e as Error).message}`);
+    process.exit(1);
+  }
+
+  const processingTime = performance.now() - startTime;
+  spinner.stop();
+
+  if (report.entries.length === 0) {
+    console.log(pc.yellow("  No agent usage data found.\n"));
+    console.log(pc.gray("  Agent tracking is only available for OpenCode sessions.\n"));
+    return;
+  }
+
+  const table = createUsageTable("Agent");
+
+  for (const entry of report.entries) {
+    table.push(
+      formatUsageRow(
+        entry.agent,
+        [],
+        entry.input,
+        entry.output,
+        entry.cacheWrite,
+        entry.cacheRead,
+        entry.cost
+      )
+    );
+  }
+
+  table.push(
+    formatTotalsRow(
+      report.totalInput,
+      report.totalOutput,
+      report.totalCacheWrite,
+      report.totalCacheRead,
+      report.totalCost
+    )
+  );
+
+  console.log(table.toString());
+
+  console.log(
+    pc.gray(
+      `\n  Total: ${formatNumber(report.totalMessages)} messages, ` +
+        `${formatNumber(report.totalInput + report.totalOutput + report.totalCacheRead + report.totalCacheWrite)} tokens, ` +
+        `${pc.green(formatCurrency(report.totalCost))}`
+    )
+  );
+
+  if (options.benchmark) {
+    console.log(pc.gray(`  Processing time: ${processingTime.toFixed(0)}ms (Rust) + ${report.processingTimeMs}ms (parsing)`));
+  }
+
+  console.log();
+}
+
+type JsonReportType = "models" | "monthly" | "agents";
 
 async function outputJsonReport(
   reportType: JsonReportType,
@@ -821,6 +940,16 @@ async function outputJsonReport(
       localMessages: localMessages || emptyMessages,
       pricing: fetcher.toPricingEntries(),
       includeCursor: includeCursor && cursorSync.synced,
+      since: dateFilters.since,
+      until: dateFilters.until,
+      year: dateFilters.year,
+    });
+    console.log(JSON.stringify(report, null, 2));
+  } else if (reportType === "agents") {
+    const openCodeMessages = await loadDataSourcesParallel(['opencode'], dateFilters);
+    const report = await finalizeAgentReportAsync({
+      localMessages: openCodeMessages.localMessages || emptyMessages,
+      pricing: fetcher.toPricingEntries(),
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,

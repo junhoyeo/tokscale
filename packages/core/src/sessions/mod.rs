@@ -21,6 +21,17 @@ pub struct UnifiedMessage {
     pub date: String,   // YYYY-MM-DD
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    /// Agent name (OpenCode only, None for other sources)
+    pub agent: Option<String>,
+}
+
+/// Normalize agent names (e.g., treat "OmO" and "Sisyphus" as the same)
+pub fn normalize_agent_name(agent: &str) -> String {
+    match agent {
+        // HARDCODED RULE: Treat OmO and Sisyphus as the same agent
+        "Sisyphus" | "OmO" | "OmO-Plan" => "OmO".to_string(),
+        other => other.to_string(),
+    }
 }
 
 impl UnifiedMessage {
@@ -44,7 +55,13 @@ impl UnifiedMessage {
             date,
             tokens,
             cost,
+            agent: None,
         }
+    }
+
+    pub fn with_agent(mut self, agent: Option<String>) -> Self {
+        self.agent = agent.map(|a| normalize_agent_name(&a));
+        self
     }
 }
 
@@ -112,5 +129,39 @@ mod tests {
         assert_eq!(msg.session_id, "test-session-id");
         assert_eq!(msg.date, "2024-12-01");
         assert_eq!(msg.cost, 0.05);
+        assert_eq!(msg.agent, None);
+    }
+
+    #[test]
+    fn test_agent_normalization() {
+        assert_eq!(normalize_agent_name("OmO"), "OmO");
+        assert_eq!(normalize_agent_name("Sisyphus"), "OmO");
+        assert_eq!(normalize_agent_name("OmO-Plan"), "OmO");
+        assert_eq!(normalize_agent_name("explore"), "explore");
+        assert_eq!(normalize_agent_name("build"), "build");
+    }
+
+    #[test]
+    fn test_unified_message_with_agent() {
+        let tokens = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let msg = UnifiedMessage::new(
+            "opencode",
+            "claude-3-5-sonnet",
+            "anthropic",
+            "test-session-id",
+            1733011200000,
+            tokens,
+            0.05,
+        )
+        .with_agent(Some("Sisyphus".to_string()));
+
+        assert_eq!(msg.agent, Some("OmO".to_string()));
     }
 }
