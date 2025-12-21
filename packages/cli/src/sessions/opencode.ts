@@ -32,8 +32,12 @@ interface OpenCodeMessageFile {
 }
 
 function normalizeAgentName(agent: string): string {
-  if (agent === "Sisyphus" || agent === "OmO" || agent === "OmO-Plan") {
-    return "OmO";
+  // Normalize agent names to Sisyphus variants
+  if (agent === "Sisyphus" || agent === "OmO") {
+    return "Sisyphus";
+  }
+  if (agent === "Planner-Sisyphus" || agent === "OmO-Plan") {
+    return "Planner-Sisyphus";
   }
   return agent;
 }

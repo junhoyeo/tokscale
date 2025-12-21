@@ -28,8 +28,9 @@ pub struct UnifiedMessage {
 /// Normalize agent names (e.g., treat "OmO" and "Sisyphus" as the same)
 pub fn normalize_agent_name(agent: &str) -> String {
     match agent {
-        // HARDCODED RULE: Treat OmO and Sisyphus as the same agent
-        "Sisyphus" | "OmO" | "OmO-Plan" => "OmO".to_string(),
+        // HARDCODED RULE: Normalize agent names to Sisyphus variants
+        "Sisyphus" | "OmO" => "Sisyphus".to_string(),
+        "Planner-Sisyphus" | "OmO-Plan" => "Planner-Sisyphus".to_string(),
         other => other.to_string(),
     }
 }
@@ -134,9 +135,10 @@ mod tests {
 
     #[test]
     fn test_agent_normalization() {
-        assert_eq!(normalize_agent_name("OmO"), "OmO");
-        assert_eq!(normalize_agent_name("Sisyphus"), "OmO");
-        assert_eq!(normalize_agent_name("OmO-Plan"), "OmO");
+        assert_eq!(normalize_agent_name("OmO"), "Sisyphus");
+        assert_eq!(normalize_agent_name("Sisyphus"), "Sisyphus");
+        assert_eq!(normalize_agent_name("OmO-Plan"), "Planner-Sisyphus");
+        assert_eq!(normalize_agent_name("Planner-Sisyphus"), "Planner-Sisyphus");
         assert_eq!(normalize_agent_name("explore"), "explore");
         assert_eq!(normalize_agent_name("build"), "build");
     }
