@@ -32,6 +32,7 @@ export interface WrappedOptions {
   output?: string;
   year?: string;
   sources?: SourceType[];
+  rawValue?: boolean;
 }
 
 const SCALE = 2;
@@ -525,7 +526,7 @@ function formatDate(dateStr: string): string {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-async function generateWrappedImage(data: WrappedData): Promise<Buffer> {
+async function generateWrappedImage(data: WrappedData, options: { rawValue?: boolean } = {}): Promise<Buffer> {
   await ensureFontsLoaded();
   
   const canvas = createCanvas(IMAGE_WIDTH, IMAGE_HEIGHT);
@@ -552,7 +553,10 @@ async function generateWrappedImage(data: WrappedData): Promise<Buffer> {
   
   ctx.fillStyle = COLORS.grade4;
   ctx.font = `bold ${56 * SCALE}px Figtree, sans-serif`;
-  ctx.fillText(formatTokens(data.totalTokens), PADDING, yPos);
+  const totalTokensDisplay = options.rawValue 
+    ? data.totalTokens.toLocaleString() 
+    : formatTokens(data.totalTokens);
+  ctx.fillText(totalTokensDisplay, PADDING, yPos);
   yPos += 50 * SCALE + 40 * SCALE;
 
   ctx.fillStyle = COLORS.textSecondary;
@@ -656,7 +660,7 @@ async function generateWrappedImage(data: WrappedData): Promise<Buffer> {
 
 export async function generateWrapped(options: WrappedOptions): Promise<string> {
   const data = await loadWrappedData(options);
-  const imageBuffer = await generateWrappedImage(data);
+  const imageBuffer = await generateWrappedImage(data, { rawValue: options.rawValue });
   
   const outputPath = options.output || `tokscale-${data.year}-wrapped.png`;
   const absolutePath = path.resolve(outputPath);
