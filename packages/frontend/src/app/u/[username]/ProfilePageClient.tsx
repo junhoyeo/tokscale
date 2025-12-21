@@ -161,7 +161,7 @@ export default function ProfilePageClient() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex flex-col" style={{ backgroundColor: "#141415" }}>
+      <div className="min-h-screen flex flex-col" style={{ backgroundColor: "#10121C" }}>
         <Navigation />
         <main className="flex-1 max-w-[800px] mx-auto px-4 sm:px-6 py-6 sm:py-10 w-full">
           <ProfileSkeleton />
@@ -173,7 +173,7 @@ export default function ProfilePageClient() {
 
   if (error || !data || !user || !stats) {
     return (
-      <div className="min-h-screen flex flex-col" style={{ backgroundColor: "#141415" }}>
+      <div className="min-h-screen flex flex-col" style={{ backgroundColor: "#10121C" }}>
         <Navigation />
         <main className="flex-1 max-w-[800px] mx-auto px-6 py-10 w-full">
           <div className="text-center py-20">
@@ -198,7 +198,7 @@ export default function ProfilePageClient() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ backgroundColor: "#141415" }}>
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: "#10121C" }}>
       <Navigation />
 
       <main className="flex-1 max-w-[800px] mx-auto px-4 sm:px-6 py-6 sm:py-10 w-full">

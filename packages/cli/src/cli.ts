@@ -13,6 +13,7 @@ const pkg = require("../package.json") as { version: string };
 import pc from "picocolors";
 import { login, logout, whoami } from "./auth.js";
 import { submit } from "./submit.js";
+import { generateWrapped } from "./wrapped.js";
 import { PricingFetcher } from "./pricing.js";
 import {
   loadCursorCredentials,
@@ -313,9 +314,21 @@ async function main() {
       await handleGraphCommand(options);
     });
 
-  // =========================================================================
-  // Authentication Commands
-  // =========================================================================
+  program
+    .command("wrapped")
+    .description("Generate 2025 Wrapped shareable image")
+    .option("--output <file>", "Output file path (default: tokscale-2025-wrapped.png)")
+    .option("--year <year>", "Year to generate wrapped for (default: current year)")
+    .option("--opencode", "Include only OpenCode data")
+    .option("--claude", "Include only Claude Code data")
+    .option("--codex", "Include only Codex CLI data")
+    .option("--gemini", "Include only Gemini CLI data")
+    .option("--cursor", "Include only Cursor IDE data")
+    .option("--no-spinner", "Disable loading spinner (for scripting)")
+    .option("--short", "Display total tokens in abbreviated format (e.g., 7.14B)")
+    .action(async (options) => {
+      await handleWrappedCommand(options);
+    });
 
   program
     .command("login")
@@ -431,7 +444,7 @@ async function main() {
   // Global flags should go to main program
   const isGlobalFlag = ['--help', '-h', '--version', '-V'].includes(firstArg);
   const hasSubcommand = args.length > 0 && !firstArg.startsWith('-');
-  const knownCommands = ['monthly', 'models', 'agents', 'graph', 'login', 'logout', 'whoami', 'submit', 'cursor', 'tui', 'help'];
+  const knownCommands = ['monthly', 'models', 'agents', 'graph', 'wrapped', 'login', 'logout', 'whoami', 'submit', 'cursor', 'tui', 'help'];
   const isKnownCommand = hasSubcommand && knownCommands.includes(firstArg);
 
   if (isKnownCommand || isGlobalFlag) {
@@ -1034,6 +1047,43 @@ async function handleGraphCommand(options: GraphCommandOptions) {
     }
   } else {
     console.log(jsonOutput);
+  }
+}
+
+interface WrappedCommandOptions extends FilterOptions {
+  output?: string;
+  year?: string;
+  spinner?: boolean; // --no-spinner sets this to false
+  short?: boolean;
+}
+
+async function handleWrappedCommand(options: WrappedCommandOptions) {
+  const useSpinner = options.spinner !== false;
+  const spinner = useSpinner ? createSpinner({ color: "cyan" }) : null;
+  spinner?.start(pc.gray("Generating your 2025 Wrapped..."));
+
+  try {
+    const enabledSources = getEnabledSources(options);
+    const outputPath = await generateWrapped({
+      output: options.output,
+      year: options.year || "2025",
+      sources: enabledSources,
+      short: options.short,
+    });
+
+    spinner?.stop();
+    console.log(pc.green(`\n  ✓ Your Tokscale Wrapped image is ready!`));
+    console.log(pc.white(`  ${outputPath}`));
+    console.log();
+    console.log(pc.gray("  Share it on Twitter/X with #TokscaleWrapped"));
+    console.log();
+  } catch (error) {
+    if (spinner) {
+      spinner.error(`Failed to generate wrapped: ${(error as Error).message}`);
+    } else {
+      console.error(pc.red(`Failed to generate wrapped: ${(error as Error).message}`));
+    }
+    process.exit(1);
   }
 }
 

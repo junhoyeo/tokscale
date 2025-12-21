@@ -63,7 +63,7 @@ export function BlackholeHero() {
         <div
           className="flex items-center gap-[6px] p-[8px] rounded-xl border backdrop-blur-sm"
           style={{
-            backgroundColor: "#141415",
+            backgroundColor: "#10121C",
             borderColor: "rgba(49, 56, 65, 0.4)",
           }}
         >

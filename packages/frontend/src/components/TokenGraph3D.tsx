@@ -75,7 +75,7 @@ export function TokenGraph3D({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctx.fillStyle = isDark ? "#141415" : "#FFFFFF";
+    ctx.fillStyle = isDark ? "#10121C" : "#FFFFFF";
     ctx.fillRect(0, 0, ISO_CANVAS_WIDTH, ISO_CANVAS_HEIGHT);
 
     const point = new obelisk.Point(130, 90);
@@ -167,7 +167,7 @@ export function TokenGraph3D({
       <div
         ref={containerRef}
         className="flex items-center justify-center w-full"
-        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}`, maxWidth: ISO_CANVAS_WIDTH, backgroundColor: isDark ? "#141415" : "#FFFFFF" }}
+        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}`, maxWidth: ISO_CANVAS_WIDTH, backgroundColor: isDark ? "#10121C" : "#FFFFFF" }}
       >
         <div className="animate-pulse" style={{ color: isDark ? "#696969" : "#656D76" }}>Loading 3D view...</div>
       </div>

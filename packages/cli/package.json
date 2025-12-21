@@ -27,10 +27,12 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@tokscale/core": "1.0.12",
+    "@napi-rs/canvas": "^0.1.68",
     "@opentui/core": "0.1.60",
     "@opentui/react": "^0.1.60",
     "@opentui/solid": "^0.1.60",
+    "@resvg/resvg-js": "^2.6.2",
+    "@tokscale/core": "1.0.12",
     "cli-table3": "^0.6.5",
     "clipboardy": "^5.0.2",
     "commander": "^14.0.2",

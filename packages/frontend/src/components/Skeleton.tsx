@@ -31,7 +31,7 @@ export function LeaderboardSkeleton() {
 
       <div
         className="rounded-2xl border overflow-hidden"
-        style={{ backgroundColor: "#141415", borderColor: "#262627" }}
+        style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
       >
         <div
           className="border-b px-6 py-3"
@@ -102,7 +102,7 @@ export function ProfileSkeleton() {
 
       <div
         className="rounded-2xl border p-6"
-        style={{ backgroundColor: "#141415", borderColor: "#262627" }}
+        style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
       >
         <Skeleton className="h-6 w-36 mb-4" />
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -117,7 +117,7 @@ export function ProfileSkeleton() {
 
       <div
         className="rounded-2xl border p-6"
-        style={{ backgroundColor: "#141415", borderColor: "#262627" }}
+        style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
       >
         <Skeleton className="h-6 w-24 mb-4" />
         <Skeleton className="h-40 w-full rounded-lg" />
@@ -130,7 +130,7 @@ export function StatCardSkeleton() {
   return (
     <div
       className="rounded-xl border p-4"
-      style={{ backgroundColor: "#141415", borderColor: "#262627" }}
+      style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
     >
       <Skeleton className="h-4 w-20 mb-2" />
       <Skeleton className="h-8 w-24" />

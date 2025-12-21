@@ -2,7 +2,7 @@
 
 :root {
   --color-bg-darkest: #111113;
-  --color-bg-default: #141415;
+  --color-bg-default: #10121C;
   --color-bg-elevated: #1F1F20;
   --color-bg-button: #212124;
   --color-bg-subtle: #262627;
@@ -19,9 +19,9 @@
   --color-accent-link: #169AFF;
 
   --color-graph-empty: #1F1F20;
-  --color-graph-canvas: #141415;
+  --color-graph-canvas: #10121C;
 
-  --color-canvas-default: #141415;
+  --color-canvas-default: #10121C;
   --color-canvas-subtle: #1F1F20;
   --color-canvas-inset: #111113;
   --color-fg-default: #FFFFFF;
@@ -41,7 +41,7 @@
   --color-btn-selected-bg: #111113;
   --color-badge-bg: rgba(133, 202, 255, 0.15);
   --color-badge-text: #85CAFF;
-  --background: #141415;
+  --background: #10121C;
   --foreground: #FFFFFF;
 }
 
