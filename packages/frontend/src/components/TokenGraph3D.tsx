@@ -69,8 +69,6 @@ export function TokenGraph3D({
 
     canvas.width = ISO_CANVAS_WIDTH;
     canvas.height = ISO_CANVAS_HEIGHT;
-    canvas.style.width = `${ISO_CANVAS_WIDTH}px`;
-    canvas.style.height = `${ISO_CANVAS_HEIGHT}px`;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -167,7 +165,7 @@ export function TokenGraph3D({
       <div
         ref={containerRef}
         className="flex items-center justify-center w-full"
-        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}`, maxWidth: ISO_CANVAS_WIDTH, backgroundColor: isDark ? "#10121C" : "#FFFFFF" }}
+        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}`, backgroundColor: isDark ? "#10121C" : "#FFFFFF" }}
       >
         <div className="animate-pulse" style={{ color: isDark ? "#696969" : "#656D76" }}>Loading 3D view...</div>
       </div>
@@ -175,7 +173,7 @@ export function TokenGraph3D({
   }
 
   return (
-    <div ref={containerRef} className="ic-contributions-wrapper relative w-full" style={{ maxWidth: ISO_CANVAS_WIDTH }}>
+    <div ref={containerRef} className="ic-contributions-wrapper relative w-full">
       <canvas
         ref={canvasRef}
         onMouseMove={handleMouseMove}
