@@ -209,7 +209,9 @@ export default function ProfilePageClient() {
           <div className="max-w-[800px] mx-auto px-4 sm:px-6 py-3">
             <p className="text-sm text-amber-200">
               <span className="font-semibold">Update available:</span>{" "}
-              Re-submit your data with <code className="px-1.5 py-0.5 rounded bg-amber-500/20 font-mono text-xs">bunx tokscale submit</code> to see detailed model breakdowns per day.
+              If you&apos;re <span className="font-semibold">@{data.user.username}</span>, please re-submit your data with{" "}
+              <code className="px-1.5 py-0.5 rounded bg-amber-500/20 font-mono text-xs">bunx tokscale submit</code>{" "}
+              to see detailed model breakdowns per day.
             </p>
           </div>
         </div>
