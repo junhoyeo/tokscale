@@ -75,7 +75,7 @@ button {
 }
 
 a:hover {
-  text-decoration: none;
+  text-decoration: none !important;
 }
 
 .bg-canvas { background-color: var(--color-canvas-default); }
