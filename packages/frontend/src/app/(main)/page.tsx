@@ -334,6 +334,10 @@ const CommandPrompt = styled.span`
 
 const CommandPrefix = styled.span`
   color: #FFF;
+  &::after {
+    content: " ";
+    white-space: pre;
+  }
 `;
 
 const CommandName = styled.span`
@@ -345,6 +349,10 @@ const CommandName = styled.span`
 
 const CommandArg = styled.span`
   color: #FFF;
+  &::before {
+    content: " ";
+    white-space: pre;
+  }
 `;
 
 type Period = "all" | "month" | "week";
@@ -640,15 +648,15 @@ export default function LeaderboardPage() {
           <CodeBlock>
             <CodeLine style={{ backgroundColor: "var(--color-bg-subtle)" }}>
               <CommandPrompt>$</CommandPrompt>
-              <CommandPrefix>bunx </CommandPrefix>
+              <CommandPrefix>bunx</CommandPrefix>
               <CommandName>tokscale</CommandName>
-              <CommandArg> login</CommandArg>
+              <CommandArg>login</CommandArg>
             </CodeLine>
             <CodeLine style={{ backgroundColor: "var(--color-bg-subtle)" }}>
               <CommandPrompt>$</CommandPrompt>
-              <CommandPrefix>bunx </CommandPrefix>
+              <CommandPrefix>bunx</CommandPrefix>
               <CommandName>tokscale</CommandName>
-              <CommandArg> submit</CommandArg>
+              <CommandArg>submit</CommandArg>
             </CodeLine>
           </CodeBlock>
         </CTASection>
