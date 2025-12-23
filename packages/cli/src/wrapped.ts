@@ -93,6 +93,30 @@ const CLIENT_LOGO_URLS: Record<string, string> = {
   "Cursor IDE": `${ASSETS_BASE_URL}/client-cursor.jpg`,
 };
 
+const PROVIDER_LOGO_URLS: Record<string, string> = {
+  "anthropic": `${ASSETS_BASE_URL}/client-claude.jpg`,
+  "openai": `${ASSETS_BASE_URL}/client-openai.jpg`,
+  "google": `${ASSETS_BASE_URL}/client-gemini.png`,
+  "xai": `${ASSETS_BASE_URL}/grok.jpg`,
+};
+
+function getProviderFromModel(modelId: string): string | null {
+  const lower = modelId.toLowerCase();
+  if (lower.includes("claude") || lower.includes("opus") || lower.includes("sonnet") || lower.includes("haiku")) {
+    return "anthropic";
+  }
+  if (lower.includes("gpt") || lower.includes("o1") || lower.includes("o3") || lower.includes("codex")) {
+    return "openai";
+  }
+  if (lower.includes("gemini")) {
+    return "google";
+  }
+  if (lower.includes("grok")) {
+    return "xai";
+  }
+  return null;
+}
+
 const TOKSCALE_LOGO_SVG_URL = "https://tokscale.ai/tokscale-logo.svg";
 const TOKSCALE_LOGO_PNG_SIZE = 400;
 
@@ -630,6 +654,9 @@ async function generateWrappedImage(data: WrappedData, options: { short?: boolea
   ctx.fillText(totalTokensDisplay, PADDING, yPos);
   yPos += 50 * SCALE + 40 * SCALE;
 
+  const logoSize = 32 * SCALE;
+  const logoRadius = 6 * SCALE;
+
   ctx.fillStyle = COLORS.textSecondary;
   ctx.font = `${20 * SCALE}px Figtree, sans-serif`;
   ctx.fillText("Top Models", PADDING, yPos);
@@ -640,14 +667,41 @@ async function generateWrappedImage(data: WrappedData, options: { short?: boolea
     ctx.fillStyle = COLORS.textPrimary;
     ctx.font = `bold ${32 * SCALE}px Figtree, sans-serif`;
     ctx.fillText(`${i + 1}`, PADDING, yPos);
-    
+
+    const provider = getProviderFromModel(model.name);
+    const providerLogoUrl = provider ? PROVIDER_LOGO_URLS[provider] : null;
+    let textX = PADDING + 40 * SCALE;
+
+    if (providerLogoUrl) {
+      try {
+        const filename = `provider-${provider}@2x.jpg`;
+        const logoPath = await fetchAndCacheImage(providerLogoUrl, filename);
+        const logo = await loadImage(logoPath);
+        const logoY = yPos - logoSize + 6 * SCALE;
+        const logoX = PADDING + 40 * SCALE;
+
+        ctx.save();
+        drawRoundedRect(ctx, logoX, logoY, logoSize, logoSize, logoRadius);
+        ctx.clip();
+        ctx.drawImage(logo, logoX, logoY, logoSize, logoSize);
+        ctx.restore();
+
+        drawRoundedRect(ctx, logoX, logoY, logoSize, logoSize, logoRadius);
+        ctx.strokeStyle = "#141A25";
+        ctx.lineWidth = 1 * SCALE;
+        ctx.stroke();
+
+        textX = logoX + logoSize + 12 * SCALE;
+      } catch {
+      }
+    }
+
+    ctx.fillStyle = COLORS.textPrimary;
     ctx.font = `${32 * SCALE}px Figtree, sans-serif`;
-    ctx.fillText(formatModelName(model.name), PADDING + 40 * SCALE, yPos);
+    ctx.fillText(formatModelName(model.name), textX, yPos);
     yPos += 50 * SCALE;
   }
   yPos += 40 * SCALE;
-
-  const logoSize = 32 * SCALE;
 
   if (options.includeAgents) {
     ctx.fillStyle = COLORS.textSecondary;
