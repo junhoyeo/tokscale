@@ -319,9 +319,33 @@ const CodeBlock = styled.div`
 const CodeLine = styled.div`
   padding: 12px;
   border-radius: 8px;
+  display: flex;
+  align-items: center;
+  font-family: "Inconsolata", monospace;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.8px;
 `;
 
-const Prompt = styled.span``;
+const CommandPrompt = styled.span`
+  color: #696969;
+  margin-right: 8px;
+`;
+
+const CommandPrefix = styled.span`
+  color: #FFF;
+`;
+
+const CommandName = styled.span`
+  background: linear-gradient(90deg, #0CF 0%, #0073FF 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+`;
+
+const CommandArg = styled.span`
+  color: #FFF;
+`;
 
 type Period = "all" | "month" | "week";
 
@@ -614,11 +638,17 @@ export default function LeaderboardPage() {
             Install Tokscale CLI and submit your usage data:
           </CTADescription>
           <CodeBlock>
-            <CodeLine style={{ backgroundColor: "var(--color-bg-elevated)", color: "var(--color-fg-muted)" }}>
-              <Prompt style={{ color: "var(--color-primary)" }}>$</Prompt> bunx tokscale login
+            <CodeLine style={{ backgroundColor: "var(--color-bg-subtle)" }}>
+              <CommandPrompt>$</CommandPrompt>
+              <CommandPrefix>bunx </CommandPrefix>
+              <CommandName>tokscale</CommandName>
+              <CommandArg> login</CommandArg>
             </CodeLine>
-            <CodeLine style={{ backgroundColor: "var(--color-bg-elevated)", color: "var(--color-fg-muted)" }}>
-              <Prompt style={{ color: "var(--color-primary)" }}>$</Prompt> bunx tokscale submit
+            <CodeLine style={{ backgroundColor: "var(--color-bg-subtle)" }}>
+              <CommandPrompt>$</CommandPrompt>
+              <CommandPrefix>bunx </CommandPrefix>
+              <CommandName>tokscale</CommandName>
+              <CommandArg> submit</CommandArg>
             </CodeLine>
           </CodeBlock>
         </CTASection>

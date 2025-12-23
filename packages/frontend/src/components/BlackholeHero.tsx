@@ -63,21 +63,6 @@ export function BlackholeHero() {
           </CommandDisplay>
         </CommandCard>
 
-        <CommandList>
-          <CommandLine>
-            <CommandPrompt>$</CommandPrompt>
-            <CommandPrefix>bunx&nbsp;</CommandPrefix>
-            <CommandName>tokscale</CommandName>
-            <CommandArg>&nbsp;login</CommandArg>
-          </CommandLine>
-          <CommandLine>
-            <CommandPrompt>$</CommandPrompt>
-            <CommandPrefix>bunx&nbsp;</CommandPrefix>
-            <CommandName>tokscale</CommandName>
-            <CommandArg>&nbsp;submit</CommandArg>
-          </CommandLine>
-        </CommandList>
-
         <FooterContainer>
           <StarContainer>
             <StyledStarIcon 
@@ -141,7 +126,7 @@ const ContentWrapper = styled.div`
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: 53px;
+  padding-top: 90px;
   gap: 39px;
 `;
 
@@ -257,32 +242,6 @@ const GradientSeparator = styled.div`
   width: 25px;
   height: 36px;
   background: linear-gradient(270deg, rgba(26, 27, 28, 0) 0%, rgba(1, 127, 255, 0.14) 50%, rgba(26, 27, 28, 0) 100%);
-`;
-
-const CommandList = styled.div`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-`;
-
-const CommandLine = styled.div`
-  display: flex;
-  align-items: center;
-  font-family: "Inconsolata", monospace;
-  font-size: 16px;
-  font-weight: 500;
-  line-height: 94%;
-  letter-spacing: -0.8px;
-`;
-
-const CommandPrompt = styled.span`
-  color: #696969;
-  margin-right: 8px;
-`;
-
-const CommandArg = styled.span`
-  color: #FFF;
 `;
 
 const FooterContainer = styled.div`
