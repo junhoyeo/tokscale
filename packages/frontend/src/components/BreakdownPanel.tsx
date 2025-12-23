@@ -357,8 +357,8 @@ function ModelRow({ model, isLast, palette }: ModelRowProps) {
   return (
     <ModelRowContainer>
       <TreeLineContainer style={{ color: "var(--color-fg-muted)" }}>
-        <TreeLineBranch style={{ borderColor: "var(--color-border-default)" }} />
-        {!isLast && <TreeLineVertical style={{ borderColor: "var(--color-border-default)" }} />}
+        <TreeLineBranch style={{ opacity: 0.2, borderColor: "var(--color-fg-muted)" }} />
+        {!isLast && <TreeLineVertical style={{ opacity: 0.2, borderColor: "var(--color-fg-muted)" }} />}
       </TreeLineContainer>
 
       <ModelContent>

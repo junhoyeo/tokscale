@@ -234,7 +234,7 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
 
   return (
     <HeaderContainer
-      style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+      style={{ backgroundColor: "#141A21", borderColor: "var(--color-border-default)" }}
     >
       <HeaderContent>
         <UserInfoCard
@@ -606,8 +606,6 @@ export function TokenBreakdown({ stats }: TokenBreakdownProps) {
 
 export interface ProfileStatsProps {
   stats: ProfileStatsData;
-  currentStreak?: number;
-  longestStreak?: number;
   favoriteModel?: string;
 }
 
@@ -623,7 +621,7 @@ const StatsGrid = styled.div`
   }
   
   @media (min-width: 768px) {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 `;
 
@@ -650,39 +648,10 @@ const StatsValue = styled.p`
   }
 `;
 
-const FavoriteModelContainer = styled.div`
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top-width: 1px;
-  border-top-style: solid;
-`;
-
-const FavoriteModelInner = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-`;
-
-const FavoriteModelLabel = styled.span`
-  font-size: 0.875rem;
-`;
-
-const FavoriteModelBadge = styled.span`
-  padding-left: 0.5rem;
-  padding-right: 0.5rem;
-  padding-top: 0.25rem;
-  padding-bottom: 0.25rem;
-  border-radius: 0.375rem;
-  font-size: 0.875rem;
-  font-weight: 500;
-`;
-
-export function ProfileStats({ stats, currentStreak = 0, longestStreak = 0, favoriteModel }: ProfileStatsProps) {
+export function ProfileStats({ stats, favoriteModel }: ProfileStatsProps) {
   const statItems = [
-    { label: "Active Days", value: stats.activeDays.toString(), color: "var(--color-primary)" },
-    { label: "Current Streak", value: `${currentStreak} days`, color: "var(--color-primary)" },
-    { label: "Longest Streak", value: `${longestStreak} days`, color: "var(--color-primary)" },
     { label: "Submits", value: (stats.submissionCount ?? 0).toString(), color: "var(--color-primary)" },
+    { label: "Favorite Model", value: favoriteModel ?? "N/A", color: "var(--color-primary)" },
   ];
 
   return (
@@ -701,19 +670,6 @@ export function ProfileStats({ stats, currentStreak = 0, longestStreak = 0, favo
           </StatsItem>
         ))}
       </StatsGrid>
-
-      {favoriteModel && (
-        <FavoriteModelContainer style={{ borderColor: "var(--color-border-default)" }}>
-          <FavoriteModelInner>
-            <FavoriteModelLabel style={{ color: "var(--color-fg-muted)" }}>Favorite Model:</FavoriteModelLabel>
-            <FavoriteModelBadge
-              style={{ backgroundColor: "var(--color-bg-subtle)", color: "var(--color-fg-default)" }}
-            >
-              {favoriteModel}
-            </FavoriteModelBadge>
-          </FavoriteModelInner>
-        </FavoriteModelContainer>
-      )}
     </StatsContainer>
   );
 }

@@ -18,7 +18,6 @@ import {
   type ModelUsage,
 } from "@/components/profile";
 import type { TokenContributionData, DailyContribution, SourceType } from "@/lib/types";
-import { calculateCurrentStreak, calculateLongestStreak } from "@/lib/utils";
 
 interface ProfileData {
   user: {
@@ -173,9 +172,9 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
                 <ProfileActivity data={graphData} />
                 <ProfileStats
                   stats={stats}
-                  currentStreak={calculateCurrentStreak(graphData.contributions)}
-                  longestStreak={calculateLongestStreak(graphData.contributions)}
-                  favoriteModel={data.models.filter(m => m !== "<synthetic>")[0]}
+                  favoriteModel={
+                    data.modelUsage?.reduce((max, current) => current.cost > max.cost ? current : max, data.modelUsage[0])?.model
+                  }
                 />
               </ActivitySection>
             ) : <ProfileEmptyActivity />

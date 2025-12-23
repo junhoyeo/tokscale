@@ -35,7 +35,7 @@ const Title = styled.h1`
 
 const Description = styled.p`
   margin-bottom: 24px;
-  color: #696969;
+  color: #4B6486;
 `;
 
 const BackButton = styled(Link)`

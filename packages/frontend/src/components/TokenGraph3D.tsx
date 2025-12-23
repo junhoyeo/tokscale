@@ -209,7 +209,7 @@ export function TokenGraph3D({
         const intensity = day?.intensity ?? 0;
         const colorHex = getGradeColor(palette, intensity);
         const resolvedColor = colorHex.startsWith("var(") 
-          ? (isDark ? "#1F1F20" : "#EBEDF0") 
+          ? (isDark ? "#1A212A" : "#EBEDF0") 
           : colorHex;
         const colorNum = hexToNumber(resolvedColor);
 
@@ -274,7 +274,7 @@ export function TokenGraph3D({
         ref={containerRef}
         style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}`, backgroundColor: isDark ? "#10121C" : "#FFFFFF" }}
       >
-        <LoadingText style={{ color: isDark ? "#696969" : "#656D76" }}>Loading 3D view...</LoadingText>
+        <LoadingText style={{ color: isDark ? "#4B6486" : "#656D76" }}>Loading 3D view...</LoadingText>
       </LoadingContainer>
     );
   }
@@ -292,27 +292,27 @@ export function TokenGraph3D({
       <TopRightStats>
         <StatsTitle style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Token Usage</StatsTitle>
         <StatsBox
-          style={{ borderColor: isDark ? "#262627" : "#D0D7DE", backgroundColor: isDark ? "#1F1F20" : "#FFFFFF" }}
+          style={{ borderColor: isDark ? "#1E2733" : "#D0D7DE", backgroundColor: isDark ? "#1A212A" : "#FFFFFF" }}
         >
           <StatItem>
             <StatValue style={{ color: palette.grade1 }}>{formatCurrency(totalCost)}</StatValue>
             <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Total</StatLabel>
-            <StatSubtext style={{ color: isDark ? "#696969" : "#656D76" }}>{dateRange.start} → {dateRange.end}</StatSubtext>
+            <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{dateRange.start} → {dateRange.end}</StatSubtext>
           </StatItem>
           <HiddenStatItem>
             <StatValue style={{ color: palette.grade1 }}>{formatTokenCount(totalTokens)}</StatValue>
             <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Tokens</StatLabel>
-            <StatSubtext style={{ color: isDark ? "#696969" : "#656D76" }}>{activeDays} active days</StatSubtext>
+            <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{activeDays} active days</StatSubtext>
           </HiddenStatItem>
           {bestDay && (
             <StatItem>
               <StatValue style={{ color: palette.grade1 }}>{formatCurrency(bestDay.totals.cost)}</StatValue>
               <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Best day</StatLabel>
-              <StatSubtext style={{ color: isDark ? "#696969" : "#656D76" }}>{formatDate(bestDay.date).split(",")[0]}</StatSubtext>
+              <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{formatDate(bestDay.date).split(",")[0]}</StatSubtext>
             </StatItem>
           )}
         </StatsBox>
-        <StatsFooter style={{ color: isDark ? "#696969" : "#656D76" }}>
+        <StatsFooter style={{ color: isDark ? "#4B6486" : "#656D76" }}>
           Average: <SpanBold style={{ color: palette.grade1 }}>{formatCurrency(activeDays > 0 ? totalCost / activeDays : 0)}</SpanBold> / day
         </StatsFooter>
       </TopRightStats>
@@ -320,7 +320,7 @@ export function TokenGraph3D({
       <BottomLeftStats>
         <StatsTitle style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Streaks</StatsTitle>
         <StatsBox
-          style={{ borderColor: isDark ? "#262627" : "#D0D7DE", backgroundColor: isDark ? "#1F1F20" : "#FFFFFF" }}
+          style={{ borderColor: isDark ? "#1E2733" : "#D0D7DE", backgroundColor: isDark ? "#1A212A" : "#FFFFFF" }}
         >
           <StatItem>
             <StatValue style={{ color: palette.grade1 }}>{longestStreak} <SpanBase>days</SpanBase></StatValue>

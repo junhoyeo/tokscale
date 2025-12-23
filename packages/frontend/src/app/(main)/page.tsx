@@ -57,27 +57,15 @@ const StatCard = styled.div`
   border-radius: 12px;
   border: 1px solid;
   padding: 12px;
-  
-  @media (min-width: 640px) {
-    padding: 16px;
-  }
 `;
 
 const StatLabel = styled.p`
   font-size: 12px;
-  
-  @media (min-width: 640px) {
-    font-size: 14px;
-  }
 `;
 
 const StatValue = styled.p`
-  font-size: 20px;
+  font-size: 16px;
   font-weight: bold;
-  
-  @media (min-width: 640px) {
-    font-size: 24px;
-  }
 `;
 
 const TabSection = styled.div`
@@ -328,7 +316,7 @@ const CodeLine = styled.div`
 `;
 
 const CommandPrompt = styled.span`
-  color: #696969;
+  color: #4B6486;
   margin-right: 8px;
 `;
 
@@ -418,7 +406,7 @@ export default function LeaderboardPage() {
             Leaderboard
           </Title>
           <Description style={{ color: "var(--color-fg-muted)" }}>
-            See who&apos;s using the most AI tokens
+            See who&apos;s using the most tokens
           </Description>
 
           <StatsGrid>

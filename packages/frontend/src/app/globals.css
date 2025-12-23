@@ -1,13 +1,13 @@
 :root {
   --color-bg-darkest: #111113;
   --color-bg-default: #10121C;
-  --color-bg-elevated: #1F1F20;
-  --color-bg-button: #212124;
-  --color-bg-subtle: #262627;
-  --color-bg-active: #2C2C2F;
+  --color-bg-elevated: #1A212A;
+  --color-bg-button: #202932;
+  --color-bg-subtle: #1E2733;
+  --color-bg-active: #0073FF;
 
   --color-text-primary: #FFFFFF;
-  --color-text-muted: #696969;
+  --color-text-muted: #4B6486;
 
   --color-primary: #53d1f3;
   --color-primary-hover: #3bc4e8;
@@ -16,24 +16,24 @@
   --color-accent-blue: #85CAFF;
   --color-accent-link: #169AFF;
 
-  --color-graph-empty: #1F1F20;
+  --color-graph-empty: #1A212A;
   --color-graph-canvas: #10121C;
 
   --color-canvas-default: #10121C;
-  --color-canvas-subtle: #1F1F20;
+  --color-canvas-subtle: #1A212A;
   --color-canvas-inset: #111113;
   --color-fg-default: #FFFFFF;
-  --color-fg-muted: #696969;
-  --color-fg-subtle: #696969;
-  --color-border-default: #262627;
-  --color-border-muted: #262627;
+  --color-fg-muted: #7691b7;
+  --color-fg-subtle: #4B6486;
+  --color-border-default: #1E2733;
+  --color-border-muted: #1E2733;
   --color-border-subtle: rgba(255, 255, 255, 0.1);
   --color-accent-fg: #85CAFF;
   --color-accent-emphasis: #169AFF;
-  --color-card-bg: #1F1F20;
-  --color-card-border: #262627;
-  --color-btn-bg: #212124;
-  --color-btn-border: #262627;
+  --color-card-bg: #1A212A;
+  --color-card-border: #1E2733;
+  --color-btn-bg: #202932;
+  --color-btn-border: #1E2733;
   --color-btn-hover-bg: #2C2C2F;
   --color-btn-active-bg: #2C2C2F;
   --color-btn-selected-bg: #111113;

@@ -106,7 +106,7 @@ export function LeaderboardSkeleton() {
       </StatsGrid>
 
       <TableContainer
-        style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
+        style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
       >
         <TableHeader
           style={{ backgroundColor: "var(--color-bg-elevated)", borderColor: "var(--color-border-default)" }}
@@ -218,7 +218,7 @@ export function ProfileSkeleton() {
       </ProfileStatsGrid>
 
       <ContentCard
-        style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
+        style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
       >
         <Skeleton $h="1.5rem" $w="9rem" $mb="1rem" />
         <ProfileStatsGrid>
@@ -232,7 +232,7 @@ export function ProfileSkeleton() {
       </ContentCard>
 
       <ContentCard
-        style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
+        style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
       >
         <Skeleton $h="1.5rem" $w="6rem" $mb="1rem" />
         <Skeleton $h="10rem" $w="100%" $rounded="0.5rem" />
@@ -244,7 +244,7 @@ export function ProfileSkeleton() {
 export function StatCardSkeleton() {
   return (
     <StatCard
-      style={{ backgroundColor: "#10121C", borderColor: "#262627" }}
+      style={{ backgroundColor: "#10121C", borderColor: "#1E2733" }}
     >
       <Skeleton $h="1rem" $w="5rem" $mb="0.5rem" />
       <Skeleton $h="2rem" $w="6rem" />
@@ -260,7 +260,7 @@ const SimpleTableRow = styled.div`
 export function TableRowSkeleton() {
   return (
     <SimpleTableRow
-      style={{ borderColor: "#262627" }}
+      style={{ borderColor: "#1E2733" }}
     >
       <RowContent>
         <Skeleton $h="1.5rem" $w="2rem" />

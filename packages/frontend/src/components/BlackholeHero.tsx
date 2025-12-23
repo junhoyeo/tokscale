@@ -275,7 +275,7 @@ const GitHubLink = styled(Link)`
   font-size: 16px;
   font-weight: 600;
   transition: color 150ms;
-  color: #696969;
+  color: #4B6486;
   font-family: var(--font-figtree), "Figtree", sans-serif;
   text-decoration: none;
 
