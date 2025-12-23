@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
