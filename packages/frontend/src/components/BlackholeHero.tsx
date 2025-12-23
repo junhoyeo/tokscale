@@ -102,9 +102,9 @@ const HeroContainer = styled.div`
   height: 470px;
   z-index: 0;
   border-radius: 0px 0px 20px 20px;
-  border-bottom: 1px solid rgba(105, 105, 105, 0.4);
-  border-left: 1px solid rgba(105, 105, 105, 0.4);
-  border-right: 1px solid rgba(105, 105, 105, 0.4);
+  border-bottom: 1px solid #1E2733;
+  border-left: 1px solid #1E2733;
+  border-right: 1px solid #1E2733;
 `;
 
 const BackgroundWrapper = styled.div`
@@ -165,7 +165,7 @@ const CommandCard = styled.div`
   border-style: solid;
   backdrop-filter: blur(4px);
   background-color: #10121C;
-  border-color: rgba(49, 56, 65, 0.4);
+  border-color: #1E2733;
 `;
 
 const CopyButton = styled.button`
@@ -204,7 +204,7 @@ const CommandDisplay = styled.div`
   position: relative;
   overflow: hidden;
   height: 36px;
-  background-color: #1A1B1C;
+  background-color: #141A21;
   border-radius: 0.5rem;
   flex-shrink: 0;
   padding-left: 0.75rem;

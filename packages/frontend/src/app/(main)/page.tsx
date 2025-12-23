@@ -158,16 +158,14 @@ const TableRow = styled.tr`
 const TableCell = styled.td`
   padding-left: 12px;
   padding-right: 12px;
-  padding-top: 12px;
-  padding-bottom: 12px;
+  padding-top: 10px;
+  padding-bottom: 10px;
   white-space: nowrap;
   vertical-align: middle;
   
   @media (min-width: 640px) {
     padding-left: 24px;
     padding-right: 24px;
-    padding-top: 16px;
-    padding-bottom: 16px;
   }
   
   &.text-right {
@@ -635,13 +633,13 @@ export default function LeaderboardPage() {
             Install Tokscale CLI and submit your usage data:
           </CTADescription>
           <CodeBlock>
-            <CodeLine style={{ backgroundColor: "var(--color-bg-subtle)" }}>
+            <CodeLine style={{ backgroundColor: "rgba(20, 26, 33, 0.4)" }}>
               <CommandPrompt>$</CommandPrompt>
               <CommandPrefix>bunx</CommandPrefix>
               <CommandName>tokscale</CommandName>
               <CommandArg>login</CommandArg>
             </CodeLine>
-            <CodeLine style={{ backgroundColor: "var(--color-bg-subtle)" }}>
+            <CodeLine style={{ backgroundColor: "rgba(20, 26, 33, 0.4)" }}>
               <CommandPrompt>$</CommandPrompt>
               <CommandPrefix>bunx</CommandPrefix>
               <CommandName>tokscale</CommandName>
