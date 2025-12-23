@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { revalidateTag } from "next/cache";
 import { db, apiTokens, users, submissions, dailyBreakdown } from "@/lib/db";
 import { eq, sql } from "drizzle-orm";
 import {
@@ -343,9 +344,13 @@ export async function POST(request: Request) {
       };
     });
 
-    // ========================================
-    // STEP 4: Return success response
-    // ========================================
+    try {
+      revalidateTag("leaderboard", "max");
+      revalidateTag(`user:${tokenRecord.username}`, "max");
+    } catch (e) {
+      console.error("Cache invalidation failed:", e);
+    }
+
     return NextResponse.json({
       success: true,
       submissionId: result.submissionId,
