@@ -375,16 +375,24 @@ export default function LeaderboardClient({ initialData }: LeaderboardClientProp
       return;
     }
 
+    const abortController = new AbortController();
+
     setIsLoading(true);
-    fetch(`/api/leaderboard?period=${period}&page=${page}&limit=50`)
+    fetch(`/api/leaderboard?period=${period}&page=${page}&limit=50`, {
+      signal: abortController.signal,
+    })
       .then((res) => res.json())
       .then((result) => {
         setData(result);
         setIsLoading(false);
       })
-      .catch(() => {
-        setIsLoading(false);
+      .catch((error) => {
+        if (error.name !== "AbortError") {
+          setIsLoading(false);
+        }
       });
+
+    return () => abortController.abort();
   }, [period, page]);
 
   return (
