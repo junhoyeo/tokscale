@@ -44,7 +44,7 @@
 }
 
 * {
-  font-family: var(--font-figtree), system-ui, -apple-system, sans-serif;
+  font-family: var(--font-figtree), system-ui, -apple-system, sans-serif !important;
 }
 
 body {
@@ -58,7 +58,7 @@ body {
 
 code, pre, .font-mono {
   font-family: var(--font-mono), ui-monospace, SFMono-Regular, "SF Mono", 
-    Menlo, Consolas, "Liberation Mono", monospace;
+    Menlo, Consolas, "Liberation Mono", monospace !important;
 }
 
 button {
