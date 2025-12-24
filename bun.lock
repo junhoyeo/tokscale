@@ -17,7 +17,7 @@
     },
     "packages/cli": {
       "name": "@tokscale/cli",
-      "version": "1.0.13",
+      "version": "1.0.14",
       "dependencies": {
         "@napi-rs/canvas": "^0.1.68",
         "@opentui/core": "0.1.60",
@@ -43,7 +43,7 @@
     },
     "packages/core": {
       "name": "@tokscale/core",
-      "version": "1.0.13",
+      "version": "1.0.14",
       "devDependencies": {
         "@napi-rs/cli": "^3.4.1",
         "ava": "^6.1.0",
@@ -91,7 +91,7 @@
     },
     "packages/tokscale": {
       "name": "tokscale",
-      "version": "1.0.13",
+      "version": "1.0.14",
       "bin": {
         "tokscale": "./bin.js",
       },
