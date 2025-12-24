@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { JetBrains_Mono, Figtree } from "next/font/google";
 import NextTopLoader from "nextjs-toploader";
 import { ToastContainer } from "react-toastify";
+import { Analytics } from "@vercel/analytics/next";
 import { Providers } from "@/lib/providers";
 import "./globals.css";
 import "react-toastify/dist/ReactToastify.css";
@@ -54,6 +55,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           {children}
         </Providers>
         <ToastContainer position="top-right" />
+        <Analytics />
       </body>
     </html>
   );

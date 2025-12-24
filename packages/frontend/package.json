@@ -17,6 +17,7 @@
     "@primer/octicons-react": "^19.21.1",
     "@primer/primitives": "^11.3.1",
     "@primer/react": "^38.3.0",
+    "@vercel/analytics": "^1.6.1",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.38.3",
     "framer-motion": "^12.23.26",
