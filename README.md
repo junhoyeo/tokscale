@@ -55,12 +55,6 @@
   - [Social](#social)
   - [Cursor IDE Commands](#cursor-ide-commands)
   - [Environment Variables](#environment-variables)
-- [Architecture](#architecture)
-  - [Hybrid TypeScript + Rust Architecture](#hybrid-typescript--rust-architecture)
-  - [Key Technologies](#key-technologies)
-- [Performance](#performance)
-  - [Memory Optimization](#memory-optimization)
-  - [Running Benchmarks](#running-benchmarks)
 - [Frontend Visualization](#frontend-visualization)
   - [Features](#features-1)
   - [Running the Frontend](#running-the-frontend)
@@ -335,123 +329,6 @@ TOKSCALE_MAX_OUTPUT_BYTES=104857600 tokscale --json > report.json
 
 > **Note**: These limits are safety measures to prevent hangs and memory issues. Most users won't need to change them.
 
-## Architecture
-
-```
-tokscale/
-├── packages/
-│   ├── cli/src/            # TypeScript CLI
-│   │   ├── cli.ts          # Commander.js entry point
-│   │   ├── tui/            # OpenTUI interactive interface
-│   │   │   ├── App.tsx     # Main TUI app (Solid.js)
-│   │   │   ├── components/ # TUI components
-│   │   │   ├── hooks/      # Data fetching & state
-│   │   │   ├── config/     # Themes & settings
-│   │   │   └── utils/      # Formatting utilities
-│   │   ├── sessions/       # Platform session parsers
-│   │   │   ├── claudecode.ts  # Claude Code parser
-│   │   │   ├── codex.ts       # Codex CLI parser
-│   │   │   ├── gemini.ts      # Gemini CLI parser
-│   │   │   └── opencode.ts    # OpenCode parser
-│   │   ├── cursor.ts       # Cursor IDE integration
-│   │   ├── graph.ts        # Graph data generation
-│   │   ├── pricing.ts      # LiteLLM pricing fetcher
-│   │   └── native.ts       # Native module loader
-│   │
-│   ├── core/               # Rust native module (napi-rs)
-│   │   ├── src/
-│   │   │   ├── lib.rs      # NAPI exports
-│   │   │   ├── scanner.rs  # Parallel file discovery
-│   │   │   ├── parser.rs   # SIMD JSON parsing
-│   │   │   ├── aggregator.rs # Parallel aggregation
-│   │   │   ├── pricing.rs  # Cost calculation
-│   │   │   └── sessions/   # Platform-specific parsers
-│   │   ├── Cargo.toml
-│   │   └── package.json
-│   │
-│   ├── frontend/           # Next.js visualization & social platform
-│   │   └── src/
-│   │       ├── app/        # Next.js app router
-│   │       └── components/ # React components
-│   │
-│   └── benchmarks/         # Performance benchmarks
-│       ├── runner.ts       # Benchmark harness
-│       └── generate.ts     # Synthetic data generator
-```
-
-### Hybrid TypeScript + Rust Architecture
-
-Tokscale uses a hybrid architecture for optimal performance:
-
-1. **TypeScript Layer**: CLI interface, pricing fetch (with disk cache), output formatting
-2. **Rust Native Core**: ALL parsing, cost calculation, and aggregation
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     TypeScript (CLI)                        │
-│  • Fetch pricing from LiteLLM (cached to disk, 1hr TTL)     │
-│  • Pass pricing data to Rust                                │
-│  • Display formatted results                                │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ pricing entries
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Rust Native Core                         │
-│  • Parallel file scanning (rayon)                           │
-│  • SIMD JSON parsing (simd-json)                            │
-│  • Cost calculation with pricing data                       │
-│  • Parallel aggregation by model/month/day                  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-All heavy computation is done in Rust when the native module is available. When the native module is not installed, the CLI automatically falls back to TypeScript implementations for full compatibility (with slower performance).
-
-### Key Technologies
-
-| Layer | Technology | Purpose |
-|-------|------------|---------|
-| CLI | [Commander.js](https://github.com/tj/commander.js) | Command-line parsing |
-| TUI | [OpenTUI](https://github.com/sst/opentui) + [Solid.js](https://www.solidjs.com/) | Interactive terminal UI (zero-flicker rendering) |
-| Runtime | [Bun](https://bun.sh/) | Fast JavaScript runtime (required) |
-| Tables | [cli-table3](https://github.com/cli-table/cli-table3) | Terminal table rendering (legacy CLI) |
-| Colors | [picocolors](https://github.com/alexeyraspopov/picocolors) | Terminal colors |
-| Native | [napi-rs](https://napi.rs/) | Node.js bindings for Rust |
-| Parallelism | [Rayon](https://github.com/rayon-rs/rayon) | Data parallelism in Rust |
-| JSON | [simd-json](https://github.com/simd-lite/simd-json) | SIMD-accelerated parsing |
-| Frontend | [Next.js 16](https://nextjs.org/) | React framework |
-| 3D Viz | [obelisk.js](https://github.com/nicklockwood/obelisk.js) | Isometric 3D rendering |
-
-## Performance
-
-The native Rust module provides significant performance improvements:
-
-| Operation | TypeScript | Rust Native | Speedup |
-|-----------|------------|-------------|---------|
-| File Discovery | ~500ms | ~50ms | **10x** |
-| JSON Parsing | ~800ms | ~100ms | **8x** |
-| Aggregation | ~200ms | ~25ms | **8x** |
-| **Total** | **~1.5s** | **~175ms** | **~8.5x** |
-
-*Benchmarks for ~1000 session files, 100k messages*
-
-### Memory Optimization
-
-The native module also provides ~45% memory reduction through:
-
-- Streaming JSON parsing (no full file buffering)
-- Zero-copy string handling
-- Efficient parallel aggregation with map-reduce
-
-### Running Benchmarks
-
-```bash
-# Generate synthetic data
-cd packages/benchmarks && bun run generate
-
-# Run Rust benchmarks
-cd packages/core && bun run bench
-```
-
 ## Frontend Visualization
 
 The frontend provides a GitHub-style contribution graph visualization:
@@ -648,6 +525,123 @@ tokscale graph --benchmark     # Benchmark graph generation
 ```bash
 # Export data for visualization
 tokscale graph --output packages/frontend/public/my-data.json
+```
+
+### Architecture
+
+```
+tokscale/
+├── packages/
+│   ├── cli/src/            # TypeScript CLI
+│   │   ├── cli.ts          # Commander.js entry point
+│   │   ├── tui/            # OpenTUI interactive interface
+│   │   │   ├── App.tsx     # Main TUI app (Solid.js)
+│   │   │   ├── components/ # TUI components
+│   │   │   ├── hooks/      # Data fetching & state
+│   │   │   ├── config/     # Themes & settings
+│   │   │   └── utils/      # Formatting utilities
+│   │   ├── sessions/       # Platform session parsers
+│   │   │   ├── claudecode.ts  # Claude Code parser
+│   │   │   ├── codex.ts       # Codex CLI parser
+│   │   │   ├── gemini.ts      # Gemini CLI parser
+│   │   │   └── opencode.ts    # OpenCode parser
+│   │   ├── cursor.ts       # Cursor IDE integration
+│   │   ├── graph.ts        # Graph data generation
+│   │   ├── pricing.ts      # LiteLLM pricing fetcher
+│   │   └── native.ts       # Native module loader
+│   │
+│   ├── core/               # Rust native module (napi-rs)
+│   │   ├── src/
+│   │   │   ├── lib.rs      # NAPI exports
+│   │   │   ├── scanner.rs  # Parallel file discovery
+│   │   │   ├── parser.rs   # SIMD JSON parsing
+│   │   │   ├── aggregator.rs # Parallel aggregation
+│   │   │   ├── pricing.rs  # Cost calculation
+│   │   │   └── sessions/   # Platform-specific parsers
+│   │   ├── Cargo.toml
+│   │   └── package.json
+│   │
+│   ├── frontend/           # Next.js visualization & social platform
+│   │   └── src/
+│   │       ├── app/        # Next.js app router
+│   │       └── components/ # React components
+│   │
+│   └── benchmarks/         # Performance benchmarks
+│       ├── runner.ts       # Benchmark harness
+│       └── generate.ts     # Synthetic data generator
+```
+
+#### Hybrid TypeScript + Rust Architecture
+
+Tokscale uses a hybrid architecture for optimal performance:
+
+1. **TypeScript Layer**: CLI interface, pricing fetch (with disk cache), output formatting
+2. **Rust Native Core**: ALL parsing, cost calculation, and aggregation
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     TypeScript (CLI)                        │
+│  • Fetch pricing from LiteLLM (cached to disk, 1hr TTL)     │
+│  • Pass pricing data to Rust                                │
+│  • Display formatted results                                │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ pricing entries
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Rust Native Core                         │
+│  • Parallel file scanning (rayon)                           │
+│  • SIMD JSON parsing (simd-json)                            │
+│  • Cost calculation with pricing data                       │
+│  • Parallel aggregation by model/month/day                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+All heavy computation is done in Rust when the native module is available. When the native module is not installed, the CLI automatically falls back to TypeScript implementations for full compatibility (with slower performance).
+
+#### Key Technologies
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| CLI | [Commander.js](https://github.com/tj/commander.js) | Command-line parsing |
+| TUI | [OpenTUI](https://github.com/sst/opentui) + [Solid.js](https://www.solidjs.com/) | Interactive terminal UI (zero-flicker rendering) |
+| Runtime | [Bun](https://bun.sh/) | Fast JavaScript runtime (required) |
+| Tables | [cli-table3](https://github.com/cli-table/cli-table3) | Terminal table rendering (legacy CLI) |
+| Colors | [picocolors](https://github.com/alexeyraspopov/picocolors) | Terminal colors |
+| Native | [napi-rs](https://napi.rs/) | Node.js bindings for Rust |
+| Parallelism | [Rayon](https://github.com/rayon-rs/rayon) | Data parallelism in Rust |
+| JSON | [simd-json](https://github.com/simd-lite/simd-json) | SIMD-accelerated parsing |
+| Frontend | [Next.js 16](https://nextjs.org/) | React framework |
+| 3D Viz | [obelisk.js](https://github.com/nicklockwood/obelisk.js) | Isometric 3D rendering |
+
+### Performance
+
+The native Rust module provides significant performance improvements:
+
+| Operation | TypeScript | Rust Native | Speedup |
+|-----------|------------|-------------|---------|
+| File Discovery | ~500ms | ~50ms | **10x** |
+| JSON Parsing | ~800ms | ~100ms | **8x** |
+| Aggregation | ~200ms | ~25ms | **8x** |
+| **Total** | **~1.5s** | **~175ms** | **~8.5x** |
+
+*Benchmarks for ~1000 session files, 100k messages*
+
+#### Memory Optimization
+
+The native module also provides ~45% memory reduction through:
+
+- Streaming JSON parsing (no full file buffering)
+- Zero-copy string handling
+- Efficient parallel aggregation with map-reduce
+
+#### Running Benchmarks
+
+```bash
+# Generate synthetic data
+cd packages/benchmarks && bun run generate
+
+# Run Rust benchmarks
+cd packages/core && bun run bench
 ```
 
 </details>

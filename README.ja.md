@@ -295,123 +295,6 @@ TOKSCALE_MAX_OUTPUT_BYTES=104857600 tokscale --json > report.json
 
 > **注**: これらの制限はハングやメモリ問題を防ぐための安全対策です。ほとんどのユーザーは変更する必要がありません。
 
-## アーキテクチャ
-
-```
-tokscale/
-├── packages/
-│   ├── cli/src/            # TypeScript CLI
-│   │   ├── cli.ts          # Commander.jsエントリーポイント
-│   │   ├── tui/            # OpenTUIインタラクティブインターフェース
-│   │   │   ├── App.tsx     # メインTUIアプリ（Solid.js）
-│   │   │   ├── components/ # TUIコンポーネント
-│   │   │   ├── hooks/      # データフェッチ＆状態
-│   │   │   ├── config/     # テーマ＆設定
-│   │   │   └── utils/      # フォーマットユーティリティ
-│   │   ├── sessions/       # プラットフォームセッションパーサー
-│   │   │   ├── claudecode.ts  # Claude Codeパーサー
-│   │   │   ├── codex.ts       # Codex CLIパーサー
-│   │   │   ├── gemini.ts      # Gemini CLIパーサー
-│   │   │   └── opencode.ts    # OpenCodeパーサー
-│   │   ├── cursor.ts       # Cursor IDE統合
-│   │   ├── graph.ts        # グラフデータ生成
-│   │   ├── pricing.ts      # LiteLLM価格フェッチャー
-│   │   └── native.ts       # ネイティブモジュールローダー
-│   │
-│   ├── core/               # Rustネイティブモジュール（napi-rs）
-│   │   ├── src/
-│   │   │   ├── lib.rs      # NAPIエクスポート
-│   │   │   ├── scanner.rs  # 並列ファイル探索
-│   │   │   ├── parser.rs   # SIMD JSON解析
-│   │   │   ├── aggregator.rs # 並列集計
-│   │   │   ├── pricing.rs  # コスト計算
-│   │   │   └── sessions/   # プラットフォーム固有パーサー
-│   │   ├── Cargo.toml
-│   │   └── package.json
-│   │
-│   ├── frontend/           # Next.js可視化＆ソーシャルプラットフォーム
-│   │   └── src/
-│   │       ├── app/        # Next.jsアプリルーター
-│   │       └── components/ # Reactコンポーネント
-│   │
-│   └── benchmarks/         # パフォーマンスベンチマーク
-│       ├── runner.ts       # ベンチマークハーネス
-│       └── generate.ts     # 合成データジェネレーター
-```
-
-### ハイブリッドTypeScript + Rustアーキテクチャ
-
-Tokscaleは最適なパフォーマンスのためにハイブリッドアーキテクチャを使用しています：
-
-1. **TypeScriptレイヤー**: CLIインターフェース、価格フェッチ（ディスクキャッシュ付き）、出力フォーマット
-2. **Rustネイティブコア**: すべての解析、コスト計算、集計
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     TypeScript (CLI)                        │
-│  • LiteLLMから価格を取得（ディスクキャッシュ、1時間TTL）        │
-│  • 価格データをRustに渡す                                     │
-│  • フォーマットされた結果を表示                                │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ pricing entries
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Rustネイティブコア                         │
-│  • 並列ファイルスキャン（rayon）                              │
-│  • SIMD JSON解析（simd-json）                               │
-│  • 価格データを使用したコスト計算                              │
-│  • モデル/月/日別の並列集計                                   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-ネイティブモジュールが利用可能な場合、すべての重い計算はRustで行われます。ネイティブモジュールがインストールされていない場合、CLIは完全な互換性のためにTypeScript実装に自動的にフォールバックします（パフォーマンスは低下）。
-
-### 主要技術
-
-| レイヤー | 技術 | 用途 |
-|-------|------------|---------|
-| CLI | [Commander.js](https://github.com/tj/commander.js) | コマンドライン解析 |
-| TUI | [OpenTUI](https://github.com/sst/opentui) + [Solid.js](https://www.solidjs.com/) | インタラクティブターミナルUI（ゼロフリッカーレンダリング） |
-| ランタイム | [Bun](https://bun.sh/) | 高速JavaScriptランタイム（必須） |
-| テーブル | [cli-table3](https://github.com/cli-table/cli-table3) | ターミナルテーブルレンダリング（レガシーCLI） |
-| 色 | [picocolors](https://github.com/alexeyraspopov/picocolors) | ターミナルカラー |
-| ネイティブ | [napi-rs](https://napi.rs/) | Rust用Node.jsバインディング |
-| 並列性 | [Rayon](https://github.com/rayon-rs/rayon) | Rustデータ並列処理 |
-| JSON | [simd-json](https://github.com/simd-lite/simd-json) | SIMD高速化解析 |
-| フロントエンド | [Next.js 16](https://nextjs.org/) | Reactフレームワーク |
-| 3D可視化 | [obelisk.js](https://github.com/nicklockwood/obelisk.js) | アイソメトリック3Dレンダリング |
-
-## パフォーマンス
-
-ネイティブRustモジュールは大幅なパフォーマンス向上を提供します：
-
-| 操作 | TypeScript | Rustネイティブ | 高速化 |
-|-----------|------------|-------------|---------|
-| ファイル探索 | ~500ms | ~50ms | **10倍** |
-| JSON解析 | ~800ms | ~100ms | **8倍** |
-| 集計 | ~200ms | ~25ms | **8倍** |
-| **合計** | **~1.5秒** | **~175ms** | **~8.5倍** |
-
-*約1000セッションファイル、100kメッセージのベンチマーク*
-
-### メモリ最適化
-
-ネイティブモジュールは以下を通じて約45%のメモリ削減も提供します：
-
-- ストリーミングJSON解析（ファイル全体のバッファリングなし）
-- ゼロコピー文字列処理
-- マップリデュースによる効率的な並列集計
-
-### ベンチマークの実行
-
-```bash
-# 合成データを生成
-cd packages/benchmarks && bun run generate
-
-# Rustベンチマークを実行
-cd packages/core && bun run bench
-```
-
 ## フロントエンド可視化
 
 フロントエンドはGitHubスタイルの貢献グラフ可視化を提供します：
@@ -610,6 +493,123 @@ tokscale graph --benchmark     # グラフ生成をベンチマーク
 ```bash
 # 可視化用データをエクスポート
 tokscale graph --output packages/frontend/public/my-data.json
+```
+
+### アーキテクチャ
+
+```
+tokscale/
+├── packages/
+│   ├── cli/src/            # TypeScript CLI
+│   │   ├── cli.ts          # Commander.jsエントリーポイント
+│   │   ├── tui/            # OpenTUIインタラクティブインターフェース
+│   │   │   ├── App.tsx     # メインTUIアプリ（Solid.js）
+│   │   │   ├── components/ # TUIコンポーネント
+│   │   │   ├── hooks/      # データフェッチ＆状態
+│   │   │   ├── config/     # テーマ＆設定
+│   │   │   └── utils/      # フォーマットユーティリティ
+│   │   ├── sessions/       # プラットフォームセッションパーサー
+│   │   │   ├── claudecode.ts  # Claude Codeパーサー
+│   │   │   ├── codex.ts       # Codex CLIパーサー
+│   │   │   ├── gemini.ts      # Gemini CLIパーサー
+│   │   │   └── opencode.ts    # OpenCodeパーサー
+│   │   ├── cursor.ts       # Cursor IDE統合
+│   │   ├── graph.ts        # グラフデータ生成
+│   │   ├── pricing.ts      # LiteLLM価格フェッチャー
+│   │   └── native.ts       # ネイティブモジュールローダー
+│   │
+│   ├── core/               # Rustネイティブモジュール（napi-rs）
+│   │   ├── src/
+│   │   │   ├── lib.rs      # NAPIエクスポート
+│   │   │   ├── scanner.rs  # 並列ファイル探索
+│   │   │   ├── parser.rs   # SIMD JSON解析
+│   │   │   ├── aggregator.rs # 並列集計
+│   │   │   ├── pricing.rs  # コスト計算
+│   │   │   └── sessions/   # プラットフォーム固有パーサー
+│   │   ├── Cargo.toml
+│   │   └── package.json
+│   │
+│   ├── frontend/           # Next.js可視化＆ソーシャルプラットフォーム
+│   │   └── src/
+│   │       ├── app/        # Next.jsアプリルーター
+│   │       └── components/ # Reactコンポーネント
+│   │
+│   └── benchmarks/         # パフォーマンスベンチマーク
+│       ├── runner.ts       # ベンチマークハーネス
+│       └── generate.ts     # 合成データジェネレーター
+```
+
+#### ハイブリッドTypeScript + Rustアーキテクチャ
+
+Tokscaleは最適なパフォーマンスのためにハイブリッドアーキテクチャを使用しています：
+
+1. **TypeScriptレイヤー**: CLIインターフェース、価格フェッチ（ディスクキャッシュ付き）、出力フォーマット
+2. **Rustネイティブコア**: すべての解析、コスト計算、集計
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     TypeScript (CLI)                        │
+│  • LiteLLMから価格を取得（ディスクキャッシュ、1時間TTL）        │
+│  • 価格データをRustに渡す                                     │
+│  • フォーマットされた結果を表示                                │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ pricing entries
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Rustネイティブコア                         │
+│  • 並列ファイルスキャン（rayon）                              │
+│  • SIMD JSON解析（simd-json）                               │
+│  • 価格データを使用したコスト計算                              │
+│  • モデル/月/日別の並列集計                                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+ネイティブモジュールが利用可能な場合、すべての重い計算はRustで行われます。ネイティブモジュールがインストールされていない場合、CLIは完全な互換性のためにTypeScript実装に自動的にフォールバックします（パフォーマンスは低下）。
+
+#### 主要技術
+
+| レイヤー | 技術 | 用途 |
+|-------|------------|---------|
+| CLI | [Commander.js](https://github.com/tj/commander.js) | コマンドライン解析 |
+| TUI | [OpenTUI](https://github.com/sst/opentui) + [Solid.js](https://www.solidjs.com/) | インタラクティブターミナルUI（ゼロフリッカーレンダリング） |
+| ランタイム | [Bun](https://bun.sh/) | 高速JavaScriptランタイム（必須） |
+| テーブル | [cli-table3](https://github.com/cli-table/cli-table3) | ターミナルテーブルレンダリング（レガシーCLI） |
+| 色 | [picocolors](https://github.com/alexeyraspopov/picocolors) | ターミナルカラー |
+| ネイティブ | [napi-rs](https://napi.rs/) | Rust用Node.jsバインディング |
+| 並列性 | [Rayon](https://github.com/rayon-rs/rayon) | Rustデータ並列処理 |
+| JSON | [simd-json](https://github.com/simd-lite/simd-json) | SIMD高速化解析 |
+| フロントエンド | [Next.js 16](https://nextjs.org/) | Reactフレームワーク |
+| 3D可視化 | [obelisk.js](https://github.com/nicklockwood/obelisk.js) | アイソメトリック3Dレンダリング |
+
+### パフォーマンス
+
+ネイティブRustモジュールは大幅なパフォーマンス向上を提供します：
+
+| 操作 | TypeScript | Rustネイティブ | 高速化 |
+|-----------|------------|-------------|---------|
+| ファイル探索 | ~500ms | ~50ms | **10倍** |
+| JSON解析 | ~800ms | ~100ms | **8倍** |
+| 集計 | ~200ms | ~25ms | **8倍** |
+| **合計** | **~1.5秒** | **~175ms** | **~8.5倍** |
+
+*約1000セッションファイル、100kメッセージのベンチマーク*
+
+#### メモリ最適化
+
+ネイティブモジュールは以下を通じて約45%のメモリ削減も提供します：
+
+- ストリーミングJSON解析（ファイル全体のバッファリングなし）
+- ゼロコピー文字列処理
+- マップリデュースによる効率的な並列集計
+
+#### ベンチマークの実行
+
+```bash
+# 合成データを生成
+cd packages/benchmarks && bun run generate
+
+# Rustベンチマークを実行
+cd packages/core && bun run bench
 ```
 
 </details>

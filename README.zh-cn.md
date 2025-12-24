@@ -295,123 +295,6 @@ TOKSCALE_MAX_OUTPUT_BYTES=104857600 tokscale --json > report.json
 
 > **注意**：这些限制是防止卡住和内存问题的安全措施。大多数用户不需要更改它们。
 
-## 架构
-
-```
-tokscale/
-├── packages/
-│   ├── cli/src/            # TypeScript CLI
-│   │   ├── cli.ts          # Commander.js 入口点
-│   │   ├── tui/            # OpenTUI 交互式界面
-│   │   │   ├── App.tsx     # 主 TUI 应用（Solid.js）
-│   │   │   ├── components/ # TUI 组件
-│   │   │   ├── hooks/      # 数据获取和状态
-│   │   │   ├── config/     # 主题和设置
-│   │   │   └── utils/      # 格式化工具
-│   │   ├── sessions/       # 平台会话解析器
-│   │   │   ├── claudecode.ts  # Claude Code 解析器
-│   │   │   ├── codex.ts       # Codex CLI 解析器
-│   │   │   ├── gemini.ts      # Gemini CLI 解析器
-│   │   │   └── opencode.ts    # OpenCode 解析器
-│   │   ├── cursor.ts       # Cursor IDE 集成
-│   │   ├── graph.ts        # 图表数据生成
-│   │   ├── pricing.ts      # LiteLLM 价格获取器
-│   │   └── native.ts       # 原生模块加载器
-│   │
-│   ├── core/               # Rust 原生模块（napi-rs）
-│   │   ├── src/
-│   │   │   ├── lib.rs      # NAPI 导出
-│   │   │   ├── scanner.rs  # 并行文件发现
-│   │   │   ├── parser.rs   # SIMD JSON 解析
-│   │   │   ├── aggregator.rs # 并行聚合
-│   │   │   ├── pricing.rs  # 成本计算
-│   │   │   └── sessions/   # 平台特定解析器
-│   │   ├── Cargo.toml
-│   │   └── package.json
-│   │
-│   ├── frontend/           # Next.js 可视化和社交平台
-│   │   └── src/
-│   │       ├── app/        # Next.js 应用路由
-│   │       └── components/ # React 组件
-│   │
-│   └── benchmarks/         # 性能基准测试
-│       ├── runner.ts       # 基准测试框架
-│       └── generate.ts     # 合成数据生成器
-```
-
-### 混合 TypeScript + Rust 架构
-
-Tokscale 使用混合架构以获得最佳性能：
-
-1. **TypeScript 层**：CLI 接口、价格获取（带磁盘缓存）、输出格式化
-2. **Rust 原生核心**：所有解析、成本计算和聚合
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     TypeScript (CLI)                        │
-│  • 从 LiteLLM 获取价格（磁盘缓存，1 小时 TTL）                  │
-│  • 将价格数据传递给 Rust                                      │
-│  • 显示格式化结果                                             │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ pricing entries
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Rust 原生核心                              │
-│  • 并行文件扫描（rayon）                                      │
-│  • SIMD JSON 解析（simd-json）                               │
-│  • 使用价格数据计算成本                                        │
-│  • 按模型/月/日并行聚合                                        │
-└─────────────────────────────────────────────────────────────┘
-```
-
-当原生模块可用时，所有繁重的计算都在 Rust 中完成。当未安装原生模块时，CLI 会自动回退到 TypeScript 实现以保证完全兼容性（性能较慢）。
-
-### 核心技术
-
-| 层 | 技术 | 用途 |
-|-------|------------|---------|
-| CLI | [Commander.js](https://github.com/tj/commander.js) | 命令行解析 |
-| TUI | [OpenTUI](https://github.com/sst/opentui) + [Solid.js](https://www.solidjs.com/) | 交互式终端 UI（零闪烁渲染） |
-| 运行时 | [Bun](https://bun.sh/) | 快速 JavaScript 运行时（必需） |
-| 表格 | [cli-table3](https://github.com/cli-table/cli-table3) | 终端表格渲染（传统 CLI） |
-| 颜色 | [picocolors](https://github.com/alexeyraspopov/picocolors) | 终端颜色 |
-| 原生 | [napi-rs](https://napi.rs/) | Rust 的 Node.js 绑定 |
-| 并行 | [Rayon](https://github.com/rayon-rs/rayon) | Rust 数据并行 |
-| JSON | [simd-json](https://github.com/simd-lite/simd-json) | SIMD 加速解析 |
-| 前端 | [Next.js 16](https://nextjs.org/) | React 框架 |
-| 3D 可视化 | [obelisk.js](https://github.com/nicklockwood/obelisk.js) | 等距 3D 渲染 |
-
-## 性能
-
-原生 Rust 模块提供显著的性能提升：
-
-| 操作 | TypeScript | Rust 原生 | 加速 |
-|-----------|------------|-------------|---------|
-| 文件发现 | ~500ms | ~50ms | **10 倍** |
-| JSON 解析 | ~800ms | ~100ms | **8 倍** |
-| 聚合 | ~200ms | ~25ms | **8 倍** |
-| **总计** | **~1.5 秒** | **~175ms** | **~8.5 倍** |
-
-*约 1000 个会话文件、100k 消息的基准测试*
-
-### 内存优化
-
-原生模块还通过以下方式提供约 45% 的内存减少：
-
-- 流式 JSON 解析（无完整文件缓冲）
-- 零拷贝字符串处理
-- 使用 map-reduce 的高效并行聚合
-
-### 运行基准测试
-
-```bash
-# 生成合成数据
-cd packages/benchmarks && bun run generate
-
-# 运行 Rust 基准测试
-cd packages/core && bun run bench
-```
-
 ## 前端可视化
 
 前端提供 GitHub 风格的贡献图可视化：
@@ -610,6 +493,123 @@ tokscale graph --benchmark     # 基准测试图表生成
 ```bash
 # 导出可视化数据
 tokscale graph --output packages/frontend/public/my-data.json
+```
+
+### 架构
+
+```
+tokscale/
+├── packages/
+│   ├── cli/src/            # TypeScript CLI
+│   │   ├── cli.ts          # Commander.js 入口点
+│   │   ├── tui/            # OpenTUI 交互式界面
+│   │   │   ├── App.tsx     # 主 TUI 应用（Solid.js）
+│   │   │   ├── components/ # TUI 组件
+│   │   │   ├── hooks/      # 数据获取和状态
+│   │   │   ├── config/     # 主题和设置
+│   │   │   └── utils/      # 格式化工具
+│   │   ├── sessions/       # 平台会话解析器
+│   │   │   ├── claudecode.ts  # Claude Code 解析器
+│   │   │   ├── codex.ts       # Codex CLI 解析器
+│   │   │   ├── gemini.ts      # Gemini CLI 解析器
+│   │   │   └── opencode.ts    # OpenCode 解析器
+│   │   ├── cursor.ts       # Cursor IDE 集成
+│   │   ├── graph.ts        # 图表数据生成
+│   │   ├── pricing.ts      # LiteLLM 价格获取器
+│   │   └── native.ts       # 原生模块加载器
+│   │
+│   ├── core/               # Rust 原生模块（napi-rs）
+│   │   ├── src/
+│   │   │   ├── lib.rs      # NAPI 导出
+│   │   │   ├── scanner.rs  # 并行文件发现
+│   │   │   ├── parser.rs   # SIMD JSON 解析
+│   │   │   ├── aggregator.rs # 并行聚合
+│   │   │   ├── pricing.rs  # 成本计算
+│   │   │   └── sessions/   # 平台特定解析器
+│   │   ├── Cargo.toml
+│   │   └── package.json
+│   │
+│   ├── frontend/           # Next.js 可视化和社交平台
+│   │   └── src/
+│   │       ├── app/        # Next.js 应用路由
+│   │       └── components/ # React 组件
+│   │
+│   └── benchmarks/         # 性能基准测试
+│       ├── runner.ts       # 基准测试框架
+│       └── generate.ts     # 合成数据生成器
+```
+
+#### 混合 TypeScript + Rust 架构
+
+Tokscale 使用混合架构以获得最佳性能：
+
+1. **TypeScript 层**：CLI 接口、价格获取（带磁盘缓存）、输出格式化
+2. **Rust 原生核心**：所有解析、成本计算和聚合
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     TypeScript (CLI)                        │
+│  • 从 LiteLLM 获取价格（磁盘缓存，1 小时 TTL）                  │
+│  • 将价格数据传递给 Rust                                      │
+│  • 显示格式化结果                                             │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ pricing entries
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Rust 原生核心                              │
+│  • 并行文件扫描（rayon）                                      │
+│  • SIMD JSON 解析（simd-json）                               │
+│  • 使用价格数据计算成本                                        │
+│  • 按模型/月/日并行聚合                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+当原生模块可用时，所有繁重的计算都在 Rust 中完成。当未安装原生模块时，CLI 会自动回退到 TypeScript 实现以保证完全兼容性（性能较慢）。
+
+#### 核心技术
+
+| 层 | 技术 | 用途 |
+|-------|------------|---------|
+| CLI | [Commander.js](https://github.com/tj/commander.js) | 命令行解析 |
+| TUI | [OpenTUI](https://github.com/sst/opentui) + [Solid.js](https://www.solidjs.com/) | 交互式终端 UI（零闪烁渲染） |
+| 运行时 | [Bun](https://bun.sh/) | 快速 JavaScript 运行时（必需） |
+| 表格 | [cli-table3](https://github.com/cli-table/cli-table3) | 终端表格渲染（传统 CLI） |
+| 颜色 | [picocolors](https://github.com/alexeyraspopov/picocolors) | 终端颜色 |
+| 原生 | [napi-rs](https://napi.rs/) | Rust 的 Node.js 绑定 |
+| 并行 | [Rayon](https://github.com/rayon-rs/rayon) | Rust 数据并行 |
+| JSON | [simd-json](https://github.com/simd-lite/simd-json) | SIMD 加速解析 |
+| 前端 | [Next.js 16](https://nextjs.org/) | React 框架 |
+| 3D 可视化 | [obelisk.js](https://github.com/nicklockwood/obelisk.js) | 等距 3D 渲染 |
+
+### 性能
+
+原生 Rust 模块提供显著的性能提升：
+
+| 操作 | TypeScript | Rust 原生 | 加速 |
+|-----------|------------|-------------|---------|
+| 文件发现 | ~500ms | ~50ms | **10 倍** |
+| JSON 解析 | ~800ms | ~100ms | **8 倍** |
+| 聚合 | ~200ms | ~25ms | **8 倍** |
+| **总计** | **~1.5 秒** | **~175ms** | **~8.5 倍** |
+
+*约 1000 个会话文件、100k 消息的基准测试*
+
+#### 内存优化
+
+原生模块还通过以下方式提供约 45% 的内存减少：
+
+- 流式 JSON 解析（无完整文件缓冲）
+- 零拷贝字符串处理
+- 使用 map-reduce 的高效并行聚合
+
+#### 运行基准测试
+
+```bash
+# 生成合成数据
+cd packages/benchmarks && bun run generate
+
+# 运行 Rust 基准测试
+cd packages/core && bun run bench
 ```
 
 </details>
