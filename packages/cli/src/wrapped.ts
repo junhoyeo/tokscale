@@ -336,7 +336,7 @@ async function loadWrappedData(options: WrappedOptions): Promise<WrappedData> {
       pinned.sort((a, b) => PINNED_AGENTS.indexOf(a.name) - PINNED_AGENTS.indexOf(b.name));
       unpinned.sort((a, b) => b.messages - a.messages);
 
-      agentsList = [...pinned, ...unpinned].slice(0, 5);
+      agentsList = [...pinned, ...unpinned.slice(0, 2)];
     } else {
       agentsList.sort((a, b) => b.messages - a.messages);
       agentsList = agentsList.slice(0, 3);
