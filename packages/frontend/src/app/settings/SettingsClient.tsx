@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
 import { Avatar, Button, Flash } from "@primer/react";
 import { KeyIcon } from "@primer/octicons-react";

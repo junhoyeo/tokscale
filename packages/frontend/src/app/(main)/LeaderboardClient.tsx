@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
 import { Pagination, Avatar } from "@primer/react";
 import { TabBar } from "@/components/TabBar";
