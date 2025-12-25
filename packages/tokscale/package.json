@@ -1,6 +1,6 @@
 {
   "name": "tokscale",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Alias for @tokscale/cli — A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
   "type": "module",
   "main": "index.js",
