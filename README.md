@@ -120,6 +120,9 @@ curl -fsSL https://bun.sh/install | bash
 
 # Run directly with bunx
 bunx tokscale@latest
+
+# Light mode (no OpenTUI, just table rendering)
+bunx tokscale@latest --light
 ```
 
 That's it! This gives you the full interactive TUI experience with zero setup.
