@@ -4,13 +4,13 @@
  */
 
 import pc from "picocolors";
-import { loadCredentials, getApiBaseUrl } from "./credentials.js";
+import { loadCredentials, getApiBaseUrl, type Credentials } from "./credentials.js";
 import { PricingFetcher } from "./pricing.js";
 import {
   isNativeAvailable,
   generateGraphWithPricingAsync,
 } from "./native.js";
-import type { TokenContributionData } from "./graph-types.js";
+import type { TokenContributionData, DailyContribution, SourceContribution } from "./graph-types.js";
 import { formatCurrency } from "./table.js";
 
 interface SubmitOptions {
@@ -23,6 +23,7 @@ interface SubmitOptions {
   until?: string;
   year?: string;
   dryRun?: boolean;
+  full?: boolean;
 }
 
 interface SubmitResponse {
@@ -46,11 +47,224 @@ interface SubmitResponse {
 
 type SourceType = "opencode" | "claude" | "codex" | "gemini" | "cursor";
 
-/**
- * Submit command - sends usage data to the platform
- */
+type ChecksumResponse = Record<string, Record<string, string>>;
+
+interface SourceBreakdownForHash {
+  tokens: number;
+  cost: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  messages: number;
+  models: Record<string, {
+    tokens: number;
+    cost: number;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    reasoning: number;
+    messages: number;
+  }>;
+}
+
+function hashSourceBreakdown(data: SourceBreakdownForHash): string {
+  const sortedModels = Object.keys(data.models || {})
+    .sort()
+    .reduce((acc, key) => {
+      const m = data.models[key];
+      acc[key] = {
+        tokens: m.tokens,
+        cost: Math.round(m.cost * 10000),
+        input: m.input,
+        output: m.output,
+        cacheRead: m.cacheRead,
+        cacheWrite: m.cacheWrite,
+        reasoning: m.reasoning || 0,
+        messages: m.messages,
+      };
+      return acc;
+    }, {} as Record<string, unknown>);
+
+  const normalized = {
+    tokens: data.tokens,
+    cost: Math.round(data.cost * 10000),
+    input: data.input,
+    output: data.output,
+    cacheRead: data.cacheRead,
+    cacheWrite: data.cacheWrite,
+    reasoning: data.reasoning || 0,
+    messages: data.messages,
+    models: sortedModels,
+  };
+
+  const content = JSON.stringify(normalized);
+
+  let hash = 5381;
+  for (let i = 0; i < content.length; i++) {
+    hash = ((hash << 5) + hash) + content.charCodeAt(i);
+    hash = hash & hash;
+  }
+
+  return Math.abs(hash).toString(16).padStart(8, "0");
+}
+
+function sourceContributionToBreakdown(sources: SourceContribution[]): Record<string, SourceBreakdownForHash> {
+  const result: Record<string, SourceBreakdownForHash> = {};
+
+  for (const source of sources) {
+    const { input, output, cacheRead, cacheWrite, reasoning } = source.tokens;
+    const totalTokens = input + output + cacheRead + cacheWrite + reasoning;
+
+    if (!result[source.source]) {
+      result[source.source] = {
+        tokens: 0,
+        cost: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 0,
+        models: {},
+      };
+    }
+
+    const r = result[source.source];
+    r.tokens += totalTokens;
+    r.cost += source.cost;
+    r.input += input;
+    r.output += output;
+    r.cacheRead += cacheRead;
+    r.cacheWrite += cacheWrite;
+    r.reasoning += reasoning;
+    r.messages += source.messages;
+
+    if (!r.models[source.modelId]) {
+      r.models[source.modelId] = {
+        tokens: 0, cost: 0, input: 0, output: 0,
+        cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 0,
+      };
+    }
+    const m = r.models[source.modelId];
+    m.tokens += totalTokens;
+    m.cost += source.cost;
+    m.input += input;
+    m.output += output;
+    m.cacheRead += cacheRead;
+    m.cacheWrite += cacheWrite;
+    m.reasoning += reasoning;
+    m.messages += source.messages;
+  }
+
+  return result;
+}
+
+async function fetchServerChecksums(
+  baseUrl: string,
+  credentials: Credentials
+): Promise<ChecksumResponse | null> {
+  try {
+    const response = await fetch(`${baseUrl}/api/submit/checksum`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${credentials.token}`,
+      },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const result = await response.json();
+    return result.checksums || {};
+  } catch {
+    return null;
+  }
+}
+
+function computeLocalChecksums(
+  data: TokenContributionData
+): Record<string, Record<string, string>> {
+  const checksums: Record<string, Record<string, string>> = {};
+
+  for (const day of data.contributions) {
+    const sourceBreakdowns = sourceContributionToBreakdown(day.sources);
+    checksums[day.date] = {};
+
+    for (const [sourceName, breakdown] of Object.entries(sourceBreakdowns)) {
+      checksums[day.date][sourceName] = hashSourceBreakdown(breakdown);
+    }
+  }
+
+  return checksums;
+}
+
+function computeDiff(
+  data: TokenContributionData,
+  localChecksums: Record<string, Record<string, string>>,
+  serverChecksums: ChecksumResponse
+): TokenContributionData {
+  const changedContributions: DailyContribution[] = [];
+
+  for (const day of data.contributions) {
+    const localDayChecksums = localChecksums[day.date] || {};
+    const serverDayChecksums = serverChecksums[day.date] || {};
+
+    let hasChanges = false;
+    const changedSources: SourceContribution[] = [];
+
+    for (const source of day.sources) {
+      const localHash = localDayChecksums[source.source];
+      const serverHash = serverDayChecksums[source.source];
+
+      if (localHash !== serverHash) {
+        hasChanges = true;
+        changedSources.push(source);
+      }
+    }
+
+    if (hasChanges) {
+      changedContributions.push({
+        ...day,
+        sources: changedSources,
+      });
+    }
+  }
+
+  const changedSources = new Set<SourceType>();
+  const changedModels = new Set<string>();
+  let totalTokens = 0;
+  let totalCost = 0;
+
+  for (const day of changedContributions) {
+    for (const source of day.sources) {
+      changedSources.add(source.source);
+      changedModels.add(source.modelId);
+      const t = source.tokens;
+      totalTokens += t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning;
+      totalCost += source.cost;
+    }
+  }
+
+  return {
+    meta: data.meta,
+    summary: {
+      ...data.summary,
+      totalTokens,
+      totalCost,
+      activeDays: changedContributions.length,
+      sources: Array.from(changedSources),
+      models: Array.from(changedModels),
+    },
+    years: data.years,
+    contributions: changedContributions,
+  };
+}
+
 export async function submit(options: SubmitOptions = {}): Promise<void> {
-  // Step 1: Check if logged in
   const credentials = loadCredentials();
   if (!credentials) {
     console.log(pc.yellow("\n  Not logged in."));
@@ -58,7 +272,6 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // Step 2: Log native module status (TS fallback available)
   if (!isNativeAvailable()) {
     console.log(pc.yellow("\n  Note: Using TypeScript fallback (native module not available)"));
     console.log(pc.gray("  Run 'bun run build:core' for faster processing.\n"));
@@ -66,14 +279,12 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
 
   console.log(pc.cyan("\n  Tokscale - Submit Usage Data\n"));
 
-  // Step 3: Generate graph data
   console.log(pc.gray("  Scanning local session data..."));
 
   const fetcher = new PricingFetcher();
   await fetcher.fetchPricing();
   const pricingEntries = fetcher.toPricingEntries();
 
-  // Determine sources
   const hasFilter = options.opencode || options.claude || options.codex || options.gemini || options.cursor;
   let sources: SourceType[] | undefined;
   if (hasFilter) {
@@ -99,8 +310,7 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // Step 4: Show summary
-  console.log(pc.white("  Data to submit:"));
+  console.log(pc.white("  Local data scanned:"));
   console.log(pc.gray(`    Date range: ${data.meta.dateRange.start} to ${data.meta.dateRange.end}`));
   console.log(pc.gray(`    Active days: ${data.summary.activeDays}`));
   console.log(pc.gray(`    Total tokens: ${data.summary.totalTokens.toLocaleString()}`));
@@ -114,16 +324,41 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
     return;
   }
 
-  // Step 5: Dry run check
   if (options.dryRun) {
     console.log(pc.yellow("  Dry run - not submitting data.\n"));
     return;
   }
 
-  // Step 6: Submit to server
-  console.log(pc.gray("  Submitting to server..."));
-
   const baseUrl = getApiBaseUrl();
+  let dataToSubmit = data;
+  let isDiffMode = false;
+
+  if (!options.full) {
+    console.log(pc.gray("  Fetching server checksums for diff..."));
+    const serverChecksums = await fetchServerChecksums(baseUrl, credentials);
+
+    if (serverChecksums && Object.keys(serverChecksums).length > 0) {
+      const localChecksums = computeLocalChecksums(data);
+      dataToSubmit = computeDiff(data, localChecksums, serverChecksums);
+      isDiffMode = true;
+
+      if (dataToSubmit.contributions.length === 0) {
+        console.log(pc.green("\n  Already up to date! No changes to submit.\n"));
+        console.log(pc.cyan(`  View your profile: ${baseUrl}/u/${credentials.username}\n`));
+        return;
+      }
+
+      console.log(pc.white("  Changes detected:"));
+      console.log(pc.gray(`    Days with changes: ${dataToSubmit.contributions.length}`));
+      console.log(pc.gray(`    Tokens in diff: ${dataToSubmit.summary.totalTokens.toLocaleString()}`));
+      console.log(pc.gray(`    Cost in diff: ${formatCurrency(dataToSubmit.summary.totalCost)}`));
+      console.log();
+    } else {
+      console.log(pc.gray("  First submission or server unreachable, uploading full data..."));
+    }
+  }
+
+  console.log(pc.gray(isDiffMode ? "  Submitting changes..." : "  Submitting to server..."));
 
   try {
     const response = await fetch(`${baseUrl}/api/submit`, {
@@ -132,7 +367,7 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
         "Content-Type": "application/json",
         Authorization: `Bearer ${credentials.token}`,
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify(dataToSubmit),
     });
 
     const result: SubmitResponse = await response.json();
@@ -148,7 +383,6 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
       process.exit(1);
     }
 
-    // Success!
     console.log(pc.green("\n  Successfully submitted!"));
     console.log();
     console.log(pc.white("  Summary:"));
@@ -156,6 +390,9 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
     console.log(pc.gray(`    Total tokens: ${result.metrics?.totalTokens?.toLocaleString()}`));
     console.log(pc.gray(`    Total cost: ${formatCurrency(result.metrics?.totalCost || 0)}`));
     console.log(pc.gray(`    Active days: ${result.metrics?.activeDays}`));
+    if (isDiffMode) {
+      console.log(pc.gray(`    Mode: incremental (diff-based)`));
+    }
     console.log();
     console.log(pc.cyan(`  View your profile: ${baseUrl}/u/${credentials.username}`));
     console.log();

@@ -125,3 +125,48 @@ export function sourceContributionToBreakdownData(
     messages: source.messages,
   };
 }
+
+/**
+ * Generate deterministic djb2 hash for source breakdown data.
+ * Used for diff-based submission optimization.
+ */
+export function hashSourceBreakdown(data: SourceBreakdownData): string {
+  const sortedModels = Object.keys(data.models || {})
+    .sort()
+    .reduce((acc, key) => {
+      const m = data.models[key];
+      acc[key] = {
+        tokens: m.tokens,
+        cost: Math.round(m.cost * 10000),
+        input: m.input,
+        output: m.output,
+        cacheRead: m.cacheRead,
+        cacheWrite: m.cacheWrite,
+        reasoning: m.reasoning || 0,
+        messages: m.messages,
+      };
+      return acc;
+    }, {} as Record<string, unknown>);
+
+  const normalized = {
+    tokens: data.tokens,
+    cost: Math.round(data.cost * 10000),
+    input: data.input,
+    output: data.output,
+    cacheRead: data.cacheRead,
+    cacheWrite: data.cacheWrite,
+    reasoning: data.reasoning || 0,
+    messages: data.messages,
+    models: sortedModels,
+  };
+
+  const content = JSON.stringify(normalized);
+
+  let hash = 5381;
+  for (let i = 0; i < content.length; i++) {
+    hash = ((hash << 5) + hash) + content.charCodeAt(i);
+    hash = hash & hash;
+  }
+
+  return Math.abs(hash).toString(16).padStart(8, "0");
+}
