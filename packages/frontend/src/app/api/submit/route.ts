@@ -15,6 +15,30 @@ import {
   type SourceBreakdownData,
 } from "@/lib/db/helpers";
 
+function normalizeSubmissionData(data: unknown): void {
+  if (!data || typeof data !== "object") return;
+  const obj = data as Record<string, unknown>;
+  if (!Array.isArray(obj.contributions)) return;
+
+  for (const contribution of obj.contributions) {
+    if (!contribution || typeof contribution !== "object") continue;
+    const day = contribution as Record<string, unknown>;
+    if (!Array.isArray(day.sources)) continue;
+
+    for (const source of day.sources) {
+      if (!source || typeof source !== "object") continue;
+      const s = source as Record<string, unknown>;
+
+      if (s.modelId == null || typeof s.modelId !== "string") {
+        s.modelId = "unknown";
+      } else {
+        const trimmed = s.modelId.trim();
+        s.modelId = trimmed === "" ? "unknown" : trimmed;
+      }
+    }
+  }
+}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -73,6 +97,8 @@ export async function POST(request: Request) {
     } catch {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
+
+    normalizeSubmissionData(rawData);
 
     const validation = validateSubmission(rawData);
     if (!validation.valid || !validation.data) {
