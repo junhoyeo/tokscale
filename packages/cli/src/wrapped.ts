@@ -11,6 +11,7 @@ import {
 } from "./native.js";
 import { PricingFetcher } from "./pricing.js";
 import { syncCursorCache, loadCursorCredentials } from "./cursor.js";
+import { loadCredentials } from "./credentials.js";
 import type { SourceType } from "./graph-types.js";
 
 interface WrappedData {
@@ -640,9 +641,13 @@ async function generateWrappedImage(data: WrappedData, options: { short?: boolea
 
   let yPos = PADDING + 24 * SCALE;
 
-  ctx.fillStyle = COLORS.textSecondary;
-  ctx.font = `${24 * SCALE}px Figtree, sans-serif`;
-  ctx.fillText(`Tracking since ${formatDate(data.firstDay)}`, PADDING, yPos);
+  const credentials = loadCredentials();
+  const titleText = credentials
+    ? `@${credentials.username}'s Wrapped ${data.year}`
+    : `My Wrapped ${data.year}`;
+  ctx.fillStyle = COLORS.textPrimary;
+  ctx.font = `bold ${28 * SCALE}px Figtree, sans-serif`;
+  ctx.fillText(titleText, PADDING, yPos);
   yPos += 60 * SCALE;
 
   ctx.fillStyle = COLORS.textSecondary;

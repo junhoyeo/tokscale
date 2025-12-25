@@ -354,11 +354,9 @@ Tokscale 包含一个社交平台，您可以在其中分享使用数据并与�
 
 生成一张精美的年度回顾图片，总结您的 AI 编程助手使用情况——灵感来自 Spotify Wrapped。
 
-<div align="center">
-
-![Wrapped 2025](.github/assets/wrapped-2025.png)
-
-</div>
+| `tokscale wrapped` | `tokscale wrapped --agents` | `tokscale wrapped --agents --pin-sisyphus` |
+|:---:|:---:|:---:|
+| ![Wrapped 2025](.github/assets/wrapped-2025.png) | ![Wrapped 2025 (Agents)](.github/assets/wrapped-2025-agents.png) | ![Wrapped 2025 (Agents + Pin Sisyphus)](.github/assets/wrapped-2025-agents-pin-sisyphus.png) |
 
 ### 命令
 

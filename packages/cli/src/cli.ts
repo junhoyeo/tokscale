@@ -295,9 +295,9 @@ async function main() {
 
   program
     .command("wrapped")
-    .description("Generate 2025 Wrapped shareable image")
-    .option("--output <file>", "Output file path (default: tokscale-2025-wrapped.png)")
-    .option("--year <year>", "Year to generate wrapped for (default: current year)")
+    .description("Generate Wrapped shareable image")
+    .option("--output <file>", "Output file path (default: tokscale-<year>-wrapped.png)")
+    .option("--year <year>", "Year to generate (default: current year)")
     .option("--opencode", "Include only OpenCode data")
     .option("--claude", "Include only Claude Code data")
     .option("--codex", "Include only Codex CLI data")
