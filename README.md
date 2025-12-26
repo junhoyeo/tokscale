@@ -54,6 +54,7 @@
   - [Filtering by Platform](#filtering-by-platform)
   - [Date Filtering](#date-filtering)
   - [Social](#social)
+  - [Automatic Sync](#automatic-sync)
   - [Cursor IDE Commands](#cursor-ide-commands)
   - [Environment Variables](#environment-variables)
 - [Frontend Visualization](#frontend-visualization)
@@ -286,6 +287,23 @@ tokscale logout
 
 <img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
 
+### Automatic Sync
+
+Set up automatic hourly submissions to keep your profile updated:
+
+```bash
+# Set up hourly sync
+tokscale sync setup
+
+# Check sync status
+tokscale sync status
+
+# Remove automatic sync
+tokscale sync remove
+```
+
+Logs are saved to `~/.config/tokscale/sync.log`.
+
 ### Cursor IDE Commands
 
 Cursor IDE requires separate authentication via session token (different from the social platform login):
@@ -387,6 +405,8 @@ Submitted data goes through Level 1 validation:
 - No future dates
 - Required fields present
 - Duplicate detection
+
+> **Cross-Machine Aggregation**: When you submit from multiple machines using the same GitHub account, your usage data is automatically aggregated (summed) rather than overwritten. Each device's contributions are tracked separately and combined into your total.
 
 ## Wrapped 2025
 
