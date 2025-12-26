@@ -14,6 +14,7 @@ pub enum SessionType {
     Codex,
     Gemini,
     Cursor,
+    Amp,
 }
 
 /// Result of scanning all session directories
@@ -24,6 +25,7 @@ pub struct ScanResult {
     pub codex_files: Vec<PathBuf>,
     pub gemini_files: Vec<PathBuf>,
     pub cursor_files: Vec<PathBuf>,
+    pub amp_files: Vec<PathBuf>,
 }
 
 impl ScanResult {
@@ -34,6 +36,7 @@ impl ScanResult {
             + self.codex_files.len()
             + self.gemini_files.len()
             + self.cursor_files.len()
+            + self.amp_files.len()
     }
 
     /// Get all files as a single vector
@@ -54,6 +57,9 @@ impl ScanResult {
         }
         for path in &self.cursor_files {
             result.push((SessionType::Cursor, path.clone()));
+        }
+        for path in &self.amp_files {
+            result.push((SessionType::Amp, path.clone()));
         }
 
         result
@@ -85,6 +91,9 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "session-*.json" => {
                     file_name.starts_with("session-") && file_name.ends_with(".json")
                 }
+                "T-*.json" => {
+                    file_name.starts_with("T-") && file_name.ends_with(".json")
+                }
                 _ => false,
             }
         })
@@ -102,6 +111,7 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
     let include_codex = include_all || sources.iter().any(|s| s == "codex");
     let include_gemini = include_all || sources.iter().any(|s| s == "gemini");
     let include_cursor = include_all || sources.iter().any(|s| s == "cursor");
+    let include_amp = include_all || sources.iter().any(|s| s == "amp");
 
     // Define scan tasks
     let mut tasks: Vec<(SessionType, String, &str)> = Vec::new();
@@ -140,6 +150,14 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
         tasks.push((SessionType::Cursor, cursor_path, "*.csv"));
     }
 
+    if include_amp {
+        // Amp: ~/.local/share/amp/threads/T-*.json
+        let xdg_data =
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir));
+        let amp_path = format!("{}/amp/threads", xdg_data);
+        tasks.push((SessionType::Amp, amp_path, "T-*.json"));
+    }
+
     // Execute scans in parallel
     let scan_results: Vec<(SessionType, Vec<PathBuf>)> = tasks
         .into_par_iter()
@@ -157,6 +175,7 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
             SessionType::Codex => result.codex_files = files,
             SessionType::Gemini => result.gemini_files = files,
             SessionType::Cursor => result.cursor_files = files,
+            SessionType::Amp => result.amp_files = files,
         }
     }
 
