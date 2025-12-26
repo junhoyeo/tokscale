@@ -67,13 +67,13 @@ export function recalculateDayTotals(
   let reasoningTokens = 0;
 
   for (const source of Object.values(sourceBreakdown)) {
-    tokens += source.tokens || 0;
-    cost += source.cost || 0;
-    inputTokens += source.input || 0;
-    outputTokens += source.output || 0;
-    cacheReadTokens += source.cacheRead || 0;
-    cacheWriteTokens += source.cacheWrite || 0;
-    reasoningTokens += source.reasoning || 0;
+    tokens += Number(source.tokens) || 0;
+    cost += Number(source.cost) || 0;
+    inputTokens += Number(source.input) || 0;
+    outputTokens += Number(source.output) || 0;
+    cacheReadTokens += Number(source.cacheRead) || 0;
+    cacheWriteTokens += Number(source.cacheWrite) || 0;
+    reasoningTokens += Number(source.reasoning) || 0;
   }
 
   return {
@@ -88,8 +88,7 @@ export function recalculateDayTotals(
 }
 
 function recalculateSourceAggregate(source: SourceBreakdownData): void {
-  if (!source.devices || Object.keys(source.devices).length === 0) return;
-
+  // Reset aggregates first - always (prevents stale values when devices becomes empty)
   source.tokens = 0;
   source.cost = 0;
   source.input = 0;
@@ -99,6 +98,9 @@ function recalculateSourceAggregate(source: SourceBreakdownData): void {
   source.reasoning = 0;
   source.messages = 0;
   source.models = {};
+
+  // If no devices or empty devices, aggregates are zero (which we just set)
+  if (!source.devices || Object.keys(source.devices).length === 0) return;
 
   for (const deviceData of Object.values(source.devices)) {
     source.tokens += Number(deviceData.tokens) || 0;
