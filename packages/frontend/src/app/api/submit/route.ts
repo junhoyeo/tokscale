@@ -241,7 +241,8 @@ export async function POST(request: Request) {
           const mergedSourceBreakdown = mergeSourceBreakdowns(
             existingSourceBreakdown,
             incomingSourceBreakdown,
-            submittedSources
+            submittedSources,
+            tokenRecord.tokenId
           );
 
           // Recalculate day totals from merged data
