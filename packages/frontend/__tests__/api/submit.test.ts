@@ -616,6 +616,88 @@ describe('POST /api/submit - Source-Level Merge', () => {
     });
   });
 
+  describe('mergeSourceBreakdowns - direct function calls', () => {
+    it('should handle legacy data without devices field', () => {
+      const existing: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 1000, cost: 0.05, input: 500, output: 500,
+          cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 10,
+          models: { 'claude-3': { tokens: 1000, cost: 0.05, input: 500, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 10 } }
+        }
+      };
+      
+      const incoming: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 500, cost: 0.02, input: 250, output: 250,
+          cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 5,
+          models: { 'claude-3': { tokens: 500, cost: 0.02, input: 250, output: 250, cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 5 } }
+        }
+      };
+      
+      const result = mergeSourceBreakdowns(existing, incoming, new Set(['claude']), 'device-1');
+      
+      expect(result.claude.devices?.['__legacy__']).toBeDefined();
+      expect(result.claude.devices?.['device-1']).toBeDefined();
+      expect(result.claude.tokens).toBe(1500);
+    });
+    
+    it('should replace same device data on resubmit (no double-count)', () => {
+      const existing: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 1000, cost: 0.05, input: 500, output: 500,
+          cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 10,
+          models: {},
+          devices: {
+            'device-1': {
+              tokens: 1000, cost: 0.05, input: 500, output: 500,
+              cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 10,
+              models: {}
+            }
+          }
+        }
+      };
+      
+      const incoming: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 1500, cost: 0.08, input: 750, output: 750,
+          cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 15,
+          models: {}
+        }
+      };
+      
+      const result = mergeSourceBreakdowns(existing, incoming, new Set(['claude']), 'device-1');
+      
+      expect(result.claude.tokens).toBe(1500);
+      expect(result.claude.devices?.['device-1']?.tokens).toBe(1500);
+    });
+
+    it('should handle legacy data with only modelId (no models field)', () => {
+      const existing: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 1000, cost: 0.05, input: 500, output: 500,
+          cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 10,
+          models: undefined as unknown as Record<string, any>,
+          modelId: 'claude-sonnet-4'
+        }
+      };
+      
+      const incoming: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 500, cost: 0.02, input: 250, output: 250,
+          cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 5,
+          models: {}
+        }
+      };
+      
+      const result = mergeSourceBreakdowns(existing, incoming, new Set(['claude']), 'device-1');
+      
+      expect(result.claude.devices?.['__legacy__']).toBeDefined();
+      expect(result.claude.devices?.['__legacy__']?.models).toEqual({});
+      expect(result.claude.devices?.['device-1']).toBeDefined();
+      expect(result.claude.tokens).toBe(1500);
+    });
+  });
+
   describe('Device-Level Tracking (Cross-Machine Aggregation)', () => {
     const createSourceData = (tokens: number, cost: number, modelId = 'claude-sonnet-4'): SourceBreakdownData => ({
       tokens,

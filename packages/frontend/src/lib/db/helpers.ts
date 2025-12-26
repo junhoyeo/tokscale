@@ -110,7 +110,7 @@ function recalculateSourceAggregate(source: SourceBreakdownData): void {
     source.reasoning += deviceData.reasoning || 0;
     source.messages += deviceData.messages;
 
-    for (const [modelId, modelData] of Object.entries(deviceData.models)) {
+    for (const [modelId, modelData] of Object.entries(deviceData.models ?? {})) {
       if (!source.models[modelId]) {
         source.models[modelId] = { ...modelData };
       } else {
@@ -168,7 +168,7 @@ export function mergeSourceBreakdowns(
             cacheWrite: merged[sourceName].cacheWrite,
             reasoning: merged[sourceName].reasoning || 0,
             messages: merged[sourceName].messages,
-            models: { ...merged[sourceName].models },
+            models: { ...(merged[sourceName].models ?? {}) },
           },
         };
       }
@@ -182,7 +182,7 @@ export function mergeSourceBreakdowns(
         cacheWrite: incomingSource.cacheWrite,
         reasoning: incomingSource.reasoning || 0,
         messages: incomingSource.messages,
-        models: { ...incomingSource.models },
+        models: { ...(incomingSource.models ?? {}) },
       };
 
       recalculateSourceAggregate(merged[sourceName]);

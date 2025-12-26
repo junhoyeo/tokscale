@@ -13,6 +13,8 @@ import { loadCredentials } from "./credentials.js";
 const CONFIG_DIR = path.join(os.homedir(), ".config", "tokscale");
 const LOG_FILE = path.join(CONFIG_DIR, "sync.log");
 const WINDOWS_TASK_NAME = "TokscaleSync";
+const WINDOWS_SCRIPT_FILE = path.join(CONFIG_DIR, "sync-task.cmd");
+const CRON_MARKER = "# TOKSCALE_SYNC_MANAGED";
 
 function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
@@ -40,18 +42,18 @@ function isWindows(): boolean {
 function buildCronEntry(): string {
   const tokscalePath = escapePathForShell(getTokscalePath());
   const logPath = escapePathForShell(LOG_FILE);
-  return `0 * * * * '${tokscalePath}' submit --quiet >> '${logPath}' 2>&1`;
+  return `0 * * * * '${tokscalePath}' submit --quiet >> '${logPath}' 2>&1 ${CRON_MARKER}`;
 }
 
 function setupCrontab(): { success: boolean; error?: string } {
   try {
     ensureConfigDir();
     const cronEntry = buildCronEntry();
-    // Remove existing tokscale sync entries, then add new one
+    // Remove existing tokscale sync entries (by marker), then add new one
     // Uses || true to handle empty crontab gracefully
     // Use printf with single quotes to prevent shell injection if path contains $() or backticks
     const escapedEntry = cronEntry.replace(/'/g, "'\\''");
-    const command = `(crontab -l 2>/dev/null | grep -v 'tokscale submit --quiet' || true) | { cat; printf '%s\\n' '${escapedEntry}'; } | crontab -`;
+    const command = `(crontab -l 2>/dev/null | grep -v '${CRON_MARKER}' || true) | { cat; printf '%s\\n' '${escapedEntry}'; } | crontab -`;
     execSync(command, { stdio: "pipe" });
     return { success: true };
   } catch (error) {
@@ -61,8 +63,7 @@ function setupCrontab(): { success: boolean; error?: string } {
 
 function removeCrontab(): { success: boolean; error?: string } {
   try {
-    // Use specific pattern to only remove our sync entry, not unrelated tokscale jobs
-    const command = `(crontab -l 2>/dev/null | grep -v 'tokscale submit --quiet' || true) | crontab -`;
+    const command = `(crontab -l 2>/dev/null | grep -v '${CRON_MARKER}' || true) | crontab -`;
     execSync(command, { stdio: "pipe" });
     return { success: true };
   } catch (error) {
@@ -72,8 +73,7 @@ function removeCrontab(): { success: boolean; error?: string } {
 
 function checkCrontab(): { exists: boolean; entry?: string; error?: string } {
   try {
-    // Use specific pattern to only find our sync entry
-    const result = execSync(`crontab -l 2>/dev/null | grep 'tokscale submit --quiet' || true`, {
+    const result = execSync(`crontab -l 2>/dev/null | grep '${CRON_MARKER}' || true`, {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -99,10 +99,10 @@ function setupWindowsTask(): { success: boolean; error?: string } {
       // Task doesn't exist yet
     }
     
-    // Wrap in cmd.exe to enable shell redirections (>> and 2>&1)
-    // Without cmd.exe, schtasks /tr doesn't run under a shell, so redirections won't work
-    const windowsCommand = `cmd.exe /c "\\"${tokscalePath}\\" submit --quiet >> \\"${LOG_FILE}\\" 2>&1"`;
-    const scheduleCmd = `schtasks /create /tn "${WINDOWS_TASK_NAME}" /sc HOURLY /tr "${windowsCommand}" /f`;
+    const scriptContent = `@echo off\r\n"${tokscalePath}" submit --quiet >> "${LOG_FILE}" 2>&1\r\n`;
+    fs.writeFileSync(WINDOWS_SCRIPT_FILE, scriptContent);
+    
+    const scheduleCmd = `schtasks /create /tn "${WINDOWS_TASK_NAME}" /sc HOURLY /tr "${WINDOWS_SCRIPT_FILE}" /f`;
     execSync(scheduleCmd, { stdio: "pipe" });
     return { success: true };
   } catch (error) {
@@ -113,14 +113,20 @@ function setupWindowsTask(): { success: boolean; error?: string } {
 function removeWindowsTask(): { success: boolean; error?: string } {
   try {
     execSync(`schtasks /delete /tn "${WINDOWS_TASK_NAME}" /f`, { stdio: "pipe" });
-    return { success: true };
   } catch (error) {
     const errorMsg = (error as Error).message;
-    if (errorMsg.includes("cannot find") || errorMsg.includes("task name")) {
-      return { success: true };
+    if (!errorMsg.includes("cannot find") && !errorMsg.includes("task name")) {
+      return { success: false, error: errorMsg };
     }
-    return { success: false, error: errorMsg };
   }
+  
+  try {
+    if (fs.existsSync(WINDOWS_SCRIPT_FILE)) {
+      fs.unlinkSync(WINDOWS_SCRIPT_FILE);
+    }
+  } catch {}
+  
+  return { success: true };
 }
 
 function checkWindowsTask(): { exists: boolean; error?: string } {
@@ -177,6 +183,9 @@ export async function setupSync(_options: SyncSetupOptions = {}): Promise<void> 
     console.log();
     console.log(pc.white("  Schedule: Hourly (at minute 0)"));
     console.log(pc.white("  Command: tokscale submit --quiet"));
+    if (isWindows()) {
+      console.log(pc.gray(`  Script: ${WINDOWS_SCRIPT_FILE}`));
+    }
     console.log(pc.gray(`  Logs: ${LOG_FILE}`));
     console.log();
     console.log(pc.gray("  Your usage data will be automatically submitted every hour."));
@@ -225,6 +234,7 @@ export async function syncStatus(): Promise<void> {
     } else if (status.exists) {
       console.log(pc.green("  Status: Active"));
       console.log(pc.gray(`  Task: ${WINDOWS_TASK_NAME}`));
+      console.log(pc.gray(`  Script: ${WINDOWS_SCRIPT_FILE}`));
       console.log(pc.gray(`  Schedule: Hourly`));
       console.log(pc.gray(`  Logs: ${LOG_FILE}`));
     } else {
