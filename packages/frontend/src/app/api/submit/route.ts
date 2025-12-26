@@ -265,8 +265,31 @@ export async function POST(request: Request) {
             .where(eq(dailyBreakdown.id, existingDay.id));
         } else {
           // ---- INSERT: New day ----
-          const dayTotals = recalculateDayTotals(incomingSourceBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingSourceBreakdown);
+          // CRITICAL: Include devices[deviceId] from the start to prevent double-count on resubmit.
+          // Without this, resubmits would migrate existing data to __legacy__ and add new data,
+          // causing duplicate counting.
+          const incomingWithDevices: Record<string, SourceBreakdownData> = {};
+          for (const [sourceName, sourceData] of Object.entries(incomingSourceBreakdown)) {
+            incomingWithDevices[sourceName] = {
+              ...sourceData,
+              devices: {
+                [tokenRecord.tokenId]: {
+                  tokens: sourceData.tokens,
+                  cost: sourceData.cost,
+                  input: sourceData.input,
+                  output: sourceData.output,
+                  cacheRead: sourceData.cacheRead,
+                  cacheWrite: sourceData.cacheWrite,
+                  reasoning: sourceData.reasoning || 0,
+                  messages: sourceData.messages,
+                  models: { ...sourceData.models },
+                },
+              },
+            };
+          }
+
+          const dayTotals = recalculateDayTotals(incomingWithDevices);
+          const modelBreakdown = buildModelBreakdown(incomingWithDevices);
 
           await tx.insert(dailyBreakdown).values({
             submissionId: submissionId,
@@ -275,7 +298,7 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
-            sourceBreakdown: incomingSourceBreakdown,
+            sourceBreakdown: incomingWithDevices,
             modelBreakdown: modelBreakdown,
           });
         }

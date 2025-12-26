@@ -47,9 +47,11 @@ function setupCrontab(): { success: boolean; error?: string } {
   try {
     ensureConfigDir();
     const cronEntry = buildCronEntry();
-    // Remove existing tokscale entries, then add new one
+    // Remove existing tokscale sync entries, then add new one
     // Uses || true to handle empty crontab gracefully
-    const command = `(crontab -l 2>/dev/null | grep -v 'tokscale' || true) | { cat; echo "${cronEntry}"; } | crontab -`;
+    // Use printf with single quotes to prevent shell injection if path contains $() or backticks
+    const escapedEntry = cronEntry.replace(/'/g, "'\\''");
+    const command = `(crontab -l 2>/dev/null | grep -v 'tokscale submit --quiet' || true) | { cat; printf '%s\\n' '${escapedEntry}'; } | crontab -`;
     execSync(command, { stdio: "pipe" });
     return { success: true };
   } catch (error) {
@@ -59,7 +61,8 @@ function setupCrontab(): { success: boolean; error?: string } {
 
 function removeCrontab(): { success: boolean; error?: string } {
   try {
-    const command = `(crontab -l 2>/dev/null | grep -v 'tokscale' || true) | crontab -`;
+    // Use specific pattern to only remove our sync entry, not unrelated tokscale jobs
+    const command = `(crontab -l 2>/dev/null | grep -v 'tokscale submit --quiet' || true) | crontab -`;
     execSync(command, { stdio: "pipe" });
     return { success: true };
   } catch (error) {
@@ -69,7 +72,8 @@ function removeCrontab(): { success: boolean; error?: string } {
 
 function checkCrontab(): { exists: boolean; entry?: string; error?: string } {
   try {
-    const result = execSync(`crontab -l 2>/dev/null | grep 'tokscale' || true`, {
+    // Use specific pattern to only find our sync entry
+    const result = execSync(`crontab -l 2>/dev/null | grep 'tokscale submit --quiet' || true`, {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -95,8 +99,11 @@ function setupWindowsTask(): { success: boolean; error?: string } {
       // Task doesn't exist yet
     }
     
-    const command = `schtasks /create /tn "${WINDOWS_TASK_NAME}" /sc HOURLY /tr "\\"${tokscalePath}\\" submit --quiet >> \\"${LOG_FILE}\\" 2>&1" /f`;
-    execSync(command, { stdio: "pipe" });
+    // Wrap in cmd.exe to enable shell redirections (>> and 2>&1)
+    // Without cmd.exe, schtasks /tr doesn't run under a shell, so redirections won't work
+    const windowsCommand = `cmd.exe /c "\\"${tokscalePath}\\" submit --quiet >> \\"${LOG_FILE}\\" 2>&1"`;
+    const scheduleCmd = `schtasks /create /tn "${WINDOWS_TASK_NAME}" /sc HOURLY /tr "${windowsCommand}" /f`;
+    execSync(scheduleCmd, { stdio: "pipe" });
     return { success: true };
   } catch (error) {
     return { success: false, error: (error as Error).message };

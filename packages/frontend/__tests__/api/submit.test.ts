@@ -402,6 +402,220 @@ describe('POST /api/submit - Source-Level Merge', () => {
     });
   });
 
+  describe('Insert Then Resubmit Same Day Same Device (Double-Count Prevention)', () => {
+    const createSourceDataWithDevices = (
+      tokens: number,
+      cost: number,
+      deviceId: string,
+      modelId = 'claude-sonnet-4'
+    ): SourceBreakdownData => ({
+      tokens,
+      cost,
+      input: Math.floor(tokens * 0.6),
+      output: Math.floor(tokens * 0.4),
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+      models: {
+        [modelId]: {
+          tokens,
+          cost,
+          input: Math.floor(tokens * 0.6),
+          output: Math.floor(tokens * 0.4),
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 1,
+        },
+      },
+      devices: {
+        [deviceId]: {
+          tokens,
+          cost,
+          input: Math.floor(tokens * 0.6),
+          output: Math.floor(tokens * 0.4),
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 1,
+          models: {
+            [modelId]: {
+              tokens,
+              cost,
+              input: Math.floor(tokens * 0.6),
+              output: Math.floor(tokens * 0.4),
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+              messages: 1,
+            },
+          },
+        },
+      },
+    });
+
+    it('should REPLACE tokens (not double) when same device resubmits same day', () => {
+      const deviceId = 'device-uuid-123';
+      const sources = new Set(['claude']);
+
+      const firstDayInsert: Record<string, SourceBreakdownData> = {
+        claude: createSourceDataWithDevices(1000, 10, deviceId),
+      };
+      expect(firstDayInsert.claude.tokens).toBe(1000);
+      expect(firstDayInsert.claude.devices?.[deviceId]?.tokens).toBe(1000);
+
+      const secondSubmissionSameDay: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 1500,
+          cost: 15,
+          input: 900,
+          output: 600,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 2,
+          models: {
+            'claude-sonnet-4': {
+              tokens: 1500,
+              cost: 15,
+              input: 900,
+              output: 600,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+              messages: 2,
+            },
+          },
+        },
+      };
+
+      const merged = mergeSourceBreakdowns(firstDayInsert, secondSubmissionSameDay, sources, deviceId);
+
+      expect(merged.claude.tokens).toBe(1500);
+      expect(merged.claude.cost).toBe(15);
+      expect(merged.claude.devices?.[deviceId]?.tokens).toBe(1500);
+      expect(Object.keys(merged.claude.devices || {}).length).toBe(1);
+      expect(merged.claude.devices?.['__legacy__']).toBeUndefined();
+    });
+
+    it('should NOT create __legacy__ when first insert already has devices field', () => {
+      const deviceId = 'device-uuid-456';
+      const sources = new Set(['claude']);
+
+      const firstInsertWithDevices: Record<string, SourceBreakdownData> = {
+        claude: createSourceDataWithDevices(500, 5, deviceId),
+      };
+
+      expect(firstInsertWithDevices.claude.devices).toBeDefined();
+      expect(firstInsertWithDevices.claude.devices?.[deviceId]).toBeDefined();
+
+      const resubmit: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 800,
+          cost: 8,
+          input: 480,
+          output: 320,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 3,
+          models: {
+            'claude-sonnet-4': {
+              tokens: 800,
+              cost: 8,
+              input: 480,
+              output: 320,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+              messages: 3,
+            },
+          },
+        },
+      };
+
+      const merged = mergeSourceBreakdowns(firstInsertWithDevices, resubmit, sources, deviceId);
+
+      expect(merged.claude.devices?.['__legacy__']).toBeUndefined();
+      expect(merged.claude.tokens).toBe(800);
+      expect(merged.claude.devices?.[deviceId]?.tokens).toBe(800);
+    });
+
+    it('should simulate full insert→resubmit flow without double-counting', () => {
+      const deviceId = 'my-api-token-id';
+      const sources = new Set(['claude', 'cursor']);
+
+      const day1FirstInsert: Record<string, SourceBreakdownData> = {
+        claude: createSourceDataWithDevices(2000, 20, deviceId, 'claude-sonnet-4'),
+        cursor: createSourceDataWithDevices(1000, 10, deviceId, 'gpt-4o'),
+      };
+
+      expect(day1FirstInsert.claude.tokens).toBe(2000);
+      expect(day1FirstInsert.cursor.tokens).toBe(1000);
+
+      const day1Resubmit: Record<string, SourceBreakdownData> = {
+        claude: {
+          tokens: 2500,
+          cost: 25,
+          input: 1500,
+          output: 1000,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 10,
+          models: {
+            'claude-sonnet-4': {
+              tokens: 2500,
+              cost: 25,
+              input: 1500,
+              output: 1000,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+              messages: 10,
+            },
+          },
+        },
+        cursor: {
+          tokens: 1200,
+          cost: 12,
+          input: 720,
+          output: 480,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 5,
+          models: {
+            'gpt-4o': {
+              tokens: 1200,
+              cost: 12,
+              input: 720,
+              output: 480,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+              messages: 5,
+            },
+          },
+        },
+      };
+
+      const merged = mergeSourceBreakdowns(day1FirstInsert, day1Resubmit, sources, deviceId);
+
+      expect(merged.claude.tokens).toBe(2500);
+      expect(merged.cursor.tokens).toBe(1200);
+      expect(merged.claude.tokens).not.toBe(4500);
+      expect(merged.cursor.tokens).not.toBe(2200);
+
+      expect(merged.claude.devices?.['__legacy__']).toBeUndefined();
+      expect(merged.cursor.devices?.['__legacy__']).toBeUndefined();
+
+      expect(Object.keys(merged.claude.devices || {}).length).toBe(1);
+      expect(Object.keys(merged.cursor.devices || {}).length).toBe(1);
+    });
+  });
+
   describe('Device-Level Tracking (Cross-Machine Aggregation)', () => {
     const createSourceData = (tokens: number, cost: number, modelId = 'claude-sonnet-4'): SourceBreakdownData => ({
       tokens,
