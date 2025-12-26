@@ -24,6 +24,7 @@ interface SubmitOptions {
   until?: string;
   year?: string;
   dryRun?: boolean;
+  quiet?: boolean;
 }
 
 interface SubmitResponse {
@@ -51,24 +52,34 @@ type SourceType = "opencode" | "claude" | "codex" | "gemini" | "cursor" | "amp";
  * Submit command - sends usage data to the platform
  */
 export async function submit(options: SubmitOptions = {}): Promise<void> {
+  const { quiet } = options;
+
+  const logIfNotQuiet = (...args: Parameters<typeof console.log>) => {
+    if (!quiet) console.log(...args);
+  };
+
   // Step 1: Check if logged in
   const credentials = loadCredentials();
   if (!credentials) {
-    console.log(pc.yellow("\n  Not logged in."));
-    console.log(pc.gray("  Run 'tokscale login' first.\n"));
+    if (!quiet) {
+      console.log(pc.yellow("\n  Not logged in."));
+      console.log(pc.gray("  Run 'tokscale login' first.\n"));
+    } else {
+      console.error("Error: Not logged in. Run 'tokscale login' first.");
+    }
     process.exit(1);
   }
 
   // Step 2: Log native module status (TS fallback available)
   if (!isNativeAvailable()) {
-    console.log(pc.yellow("\n  Note: Using TypeScript fallback (native module not available)"));
-    console.log(pc.gray("  Run 'bun run build:core' for faster processing.\n"));
+    logIfNotQuiet(pc.yellow("\n  Note: Using TypeScript fallback (native module not available)"));
+    logIfNotQuiet(pc.gray("  Run 'bun run build:core' for faster processing.\n"));
   }
 
-  console.log(pc.cyan("\n  Tokscale - Submit Usage Data\n"));
+  logIfNotQuiet(pc.cyan("\n  Tokscale - Submit Usage Data\n"));
 
   // Step 3: Generate graph data
-  console.log(pc.gray("  Scanning local session data..."));
+  logIfNotQuiet(pc.gray("  Scanning local session data..."));
 
   const fetcher = new PricingFetcher();
   await fetcher.fetchPricing();
@@ -102,28 +113,28 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
   }
 
   // Step 4: Show summary
-  console.log(pc.white("  Data to submit:"));
-  console.log(pc.gray(`    Date range: ${data.meta.dateRange.start} to ${data.meta.dateRange.end}`));
-  console.log(pc.gray(`    Active days: ${data.summary.activeDays}`));
-  console.log(pc.gray(`    Total tokens: ${data.summary.totalTokens.toLocaleString()}`));
-  console.log(pc.gray(`    Total cost: ${formatCurrency(data.summary.totalCost)}`));
-  console.log(pc.gray(`    Sources: ${data.summary.sources.join(", ")}`));
-  console.log(pc.gray(`    Models: ${data.summary.models.length} models`));
-  console.log();
+  logIfNotQuiet(pc.white("  Data to submit:"));
+  logIfNotQuiet(pc.gray(`    Date range: ${data.meta.dateRange.start} to ${data.meta.dateRange.end}`));
+  logIfNotQuiet(pc.gray(`    Active days: ${data.summary.activeDays}`));
+  logIfNotQuiet(pc.gray(`    Total tokens: ${data.summary.totalTokens.toLocaleString()}`));
+  logIfNotQuiet(pc.gray(`    Total cost: ${formatCurrency(data.summary.totalCost)}`));
+  logIfNotQuiet(pc.gray(`    Sources: ${data.summary.sources.join(", ")}`));
+  logIfNotQuiet(pc.gray(`    Models: ${data.summary.models.length} models`));
+  logIfNotQuiet();
 
   if (data.summary.totalTokens === 0) {
-    console.log(pc.yellow("  No usage data found to submit.\n"));
+    logIfNotQuiet(pc.yellow("  No usage data found to submit.\n"));
     return;
   }
 
   // Step 5: Dry run check
   if (options.dryRun) {
-    console.log(pc.yellow("  Dry run - not submitting data.\n"));
+    logIfNotQuiet(pc.yellow("  Dry run - not submitting data.\n"));
     return;
   }
 
   // Step 6: Submit to server
-  console.log(pc.gray("  Submitting to server..."));
+  logIfNotQuiet(pc.gray("  Submitting to server..."));
 
   const baseUrl = getApiBaseUrl();
 
@@ -146,28 +157,28 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
           console.error(pc.gray(`    - ${detail}`));
         }
       }
-      console.log();
+      logIfNotQuiet();
       process.exit(1);
     }
 
     // Success!
-    console.log(pc.green("\n  Successfully submitted!"));
-    console.log();
-    console.log(pc.white("  Summary:"));
-    console.log(pc.gray(`    Submission ID: ${result.submissionId}`));
-    console.log(pc.gray(`    Total tokens: ${result.metrics?.totalTokens?.toLocaleString()}`));
-    console.log(pc.gray(`    Total cost: ${formatCurrency(result.metrics?.totalCost || 0)}`));
-    console.log(pc.gray(`    Active days: ${result.metrics?.activeDays}`));
-    console.log();
-    console.log(pc.cyan(`  View your profile: ${baseUrl}/u/${credentials.username}`));
-    console.log();
+    logIfNotQuiet(pc.green("\n  Successfully submitted!"));
+    logIfNotQuiet();
+    logIfNotQuiet(pc.white("  Summary:"));
+    logIfNotQuiet(pc.gray(`    Submission ID: ${result.submissionId}`));
+    logIfNotQuiet(pc.gray(`    Total tokens: ${result.metrics?.totalTokens?.toLocaleString()}`));
+    logIfNotQuiet(pc.gray(`    Total cost: ${formatCurrency(result.metrics?.totalCost || 0)}`));
+    logIfNotQuiet(pc.gray(`    Active days: ${result.metrics?.activeDays}`));
+    logIfNotQuiet();
+    logIfNotQuiet(pc.cyan(`  View your profile: ${baseUrl}/u/${credentials.username}`));
+    logIfNotQuiet();
 
     if (result.warnings && result.warnings.length > 0) {
-      console.log(pc.yellow("  Warnings:"));
+      logIfNotQuiet(pc.yellow("  Warnings:"));
       for (const warning of result.warnings) {
-        console.log(pc.gray(`    - ${warning}`));
+        logIfNotQuiet(pc.gray(`    - ${warning}`));
       }
-      console.log();
+      logIfNotQuiet();
     }
   } catch (error) {
     console.error(pc.red(`\n  Error: Failed to connect to server.`));

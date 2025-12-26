@@ -355,6 +355,7 @@ async function main() {
     .option("--until <date>", "End date (YYYY-MM-DD)")
     .option("--year <year>", "Filter to specific year")
     .option("--dry-run", "Show what would be submitted without actually submitting")
+    .option("--quiet", "Suppress output (for cron jobs)")
     .action(async (options) => {
       await submit({
         opencode: options.opencode,
@@ -367,6 +368,7 @@ async function main() {
         until: options.until,
         year: options.year,
         dryRun: options.dryRun,
+        quiet: options.quiet,
       });
     });
 
