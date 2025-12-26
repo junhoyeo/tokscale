@@ -157,12 +157,28 @@ export function mergeSourceBreakdowns(
         };
       }
 
-      // CRITICAL: Legacy migration - first device inherits (no __legacy__ to avoid double-count)
+      // MIGRATION: If existing source has NO devices field (legacy data)
       if (!merged[sourceName].devices) {
-        merged[sourceName].devices = {};
+        // Seed devices with legacy totals under current deviceId
+        // This preserves historical data as this device's contribution
+        merged[sourceName].devices = {
+          [deviceId]: {
+            tokens: merged[sourceName].tokens,
+            cost: merged[sourceName].cost,
+            input: merged[sourceName].input,
+            output: merged[sourceName].output,
+            cacheRead: merged[sourceName].cacheRead,
+            cacheWrite: merged[sourceName].cacheWrite,
+            reasoning: merged[sourceName].reasoning || 0,
+            messages: merged[sourceName].messages,
+            models: { ...(merged[sourceName].models ?? {}) },
+          },
+        };
       }
 
-      merged[sourceName].devices[deviceId] = {
+      // REPLACE this device's contribution (handles resubmits correctly)
+      // This preserves OTHER devices' contributions
+      merged[sourceName].devices![deviceId] = {
         tokens: incomingSource.tokens,
         cost: incomingSource.cost,
         input: incomingSource.input,
