@@ -101,28 +101,37 @@ function recalculateSourceAggregate(source: SourceBreakdownData): void {
   source.models = {};
 
   for (const deviceData of Object.values(source.devices)) {
-    source.tokens += deviceData.tokens;
-    source.cost += deviceData.cost;
-    source.input += deviceData.input;
-    source.output += deviceData.output;
-    source.cacheRead += deviceData.cacheRead;
-    source.cacheWrite += deviceData.cacheWrite;
-    source.reasoning += deviceData.reasoning || 0;
-    source.messages += deviceData.messages;
+    source.tokens += Number(deviceData.tokens) || 0;
+    source.cost += Number(deviceData.cost) || 0;
+    source.input += Number(deviceData.input) || 0;
+    source.output += Number(deviceData.output) || 0;
+    source.cacheRead += Number(deviceData.cacheRead) || 0;
+    source.cacheWrite += Number(deviceData.cacheWrite) || 0;
+    source.reasoning += Number(deviceData.reasoning) || 0;
+    source.messages += Number(deviceData.messages) || 0;
 
     for (const [modelId, modelData] of Object.entries(deviceData.models ?? {})) {
       if (!source.models[modelId]) {
-        source.models[modelId] = { ...modelData };
+        source.models[modelId] = {
+          tokens: Number(modelData.tokens) || 0,
+          cost: Number(modelData.cost) || 0,
+          input: Number(modelData.input) || 0,
+          output: Number(modelData.output) || 0,
+          cacheRead: Number(modelData.cacheRead) || 0,
+          cacheWrite: Number(modelData.cacheWrite) || 0,
+          reasoning: Number(modelData.reasoning) || 0,
+          messages: Number(modelData.messages) || 0,
+        };
       } else {
         const m = source.models[modelId];
-        m.tokens += modelData.tokens;
-        m.cost += modelData.cost;
-        m.input += modelData.input;
-        m.output += modelData.output;
-        m.cacheRead += modelData.cacheRead;
-        m.cacheWrite += modelData.cacheWrite;
-        m.reasoning += modelData.reasoning || 0;
-        m.messages += modelData.messages;
+        m.tokens += Number(modelData.tokens) || 0;
+        m.cost += Number(modelData.cost) || 0;
+        m.input += Number(modelData.input) || 0;
+        m.output += Number(modelData.output) || 0;
+        m.cacheRead += Number(modelData.cacheRead) || 0;
+        m.cacheWrite += Number(modelData.cacheWrite) || 0;
+        m.reasoning += Number(modelData.reasoning) || 0;
+        m.messages += Number(modelData.messages) || 0;
       }
     }
   }
@@ -158,11 +167,10 @@ export function mergeSourceBreakdowns(
       }
 
       // MIGRATION: If existing source has NO devices field (legacy data)
+      // Use "__legacy__" device to preserve historical data separately from current device
       if (!merged[sourceName].devices) {
-        // Seed devices with legacy totals under current deviceId
-        // This preserves historical data as this device's contribution
         merged[sourceName].devices = {
-          [deviceId]: {
+          "__legacy__": {
             tokens: merged[sourceName].tokens,
             cost: merged[sourceName].cost,
             input: merged[sourceName].input,
