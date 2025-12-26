@@ -157,23 +157,12 @@ export function mergeSourceBreakdowns(
         };
       }
 
+      // CRITICAL: Legacy migration - first device inherits (no __legacy__ to avoid double-count)
       if (!merged[sourceName].devices) {
-        merged[sourceName].devices = {
-          __legacy__: {
-            tokens: merged[sourceName].tokens,
-            cost: merged[sourceName].cost,
-            input: merged[sourceName].input,
-            output: merged[sourceName].output,
-            cacheRead: merged[sourceName].cacheRead,
-            cacheWrite: merged[sourceName].cacheWrite,
-            reasoning: merged[sourceName].reasoning || 0,
-            messages: merged[sourceName].messages,
-            models: { ...(merged[sourceName].models ?? {}) },
-          },
-        };
+        merged[sourceName].devices = {};
       }
 
-      merged[sourceName].devices![deviceId] = {
+      merged[sourceName].devices[deviceId] = {
         tokens: incomingSource.tokens,
         cost: incomingSource.cost,
         input: incomingSource.input,

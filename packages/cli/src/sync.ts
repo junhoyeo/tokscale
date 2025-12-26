@@ -102,7 +102,8 @@ function setupWindowsTask(): { success: boolean; error?: string } {
     const scriptContent = `@echo off\r\n"${tokscalePath}" submit --quiet >> "${LOG_FILE}" 2>&1\r\n`;
     fs.writeFileSync(WINDOWS_SCRIPT_FILE, scriptContent);
     
-    const scheduleCmd = `schtasks /create /tn "${WINDOWS_TASK_NAME}" /sc HOURLY /tr "${WINDOWS_SCRIPT_FILE}" /f`;
+    // Use cmd.exe /c wrapper for robustness with Task Scheduler
+    const scheduleCmd = `schtasks /create /tn "${WINDOWS_TASK_NAME}" /sc HOURLY /tr "cmd.exe /c \\"${WINDOWS_SCRIPT_FILE}\\"" /f`;
     execSync(scheduleCmd, { stdio: "pipe" });
     return { success: true };
   } catch (error) {

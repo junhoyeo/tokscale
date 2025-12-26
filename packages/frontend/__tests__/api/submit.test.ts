@@ -617,7 +617,7 @@ describe('POST /api/submit - Source-Level Merge', () => {
   });
 
   describe('mergeSourceBreakdowns - direct function calls', () => {
-    it('should handle legacy data without devices field', () => {
+    it('should handle legacy data without devices field (first device inherits, no __legacy__)', () => {
       const existing: Record<string, SourceBreakdownData> = {
         claude: {
           tokens: 1000, cost: 0.05, input: 500, output: 500,
@@ -636,9 +636,9 @@ describe('POST /api/submit - Source-Level Merge', () => {
       
       const result = mergeSourceBreakdowns(existing, incoming, new Set(['claude']), 'device-1');
       
-      expect(result.claude.devices?.['__legacy__']).toBeDefined();
+      expect(result.claude.devices?.['__legacy__']).toBeUndefined();
       expect(result.claude.devices?.['device-1']).toBeDefined();
-      expect(result.claude.tokens).toBe(1500);
+      expect(result.claude.tokens).toBe(500);
     });
     
     it('should replace same device data on resubmit (no double-count)', () => {
@@ -671,7 +671,7 @@ describe('POST /api/submit - Source-Level Merge', () => {
       expect(result.claude.devices?.['device-1']?.tokens).toBe(1500);
     });
 
-    it('should handle legacy data with only modelId (no models field)', () => {
+    it('should handle legacy data with only modelId - first device inherits (no __legacy__)', () => {
       const existing: Record<string, SourceBreakdownData> = {
         claude: {
           tokens: 1000, cost: 0.05, input: 500, output: 500,
@@ -691,10 +691,9 @@ describe('POST /api/submit - Source-Level Merge', () => {
       
       const result = mergeSourceBreakdowns(existing, incoming, new Set(['claude']), 'device-1');
       
-      expect(result.claude.devices?.['__legacy__']).toBeDefined();
-      expect(result.claude.devices?.['__legacy__']?.models).toEqual({});
+      expect(result.claude.devices?.['__legacy__']).toBeUndefined();
       expect(result.claude.devices?.['device-1']).toBeDefined();
-      expect(result.claude.tokens).toBe(1500);
+      expect(result.claude.tokens).toBe(500);
     });
   });
 
@@ -770,7 +769,7 @@ describe('POST /api/submit - Source-Level Merge', () => {
       expect(Object.keys(afterB.claude.devices || {}).length).toBe(2);
     });
 
-    it('should migrate existing data without devices field to __legacy__ device', () => {
+    it('should NOT create __legacy__ when migrating - first device inherits legacy data', () => {
       const newDevice = 'new-device-uuid';
       const sources = new Set(['claude']);
       
@@ -805,11 +804,10 @@ describe('POST /api/submit - Source-Level Merge', () => {
       
       const merged = mergeSourceBreakdowns(existingWithoutDevices, newSubmission, sources, newDevice);
       
-      expect(merged.claude.devices?.['__legacy__']).toBeDefined();
-      expect(merged.claude.devices?.['__legacy__']?.tokens).toBe(1000);
+      expect(merged.claude.devices?.['__legacy__']).toBeUndefined();
       expect(merged.claude.devices?.[newDevice]?.tokens).toBe(500);
-      expect(merged.claude.tokens).toBe(1500);
-      expect(merged.claude.cost).toBe(15);
+      expect(merged.claude.tokens).toBe(500);
+      expect(merged.claude.cost).toBe(5);
     });
 
     it('should aggregate models across devices correctly', () => {
