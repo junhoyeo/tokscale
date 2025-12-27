@@ -209,7 +209,7 @@ export async function POST(request: Request) {
             existing.output += modelData.output;
             existing.cacheRead += modelData.cacheRead;
             existing.cacheWrite += modelData.cacheWrite;
-            existing.reasoning = (existing.reasoning || 0) + modelData.reasoning;
+            existing.reasoning = (Number(existing.reasoning) || 0) + modelData.reasoning;
             existing.messages += modelData.messages;
             const existingModel = existing.models[source.modelId];
             if (existingModel) {
@@ -219,7 +219,7 @@ export async function POST(request: Request) {
               existingModel.output += modelData.output;
               existingModel.cacheRead += modelData.cacheRead;
               existingModel.cacheWrite += modelData.cacheWrite;
-              existingModel.reasoning = (existingModel.reasoning || 0) + modelData.reasoning;
+              existingModel.reasoning = (Number(existingModel.reasoning) || 0) + modelData.reasoning;
               existingModel.messages += modelData.messages;
             } else {
               existing.models[source.modelId] = modelData;
@@ -241,7 +241,8 @@ export async function POST(request: Request) {
           const mergedSourceBreakdown = mergeSourceBreakdowns(
             existingSourceBreakdown,
             incomingSourceBreakdown,
-            submittedSources
+            submittedSources,
+            tokenRecord.tokenId
           );
 
           // Recalculate day totals from merged data
@@ -264,8 +265,31 @@ export async function POST(request: Request) {
             .where(eq(dailyBreakdown.id, existingDay.id));
         } else {
           // ---- INSERT: New day ----
-          const dayTotals = recalculateDayTotals(incomingSourceBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingSourceBreakdown);
+          // CRITICAL: Include devices[deviceId] from the start to prevent double-count on resubmit.
+          // Without this, resubmits would migrate existing data to __legacy__ and add new data,
+          // causing duplicate counting.
+          const incomingWithDevices: Record<string, SourceBreakdownData> = {};
+          for (const [sourceName, sourceData] of Object.entries(incomingSourceBreakdown)) {
+            incomingWithDevices[sourceName] = {
+              ...sourceData,
+              devices: {
+                [tokenRecord.tokenId]: {
+                  tokens: sourceData.tokens,
+                  cost: sourceData.cost,
+                  input: sourceData.input,
+                  output: sourceData.output,
+                  cacheRead: sourceData.cacheRead,
+                  cacheWrite: sourceData.cacheWrite,
+                  reasoning: Number(sourceData.reasoning) || 0,
+                  messages: sourceData.messages,
+                  models: { ...sourceData.models },
+                },
+              },
+            };
+          }
+
+          const dayTotals = recalculateDayTotals(incomingWithDevices);
+          const modelBreakdown = buildModelBreakdown(incomingWithDevices);
 
           await tx.insert(dailyBreakdown).values({
             submissionId: submissionId,
@@ -274,7 +298,7 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
-            sourceBreakdown: incomingSourceBreakdown,
+            sourceBreakdown: incomingWithDevices,
             modelBreakdown: modelBreakdown,
           });
         }
@@ -323,9 +347,9 @@ export async function POST(request: Request) {
             } else if (sd.modelId) {
               allModels.add(sd.modelId);
             }
-            totalCacheRead += sd.cacheRead || 0;
-            totalCacheCreation += sd.cacheWrite || 0;
-            totalReasoning += sd.reasoning || 0;
+            totalCacheRead += Number(sd.cacheRead) || 0;
+            totalCacheCreation += Number(sd.cacheWrite) || 0;
+            totalReasoning += Number(sd.reasoning) || 0;
           }
         }
       }
