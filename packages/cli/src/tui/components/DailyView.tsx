@@ -50,7 +50,7 @@ export function DailyView(props: DailyViewProps) {
       let cmp = 0;
       if (sortBy === "cost") cmp = a.cost - b.cost;
       else if (sortBy === "tokens") cmp = a.total - b.total;
-      else cmp = a.date.localeCompare(b.date);
+      else cmp = b.date.localeCompare(a.date);
       return sortDesc ? -cmp : cmp;
     });
   });
