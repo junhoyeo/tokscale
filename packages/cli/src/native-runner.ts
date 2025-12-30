@@ -5,56 +5,26 @@
  * This script runs in a separate process to keep the main event loop free
  * for UI rendering (e.g., spinner animation).
  * 
- * Communication: stdin (JSON input) -> stdout (JSON output)
- * No temp files needed - pure Unix IPC pattern.
+ * Communication: file (JSON input) -> stdout (JSON output)
  */
 
 import nativeCore from "@tokscale/core";
-
-const MAX_INPUT_SIZE = 50 * 1024 * 1024; // 50MB
-const STDIN_TIMEOUT_MS = 30_000; // 30s
+import { readFileSync } from "node:fs";
 
 interface NativeRunnerRequest {
   method: string;
   args: unknown[];
 }
 
-async function readStdinWithLimits(): Promise<string> {
-  const chunks: Buffer[] = [];
-  let totalSize = 0;
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error(`Stdin read timed out after ${STDIN_TIMEOUT_MS}ms`)), STDIN_TIMEOUT_MS);
-  });
-
-  const readPromise = (async () => {
-    for await (const chunk of process.stdin) {
-      const buf = Buffer.from(chunk as ArrayBuffer);
-      totalSize += buf.length;
-      if (totalSize > MAX_INPUT_SIZE) {
-        throw new Error(`Input exceeds maximum size of ${MAX_INPUT_SIZE} bytes (${Math.round(MAX_INPUT_SIZE / 1024 / 1024)}MB)`);
-      }
-      chunks.push(buf);
-    }
-    return Buffer.concat(chunks).toString("utf-8");
-  })();
-
-  try {
-    const result = await Promise.race([readPromise, timeoutPromise]);
-    return result;
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
-}
-
 async function main() {
-  const input = await readStdinWithLimits();
+  const inputFile = process.argv[2];
   
-  if (!input.trim()) {
-    process.stderr.write(JSON.stringify({ error: "No input received" }));
+  if (!inputFile) {
+    process.stderr.write(JSON.stringify({ error: "No input file provided" }));
     process.exit(1);
   }
+  
+  const input = readFileSync(inputFile, "utf-8");
   
   let request: NativeRunnerRequest;
   try {
