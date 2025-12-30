@@ -378,6 +378,9 @@ export interface FinalizeOptions {
 
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -396,7 +399,6 @@ const MAX_OUTPUT_BYTES = parseInt(
 );
 
 interface BunSubprocess {
-  stdin: { write: (data: string) => void; end: () => void };
   stdout: { text: () => Promise<string> };
   stderr: { text: () => Promise<string> };
   exited: Promise<number>;
@@ -406,7 +408,6 @@ interface BunSubprocess {
 }
 
 interface BunSpawnOptions {
-  stdin: string;
   stdout: string;
   stderr: string;
 }
@@ -425,16 +426,22 @@ async function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
   const runnerPath = join(__dirname, "native-runner.js");
   const input = JSON.stringify({ method, args });
 
+  const tmpDir = join(tmpdir(), "tokscale");
+  mkdirSync(tmpDir, { recursive: true });
+  const inputFile = join(tmpDir, `input-${randomUUID()}.json`);
+  
+  writeFileSync(inputFile, input, "utf-8");
+
   const BunGlobal = (globalThis as Record<string, unknown>).Bun as BunGlobalType;
 
   let proc: BunSubprocess;
   try {
-    proc = BunGlobal.spawn([process.execPath, runnerPath], {
-      stdin: "pipe",
+    proc = BunGlobal.spawn([process.execPath, runnerPath, inputFile], {
       stdout: "pipe",
       stderr: "pipe",
     });
   } catch (e) {
+    unlinkSync(inputFile);
     throw new Error(`Failed to spawn subprocess: ${(e as Error).message}`);
   }
 
@@ -446,6 +453,7 @@ async function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
   const cleanup = async () => {
     if (timeoutId) clearTimeout(timeoutId);
     if (sigkillId) clearTimeout(sigkillId);
+    try { unlinkSync(inputFile); } catch {}
     if (aborted) {
       safeKill(proc, "SIGKILL");
       await proc.exited.catch(() => {});
@@ -458,9 +466,6 @@ async function runInSubprocess<T>(method: string, args: unknown[]): Promise<T> {
   };
 
   try {
-    proc.stdin.write(input);
-    proc.stdin.end();
-
     const stdoutChunks: Uint8Array[] = [];
     const stderrChunks: Uint8Array[] = [];
     let stdoutBytes = 0;
