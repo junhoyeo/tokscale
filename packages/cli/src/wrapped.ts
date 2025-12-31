@@ -252,8 +252,9 @@ async function loadWrappedData(options: WrappedOptions): Promise<WrappedData> {
 
   const modelMap = new Map<string, { cost: number; tokens: number }>();
   for (const entry of report.entries) {
-    const existing = modelMap.get(entry.model) || { cost: 0, tokens: 0 };
-    modelMap.set(entry.model, {
+    const displayName = formatModelName(entry.model);
+    const existing = modelMap.get(displayName) || { cost: 0, tokens: 0 };
+    modelMap.set(displayName, {
       cost: existing.cost + entry.cost,
       tokens: existing.tokens + entry.input + entry.output + entry.cacheRead + entry.cacheWrite,
     });
@@ -681,7 +682,7 @@ async function generateWrappedImage(data: WrappedData, options: { short?: boolea
 
     ctx.fillStyle = COLORS.textPrimary;
     ctx.font = `${32 * SCALE}px Figtree, sans-serif`;
-    ctx.fillText(formatModelName(model.name), textX, yPos);
+    ctx.fillText(model.name, textX, yPos);
     yPos += 50 * SCALE;
   }
   yPos += 40 * SCALE;
