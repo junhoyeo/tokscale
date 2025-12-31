@@ -381,10 +381,14 @@ For advanced users with large datasets or specific requirements:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `TOKSCALE_CACHE_DIR` | `~/.cache/tokscale` | Custom cache directory for pricing data |
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Maximum time for native subprocess processing |
 | `TOKSCALE_MAX_OUTPUT_BYTES` | `104857600` (100MB) | Maximum output size from native subprocess |
 
 ```bash
+# Example: Use custom cache directory
+TOKSCALE_CACHE_DIR=/path/to/cache tokscale
+
 # Example: Increase timeout for very large datasets
 TOKSCALE_NATIVE_TIMEOUT_MS=600000 tokscale graph --output data.json
 

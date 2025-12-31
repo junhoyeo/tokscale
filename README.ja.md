@@ -324,10 +324,14 @@ tokscale cursor logout
 
 | 変数 | デフォルト | 説明 |
 |----------|---------|-------------|
+| `TOKSCALE_CACHE_DIR` | `~/.cache/tokscale` | 価格データ用のカスタムキャッシュディレクトリ |
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000`（5分） | ネイティブサブプロセス処理の最大時間 |
 | `TOKSCALE_MAX_OUTPUT_BYTES` | `104857600`（100MB） | ネイティブサブプロセスからの最大出力サイズ |
 
 ```bash
+# 例：カスタムキャッシュディレクトリを使用
+TOKSCALE_CACHE_DIR=/path/to/cache tokscale
+
 # 例：非常に大きなデータセット用にタイムアウトを増加
 TOKSCALE_NATIVE_TIMEOUT_MS=600000 tokscale graph --output data.json
 

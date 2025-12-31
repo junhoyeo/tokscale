@@ -6,16 +6,20 @@ use serde::{Serialize, Deserialize};
 const CACHE_TTL_SECS: u64 = 3600;
 
 pub fn get_cache_dir() -> PathBuf {
-    // On macOS, use ~/.cache/tokscale for consistency with CLI
-    // (dirs::cache_dir() returns ~/Library/Caches on macOS, but we want ~/.cache)
-    #[cfg(target_os = "macos")]
+    // Allow custom cache directory via environment variable
+    if let Ok(custom_dir) = std::env::var("TOKSCALE_CACHE_DIR") {
+        return PathBuf::from(custom_dir);
+    }
+
+    // On macOS and Linux, use ~/.cache/tokscale for consistency with CLI
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if let Some(home) = dirs::home_dir() {
             return home.join(".cache").join("tokscale");
         }
     }
 
-    // On other platforms (Linux, Windows), use platform defaults
+    // On Windows (or fallback), use platform defaults
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("tokscale")
