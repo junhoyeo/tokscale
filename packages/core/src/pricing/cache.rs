@@ -6,6 +6,16 @@ use serde::{Serialize, Deserialize};
 const CACHE_TTL_SECS: u64 = 3600;
 
 pub fn get_cache_dir() -> PathBuf {
+    // On macOS, use ~/.cache/tokscale for consistency with CLI
+    // (dirs::cache_dir() returns ~/Library/Caches on macOS, but we want ~/.cache)
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(".cache").join("tokscale");
+        }
+    }
+
+    // On other platforms (Linux, Windows), use platform defaults
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("tokscale")
