@@ -69,6 +69,20 @@ export function parseOpenCodeMessages(): UnifiedMessage[] {
               reasoning: msg.tokens.reasoning || 0,
             };
 
+            let cost = msg.cost || 0;
+
+            // Fix missing cost for Gemini 3 Pro High
+            if (cost === 0 && msg.modelID === "gemini-3-pro-high") {
+              const input = msg.tokens.input || 0;
+              const output = msg.tokens.output || 0;
+              const cacheRead = msg.tokens.cache?.read || 0;
+              
+              // Estimate based on $3.50/$10.50 per 1M tokens
+              cost = (input * 3.5 / 1000000) + 
+                     (output * 10.5 / 1000000) + 
+                     (cacheRead * 0.35 / 1000000);
+            }
+
             messages.push(
               createUnifiedMessage(
                 "opencode",
@@ -77,7 +91,7 @@ export function parseOpenCodeMessages(): UnifiedMessage[] {
                 sessionId,
                 msg.time.created,
                 tokens,
-                msg.cost || 0
+                cost
               )
             );
           }

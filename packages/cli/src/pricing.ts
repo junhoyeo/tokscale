@@ -52,6 +52,9 @@ export function normalizeModelName(modelId: string): string | null {
   if (lower.includes("gemini-2.5-flash")) {
     return "gemini-2.5-flash";
   }
+  if (lower.includes("gemini-3-pro-high")) {
+    return "gemini-1.5-pro"; // Try simple key
+  }
 
   return null;
 }
@@ -280,8 +283,19 @@ export class PricingFetcher {
       cacheRead: number;
       cacheWrite: number;
     },
-    pricing: LiteLLMModelPricing
+    pricing: LiteLLMModelPricing,
+    modelId?: string // Add modelId parameter
   ): number {
+    // Hardcode pricing for Gemini 3 Pro High
+    if (modelId && modelId.includes("gemini-3-pro-high")) {
+        const inputCost = tokens.input * (3.5 / 1000000);
+        const outputCost = (tokens.output + (tokens.reasoning ?? 0)) * (10.5 / 1000000);
+        // Assuming cache discount is similar to others (e.g. 50% or free read)
+        // Let's be conservative and treat cache read as 10% of input cost
+        const cacheReadCost = tokens.cacheRead * (0.35 / 1000000); 
+        return inputCost + outputCost + cacheReadCost;
+    }
+
     const inputCost = tokens.input * (pricing.input_cost_per_token ?? 0);
     const outputCost =
       (tokens.output + (tokens.reasoning ?? 0)) * (pricing.output_cost_per_token ?? 0);
