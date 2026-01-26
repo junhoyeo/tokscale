@@ -415,113 +415,35 @@ function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 
-const MODEL_DISPLAY_NAMES: Record<string, string> = {
-  "claude-opus-4-5": "Claude Opus 4.5",
-  "claude-opus-4-1": "Claude Opus 4.1",
-  "claude-opus-4": "Claude Opus 4",
-  "claude-sonnet-4-5": "Claude Sonnet 4.5",
-  "claude-sonnet-4": "Claude Sonnet 4",
-  "claude-haiku-4-5": "Claude Haiku 4.5",
-  "claude-3-7-sonnet": "Claude 3.7 Sonnet",
-  "claude-3-5-sonnet": "Claude 3.5 Sonnet",
-  "claude-3-5-haiku": "Claude 3.5 Haiku",
-  "claude-3-opus": "Claude 3 Opus",
-  "claude-3-haiku": "Claude 3 Haiku",
-  "gpt-5-codex": "GPT-5 Codex",
-  "gpt-5": "GPT-5",
-  "gpt-5.1-codex-max": "GPT-5.1 Codex Max",
-  "gpt-5.1-codex": "GPT-5.1 Codex",
-  "gpt-5.1": "GPT-5.1",
-  "gpt-5.2-codex": "GPT-5.2 Codex",
-  "gpt-5.2": "GPT-5.2",
-  "gpt-4o": "GPT-4o",
-  "gpt-4o-mini": "GPT-4o Mini",
-  "gpt-4-turbo": "GPT-4 Turbo",
-  "o1": "o1",
-  "o1-mini": "o1 Mini",
-  "o1-preview": "o1 Preview",
-  "o3-mini": "o3 Mini",
-  "o3": "o3",
-  "gemini-3-pro": "Gemini 3 Pro",
-  "gemini-3-flash": "Gemini 3 Flash",
-  "gemini-2.5-pro": "Gemini 2.5 Pro",
-  "gemini-2.5-flash": "Gemini 2.5 Flash",
-  "gemini-2.0-flash": "Gemini 2.0 Flash",
-  "gemini-1.5-pro": "Gemini 1.5 Pro",
-  "gemini-1.5-flash": "Gemini 1.5 Flash",
-  "grok-code": "Grok Code",
-  "grok-code-fast-1": "Grok Code Fast",
-  "glm-4.7": "GLM-4.7",
-  "composer-1": "Composer 1",
-  "minimax-m2.1-free": "MiniMax M2.1",
-  "cursor-small": "Cursor Small",
-};
+const BRAND_PREFIXES: [string, string][] = [
+  ["claude-", "Claude "],
+  ["gpt-", "GPT-"],
+  ["gemini-", "Gemini "],
+  ["grok-", "Grok "],
+  ["deepseek-", "DeepSeek "],
+  ["glm-", "GLM-"],
+];
 
 function formatModelName(model: string): string {
-  if (MODEL_DISPLAY_NAMES[model]) return MODEL_DISPLAY_NAMES[model];
-  
-  const suffixMatch = model.match(/[-_](high|medium|low)$/i);
-  const suffix = suffixMatch ? ` ${suffixMatch[1].charAt(0).toUpperCase()}${suffixMatch[1].slice(1).toLowerCase()}` : "";
-  
-  const cleaned = model
-    .replace(/-20\d{6,8}(-\d+)?$/, "")
-    .replace(/-\d{8}$/, "")
-    .replace(/:[-\w]+$/, "")
-    .replace(/[-_](high|medium|low)$/i, "")
-    .replace(/[-_]thinking$/i, "");
+  if (/^o\d/.test(model)) {
+    const [head, ...tail] = model.split("-");
+    if (tail.length === 0) return head;
+    return `${head} ${tail.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}`;
+  }
 
-  if (/claude[-_]?opus[-_]?4[-_.]?5/i.test(cleaned)) return `Claude Opus 4.5${suffix}`;
-  if (/claude[-_]?4[-_]?opus/i.test(cleaned)) return `Claude 4 Opus${suffix}`;
-  if (/claude[-_]?opus[-_]?4/i.test(cleaned)) return `Claude Opus 4${suffix}`;
-  if (/claude[-_]?sonnet[-_]?4[-_.]?5/i.test(cleaned)) return `Claude Sonnet 4.5${suffix}`;
-  if (/claude[-_]?4[-_]?sonnet/i.test(cleaned)) return `Claude 4 Sonnet${suffix}`;
-  if (/claude[-_]?sonnet[-_]?4/i.test(cleaned)) return `Claude Sonnet 4${suffix}`;
-  if (/claude[-_]?haiku[-_]?4[-_.]?5/i.test(cleaned)) return `Claude Haiku 4.5${suffix}`;
-  if (/claude[-_]?4[-_]?haiku/i.test(cleaned)) return `Claude 4 Haiku${suffix}`;
-  if (/claude[-_]?haiku[-_]?4/i.test(cleaned)) return `Claude Haiku 4${suffix}`;
-  if (/claude[-_]?3[-_.]?7[-_]?sonnet/i.test(cleaned)) return `Claude 3.7 Sonnet${suffix}`;
-  if (/claude[-_]?3[-_.]?5[-_]?sonnet/i.test(cleaned)) return `Claude 3.5 Sonnet${suffix}`;
-  if (/claude[-_]?3[-_.]?5[-_]?haiku/i.test(cleaned)) return `Claude 3.5 Haiku${suffix}`;
-  if (/claude[-_]?3[-_]?opus/i.test(cleaned)) return `Claude 3 Opus${suffix}`;
-  if (/claude[-_]?3[-_]?sonnet/i.test(cleaned)) return `Claude 3 Sonnet${suffix}`;
-  if (/claude[-_]?3[-_]?haiku/i.test(cleaned)) return `Claude 3 Haiku${suffix}`;
-  if (/gpt[-_]?5[-_.]?1/i.test(cleaned)) return `GPT-5.1${suffix}`;
-  if (/gpt[-_]?5/i.test(cleaned)) return `GPT-5${suffix}`;
-  if (/gpt[-_]?4[-_]?o[-_]?mini/i.test(cleaned)) return `GPT-4o Mini${suffix}`;
-  if (/gpt[-_]?4[-_]?o/i.test(cleaned)) return `GPT-4o${suffix}`;
-  if (/gpt[-_]?4[-_]?turbo/i.test(cleaned)) return `GPT-4 Turbo${suffix}`;
-  if (/gpt[-_]?4/i.test(cleaned)) return `GPT-4${suffix}`;
-  if (/^o1[-_]?mini/i.test(cleaned)) return `o1 Mini${suffix}`;
-  if (/^o1[-_]?preview/i.test(cleaned)) return `o1 Preview${suffix}`;
-  if (/^o3[-_]?mini/i.test(cleaned)) return `o3 Mini${suffix}`;
-  if (/^o1$/i.test(cleaned)) return `o1${suffix}`;
-  if (/^o3$/i.test(cleaned)) return `o3${suffix}`;
-  if (/gemini[-_]?3[-_]?pro/i.test(cleaned)) return `Gemini 3 Pro${suffix}`;
-  if (/gemini[-_]?3[-_]?flash/i.test(cleaned)) return `Gemini 3 Flash${suffix}`;
-  if (/gemini[-_]?2[-_.]?5[-_]?pro/i.test(cleaned)) return `Gemini 2.5 Pro${suffix}`;
-  if (/gemini[-_]?2[-_.]?5[-_]?flash/i.test(cleaned)) return `Gemini 2.5 Flash${suffix}`;
-  if (/gemini[-_]?2[-_.]?0[-_]?flash/i.test(cleaned)) return `Gemini 2.0 Flash${suffix}`;
-  if (/gemini[-_]?1[-_.]?5[-_]?pro/i.test(cleaned)) return `Gemini 1.5 Pro${suffix}`;
-  if (/gemini[-_]?1[-_.]?5[-_]?flash/i.test(cleaned)) return `Gemini 1.5 Flash${suffix}`;
-  if (/grok[-_]?3[-_]?mini/i.test(cleaned)) return `Grok Code 3 Mini${suffix}`;
-  if (/grok[-_]?3/i.test(cleaned)) return `Grok Code 3${suffix}`;
-  if (/grok/i.test(cleaned)) return `Grok Code${suffix}`;
-  if (/deepseek[-_]?v3/i.test(cleaned)) return `DeepSeek V3${suffix}`;
-  if (/deepseek[-_]?r1/i.test(cleaned)) return `DeepSeek R1${suffix}`;
-  if (/deepseek/i.test(cleaned)) return `DeepSeek${suffix}`;
+  for (const [prefix, display] of BRAND_PREFIXES) {
+    if (model.startsWith(prefix)) {
+      const rest = model.slice(prefix.length);
+      if (!rest) return display.trim();
+      const words = rest.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1));
+      return `${display}${words.join(" ")}`;
+    }
+  }
 
-  const baseName = cleaned
-    .replace(/^claude[-_]/i, "Claude ")
-    .replace(/^gpt[-_]/i, "GPT-")
-    .replace(/^gemini[-_]/i, "Gemini ")
-    .replace(/^grok[-_]/i, "Grok Code ")
-    .split(/[-_]/)
-    .filter(Boolean)
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(" ")
-    .trim();
-  
-  return `${baseName}${suffix}`;
+  return model
+    .split("-")
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
 }
 
 function drawRoundedRect(

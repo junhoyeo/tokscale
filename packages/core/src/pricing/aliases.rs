@@ -20,23 +20,19 @@ const DISPLAY_STRIPPED_PREFIXES: &[&str] = &["antigravity-"];
 /// Applied after lowercasing, prefix stripping, provider stripping, and date stripping.
 static DISPLAY_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    // Claude wrong naming order + thinking/max variants
     m.insert("claude-4-sonnet", "claude-sonnet-4");
     m.insert("claude-4-opus", "claude-opus-4");
     m.insert("claude-4-sonnet-thinking", "claude-sonnet-4");
     m.insert("claude-4-opus-thinking", "claude-opus-4");
-    m.insert("claude-4.5-opus-high-thinking", "claude-opus-4-5");
-    m.insert("claude-4.5-sonnet-thinking", "claude-sonnet-4-5");
-    // Claude 3.x thinking/max variants
-    m.insert("claude-3.7-sonnet-thinking-max", "claude-3-7-sonnet");
-    m.insert("claude-3.7-sonnet-max", "claude-3-7-sonnet");
-    m.insert("claude-3.7-sonnet-thinking", "claude-3-7-sonnet");
-    m.insert("claude-3-7-sonnet-thinking-max", "claude-3-7-sonnet");
-    m.insert("claude-3-7-sonnet-max", "claude-3-7-sonnet");
-    m.insert("claude-3-7-sonnet-thinking", "claude-3-7-sonnet");
-    // Gemini max variant
+    m.insert("claude-4.5-opus-high-thinking", "claude-opus-4.5");
+    m.insert("claude-4.5-sonnet-thinking", "claude-sonnet-4.5");
+    m.insert("claude-3.7-sonnet-thinking-max", "claude-3.7-sonnet");
+    m.insert("claude-3.7-sonnet-max", "claude-3.7-sonnet");
+    m.insert("claude-3.7-sonnet-thinking", "claude-3.7-sonnet");
+    m.insert("claude-3-7-sonnet-thinking-max", "claude-3.7-sonnet");
+    m.insert("claude-3-7-sonnet-max", "claude-3.7-sonnet");
+    m.insert("claude-3-7-sonnet-thinking", "claude-3.7-sonnet");
     m.insert("gemini-2.5-pro-max", "gemini-2.5-pro");
-    // GPT codex variant
     m.insert("gpt-5-1-codex-max-0", "gpt-5.1-codex-max");
     m
 });
@@ -86,10 +82,8 @@ pub fn normalize_display_model_id(model_id: &str) -> String {
     // 8. Strip -thinking suffix from Claude models (also handle -high-thinking, etc.)
     s = strip_claude_thinking_suffix(&s);
 
-    // 9. Version separator normalization for Claude only: dots → hyphens between single digits
-    if s.starts_with("claude-") {
-        s = normalize_claude_version_separator(&s);
-    }
+    // 9. Version separator: hyphens → dots between single digits (e.g., 4-5 → 4.5, 3-7 → 3.7)
+    s = normalize_version_separator(&s);
 
     s
 }
@@ -161,27 +155,24 @@ fn strip_claude_thinking_suffix(s: &str) -> String {
     s.to_string()
 }
 
-/// Normalize version separators for Claude models only: convert dots to hyphens
-/// between single digits. E.g., `claude-3.5-sonnet` → `claude-3-5-sonnet`.
-fn normalize_claude_version_separator(s: &str) -> String {
+fn normalize_version_separator(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
 
     for i in 0..chars.len() {
-        if chars[i] == '.'
+        if chars[i] == '-'
             && i > 0
             && i < chars.len() - 1
             && chars[i - 1].is_ascii_digit()
             && chars[i + 1].is_ascii_digit()
         {
-            // Only convert if both sides are single digits
             let is_multi_digit_before = i >= 2 && chars[i - 2].is_ascii_digit();
             let is_multi_digit_after = i + 2 < chars.len() && chars[i + 2].is_ascii_digit();
 
             if !is_multi_digit_before && !is_multi_digit_after {
-                result.push('-');
-            } else {
                 result.push('.');
+            } else {
+                result.push('-');
             }
         } else {
             result.push(chars[i]);
@@ -199,22 +190,20 @@ mod tests {
     // normalize_display_model_id tests
     // =========================================================================
 
-    // --- Rule 1: Lowercase ---
     #[test]
     fn test_display_lowercase() {
         assert_eq!(
             normalize_display_model_id("Claude-Opus-4-5"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
         assert_eq!(normalize_display_model_id("GPT-5.1"), "gpt-5.1");
     }
 
-    // --- Rule 2: Strip routing prefixes ---
     #[test]
     fn test_display_strip_antigravity_prefix() {
         assert_eq!(
             normalize_display_model_id("antigravity-claude-opus-4-5-thinking"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_display_model_id("antigravity-gemini-3-flash"),
@@ -222,7 +211,6 @@ mod tests {
         );
     }
 
-    // --- Rule 3: Strip provider prefixes with "/" ---
     #[test]
     fn test_display_strip_provider_prefix() {
         assert_eq!(normalize_display_model_id("qwen/qwen3-32b"), "qwen3-32b");
@@ -240,12 +228,11 @@ mod tests {
         );
     }
 
-    // --- Rule 4: Strip date suffixes ---
     #[test]
     fn test_display_strip_date_suffix() {
         assert_eq!(
             normalize_display_model_id("claude-opus-4-1-20250805"),
-            "claude-opus-4-1"
+            "claude-opus-4.1"
         );
         assert_eq!(
             normalize_display_model_id("claude-sonnet-4-20250514"),
@@ -253,15 +240,15 @@ mod tests {
         );
         assert_eq!(
             normalize_display_model_id("claude-opus-4-5-20251101"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_display_model_id("claude-sonnet-4-5-20250929"),
-            "claude-sonnet-4-5"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_display_model_id("claude-haiku-4-5-20251001"),
-            "claude-haiku-4-5"
+            "claude-haiku-4.5"
         );
         assert_eq!(
             normalize_display_model_id("claude-3-haiku-20240307"),
@@ -269,22 +256,20 @@ mod tests {
         );
         assert_eq!(
             normalize_display_model_id("claude-3-5-haiku-20241022"),
-            "claude-3-5-haiku"
+            "claude-3.5-haiku"
         );
         assert_eq!(
             normalize_display_model_id("claude-3-5-sonnet-20241022"),
-            "claude-3-5-sonnet"
+            "claude-3.5-sonnet"
         );
     }
 
     #[test]
     fn test_display_no_strip_short_version() {
-        // gpt-5.1 should stay as is (not a date suffix)
         assert_eq!(normalize_display_model_id("gpt-5.1"), "gpt-5.1");
         assert_eq!(normalize_display_model_id("gpt-5.2"), "gpt-5.2");
     }
 
-    // --- Rule 5: Strip -preview and -exp suffixes ---
     #[test]
     fn test_display_strip_preview_suffix() {
         assert_eq!(
@@ -313,7 +298,6 @@ mod tests {
         );
     }
 
-    // --- Rule 6: Strip -latest suffix ---
     #[test]
     fn test_display_strip_latest_suffix() {
         assert_eq!(
@@ -322,12 +306,11 @@ mod tests {
         );
     }
 
-    // --- Rule 7: Known display aliases ---
     #[test]
     fn test_display_alias_claude_thinking_max() {
         assert_eq!(
             normalize_display_model_id("claude-3.7-sonnet-thinking-max"),
-            "claude-3-7-sonnet"
+            "claude-3.7-sonnet"
         );
     }
 
@@ -335,7 +318,7 @@ mod tests {
     fn test_display_alias_claude_max() {
         assert_eq!(
             normalize_display_model_id("claude-3.7-sonnet-max"),
-            "claude-3-7-sonnet"
+            "claude-3.7-sonnet"
         );
     }
 
@@ -343,7 +326,7 @@ mod tests {
     fn test_display_alias_claude_thinking() {
         assert_eq!(
             normalize_display_model_id("claude-3.7-sonnet-thinking"),
-            "claude-3-7-sonnet"
+            "claude-3.7-sonnet"
         );
     }
 
@@ -402,24 +385,23 @@ mod tests {
     fn test_display_alias_claude_4_5_variants() {
         assert_eq!(
             normalize_display_model_id("claude-4.5-opus-high-thinking"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_display_model_id("claude-4.5-sonnet-thinking"),
-            "claude-sonnet-4-5"
+            "claude-sonnet-4.5"
         );
     }
 
-    // --- Rule 8: Strip -thinking from Claude ---
     #[test]
     fn test_display_strip_claude_thinking() {
         assert_eq!(
             normalize_display_model_id("claude-opus-4-5-thinking"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_display_model_id("claude-sonnet-4-5-thinking"),
-            "claude-sonnet-4-5"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_display_model_id("claude-sonnet-4-thinking"),
@@ -427,31 +409,43 @@ mod tests {
         );
     }
 
-    // --- Rule 9: Version separator normalization for Claude ---
     #[test]
-    fn test_display_claude_version_separator() {
+    fn test_display_version_separator_hyphen_to_dot() {
         assert_eq!(
-            normalize_display_model_id("claude-3.5-sonnet"),
-            "claude-3-5-sonnet"
+            normalize_display_model_id("claude-3-5-sonnet"),
+            "claude-3.5-sonnet"
         );
         assert_eq!(
-            normalize_display_model_id("claude-3.7-sonnet"),
-            "claude-3-7-sonnet"
+            normalize_display_model_id("claude-3-7-sonnet"),
+            "claude-3.7-sonnet"
         );
-    }
-
-    #[test]
-    fn test_display_non_claude_version_separator_unchanged() {
-        // Gemini and GPT should NOT have dots converted
+        assert_eq!(
+            normalize_display_model_id("claude-opus-4-5"),
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            normalize_display_model_id("claude-opus-4-1"),
+            "claude-opus-4.1"
+        );
+        assert_eq!(normalize_display_model_id("gpt-5-codex"), "gpt-5-codex");
+        assert_eq!(normalize_display_model_id("gpt-5.1"), "gpt-5.1");
+        assert_eq!(normalize_display_model_id("gpt-5.2"), "gpt-5.2");
         assert_eq!(
             normalize_display_model_id("gemini-2.5-pro"),
             "gemini-2.5-pro"
         );
-        assert_eq!(normalize_display_model_id("gpt-5.1"), "gpt-5.1");
-        assert_eq!(normalize_display_model_id("gpt-5.2"), "gpt-5.2");
     }
 
-    // --- Edge cases ---
+    #[test]
+    fn test_display_version_separator_preserves_multi_digit() {
+        assert_eq!(normalize_display_model_id("qwen3-32b"), "qwen3-32b");
+        assert_eq!(normalize_display_model_id("llama-3-70b"), "llama-3-70b");
+        assert_eq!(
+            normalize_display_model_id("minimax-m2.1-free"),
+            "minimax-m2.1-free"
+        );
+    }
+
     #[test]
     fn test_display_empty_string() {
         assert_eq!(normalize_display_model_id(""), "");
@@ -460,8 +454,8 @@ mod tests {
     #[test]
     fn test_display_already_normalized() {
         assert_eq!(
-            normalize_display_model_id("claude-opus-4-5"),
-            "claude-opus-4-5"
+            normalize_display_model_id("claude-opus-4.5"),
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_display_model_id("gemini-2.5-pro"),
@@ -478,13 +472,11 @@ mod tests {
         );
     }
 
-    // --- Combined rules ---
     #[test]
     fn test_display_combined_prefix_and_date() {
-        // antigravity prefix + date suffix + thinking
         assert_eq!(
             normalize_display_model_id("antigravity-claude-opus-4-5-20251101"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
     }
 
@@ -498,16 +490,14 @@ mod tests {
 
     #[test]
     fn test_display_combined_all_rules() {
-        // Provider prefix + date suffix
         assert_eq!(
             normalize_display_model_id("anthropic/claude-3-5-sonnet-20241022"),
-            "claude-3-5-sonnet"
+            "claude-3.5-sonnet"
         );
     }
 
     #[test]
     fn test_display_gemini_preview_with_date() {
-        // preview-DD-DD pattern
         assert_eq!(
             normalize_display_model_id("gemini-2.5-pro-preview-05-06"),
             "gemini-2.5-pro"
@@ -516,10 +506,9 @@ mod tests {
 
     #[test]
     fn test_display_claude_3_5_with_dot_and_date() {
-        // claude-3.5-sonnet-20241022 → strip date → claude-3.5-sonnet → normalize version → claude-3-5-sonnet
         assert_eq!(
             normalize_display_model_id("claude-3.5-sonnet-20241022"),
-            "claude-3-5-sonnet"
+            "claude-3.5-sonnet"
         );
     }
 }
