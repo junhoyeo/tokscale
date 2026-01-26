@@ -4,6 +4,7 @@ import styled from "styled-components";
 import type { DailyContribution, GraphColorPalette, SourceType } from "@/lib/types";
 import { formatDateFull, formatCurrency, formatTokenCount, groupSourcesByType, sortSourcesByCost } from "@/lib/utils";
 import { SOURCE_DISPLAY_NAMES, SOURCE_COLORS } from "@/lib/constants";
+import { normalizeDisplayModelId, formatModelDisplayName } from "@/lib/normalizeModel";
 import { SourceLogo } from "./SourceLogo";
 
 interface BreakdownPanelProps {
@@ -170,19 +171,19 @@ export function BreakdownPanel({ day, onClose, palette }: BreakdownPanelProps) {
             <SummaryItem style={{ color: "var(--color-fg-muted)" }}>
               <SummaryValue style={{ color: "var(--color-fg-default)" }}>
                 {(() => {
-                  const allModels = new Set<string>();
-                  for (const s of day.sources) {
-                    if (s.models) {
-                      for (const modelId of Object.keys(s.models)) {
-                        allModels.add(modelId);
-                      }
-                    } else if (s.modelId) {
-                      allModels.add(s.modelId);
-                    }
-                  }
-                  const count = allModels.size;
-                  return `${count} model${count !== 1 ? "s" : ""}`;
-                })()}
+                   const allModels = new Set<string>();
+                   for (const s of day.sources) {
+                     if (s.models) {
+                       for (const modelId of Object.keys(s.models)) {
+                         allModels.add(normalizeDisplayModelId(modelId));
+                       }
+                     } else if (s.modelId) {
+                       allModels.add(normalizeDisplayModelId(s.modelId));
+                     }
+                   }
+                   const count = allModels.size;
+                   return `${count} model${count !== 1 ? "s" : ""}`;
+                 })()}
               </SummaryValue>
             </SummaryItem>
           </SummaryFooter>
@@ -236,32 +237,33 @@ const ModelsList = styled.div`
 function SourceSection({ sourceType, sources, totalCost, palette }: SourceSectionProps) {
   const sourceColor = SOURCE_COLORS[sourceType] || palette.grade3;
 
-  const modelEntries: Array<{ modelId: string; cost: number; messages: number; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number } }> = [];
-  for (const source of sources) {
-    if (source.models && Object.keys(source.models).length > 0) {
-      for (const [modelId, data] of Object.entries(source.models)) {
-        modelEntries.push({
-          modelId,
-          cost: data.cost || 0,
-          messages: data.messages || 0,
-          tokens: {
-            input: data.input || 0,
-            output: data.output || 0,
-            cacheRead: data.cacheRead || 0,
-            cacheWrite: data.cacheWrite || 0,
-            reasoning: data.reasoning || 0,
-          },
-        });
-      }
-    } else if (source.modelId) {
-      modelEntries.push({
-        modelId: source.modelId,
-        cost: source.cost,
-        messages: source.messages,
-        tokens: source.tokens,
-      });
-    }
-  }
+   const modelEntries: Array<{ modelId: string; cost: number; messages: number; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number } }> = [];
+   for (const source of sources) {
+     if (source.models && Object.keys(source.models).length > 0) {
+       for (const [rawModelId, data] of Object.entries(source.models)) {
+         const modelId = normalizeDisplayModelId(rawModelId);
+         modelEntries.push({
+           modelId,
+           cost: data.cost || 0,
+           messages: data.messages || 0,
+           tokens: {
+             input: data.input || 0,
+             output: data.output || 0,
+             cacheRead: data.cacheRead || 0,
+             cacheWrite: data.cacheWrite || 0,
+             reasoning: data.reasoning || 0,
+           },
+         });
+       }
+     } else if (source.modelId) {
+       modelEntries.push({
+         modelId: normalizeDisplayModelId(source.modelId),
+         cost: source.cost,
+         messages: source.messages,
+         tokens: source.tokens,
+       });
+     }
+   }
 
   const sortedModels = modelEntries.sort((a, b) => b.cost - a.cost);
 
@@ -393,7 +395,7 @@ function ModelRow({ model, isLast, palette }: ModelRowProps) {
 
       <ModelContent>
         <ModelHeader>
-          <ModelName style={{ color: "var(--color-fg-default)" }}>{modelId}</ModelName>
+          <ModelName style={{ color: "var(--color-fg-default)" }}>{formatModelDisplayName(modelId)}</ModelName>
           <ModelCost style={{ color: palette.grade1 }}>{formatCurrency(cost)}</ModelCost>
         </ModelHeader>
 

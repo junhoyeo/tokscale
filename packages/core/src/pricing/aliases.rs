@@ -13,82 +13,118 @@ pub fn resolve_alias(model_id: &str) -> Option<&'static str> {
     MODEL_ALIASES.get(model_id.to_lowercase().as_str()).copied()
 }
 
-/// Routing prefixes to strip (e.g., `antigravity-claude-opus-4-5` → `claude-opus-4-5`).
-const DISPLAY_STRIPPED_PREFIXES: &[&str] = &["antigravity-"];
-
-/// Known display aliases: maps variant/wrong names to canonical display names.
-/// Applied after lowercasing, prefix stripping, provider stripping, and date stripping.
-static DISPLAY_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
-    let mut m = HashMap::new();
-    m.insert("claude-4-sonnet", "claude-sonnet-4");
-    m.insert("claude-4-opus", "claude-opus-4");
-    m.insert("claude-4-sonnet-thinking", "claude-sonnet-4");
-    m.insert("claude-4-opus-thinking", "claude-opus-4");
-    m.insert("claude-4.5-opus-high-thinking", "claude-opus-4.5");
-    m.insert("claude-4.5-sonnet-thinking", "claude-sonnet-4.5");
-    m.insert("claude-3.7-sonnet-thinking-max", "claude-3.7-sonnet");
-    m.insert("claude-3.7-sonnet-max", "claude-3.7-sonnet");
-    m.insert("claude-3.7-sonnet-thinking", "claude-3.7-sonnet");
-    m.insert("claude-3-7-sonnet-thinking-max", "claude-3.7-sonnet");
-    m.insert("claude-3-7-sonnet-max", "claude-3.7-sonnet");
-    m.insert("claude-3-7-sonnet-thinking", "claude-3.7-sonnet");
-    m.insert("gemini-2.5-pro-max", "gemini-2.5-pro");
-    m.insert("gpt-5-1-codex-max-0", "gpt-5.1-codex-max");
-    m
-});
-
-/// Normalize a model ID for display and aggregation purposes.
-///
-/// This function applies a series of normalization rules so that model ID variants
-/// (e.g., `claude-opus-4-1-20250805` and `claude-opus-4-1`) map to the same display key.
-///
-/// **This does NOT affect pricing lookup** — it is only for display/aggregation.
 pub fn normalize_display_model_id(model_id: &str) -> String {
     if model_id.is_empty() {
         return String::new();
     }
 
-    // 1. Lowercase
     let mut s = model_id.to_lowercase();
 
-    // 2. Strip routing prefixes (e.g., "antigravity-")
-    for prefix in DISPLAY_STRIPPED_PREFIXES {
-        if s.starts_with(prefix) {
-            s = s[prefix.len()..].to_string();
-        }
+    // Strip known routing prefixes
+    if s.starts_with("antigravity-") {
+        s = s["antigravity-".len()..].to_string();
     }
 
-    // 3. Strip provider prefixes with "/" (e.g., "qwen/", "accounts/fireworks/models/")
+    // Strip model-family routing: if first segment wraps another model family
+    // e.g., "gemini-claude-opus-4.5" → "claude-opus-4.5"
+    s = strip_outer_model_family(&s);
+
+    // Strip provider prefixes with "/" (e.g., "qwen/", "accounts/fireworks/models/")
     if let Some(pos) = s.rfind('/') {
         s = s[pos + 1..].to_string();
     }
 
-    // 4. Strip date suffixes: -YYYYMMDD (exactly 8 digits at end)
     s = strip_date_suffix(&s);
-
-    // 5. Strip -preview and -exp suffixes (and variants like -preview-05-06, -exp-03-25)
     s = strip_preview_exp_suffix(&s);
 
-    // 6. Strip -latest suffix
-    if s.ends_with("-latest") {
-        s = s[..s.len() - 7].to_string();
+    if let Some(stripped) = s.strip_suffix("-latest") {
+        s = stripped.to_string();
     }
 
-    // 7. Apply known display aliases
-    if let Some(canonical) = DISPLAY_ALIASES.get(s.as_str()) {
-        s = canonical.to_string();
-    }
-
-    // 8. Strip -thinking suffix from Claude models (also handle -high-thinking, etc.)
+    s = strip_tier_suffixes(&s);
+    s = strip_trailing_iteration(&s);
     s = strip_claude_thinking_suffix(&s);
-
-    // 9. Version separator: hyphens → dots between single digits (e.g., 4-5 → 4.5, 3-7 → 3.7)
+    s = strip_max_suffix(&s);
+    s = strip_claude_thinking_suffix(&s);
+    s = fix_claude_wrong_order(&s);
     s = normalize_version_separator(&s);
 
     s
 }
 
-/// Strip date suffix: removes `-YYYYMMDD` (exactly 8 digits) at the end.
+fn strip_outer_model_family(s: &str) -> String {
+    if let Some(first_dash) = s.find('-') {
+        let rest = &s[first_dash + 1..];
+        if rest.starts_with("claude-") || rest.starts_with("gpt-") || rest.starts_with("gemini-") {
+            return rest.to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Fix claude-N-family → claude-family-N (e.g., "claude-4-sonnet" → "claude-sonnet-4")
+fn fix_claude_wrong_order(s: &str) -> String {
+    if !s.starts_with("claude-") {
+        return s.to_string();
+    }
+    let rest = &s["claude-".len()..];
+    let parts: Vec<&str> = rest.splitn(2, '-').collect();
+    if parts.len() == 2 {
+        let maybe_version = parts[0];
+        let maybe_family = parts[1];
+        let version_num = maybe_version
+            .split('.')
+            .next()
+            .unwrap_or("0")
+            .parse::<u32>()
+            .unwrap_or(0);
+        if version_num >= 4
+            && maybe_version
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.')
+            && !maybe_family.is_empty()
+            && maybe_family.chars().next().unwrap().is_ascii_alphabetic()
+        {
+            let family_word = maybe_family.split('-').next().unwrap_or(maybe_family);
+            if matches!(family_word, "opus" | "sonnet" | "haiku") {
+                let after_family = &maybe_family[family_word.len()..];
+                return format!("claude-{}{}-{}", family_word, after_family, maybe_version);
+            }
+        }
+    }
+    s.to_string()
+}
+
+fn strip_tier_suffixes(s: &str) -> String {
+    const TIER_WORDS: &[&str] = &["low", "high", "fast", "free", "extra", "medium", "xhigh"];
+
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() <= 1 {
+        return s.to_string();
+    }
+
+    let mut end = parts.len();
+    while end > 1 && TIER_WORDS.contains(&parts[end - 1]) {
+        end -= 1;
+    }
+
+    if end == parts.len() {
+        return s.to_string();
+    }
+
+    parts[..end].join("-")
+}
+
+fn strip_max_suffix(s: &str) -> String {
+    if s.contains("codex-max") {
+        return s.to_string();
+    }
+    if let Some(stripped) = s.strip_suffix("-max") {
+        return stripped.to_string();
+    }
+    s.to_string()
+}
+
 fn strip_date_suffix(s: &str) -> String {
     // Check if the string ends with -<8 digits>
     if s.len() < 10 {
@@ -152,6 +188,25 @@ fn strip_claude_thinking_suffix(s: &str) -> String {
         return base.to_string();
     }
 
+    s.to_string()
+}
+
+fn strip_trailing_iteration(s: &str) -> String {
+    if let Some(pos) = s.rfind('-') {
+        let suffix = &s[pos + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            let base = &s[..pos];
+            let is_multi_digit = suffix.len() >= 2;
+            let after_max = base.ends_with("-max");
+            // Multi-digit trailing number on claude/gemini, OR any digit after -max
+            if base.contains('-')
+                && ((is_multi_digit && (s.starts_with("claude-") || s.starts_with("gemini-")))
+                    || after_max)
+            {
+                return base.to_string();
+            }
+        }
+    }
     s.to_string()
 }
 
@@ -442,7 +497,43 @@ mod tests {
         assert_eq!(normalize_display_model_id("llama-3-70b"), "llama-3-70b");
         assert_eq!(
             normalize_display_model_id("minimax-m2.1-free"),
-            "minimax-m2.1-free"
+            "minimax-m2.1"
+        );
+    }
+
+    #[test]
+    fn test_display_strip_tier_suffixes() {
+        assert_eq!(
+            normalize_display_model_id("gpt-5.2-codex-fast"),
+            "gpt-5.2-codex"
+        );
+        assert_eq!(
+            normalize_display_model_id("gpt-5.1-codex-max-high"),
+            "gpt-5.1-codex-max"
+        );
+        assert_eq!(normalize_display_model_id("gpt-5.2-xhigh"), "gpt-5.2");
+        assert_eq!(normalize_display_model_id("gpt-5.2-low-fast"), "gpt-5.2");
+        assert_eq!(
+            normalize_display_model_id("gpt-5.2-extra-high-fast"),
+            "gpt-5.2"
+        );
+        assert_eq!(normalize_display_model_id("gpt-5.2-medium-fast"), "gpt-5.2");
+        assert_eq!(
+            normalize_display_model_id("minimax-m2.1-free"),
+            "minimax-m2.1"
+        );
+    }
+
+    #[test]
+    fn test_display_tier_suffixes_preserve_real_names() {
+        assert_eq!(normalize_display_model_id("gpt-5-codex"), "gpt-5-codex");
+        assert_eq!(
+            normalize_display_model_id("gemini-3-flash"),
+            "gemini-3-flash"
+        );
+        assert_eq!(
+            normalize_display_model_id("claude-sonnet-4"),
+            "claude-sonnet-4"
         );
     }
 
@@ -510,5 +601,58 @@ mod tests {
             normalize_display_model_id("claude-3.5-sonnet-20241022"),
             "claude-3.5-sonnet"
         );
+    }
+
+    #[test]
+    fn test_display_model_family_routing_prefix() {
+        assert_eq!(
+            normalize_display_model_id("gemini-claude-opus-4.5-thinking-13"),
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            normalize_display_model_id("gemini-claude-sonnet-4-thinking"),
+            "claude-sonnet-4"
+        );
+    }
+
+    #[test]
+    fn test_display_model_family_prefix_not_stripped_for_real_models() {
+        assert_eq!(
+            normalize_display_model_id("gemini-2.5-pro"),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(
+            normalize_display_model_id("gemini-3-flash"),
+            "gemini-3-flash"
+        );
+    }
+
+    #[test]
+    fn test_display_trailing_iteration_stripped() {
+        assert_eq!(
+            normalize_display_model_id("claude-opus-4.5-13"),
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            normalize_display_model_id("gemini-2.5-pro-123"),
+            "gemini-2.5-pro"
+        );
+    }
+
+    #[test]
+    fn test_display_trailing_iteration_preserves_single_digit_versions() {
+        assert_eq!(
+            normalize_display_model_id("claude-sonnet-4"),
+            "claude-sonnet-4"
+        );
+        assert_eq!(
+            normalize_display_model_id("gemini-3-flash"),
+            "gemini-3-flash"
+        );
+        assert_eq!(
+            normalize_display_model_id("grok-code-fast-1"),
+            "grok-code-fast-1"
+        );
+        assert_eq!(normalize_display_model_id("gpt-5"), "gpt-5");
     }
 }

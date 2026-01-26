@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
 import { eq, desc, sql, and, gte } from "drizzle-orm";
+import { normalizeDisplayModelId } from "@/lib/normalizeModel";
 
 export const revalidate = 60; // ISR: revalidate every 60 seconds
 
@@ -330,11 +331,20 @@ export async function GET(_request: Request, { params }: RouteParams) {
 
     const modelUsageMap = new Map<string, { tokens: number; cost: number }>();
     for (const day of contributions) {
-      for (const [model, data] of Object.entries(day.models)) {
+      for (const [rawModel, data] of Object.entries(day.models)) {
+        const model = normalizeDisplayModelId(rawModel);
         const existing = modelUsageMap.get(model) || { tokens: 0, cost: 0 };
         existing.tokens += data.tokens;
         existing.cost += data.cost;
         modelUsageMap.set(model, existing);
+      }
+    }
+
+    // Merge modelsUsed into modelUsageMap so models from both sources are unified
+    for (const rawModel of latestSubmission?.modelsUsed || []) {
+      const model = normalizeDisplayModelId(rawModel);
+      if (!modelUsageMap.has(model)) {
+        modelUsageMap.set(model, { tokens: 0, cost: 0 });
       }
     }
 
@@ -375,7 +385,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       },
       updatedAt: latestSubmission?.updatedAt?.toISOString() || null,
       sources: latestSubmission?.sourcesUsed || [],
-      models: latestSubmission?.modelsUsed || [],
+      models: [...new Set((latestSubmission?.modelsUsed || []).map(normalizeDisplayModelId))],
       modelUsage,
       contributions: graphContributions,
     });

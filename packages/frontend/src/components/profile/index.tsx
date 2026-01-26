@@ -6,6 +6,7 @@ import { toast } from "react-toastify";
 import { GraphContainer } from "@/components/GraphContainer";
 import type { TokenContributionData } from "@/lib/types";
 import { formatNumber, formatCurrency } from "@/lib/utils";
+import { formatModelDisplayName } from "@/lib/normalizeModel";
 import { legacy } from "@/lib/responsive";
 
 export interface ProfileUser {
@@ -1036,7 +1037,7 @@ export function ProfileModels({ models, modelUsage }: ProfileModelsProps) {
               <ModelNameCell>
                 <ModelColorDot style={{ backgroundColor: getModelColor(usage.model) }} />
                 <ModelNameText style={{ color: "var(--color-fg-default)" }}>
-                  {usage.model}
+                  {formatModelDisplayName(usage.model)}
                 </ModelNameText>
               </ModelNameCell>
               <ModelMetricCell $width="5rem" $smWidth="6rem">
@@ -1072,7 +1073,7 @@ export function ProfileModels({ models, modelUsage }: ProfileModelsProps) {
             style={{ backgroundColor: "var(--color-bg-subtle)", color: "var(--color-fg-default)" }}
           >
             <ModelColorDot style={{ backgroundColor: getModelColor(model) }} />
-            {model}
+            {formatModelDisplayName(model)}
           </ModelTag>
         ))}
       </ModelsTagsWrapper>
