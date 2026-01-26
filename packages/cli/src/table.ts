@@ -151,16 +151,9 @@ export function formatCurrency(amount: number): string {
 }
 
 export function formatModelName(modelName: string): string {
-  // claude-sonnet-4-20250514 -> sonnet-4
-  // claude-opus-4-5-20251101 -> opus-4-5
-  const match = modelName.match(/claude-(\w+)-([\d-]+)-(\d{8})/);
-  if (match) {
-    return `${match[1]}-${match[2]}`;
-  }
-  // Handle OpenCode style: claude-opus-4-5-high -> opus-4-5-high
-  const openCodeMatch = modelName.match(/claude-(\w+)-(.+)/);
-  if (openCodeMatch) {
-    return `${openCodeMatch[1]}-${openCodeMatch[2]}`;
+  const claudeMatch = modelName.match(/claude-(\w+)-(.+)/);
+  if (claudeMatch) {
+    return `${claudeMatch[1]}-${claudeMatch[2]}`;
   }
   return modelName;
 }
