@@ -484,10 +484,11 @@ pub async fn get_model_report(options: ReportOptions) -> napi::Result<ModelRepor
         std::collections::HashMap::new();
 
     for msg in filtered {
-        let key = format!("{}:{}:{}", msg.source, msg.provider_id, msg.model_id);
+        let normalized_model = pricing::aliases::normalize_display_model_id(&msg.model_id);
+        let key = format!("{}:{}:{}", msg.source, msg.provider_id, normalized_model);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             source: msg.source.clone(),
-            model: msg.model_id.clone(),
+            model: normalized_model.clone(),
             provider: msg.provider_id.clone(),
             input: 0,
             output: 0,
@@ -594,7 +595,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> napi::Result<MonthlyR
 
         let entry = month_map.entry(month).or_default();
 
-        entry.models.insert(msg.model_id.clone());
+        entry.models.insert(pricing::aliases::normalize_display_model_id(&msg.model_id));
         entry.input += msg.tokens.input;
         entry.output += msg.tokens.output;
         entry.cache_read += msg.tokens.cache_read;
@@ -834,7 +835,7 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
         source: msg.source.clone(),
-        model_id: msg.model_id.clone(),
+        model_id: pricing::aliases::normalize_display_model_id(&msg.model_id),
         provider_id: msg.provider_id.clone(),
         session_id: msg.session_id.clone(),
         timestamp: msg.timestamp,
@@ -974,10 +975,11 @@ pub async fn finalize_report(options: FinalizeReportOptions) -> napi::Result<Mod
         std::collections::HashMap::new();
 
     for msg in all_messages {
-        let key = format!("{}:{}:{}", msg.source, msg.provider_id, msg.model_id);
+        let normalized_model = pricing::aliases::normalize_display_model_id(&msg.model_id);
+        let key = format!("{}:{}:{}", msg.source, msg.provider_id, normalized_model);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             source: msg.source.clone(),
-            model: msg.model_id.clone(),
+            model: normalized_model.clone(),
             provider: msg.provider_id.clone(),
             input: 0,
             output: 0,
@@ -1126,7 +1128,7 @@ pub async fn finalize_monthly_report(options: FinalizeMonthlyOptions) -> napi::R
         };
 
         let entry = month_map.entry(month).or_default();
-        entry.models.insert(msg.model_id.clone());
+        entry.models.insert(pricing::aliases::normalize_display_model_id(&msg.model_id));
         entry.input += msg.tokens.input;
         entry.output += msg.tokens.output;
         entry.cache_read += msg.tokens.cache_read;
@@ -1348,10 +1350,11 @@ pub async fn finalize_report_and_graph(options: FinalizeReportOptions) -> napi::
         std::collections::HashMap::new();
 
     for msg in all_messages {
-        let key = format!("{}:{}:{}", msg.source, msg.provider_id, msg.model_id);
+        let normalized_model = pricing::aliases::normalize_display_model_id(&msg.model_id);
+        let key = format!("{}:{}:{}", msg.source, msg.provider_id, normalized_model);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             source: msg.source.clone(),
-            model: msg.model_id.clone(),
+            model: normalized_model.clone(),
             provider: msg.provider_id.clone(),
             input: 0,
             output: 0,
