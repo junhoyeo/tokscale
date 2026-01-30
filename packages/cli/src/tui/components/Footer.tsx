@@ -210,18 +210,20 @@ export function Footer(props: FooterProps) {
                 </box>
               }
             >
-              <text dim>↑↓•←→•y•</text>
-              <box onMouseDown={props.onPaletteChange}>
-                <text fg="magenta">[p]</text>
+              <box flexDirection="row">
+                <text dim>↑↓•←→•y•</text>
+                <box onMouseDown={props.onPaletteChange}>
+                  <text fg="magenta">[p]</text>
+                </box>
+                <text fg={props.autoRefreshEnabled ? "green" : "gray"}>
+                  {`[Shift+R:auto update ${formatIntervalSeconds(props.autoRefreshMs)}]`}
+                </text>
+                <text dim>-+•</text>
+                <box onMouseDown={props.onRefresh}>
+                  <text fg="yellow">[r]</text>
+                </box>
+                <text dim>•e•q</text>
               </box>
-              <text fg={props.autoRefreshEnabled ? "green" : "gray"}>
-                {`[Shift+R:auto update ${formatIntervalSeconds(props.autoRefreshMs)}]`}
-              </text>
-              <text dim>-+•</text>
-              <box onMouseDown={props.onRefresh}>
-                <text fg="yellow">[r]</text>
-              </box>
-              <text dim>•e•q</text>
             </Show>
           }
         >
