@@ -194,7 +194,7 @@ export function Footer(props: FooterProps) {
             <Show
               when={isVeryNarrowTerminal()}
               fallback={
-                <>
+                <box flexDirection="row">
                   <text dim>↑↓ scroll • ←→/tab view • y copy •</text>
                   <box onMouseDown={props.onPaletteChange}>
                     <text fg="magenta">{`[p:${palette().name}]`}</text>
@@ -207,7 +207,7 @@ export function Footer(props: FooterProps) {
                     <text fg="yellow">[r:refresh]</text>
                   </box>
                   <text dim>• e export • q quit</text>
-                </>
+                </box>
               }
             >
               <text dim>↑↓•←→•y•</text>
