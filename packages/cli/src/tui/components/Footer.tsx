@@ -174,7 +174,7 @@ export function Footer(props: FooterProps) {
             <text dim>|</text>
             <text
               dim
-            >{`↓ ${props.scrollStart! + 1}-${props.scrollEnd} of ${props.totalItems}`}</text>
+            >{`v ${props.scrollStart! + 1}-${props.scrollEnd} of ${props.totalItems}`}</text>
           </Show>
         </box>
         <box flexDirection="row" gap={1}>
@@ -195,34 +195,34 @@ export function Footer(props: FooterProps) {
               when={isVeryNarrowTerminal()}
               fallback={
                 <box flexDirection="row">
-                  <text dim>↑↓ scroll • ←→/tab view • y copy •</text>
+                  <text dim>{"Up/Down scroll | Left/Right view | y copy |"}</text>
                   <box onMouseDown={props.onPaletteChange}>
                     <text fg="magenta">{`[p:${palette().name}]`}</text>
                   </box>
                   <text fg={props.autoRefreshEnabled ? "green" : "gray"}>
                     {`[Shift+R:auto update ${formatIntervalSeconds(props.autoRefreshMs)}]`}
                   </text>
-                  <text dim>[-/+ interval]•</text>
+                  <text dim>{"[-/+ interval] |"}</text>
                   <box onMouseDown={props.onRefresh}>
                     <text fg="yellow">[r:refresh]</text>
                   </box>
-                  <text dim>• e export • q quit</text>
+                  <text dim>{"e export | q quit"}</text>
                 </box>
               }
             >
               <box flexDirection="row">
-                <text dim>↑↓•←→•y•</text>
+                <text dim>{"^v|<>|y|"}</text>
                 <box onMouseDown={props.onPaletteChange}>
                   <text fg="magenta">[p]</text>
                 </box>
                 <text fg={props.autoRefreshEnabled ? "green" : "gray"}>
                   {`[Shift+R:auto update ${formatIntervalSeconds(props.autoRefreshMs)}]`}
                 </text>
-                <text dim>-+•</text>
+                <text dim>{"-+|"}</text>
                 <box onMouseDown={props.onRefresh}>
                   <text fg="yellow">[r]</text>
                 </box>
-                <text dim>•e•q</text>
+                <text dim>{"|e|q"}</text>
               </box>
             </Show>
           }
@@ -243,7 +243,7 @@ export function Footer(props: FooterProps) {
           <Show when={props.autoRefreshEnabled}>
             <text
               dim
-            >{`• Auto: ${formatIntervalSeconds(props.autoRefreshMs)}`}</text>
+            >{`| Auto: ${formatIntervalSeconds(props.autoRefreshMs)}`}</text>
           </Show>
         </box>
       </Show>

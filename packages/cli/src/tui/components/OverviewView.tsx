@@ -113,7 +113,7 @@ export function OverviewView(props: OverviewViewProps) {
         </box>
 
         <Show when={totalModels() > visibleModels().length}>
-          <text dim>{`↓ ${props.scrollOffset() + 1}-${endIndex()} of ${totalModels()} models (↑↓ to scroll)`}</text>
+          <text dim>{`v ${props.scrollOffset() + 1}-${endIndex()} of ${totalModels()} models (Up/Down to scroll)`}</text>
         </Show>
       </box>
     </box>
