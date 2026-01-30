@@ -150,31 +150,35 @@ export function Footer(props: FooterProps) {
             onToggle={props.onSourceToggle}
           />
           <Show when={!isVeryNarrowTerminal()}>
-            <text dim>|</text>
-            <SortButton
-              label="Date"
-              sortType="date"
-              active={props.sortBy === "date"}
-              onClick={props.onSortChange}
-            />
-            <SortButton
-              label="Cost"
-              sortType="cost"
-              active={props.sortBy === "cost"}
-              onClick={props.onSortChange}
-            />
-            <SortButton
-              label="Tokens"
-              sortType="tokens"
-              active={props.sortBy === "tokens"}
-              onClick={props.onSortChange}
-            />
+            <box flexDirection="row" gap={1}>
+              <text dim>|</text>
+              <SortButton
+                label="Date"
+                sortType="date"
+                active={props.sortBy === "date"}
+                onClick={props.onSortChange}
+              />
+              <SortButton
+                label="Cost"
+                sortType="cost"
+                active={props.sortBy === "cost"}
+                onClick={props.onSortChange}
+              />
+              <SortButton
+                label="Tokens"
+                sortType="tokens"
+                active={props.sortBy === "tokens"}
+                onClick={props.onSortChange}
+              />
+            </box>
           </Show>
           <Show when={showScrollInfo() && !isVeryNarrowTerminal()}>
-            <text dim>|</text>
-            <text
-              dim
-            >{`v ${props.scrollStart! + 1}-${props.scrollEnd} of ${props.totalItems}`}</text>
+            <box flexDirection="row" gap={1}>
+              <text dim>|</text>
+              <text
+                dim
+              >{`v ${props.scrollStart! + 1}-${props.scrollEnd} of ${props.totalItems}`}</text>
+            </box>
           </Show>
         </box>
         <box flexDirection="row" gap={1}>
