@@ -83,9 +83,7 @@ export function OverviewView(props: OverviewViewProps) {
         <box flexDirection="row" justifyContent="space-between" marginBottom={0}>
           <text bold>{isVeryNarrowTerminal() ? "Top Models" : `Models by ${props.sortBy === "tokens" ? "Tokens" : "Cost"}`}</text>
           <box flexDirection="row">
-            <Show when={!isVeryNarrowTerminal()}>
-              <text dim>Total: </text>
-            </Show>
+            {!isVeryNarrowTerminal() && <text dim>Total: </text>}
             <text fg="green">{formatCost(props.data.totalCost)}</text>
           </box>
         </box>
