@@ -28,8 +28,8 @@
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.68",
-    "@opentui/core": "0.1.60",
-    "@opentui/solid": "^0.1.60",
+    "@opentui/core": "0.1.75",
+    "@opentui/solid": "^0.1.75",
     "@resvg/resvg-js": "^2.6.2",
     "@tokscale/core": "1.2.0",
     "cli-table3": "^0.6.5",

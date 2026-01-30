@@ -6,6 +6,7 @@ import { restoreTerminalState } from "./utils/cleanup.js";
 export type { TUIOptions };
 
 export async function launchTUI(options?: TUIOptions) {
+  
   const cleanup = () => {
     restoreTerminalState();
   };
@@ -36,8 +37,6 @@ export async function launchTUI(options?: TUIOptions) {
 
   await render(() => <App {...(options ?? {})} />, {
     exitOnCtrlC: false,
-    useAlternateScreen: true,
-    useMouse: true,
     targetFps: 60,
     useKittyKeyboard: {},
   } as any);
