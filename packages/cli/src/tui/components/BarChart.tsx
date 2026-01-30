@@ -191,7 +191,7 @@ export function BarChart(props: BarChartProps) {
           <text dim>{isVeryNarrowTerminal() ? "    0│" : "     0│"}</text>
           <text dim>{getRepeatedString("─", axisWidth())}</text>
         </box>
-        <Show when={dateLabels().length > 0}>
+        <Show when={dateLabels().length > 0} fallback={<text />}>
           <box flexDirection="row">
             <text dim>{isVeryNarrowTerminal() ? "      " : "       "}</text>
             <text dim>

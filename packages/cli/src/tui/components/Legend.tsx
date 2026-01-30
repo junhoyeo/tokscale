@@ -20,14 +20,14 @@ export function Legend(props: LegendProps) {
   const models = () => props.models;
 
   return (
-    <Show when={models().length > 0}>
+    <Show when={models().length > 0} fallback={<text />}>
       <box flexDirection="row" gap={1} flexWrap="wrap">
         <For each={models()}>
           {(modelId, i) => (
             <box flexDirection="row" gap={0}>
               <text fg={getModelColor(modelId)}>●</text>
               <text>{` ${truncateModelName(modelId)}`}</text>
-              <Show when={i() < models().length - 1}>
+              <Show when={i() < models().length - 1} fallback={<text />}>
                 <text dim>{isVeryNarrowTerminal() ? " " : "  ·"}</text>
               </Show>
             </box>

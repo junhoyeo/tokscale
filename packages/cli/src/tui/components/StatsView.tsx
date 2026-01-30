@@ -180,17 +180,17 @@ export function StatsView(props: StatsViewProps) {
           </For>
         </box>
         <text dim>More</text>
-        <Show when={!isNarrowTerminal()}>
+        <Show when={!isNarrowTerminal()} fallback={<text />}>
           <text dim>|</text>
           <text dim>Click on a day to see breakdown</text>
         </Show>
       </box>
 
-      <Show when={selectedBreakdown()}>
+      <Show when={selectedBreakdown()} fallback={<text />}>
         <DateBreakdownPanel breakdown={selectedBreakdown()!} isNarrow={isNarrowTerminal()} />
       </Show>
 
-      <Show when={!selectedBreakdown()}>
+      <Show when={!selectedBreakdown()} fallback={<text />}>
         <box flexDirection="column" marginTop={1}>
           <box flexDirection={isNarrowTerminal() ? "column" : "row"} gap={isNarrowTerminal() ? 0 : 4}>
             <box flexDirection="column">
@@ -233,12 +233,12 @@ export function StatsView(props: StatsViewProps) {
           </box>
         </box>
 
-        <Show when={!isNarrowTerminal()}>
+        <Show when={!isNarrowTerminal()} fallback={<text />}>
           <box marginTop={1}>
             <text fg="yellow" italic>{`Your total spending is $${props.data.totalCost.toFixed(2)} on AI coding assistants!`}</text>
           </box>
         </Show>
-        <Show when={isNarrowTerminal()}>
+        <Show when={isNarrowTerminal()} fallback={<text />}>
           <box marginTop={1}>
             <text fg="yellow" italic>{`Total: $${props.data.totalCost.toFixed(2)}`}</text>
           </box>

@@ -149,7 +149,7 @@ export function Footer(props: FooterProps) {
             enabled={props.enabledSources.has("openclaw")}
             onToggle={props.onSourceToggle}
           />
-          <Show when={!isVeryNarrowTerminal()}>
+          <Show when={!isVeryNarrowTerminal()} fallback={<text />}>
             <box flexDirection="row" gap={1}>
               <text dim>|</text>
               <SortButton
@@ -172,7 +172,7 @@ export function Footer(props: FooterProps) {
               />
             </box>
           </Show>
-          <Show when={showScrollInfo() && !isVeryNarrowTerminal()}>
+          <Show when={showScrollInfo() && !isVeryNarrowTerminal()} fallback={<text />}>
             <box flexDirection="row" gap={1}>
               <text dim>|</text>
               <text
@@ -186,7 +186,7 @@ export function Footer(props: FooterProps) {
           <text dim>tokens</text>
           <text dim>|</text>
           <text fg="green" bold>{`$${totals().cost.toFixed(2)}`}</text>
-          <Show when={!isVeryNarrowTerminal()}>
+          <Show when={!isVeryNarrowTerminal()} fallback={<text />}>
             <text dim>({props.modelCount} models)</text>
           </Show>
         </box>
@@ -236,15 +236,15 @@ export function Footer(props: FooterProps) {
           </text>
         </Show>
       </box>
-      <Show when={props.isRefreshing}>
+      <Show when={props.isRefreshing} fallback={<text />}>
         <LoadingStatusLine phase={props.loadingPhase} />
       </Show>
-      <Show when={!props.isRefreshing && props.cacheTimestamp}>
+      <Show when={!props.isRefreshing && props.cacheTimestamp} fallback={<text />}>
         <box flexDirection="row" gap={1}>
           <text
             dim
           >{`Last updated: ${formatTimeAgo(props.cacheTimestamp!, now())}`}</text>
-          <Show when={props.autoRefreshEnabled}>
+          <Show when={props.autoRefreshEnabled} fallback={<text />}>
             <text
               dim
             >{`| Auto: ${formatIntervalSeconds(props.autoRefreshMs)}`}</text>
