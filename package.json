@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "postinstall": "if [ -z \"$VERCEL\" ]; then bun run build:core; else echo 'Skipping core build on Vercel'; fi",
+    "postinstall": "node -e \"if(!process.env.VERCEL){require('child_process').execSync('bun run build:core',{stdio:'inherit'})}else{console.log('Skipping core build on Vercel')}\"",
     "build": "bun run build:core && bun run build:cli",
     "build:cli": "bun run --cwd packages/cli build",
     "build:core": "bun run --cwd packages/core build",
