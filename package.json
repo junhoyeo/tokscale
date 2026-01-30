@@ -12,7 +12,8 @@
     "build": "bun run build:core && bun run build:cli",
     "build:cli": "bun run --cwd packages/cli build",
     "build:core": "bun run --cwd packages/core build",
-    "cli": "./scripts/cli.sh",
+    "cli": "bun run --cwd packages/cli dev",
+    "tui": "bun run --cwd packages/cli tui",
     "dev:frontend": "bun run --cwd packages/frontend dev",
     "dev:benchmarks": "bun run --cwd packages/benchmarks run"
   },
