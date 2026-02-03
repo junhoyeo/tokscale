@@ -16,6 +16,44 @@ import { formatCurrency } from "./table.js";
 
 const execAsync = promisify(exec);
 
+function parseDateStringToLocal(dateStr: string): Date | null {
+  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const [, year, month, day] = match;
+  return new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+}
+
+function getStartOfDayTimestamp(date: Date): number {
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+  return start.getTime();
+}
+
+function getEndOfDayTimestamp(date: Date): number {
+  const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+  return end.getTime();
+}
+
+function getTimestampFilters(since?: string, until?: string): { sinceTs?: number; untilTs?: number } {
+  let sinceTs: number | undefined;
+  let untilTs: number | undefined;
+  
+  if (since) {
+    const sinceDate = parseDateStringToLocal(since);
+    if (sinceDate) {
+      sinceTs = getStartOfDayTimestamp(sinceDate);
+    }
+  }
+  
+  if (until) {
+    const untilDate = parseDateStringToLocal(until);
+    if (untilDate) {
+      untilTs = getEndOfDayTimestamp(untilDate);
+    }
+  }
+  
+  return { sinceTs, untilTs };
+}
+
 interface SubmitOptions {
   opencode?: boolean;
   claude?: boolean;
@@ -211,6 +249,7 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
 
   // Filter out cursor from local sources (it's handled separately via sync)
   const localSources = sources?.filter((s): s is Exclude<SourceType, "cursor"> => s !== "cursor");
+  const { sinceTs, untilTs } = getTimestampFilters(options.since, options.until);
 
   let data: TokenContributionData;
   try {
@@ -222,6 +261,8 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
         since: options.since,
         until: options.until,
         year: options.year,
+        sinceTs,
+        untilTs,
       }),
       includeCursor && isCursorLoggedIn()
         ? syncCursorCache()
@@ -241,6 +282,8 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
       since: options.since,
       until: options.until,
       year: options.year,
+      sinceTs,
+      untilTs,
     });
 
     // Use graph structure for submission, report's cost for display
