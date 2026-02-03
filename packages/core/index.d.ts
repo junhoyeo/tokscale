@@ -52,6 +52,8 @@ export interface FinalizeMonthlyOptions {
   since?: string
   until?: string
   year?: string
+  sinceTs?: number
+  untilTs?: number
 }
 
 /** Finalize monthly report */

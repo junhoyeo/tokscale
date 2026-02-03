@@ -164,6 +164,8 @@ interface NativeLocalParseOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 interface NativeFinalizeReportOptions {
@@ -367,6 +369,8 @@ export interface LocalParseOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 export interface FinalizeOptions {
@@ -572,6 +576,8 @@ export async function parseLocalSourcesAsync(options: LocalParseOptions): Promis
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   return runInSubprocess<ParsedMessages>("parseLocalSources", [nativeOptions]);
@@ -589,6 +595,8 @@ export async function finalizeReportAsync(options: FinalizeOptions): Promise<Mod
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   return runInSubprocess<ModelReport>("finalizeReport", [nativeOptions]);
@@ -606,6 +614,8 @@ export async function finalizeMonthlyReportAsync(options: FinalizeOptions): Prom
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   return runInSubprocess<MonthlyReport>("finalizeMonthlyReport", [nativeOptions]);

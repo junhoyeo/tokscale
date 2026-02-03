@@ -1059,7 +1059,7 @@ interface LoadedDataSources {
 
 async function loadDataSourcesParallel(
   localSources: SourceType[],
-  dateFilters: { since?: string; until?: string; year?: string },
+  dateFilters: DateFilters,
   onPhase?: (phase: string) => void
 ): Promise<LoadedDataSources> {
   const shouldParseLocal = localSources.length > 0;
@@ -1072,6 +1072,8 @@ async function loadDataSourcesParallel(
           since: dateFilters.since,
           until: dateFilters.until,
           year: dateFilters.year,
+          sinceTs: dateFilters.sinceTs,
+          untilTs: dateFilters.untilTs,
         })
       : Promise.resolve(null),
   ]);
@@ -1153,6 +1155,8 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
   } catch (e) {
     if (spinner) {
@@ -1285,6 +1289,8 @@ async function showMonthlyReport(options: FilterOptions & DateFilterOptions & { 
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
   } catch (e) {
     if (spinner) {
@@ -1384,6 +1390,8 @@ async function outputJsonReport(
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
     console.log(JSON.stringify(report, null, 2));
   } else {
@@ -1393,6 +1401,8 @@ async function outputJsonReport(
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
     console.log(JSON.stringify(report, null, 2));
   }
