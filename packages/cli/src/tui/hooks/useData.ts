@@ -218,7 +218,15 @@ async function loadData(
 
   const dailyMap = new Map<string, DailyEntry>();
   for (const contrib of graph.contributions) {
-    const dateStr = contrib.date;
+    let dateStr = contrib.date;
+    
+    // When timestamp is available and valid, use it to compute local date
+    // This ensures the contribution is bucketed by local timezone, not UTC
+    if (contrib.timestamp && contrib.timestamp > 0) {
+      const localDate = new Date(contrib.timestamp);
+      dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
+    }
+    
     if (!dailyMap.has(dateStr)) {
       dailyMap.set(dateStr, {
         date: dateStr,
@@ -335,7 +343,11 @@ async function loadData(
 
   const dailyModelMap = new Map<string, Map<string, number>>();
   for (const contrib of graph.contributions) {
-    const dateStr = contrib.date;
+    let dateStr = contrib.date;
+    if (contrib.timestamp && contrib.timestamp > 0) {
+      const localDate = new Date(contrib.timestamp);
+      dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
+    }
     if (!dailyModelMap.has(dateStr)) {
       dailyModelMap.set(dateStr, new Map());
     }
@@ -404,6 +416,12 @@ async function loadData(
 
   const dailyBreakdowns = new Map<string, DailyModelBreakdown>();
   for (const contrib of graph.contributions) {
+    let dateStr = contrib.date;
+    if (contrib.timestamp && contrib.timestamp > 0) {
+      const localDate = new Date(contrib.timestamp);
+      dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
+    }
+    
     const models = contrib.sources.map((source: { modelId: string; source: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning?: number }; cost: number; messages: number }) => ({
       modelId: source.modelId,
       source: source.source,
@@ -418,12 +436,20 @@ async function loadData(
       messages: source.messages,
     }));
     
-    dailyBreakdowns.set(contrib.date, {
-      date: contrib.date,
-      cost: contrib.totals.cost,
-      totalTokens: contrib.totals.tokens,
-      models: models.sort((a, b) => b.cost - a.cost),
-    });
+    const existing = dailyBreakdowns.get(dateStr);
+    if (existing) {
+      existing.cost += contrib.totals.cost;
+      existing.totalTokens += contrib.totals.tokens;
+      existing.models.push(...models);
+      existing.models.sort((a, b) => b.cost - a.cost);
+    } else {
+      dailyBreakdowns.set(dateStr, {
+        date: dateStr,
+        cost: contrib.totals.cost,
+        totalTokens: contrib.totals.tokens,
+        models: models.sort((a, b) => b.cost - a.cost),
+      });
+    }
   }
 
   return {

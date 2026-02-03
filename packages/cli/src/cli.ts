@@ -168,8 +168,17 @@ function parseDateStringToLocal(dateStr: string): Date | null {
   // Parse YYYY-MM-DD as local date (not UTC)
   const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return null;
-  const [, year, month, day] = match;
-  return new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+  const [, yearStr, monthStr, dayStr] = match;
+  const year = parseInt(yearStr);
+  const month = parseInt(monthStr) - 1;
+  const day = parseInt(dayStr);
+  const date = new Date(year, month, day);
+  
+  // Validate that the date didn't auto-correct (e.g., Feb 30 -> Mar 2)
+  if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day) {
+    return null;
+  }
+  return date;
 }
 
 interface DateFilters {
@@ -183,7 +192,6 @@ interface DateFilters {
 function getDateFilters(options: DateFilterOptions): DateFilters {
   const today = new Date();
   
-  // --today: just today (local timezone)
   if (options.today) {
     return {
       sinceTs: getStartOfDayTimestamp(today),
@@ -191,7 +199,6 @@ function getDateFilters(options: DateFilterOptions): DateFilters {
     };
   }
   
-  // --week: last 7 days (local timezone)
   if (options.week) {
     const weekAgo = new Date(today);
     weekAgo.setDate(weekAgo.getDate() - 6);
@@ -201,7 +208,6 @@ function getDateFilters(options: DateFilterOptions): DateFilters {
     };
   }
   
-  // --month: current calendar month (local timezone)
   if (options.month) {
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     return {
@@ -210,23 +216,31 @@ function getDateFilters(options: DateFilterOptions): DateFilters {
     };
   }
   
-  // Explicit --since/--until: convert to local timezone timestamps for consistency
   if (options.since || options.until) {
     let sinceTs: number | undefined;
     let untilTs: number | undefined;
     
     if (options.since) {
       const sinceDate = parseDateStringToLocal(options.since);
-      if (sinceDate) {
-        sinceTs = getStartOfDayTimestamp(sinceDate);
+      if (!sinceDate) {
+        console.error(pc.red(`\n  Error: Invalid --since date '${options.since}'. Use YYYY-MM-DD format with valid date.\n`));
+        process.exit(1);
       }
+      sinceTs = getStartOfDayTimestamp(sinceDate);
     }
     
     if (options.until) {
       const untilDate = parseDateStringToLocal(options.until);
-      if (untilDate) {
-        untilTs = getEndOfDayTimestamp(untilDate);
+      if (!untilDate) {
+        console.error(pc.red(`\n  Error: Invalid --until date '${options.until}'. Use YYYY-MM-DD format with valid date.\n`));
+        process.exit(1);
       }
+      untilTs = getEndOfDayTimestamp(untilDate);
+    }
+    
+    if (sinceTs !== undefined && untilTs !== undefined && sinceTs > untilTs) {
+      console.error(pc.red(`\n  Error: --since date must be before --until date.\n`));
+      process.exit(1);
     }
     
     return {

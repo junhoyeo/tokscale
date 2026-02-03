@@ -46,10 +46,11 @@ export interface SourceContribution {
  * Daily contribution entry with full granularity
  */
 export interface DailyContribution {
-  /** ISO date string (YYYY-MM-DD) in UTC */
+  /** ISO date string (YYYY-MM-DD) in UTC - note: this is the UTC day bucket, not local date */
   date: string;
 
-  /** Unix timestamp in milliseconds (earliest message of the day) */
+  /** Unix timestamp (ms) of earliest message in this UTC day bucket.
+   *  Use this to compute local date for timezone-aware display. */
   timestamp: number;
 
   /** Aggregated totals for the day */
