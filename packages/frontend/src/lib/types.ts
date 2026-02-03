@@ -43,6 +43,7 @@ export interface SourceContribution {
 
 export interface DailyContribution {
   date: string;
+  timestamp?: number;
   totals: {
     tokens: number;
     cost: number;

@@ -42,7 +42,11 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
 
     // Convert to sorted vector with pre-allocated capacity
     let mut contributions: Vec<DailyContribution> = Vec::with_capacity(daily_map.len());
-    contributions.extend(daily_map.into_iter().map(|(date, acc)| acc.into_contribution(date)));
+    contributions.extend(
+        daily_map
+            .into_iter()
+            .map(|(date, acc)| acc.into_contribution(date)),
+    );
 
     // Sort by date
     contributions.sort_by(|a, b| a.date.cmp(&b.date));
@@ -159,6 +163,7 @@ struct DayAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
     sources: HashMap<String, SourceContribution>,
+    min_timestamp: i64,
 }
 
 impl Default for DayAccumulator {
@@ -167,13 +172,16 @@ impl Default for DayAccumulator {
             totals: DailyTotals::default(),
             token_breakdown: TokenBreakdown::default(),
             sources: HashMap::with_capacity(8),
+            min_timestamp: i64::MAX,
         }
     }
 }
 
 impl DayAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
-        let total_tokens = msg.tokens.input
+        let total_tokens = msg
+            .tokens
+            .input
             .saturating_add(msg.tokens.output)
             .saturating_add(msg.tokens.cache_read)
             .saturating_add(msg.tokens.cache_write)
@@ -183,11 +191,27 @@ impl DayAccumulator {
         self.totals.cost += msg.cost;
         self.totals.messages = self.totals.messages.saturating_add(1);
 
+        if msg.timestamp < self.min_timestamp {
+            self.min_timestamp = msg.timestamp;
+        }
+
         self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
-        self.token_breakdown.output = self.token_breakdown.output.saturating_add(msg.tokens.output);
-        self.token_breakdown.cache_read = self.token_breakdown.cache_read.saturating_add(msg.tokens.cache_read);
-        self.token_breakdown.cache_write = self.token_breakdown.cache_write.saturating_add(msg.tokens.cache_write);
-        self.token_breakdown.reasoning = self.token_breakdown.reasoning.saturating_add(msg.tokens.reasoning);
+        self.token_breakdown.output = self
+            .token_breakdown
+            .output
+            .saturating_add(msg.tokens.output);
+        self.token_breakdown.cache_read = self
+            .token_breakdown
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        self.token_breakdown.cache_write = self
+            .token_breakdown
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
+        self.token_breakdown.reasoning = self
+            .token_breakdown
+            .reasoning
+            .saturating_add(msg.tokens.reasoning);
 
         // Update source contribution
         let key = format!("{}:{}", msg.source, msg.model_id);
@@ -205,8 +229,14 @@ impl DayAccumulator {
 
         source.tokens.input = source.tokens.input.saturating_add(msg.tokens.input);
         source.tokens.output = source.tokens.output.saturating_add(msg.tokens.output);
-        source.tokens.cache_read = source.tokens.cache_read.saturating_add(msg.tokens.cache_read);
-        source.tokens.cache_write = source.tokens.cache_write.saturating_add(msg.tokens.cache_write);
+        source.tokens.cache_read = source
+            .tokens
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        source.tokens.cache_write = source
+            .tokens
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
         source.tokens.reasoning = source.tokens.reasoning.saturating_add(msg.tokens.reasoning);
         source.cost += msg.cost;
         source.messages = source.messages.saturating_add(1);
@@ -217,11 +247,26 @@ impl DayAccumulator {
         self.totals.cost += other.totals.cost;
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
 
-        self.token_breakdown.input = self.token_breakdown.input.saturating_add(other.token_breakdown.input);
-        self.token_breakdown.output = self.token_breakdown.output.saturating_add(other.token_breakdown.output);
-        self.token_breakdown.cache_read = self.token_breakdown.cache_read.saturating_add(other.token_breakdown.cache_read);
-        self.token_breakdown.cache_write = self.token_breakdown.cache_write.saturating_add(other.token_breakdown.cache_write);
-        self.token_breakdown.reasoning = self.token_breakdown.reasoning.saturating_add(other.token_breakdown.reasoning);
+        self.token_breakdown.input = self
+            .token_breakdown
+            .input
+            .saturating_add(other.token_breakdown.input);
+        self.token_breakdown.output = self
+            .token_breakdown
+            .output
+            .saturating_add(other.token_breakdown.output);
+        self.token_breakdown.cache_read = self
+            .token_breakdown
+            .cache_read
+            .saturating_add(other.token_breakdown.cache_read);
+        self.token_breakdown.cache_write = self
+            .token_breakdown
+            .cache_write
+            .saturating_add(other.token_breakdown.cache_write);
+        self.token_breakdown.reasoning = self
+            .token_breakdown
+            .reasoning
+            .saturating_add(other.token_breakdown.reasoning);
 
         for (key, source) in other.sources {
             let entry = self
@@ -238,19 +283,37 @@ impl DayAccumulator {
 
             entry.tokens.input = entry.tokens.input.saturating_add(source.tokens.input);
             entry.tokens.output = entry.tokens.output.saturating_add(source.tokens.output);
-            entry.tokens.cache_read = entry.tokens.cache_read.saturating_add(source.tokens.cache_read);
-            entry.tokens.cache_write = entry.tokens.cache_write.saturating_add(source.tokens.cache_write);
-            entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(source.tokens.reasoning);
+            entry.tokens.cache_read = entry
+                .tokens
+                .cache_read
+                .saturating_add(source.tokens.cache_read);
+            entry.tokens.cache_write = entry
+                .tokens
+                .cache_write
+                .saturating_add(source.tokens.cache_write);
+            entry.tokens.reasoning = entry
+                .tokens
+                .reasoning
+                .saturating_add(source.tokens.reasoning);
             entry.cost += source.cost;
             entry.messages = entry.messages.saturating_add(source.messages);
+        }
+
+        if other.min_timestamp < self.min_timestamp {
+            self.min_timestamp = other.min_timestamp;
         }
     }
 
     fn into_contribution(self, date: String) -> DailyContribution {
         DailyContribution {
             date,
+            timestamp: if self.min_timestamp == i64::MAX {
+                0
+            } else {
+                self.min_timestamp
+            },
             totals: self.totals,
-            intensity: 0, // Will be calculated later
+            intensity: 0,
             token_breakdown: self.token_breakdown,
             sources: self.sources.into_values().collect(),
         }

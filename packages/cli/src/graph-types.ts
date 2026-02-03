@@ -46,8 +46,11 @@ export interface SourceContribution {
  * Daily contribution entry with full granularity
  */
 export interface DailyContribution {
-  /** ISO date string (YYYY-MM-DD) */
+  /** ISO date string (YYYY-MM-DD) in UTC */
   date: string;
+
+  /** Unix timestamp in milliseconds (earliest message of the day) */
+  timestamp: number;
 
   /** Aggregated totals for the day */
   totals: {

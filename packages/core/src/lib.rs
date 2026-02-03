@@ -125,6 +125,7 @@ pub struct SourceContribution {
 #[derive(Debug, Clone)]
 pub struct DailyContribution {
     pub date: String,
+    pub timestamp: i64,
     pub totals: DailyTotals,
     pub intensity: u8,
     pub token_breakdown: TokenBreakdown,

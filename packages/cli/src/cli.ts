@@ -148,10 +148,7 @@ interface CursorSyncResult {
 // =============================================================================
 
 function formatDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  return date.toISOString().split("T")[0];
 }
 
 function getDateFilters(options: DateFilterOptions): { since?: string; until?: string; year?: string } {

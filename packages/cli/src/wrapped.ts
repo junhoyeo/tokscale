@@ -365,8 +365,7 @@ function calculateIntensity(cost: number, maxCost: number): 0 | 1 | 2 | 3 | 4 {
 function calculateStreaks(sortedDates: string[]): { currentStreak: number; longestStreak: number } {
   if (sortedDates.length === 0) return { currentStreak: 0, longestStreak: 0 };
 
-  const today = new Date();
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const todayStr = new Date().toISOString().split("T")[0];
   let currentStreak = 0;
   let longestStreak = 0;
   let streak = 1;
@@ -566,7 +565,7 @@ function drawContributionGraph(
   let dayIndex = 0;
 
   while (currentDate <= endDate) {
-    const dateStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
+    const dateStr = currentDate.toISOString().split("T")[0];
     const level = contribMap.get(dateStr) || 0;
 
     const col = dayIndex % DAYS_PER_ROW;
