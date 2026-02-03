@@ -141,11 +141,11 @@ impl UnifiedMessage {
     }
 }
 
-/// Convert Unix milliseconds timestamp to YYYY-MM-DD date string in local timezone
+/// Convert Unix milliseconds timestamp to YYYY-MM-DD date string in UTC
 fn timestamp_to_date(timestamp_ms: i64) -> String {
-    use chrono::{Local, TimeZone};
+    use chrono::{TimeZone, Utc};
 
-    let datetime = Local.timestamp_millis_opt(timestamp_ms);
+    let datetime = Utc.timestamp_millis_opt(timestamp_ms);
     match datetime {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
         _ => String::new(),
@@ -155,31 +155,21 @@ fn timestamp_to_date(timestamp_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Local, TimeZone};
-
-    fn expected_local_date(timestamp_ms: i64) -> String {
-        Local
-            .timestamp_millis_opt(timestamp_ms)
-            .single()
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_default()
-    }
 
     #[test]
     fn test_timestamp_to_date() {
         // 2025-06-16 12:00:00 UTC (1750075200 seconds since epoch)
         let ts = 1750075200000_i64;
         let date = timestamp_to_date(ts);
-        let expected = expected_local_date(ts);
-        assert_eq!(date, expected);
+        assert_eq!(date, "2025-06-16");
     }
 
     #[test]
     fn test_timestamp_to_date_epoch() {
+        // Unix epoch: 1970-01-01
         let ts = 0_i64;
         let date = timestamp_to_date(ts);
-        let expected = expected_local_date(ts);
-        assert_eq!(date, expected);
+        assert_eq!(date, "1970-01-01");
     }
 
     #[test]
@@ -187,21 +177,7 @@ mod tests {
         // 2024-12-01 00:00:00 UTC
         let ts = 1733011200000_i64;
         let date = timestamp_to_date(ts);
-        let expected = expected_local_date(ts);
-        assert_eq!(date, expected);
-    }
-
-    #[test]
-    fn test_timestamp_to_date_format() {
-        let ts = 1733011200000_i64;
-        let date = timestamp_to_date(ts);
-        assert!(
-            date.len() == 10
-                && date.chars().nth(4) == Some('-')
-                && date.chars().nth(7) == Some('-'),
-            "Date should be in YYYY-MM-DD format, got: {}",
-            date
-        );
+        assert_eq!(date, "2024-12-01");
     }
 
     #[test]
@@ -214,13 +190,12 @@ mod tests {
             reasoning: 0,
         };
 
-        let ts = 1733011200000_i64;
         let msg = UnifiedMessage::new(
             "opencode",
             "claude-3-5-sonnet",
             "anthropic",
             "test-session-id",
-            ts,
+            1733011200000,
             tokens,
             0.05,
         );
@@ -228,7 +203,7 @@ mod tests {
         assert_eq!(msg.source, "opencode");
         assert_eq!(msg.model_id, "claude-3-5-sonnet");
         assert_eq!(msg.session_id, "test-session-id");
-        assert_eq!(msg.date, expected_local_date(ts));
+        assert_eq!(msg.date, "2024-12-01");
         assert_eq!(msg.cost, 0.05);
         assert_eq!(msg.agent, None);
     }
