@@ -173,6 +173,8 @@ interface NativeFinalizeReportOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 interface NativeCore {
@@ -373,6 +375,8 @@ export interface FinalizeOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 
@@ -619,6 +623,8 @@ export async function finalizeGraphAsync(options: FinalizeOptions): Promise<Toke
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   const result = await runInSubprocess<NativeGraphResult>("finalizeGraph", [nativeOptions]);
@@ -647,6 +653,8 @@ export async function finalizeReportAndGraphAsync(options: FinalizeOptions): Pro
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   const result = await runInSubprocess<NativeReportAndGraph>("finalizeReportAndGraph", [nativeOptions]);

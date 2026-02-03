@@ -41,6 +41,8 @@ export interface DateFilters {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
@@ -151,7 +153,7 @@ async function loadData(
   const sources = Array.from(enabledSources);
   const localSources = sources.filter(s => s !== "cursor");
   const includeCursor = sources.includes("cursor");
-  const { since, until, year } = dateFilters ?? {};
+  const { since, until, year, sinceTs, untilTs } = dateFilters ?? {};
 
   setPhase?.("parsing-sources");
   
@@ -188,13 +190,14 @@ async function loadData(
   };
 
   setPhase?.("finalizing-report");
-  // Single call ensures consistent pricing between report and graph
   const { report, graph } = await finalizeReportAndGraphAsync({
     localMessages: localMessages || emptyMessages,
     includeCursor: includeCursor && (cursorSync.synced || hasCursorUsageCache()),
     since,
     until,
     year,
+    sinceTs,
+    untilTs,
   });
 
   const settings = loadSettings();

@@ -147,33 +147,61 @@ interface CursorSyncResult {
 // Date Helpers
 // =============================================================================
 
-function formatDate(date: Date): string {
-  return date.toISOString().split("T")[0];
+function formatDateLocal(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
-function getDateFilters(options: DateFilterOptions): { since?: string; until?: string; year?: string } {
+function getStartOfDayTimestamp(date: Date): number {
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+  return start.getTime();
+}
+
+function getEndOfDayTimestamp(date: Date): number {
+  const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+  return end.getTime();
+}
+
+interface DateFilters {
+  since?: string;
+  until?: string;
+  year?: string;
+  sinceTs?: number;
+  untilTs?: number;
+}
+
+function getDateFilters(options: DateFilterOptions): DateFilters {
   const today = new Date();
   
-  // --today: just today
+  // --today: just today (local timezone)
   if (options.today) {
-    const todayStr = formatDate(today);
-    return { since: todayStr, until: todayStr };
+    return {
+      sinceTs: getStartOfDayTimestamp(today),
+      untilTs: getEndOfDayTimestamp(today),
+    };
   }
   
-  // --week: last 7 days
+  // --week: last 7 days (local timezone)
   if (options.week) {
     const weekAgo = new Date(today);
-    weekAgo.setDate(weekAgo.getDate() - 6); // Include today = 7 days
-    return { since: formatDate(weekAgo), until: formatDate(today) };
+    weekAgo.setDate(weekAgo.getDate() - 6);
+    return {
+      sinceTs: getStartOfDayTimestamp(weekAgo),
+      untilTs: getEndOfDayTimestamp(today),
+    };
   }
   
-  // --month: current calendar month
+  // --month: current calendar month (local timezone)
   if (options.month) {
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    return { since: formatDate(startOfMonth), until: formatDate(today) };
+    return {
+      sinceTs: getStartOfDayTimestamp(startOfMonth),
+      untilTs: getEndOfDayTimestamp(today),
+    };
   }
   
-  // Explicit filters
   return {
     since: options.since,
     until: options.until,
@@ -422,6 +450,8 @@ function buildTUIOptions(
     since: dateFilters.since,
     until: dateFilters.until,
     year: dateFilters.year,
+    sinceTs: dateFilters.sinceTs,
+    untilTs: dateFilters.untilTs,
   };
 }
 
@@ -1406,6 +1436,8 @@ async function handleGraphCommand(options: GraphCommandOptions) {
     since: dateFilters.since,
     until: dateFilters.until,
     year: dateFilters.year,
+    sinceTs: dateFilters.sinceTs,
+    untilTs: dateFilters.untilTs,
   });
 
   const processingTime = performance.now() - startTime;

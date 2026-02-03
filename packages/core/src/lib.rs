@@ -85,6 +85,8 @@ pub struct LocalParseOptions {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+    pub since_ts: Option<i64>,
+    pub until_ts: Option<i64>,
 }
 
 /// Options for finalizing report
@@ -97,6 +99,8 @@ pub struct FinalizeReportOptions {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+    pub since_ts: Option<i64>,
+    pub until_ts: Option<i64>,
 }
 
 /// Daily contribution totals
@@ -908,7 +912,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     }
 }
 
-/// Filter parsed messages by date range
+/// Filter parsed messages by date range or timestamp range
 fn filter_parsed_messages(
     messages: Vec<ParsedMessage>,
     options: &LocalParseOptions,
@@ -920,12 +924,20 @@ fn filter_parsed_messages(
         filtered.retain(|m| m.date.starts_with(&year_prefix));
     }
 
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
+    if options.since_ts.is_some() || options.until_ts.is_some() {
+        if let Some(since_ts) = options.since_ts {
+            filtered.retain(|m| m.timestamp >= since_ts);
+        }
+        if let Some(until_ts) = options.until_ts {
+            filtered.retain(|m| m.timestamp <= until_ts);
+        }
+    } else {
+        if let Some(since) = &options.since {
+            filtered.retain(|m| m.date.as_str() >= since.as_str());
+        }
+        if let Some(until) = &options.until {
+            filtered.retain(|m| m.date.as_str() <= until.as_str());
+        }
     }
 
     filtered
@@ -1229,6 +1241,8 @@ pub struct FinalizeGraphOptions {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+    pub since_ts: Option<i64>,
+    pub until_ts: Option<i64>,
 }
 
 /// Finalize graph
@@ -1299,11 +1313,21 @@ pub async fn finalize_graph(options: FinalizeGraphOptions) -> napi::Result<Graph
         let year_prefix = format!("{}-", year);
         all_messages.retain(|m| m.date.starts_with(&year_prefix));
     }
-    if let Some(since) = &options.since {
-        all_messages.retain(|m| m.date.as_str() >= since.as_str());
-    }
-    if let Some(until) = &options.until {
-        all_messages.retain(|m| m.date.as_str() <= until.as_str());
+
+    if options.since_ts.is_some() || options.until_ts.is_some() {
+        if let Some(since_ts) = options.since_ts {
+            all_messages.retain(|m| m.timestamp >= since_ts);
+        }
+        if let Some(until_ts) = options.until_ts {
+            all_messages.retain(|m| m.timestamp <= until_ts);
+        }
+    } else {
+        if let Some(since) = &options.since {
+            all_messages.retain(|m| m.date.as_str() >= since.as_str());
+        }
+        if let Some(until) = &options.until {
+            all_messages.retain(|m| m.date.as_str() <= until.as_str());
+        }
     }
 
     // Aggregate by date
@@ -1393,11 +1417,21 @@ pub async fn finalize_report_and_graph(options: FinalizeReportOptions) -> napi::
         let year_prefix = format!("{}-", year);
         all_messages.retain(|m| m.date.starts_with(&year_prefix));
     }
-    if let Some(since) = &options.since {
-        all_messages.retain(|m| m.date.as_str() >= since.as_str());
-    }
-    if let Some(until) = &options.until {
-        all_messages.retain(|m| m.date.as_str() <= until.as_str());
+
+    if options.since_ts.is_some() || options.until_ts.is_some() {
+        if let Some(since_ts) = options.since_ts {
+            all_messages.retain(|m| m.timestamp >= since_ts);
+        }
+        if let Some(until_ts) = options.until_ts {
+            all_messages.retain(|m| m.timestamp <= until_ts);
+        }
+    } else {
+        if let Some(since) = &options.since {
+            all_messages.retain(|m| m.date.as_str() >= since.as_str());
+        }
+        if let Some(until) = &options.until {
+            all_messages.retain(|m| m.date.as_str() <= until.as_str());
+        }
     }
 
     // Clone messages for graph aggregation (report consumes for model aggregation)
