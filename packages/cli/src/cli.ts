@@ -164,6 +164,14 @@ function getEndOfDayTimestamp(date: Date): number {
   return end.getTime();
 }
 
+function parseDateStringToLocal(dateStr: string): Date | null {
+  // Parse YYYY-MM-DD as local date (not UTC)
+  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const [, year, month, day] = match;
+  return new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+}
+
 interface DateFilters {
   since?: string;
   until?: string;
@@ -202,9 +210,35 @@ function getDateFilters(options: DateFilterOptions): DateFilters {
     };
   }
   
+  // Explicit --since/--until: convert to local timezone timestamps for consistency
+  if (options.since || options.until) {
+    let sinceTs: number | undefined;
+    let untilTs: number | undefined;
+    
+    if (options.since) {
+      const sinceDate = parseDateStringToLocal(options.since);
+      if (sinceDate) {
+        sinceTs = getStartOfDayTimestamp(sinceDate);
+      }
+    }
+    
+    if (options.until) {
+      const untilDate = parseDateStringToLocal(options.until);
+      if (untilDate) {
+        untilTs = getEndOfDayTimestamp(untilDate);
+      }
+    }
+    
+    return {
+      since: options.since,
+      until: options.until,
+      year: options.year,
+      sinceTs,
+      untilTs,
+    };
+  }
+  
   return {
-    since: options.since,
-    until: options.until,
     year: options.year,
   };
 }

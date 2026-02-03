@@ -111,10 +111,8 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   const submission = parseResult.data;
 
-  // Step 2: No future dates
-  const today = new Date();
-  today.setHours(23, 59, 59, 999);
-  const todayStr = today.toISOString().split("T")[0];
+  // Step 2: No future dates (using UTC since DailyContribution.date is in UTC)
+  const todayStr = new Date().toISOString().split("T")[0];
 
   if (submission.meta.dateRange.end > todayStr) {
     errors.push(`Date range extends into the future: ${submission.meta.dateRange.end}`);
