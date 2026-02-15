@@ -142,11 +142,11 @@ impl UnifiedMessage {
     }
 }
 
-/// Convert Unix milliseconds timestamp to YYYY-MM-DD date string
+/// Convert Unix milliseconds timestamp to YYYY-MM-DD date string in local timezone
 fn timestamp_to_date(timestamp_ms: i64) -> String {
-    use chrono::{TimeZone, Utc};
+    use chrono::{TimeZone, Local};
 
-    let datetime = Utc.timestamp_millis_opt(timestamp_ms);
+    let datetime = Local.timestamp_millis_opt(timestamp_ms);
     match datetime {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
         _ => String::new(),
@@ -159,26 +159,66 @@ mod tests {
 
     #[test]
     fn test_timestamp_to_date() {
-        // 2025-06-16 12:00:00 UTC (1750075200 seconds since epoch)
+        // 2025-06-16 12:00:00 UTC
+        // Verify it returns a valid date string (exact value depends on local TZ)
         let ts = 1750075200000_i64;
         let date = timestamp_to_date(ts);
-        assert_eq!(date, "2025-06-16");
+        assert!(date.len() == 10, "Should return YYYY-MM-DD format");
+        assert!(date.starts_with("2025-06-1"), "Should be 2025-06-16 or 2025-06-17 depending on TZ");
     }
 
     #[test]
     fn test_timestamp_to_date_epoch() {
-        // Unix epoch: 1970-01-01
+        // Unix epoch: 1970-01-01 00:00:00 UTC
+        // In UTC+9, this is 1970-01-01 09:00:00
         let ts = 0_i64;
         let date = timestamp_to_date(ts);
-        assert_eq!(date, "1970-01-01");
+        assert!(date.starts_with("1970-01-01"), "Epoch should be 1970-01-01 in any positive-offset TZ");
     }
 
     #[test]
     fn test_timestamp_to_date_recent() {
-        // 2024-12-01 00:00:00 UTC
+        // 2024-12-01 00:00:00 UTC = 2024-12-01 09:00:00 KST
         let ts = 1733011200000_i64;
         let date = timestamp_to_date(ts);
-        assert_eq!(date, "2024-12-01");
+        assert!(date.starts_with("2024-12-01"), "Should be 2024-12-01 in UTC and positive-offset TZs");
+    }
+
+    #[test]
+    fn test_timestamp_to_date_uses_local_not_utc() {
+        use chrono::{TimeZone, Utc, Local};
+
+        // 2025-06-16 23:00:00 UTC = 2025-06-17 08:00:00 KST (UTC+9)
+        let ts = 1750114800000_i64;
+
+        // What UTC would give (the OLD behavior)
+        let utc_date = Utc.timestamp_millis_opt(ts)
+            .single()
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+
+        // What Local gives (the NEW behavior via timestamp_to_date)
+        let local_date = timestamp_to_date(ts);
+
+        // What Local timezone produces directly (sanity check)
+        let local_direct = Local.timestamp_millis_opt(ts)
+            .single()
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+
+        eprintln!("[TZ test] UTC   = {}", utc_date);
+        eprintln!("[TZ test] Local = {}", local_date);
+
+        // timestamp_to_date should match Local, not UTC
+        assert_eq!(local_date, local_direct,
+            "timestamp_to_date should use Local timezone");
+
+        // In any timezone east of UTC, Local date > UTC date for late-night UTC timestamps
+        let local_offset = Local::now().offset().local_minus_utc();
+        if local_offset > 0 {
+            assert_ne!(local_date, utc_date,
+                "In UTC+ timezone, late-night UTC timestamp should produce different local date");
+        }
     }
 
     #[test]
