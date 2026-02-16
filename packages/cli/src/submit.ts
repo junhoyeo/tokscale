@@ -13,25 +13,9 @@ import { parseLocalSourcesAsync, finalizeReportAndGraphAsync, type ParsedMessage
 import { syncCursorCache, isCursorLoggedIn, hasCursorUsageCache } from "./cursor.js";
 import type { TokenContributionData } from "./graph-types.js";
 import { formatCurrency } from "./table.js";
+import { parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp } from "./date-utils.js";
 
 const execAsync = promisify(exec);
-
-function parseDateStringToLocal(dateStr: string): Date | null {
-  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return null;
-  const [, year, month, day] = match;
-  return new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-}
-
-function getStartOfDayTimestamp(date: Date): number {
-  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
-  return start.getTime();
-}
-
-function getEndOfDayTimestamp(date: Date): number {
-  const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
-  return end.getTime();
-}
 
 function getTimestampFilters(since?: string, until?: string): { sinceTs?: number; untilTs?: number } {
   let sinceTs: number | undefined;

@@ -23,6 +23,7 @@ import {
 import { syncCursorCache, isCursorLoggedIn, hasCursorUsageCache } from "../../cursor.js";
 import { getModelColor } from "../utils/colors.js";
 import { loadCachedData, saveCachedData, isCacheStale, loadSettings } from "../config/settings.js";
+import { formatDateLocal } from "../../date-utils.js";
 
 export type {
   SortType,
@@ -49,7 +50,7 @@ function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
   const grid: GridCell[][] = Array.from({ length: 7 }, () => []);
 
   const today = new Date();
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const todayStr = formatDateLocal(today);
   
   const startDate = new Date(today);
   startDate.setDate(startDate.getDate() - 364);
@@ -66,10 +67,7 @@ function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
 
   const currentDate = new Date(startDate);
   while (currentDate <= endDate) {
-    const year = currentDate.getFullYear();
-    const month = String(currentDate.getMonth() + 1).padStart(2, "0");
-    const day = String(currentDate.getDate()).padStart(2, "0");
-    const dateStr = `${year}-${month}-${day}`;
+    const dateStr = formatDateLocal(currentDate);
     const dayOfWeek = currentDate.getDay();
     
     const isFuture = dateStr > todayStr;
@@ -224,7 +222,7 @@ async function loadData(
     // This ensures the contribution is bucketed by local timezone, not UTC
     if (contrib.timestamp && contrib.timestamp > 0) {
       const localDate = new Date(contrib.timestamp);
-      dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
+      dateStr = formatDateLocal(localDate);
     }
     
     if (!dailyMap.has(dateStr)) {
@@ -341,13 +339,13 @@ async function loadData(
     peakHour: calculatePeakHour(localMessages?.messages || []),
   };
 
-  const dailyModelMap = new Map<string, Map<string, number>>();
-  for (const contrib of graph.contributions) {
-    let dateStr = contrib.date;
-    if (contrib.timestamp && contrib.timestamp > 0) {
-      const localDate = new Date(contrib.timestamp);
-      dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
-    }
+   const dailyModelMap = new Map<string, Map<string, number>>();
+   for (const contrib of graph.contributions) {
+     let dateStr = contrib.date;
+     if (contrib.timestamp && contrib.timestamp > 0) {
+       const localDate = new Date(contrib.timestamp);
+       dateStr = formatDateLocal(localDate);
+     }
     if (!dailyModelMap.has(dateStr)) {
       dailyModelMap.set(dateStr, new Map());
     }
@@ -414,13 +412,13 @@ async function loadData(
     cost: report.totalCost,
   };
 
-  const dailyBreakdowns = new Map<string, DailyModelBreakdown>();
-  for (const contrib of graph.contributions) {
-    let dateStr = contrib.date;
-    if (contrib.timestamp && contrib.timestamp > 0) {
-      const localDate = new Date(contrib.timestamp);
-      dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
-    }
+   const dailyBreakdowns = new Map<string, DailyModelBreakdown>();
+   for (const contrib of graph.contributions) {
+     let dateStr = contrib.date;
+     if (contrib.timestamp && contrib.timestamp > 0) {
+       const localDate = new Date(contrib.timestamp);
+       dateStr = formatDateLocal(localDate);
+     }
     
     const models = contrib.sources.map((source: { modelId: string; source: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning?: number }; cost: number; messages: number }) => ({
       modelId: source.modelId,

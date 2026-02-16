@@ -60,6 +60,7 @@ import { performance } from "node:perf_hooks";
 import type { SourceType } from "./graph-types.js";
 import type { TUIOptions, TabType } from "./tui/types/index.js";
 import { loadSettings } from "./tui/config/settings.js";
+import { formatDateLocal, parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp } from "./date-utils.js";
 
 type LaunchTUIFunction = (options?: TUIOptions) => Promise<void>;
 
@@ -143,43 +144,7 @@ interface CursorSyncResult {
   error?: string;
 }
 
-// =============================================================================
-// Date Helpers
-// =============================================================================
 
-function formatDateLocal(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function getStartOfDayTimestamp(date: Date): number {
-  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
-  return start.getTime();
-}
-
-function getEndOfDayTimestamp(date: Date): number {
-  const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
-  return end.getTime();
-}
-
-function parseDateStringToLocal(dateStr: string): Date | null {
-  // Parse YYYY-MM-DD as local date (not UTC)
-  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return null;
-  const [, yearStr, monthStr, dayStr] = match;
-  const year = parseInt(yearStr);
-  const month = parseInt(monthStr) - 1;
-  const day = parseInt(dayStr);
-  const date = new Date(year, month, day);
-  
-  // Validate that the date didn't auto-correct (e.g., Feb 30 -> Mar 2)
-  if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day) {
-    return null;
-  }
-  return date;
-}
 
 interface DateFilters {
   since?: string;
