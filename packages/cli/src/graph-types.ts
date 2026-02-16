@@ -50,8 +50,8 @@ export interface DailyContribution {
   date: string;
 
   /** Unix timestamp (ms) of earliest message in this UTC day bucket.
-   *  Use this to compute local date for timezone-aware display. */
-  timestamp: number;
+   *  Undefined for days with no valid timestamps. */
+  timestamp?: number;
 
   /** Aggregated totals for the day */
   totals: {

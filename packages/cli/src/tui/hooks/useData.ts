@@ -219,9 +219,7 @@ async function loadData(
   for (const contrib of graph.contributions) {
     let dateStr = contrib.date;
     
-    // When timestamp is available and valid, use it to compute local date
-    // This ensures the contribution is bucketed by local timezone, not UTC
-    if (contrib.timestamp && contrib.timestamp > 0) {
+    if (contrib.timestamp != null) {
       const localDate = new Date(contrib.timestamp);
       dateStr = formatDateLocal(localDate);
     }
@@ -343,7 +341,7 @@ async function loadData(
    const dailyModelMap = new Map<string, Map<string, number>>();
    for (const contrib of graph.contributions) {
      let dateStr = contrib.date;
-     if (contrib.timestamp && contrib.timestamp > 0) {
+     if (contrib.timestamp != null) {
        const localDate = new Date(contrib.timestamp);
        dateStr = formatDateLocal(localDate);
      }
@@ -416,7 +414,7 @@ async function loadData(
    const dailyBreakdowns = new Map<string, DailyModelBreakdown>();
    for (const contrib of graph.contributions) {
      let dateStr = contrib.date;
-     if (contrib.timestamp && contrib.timestamp > 0) {
+     if (contrib.timestamp != null) {
        const localDate = new Date(contrib.timestamp);
        dateStr = formatDateLocal(localDate);
      }

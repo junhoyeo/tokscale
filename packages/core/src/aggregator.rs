@@ -332,9 +332,9 @@ impl DayAccumulator {
         DailyContribution {
             date,
             timestamp: if self.min_timestamp == i64::MAX {
-                0
+                None
             } else {
-                self.min_timestamp
+                Some(self.min_timestamp)
             },
             totals: DailyTotals {
                 tokens: self.totals.tokens.max(0),
