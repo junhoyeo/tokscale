@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
 import { eq, desc, sql, and, gte } from "drizzle-orm";
+import { mergeTimestampMs } from "@/lib/db/helpers";
 
 export const revalidate = 60; // ISR: revalidate every 60 seconds
 
@@ -144,12 +145,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
     for (const day of dailyData) {
       const existing = aggregatedDaily.get(day.date);
       if (existing) {
-        if (day.timestampMs != null) {
-          existing.timestampMs =
-            existing.timestampMs != null
-              ? Math.min(existing.timestampMs, day.timestampMs)
-              : day.timestampMs;
-        }
+        existing.timestampMs = mergeTimestampMs(existing.timestampMs, day.timestampMs);
         existing.tokens += Number(day.tokens);
         existing.cost += Number(day.cost);
         existing.inputTokens += Number(day.inputTokens);

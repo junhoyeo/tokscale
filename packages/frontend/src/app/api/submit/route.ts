@@ -12,6 +12,7 @@ import {
   recalculateDayTotals,
   buildModelBreakdown,
   sourceContributionToBreakdownData,
+  mergeTimestampMs,
   type SourceBreakdownData,
 } from "@/lib/db/helpers";
 
@@ -278,12 +279,7 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
-            timestampMs:
-              incomingDay.timestamp != null
-                ? existingDay.timestampMs != null
-                  ? Math.min(existingDay.timestampMs, incomingDay.timestamp)
-                  : incomingDay.timestamp
-                : existingDay.timestampMs ?? null,
+            timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestamp),
             sourceBreakdown: mergedSourceBreakdown,
             modelBreakdown,
           });
