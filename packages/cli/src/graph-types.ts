@@ -49,9 +49,9 @@ export interface DailyContribution {
   /** ISO date string (YYYY-MM-DD) in UTC - note: this is the UTC day bucket, not local date */
   date: string;
 
-  /** Unix timestamp (ms) of earliest message in this UTC day bucket.
+  /** Unix timestampMs (ms) of earliest message in this UTC day bucket.
    *  Undefined for days with no valid timestamps. */
-  timestamp?: number;
+  timestampMs?: number;
 
   /** Aggregated totals for the day */
   totals: {
@@ -186,7 +186,7 @@ export interface UnifiedMessage {
   source: SourceType;
   modelId: string;
   providerId?: string;
-  timestamp: number; // Unix milliseconds
+  timestampMs: number; // Unix milliseconds
   tokens: TokenBreakdown;
   cost: number;
 }

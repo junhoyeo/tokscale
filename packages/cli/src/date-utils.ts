@@ -30,9 +30,9 @@ export function getEndOfDayTimestamp(date: Date): number {
   return nextDay.getTime();
 }
 
-export function getContributionLocalDate(contrib: { date: string; timestamp?: number }): string {
-  if (contrib.timestamp != null) {
-    return formatDateLocal(new Date(contrib.timestamp));
+export function getContributionLocalDate(contrib: { date: string; timestampMs?: number }): string {
+  if (contrib.timestampMs != null) {
+    return formatDateLocal(new Date(contrib.timestampMs));
   }
   return contrib.date;
 }

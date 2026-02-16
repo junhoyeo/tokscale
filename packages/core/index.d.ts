@@ -3,7 +3,7 @@
 /** Daily contribution data */
 export interface DailyContribution {
   date: string
-  timestamp?: number
+  timestampMs?: number
   totals: DailyTotals
   intensity: number
   tokenBreakdown: TokenBreakdown

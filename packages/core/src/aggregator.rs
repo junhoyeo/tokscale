@@ -331,7 +331,7 @@ impl DayAccumulator {
 
         DailyContribution {
             date,
-            timestamp: if self.min_timestamp == i64::MAX {
+            timestamp_ms: if self.min_timestamp == i64::MAX {
                 None
             } else {
                 Some(self.min_timestamp)

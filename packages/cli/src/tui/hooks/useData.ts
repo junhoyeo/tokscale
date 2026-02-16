@@ -80,12 +80,12 @@ function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
   return grid;
 }
 
-function calculatePeakHour(messages: Array<{ timestamp: number }>): string {
+function calculatePeakHour(messages: Array<{ timestampMs: number }>): string {
   if (messages.length === 0) return "N/A";
   
   const hourCounts = new Array(24).fill(0);
   for (const msg of messages) {
-    const hour = new Date(msg.timestamp).getHours();
+    const hour = new Date(msg.timestampMs).getHours();
     hourCounts[hour]++;
   }
   
@@ -105,14 +105,14 @@ function calculatePeakHour(messages: Array<{ timestamp: number }>): string {
   return `${displayHour}${suffix}`;
 }
 
-function calculateLongestSession(messages: Array<{ sessionId: string; timestamp: number }>): string {
+function calculateLongestSession(messages: Array<{ sessionId: string; timestampMs: number }>): string {
   if (messages.length === 0) return "N/A";
   
   const sessions = new Map<string, number[]>();
   for (const msg of messages) {
     if (!msg.sessionId) continue;
     const timestamps = sessions.get(msg.sessionId) || [];
-    timestamps.push(msg.timestamp);
+    timestamps.push(msg.timestampMs);
     sessions.set(msg.sessionId, timestamps);
   }
   
@@ -325,12 +325,17 @@ async function loadData(
     favoriteModel,
     totalTokens: report.totalInput + report.totalOutput + report.totalCacheRead + report.totalCacheWrite,
     sessions: report.totalMessages,
-    longestSession: calculateLongestSession(localMessages?.messages || []),
+    longestSession: calculateLongestSession((localMessages?.messages || []).map((m) => ({
+      sessionId: m.sessionId,
+      timestampMs: m.timestamp,
+    }))),
     currentStreak,
     longestStreak,
     activeDays: dailyEntries.length,
     totalDays: graph.summary.totalDays,
-    peakHour: calculatePeakHour(localMessages?.messages || []),
+    peakHour: calculatePeakHour((localMessages?.messages || []).map((m) => ({
+      timestampMs: m.timestamp,
+    }))),
   };
 
   const dailyModelMap = new Map<string, Map<string, number>>();

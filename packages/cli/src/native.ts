@@ -41,7 +41,7 @@ interface NativeSourceContribution {
 
 interface NativeDailyContribution {
   date: string;
-  timestamp?: number;
+  timestampMs?: number;
   totals: NativeDailyTotals;
   intensity: number;
   tokenBreakdown: NativeTokenBreakdown;
@@ -259,7 +259,7 @@ function fromNativeResult(result: NativeGraphResult): TokenContributionData {
     })),
     contributions: result.contributions.map((c) => ({
       date: c.date,
-      timestamp: c.timestamp ?? undefined,
+      timestampMs: c.timestampMs ?? undefined,
       totals: {
         tokens: c.totals.tokens,
         cost: c.totals.cost,
