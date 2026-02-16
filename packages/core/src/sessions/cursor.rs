@@ -254,12 +254,11 @@ fn parse_date_to_timestamp(date_str: &str) -> i64 {
         return Utc.from_utc_datetime(&dt).timestamp_millis();
     }
 
-    // Date-only format: "2025-02-05" - use start of day UTC (00:00:00Z)
-    // Note: For extreme timezones (UTC+14, UTC-12), this timestamp may not
-    // fall within the expected local day range when filtering by local time.
-    // Most Cursor data uses full timestamps; this fallback is for legacy data.
+    // Date-only format: "2025-02-05" - use noon UTC (12:00:00Z)
+    // Noon keeps the local date stable for all timezones from UTC-12 to UTC+14,
+    // so filtering by local day boundaries won't shift the record to an adjacent day.
     if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-        let dt = date.and_hms_opt(0, 0, 0).unwrap();
+        let dt = date.and_hms_opt(12, 0, 0).unwrap();
         return Utc.from_utc_datetime(&dt).timestamp_millis();
     }
 
