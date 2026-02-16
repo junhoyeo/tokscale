@@ -25,8 +25,9 @@ export function getStartOfDayTimestamp(date: Date): number {
 }
 
 export function getEndOfDayTimestamp(date: Date): number {
-  const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
-  return end.getTime();
+  // Returns start of NEXT day (exclusive upper bound for half-open interval [since, until))
+  const nextDay = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 0, 0, 0, 0);
+  return nextDay.getTime();
 }
 
 export function getContributionLocalDate(contrib: { date: string; timestamp?: number }): string {

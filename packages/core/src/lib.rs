@@ -1029,7 +1029,7 @@ fn apply_date_filters<T>(
             items.retain(|item| get_timestamp(item) >= since_ts);
         }
         if let Some(until_ts) = until_ts {
-            items.retain(|item| get_timestamp(item) <= until_ts);
+            items.retain(|item| get_timestamp(item) < until_ts);
         }
     } else {
         if let Some(year) = year {
