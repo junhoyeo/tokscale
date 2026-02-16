@@ -13,7 +13,7 @@ import { parseLocalSourcesAsync, finalizeReportAndGraphAsync, type ParsedMessage
 import { syncCursorCache, isCursorLoggedIn, hasCursorUsageCache } from "./cursor.js";
 import type { TokenContributionData } from "./graph-types.js";
 import { formatCurrency } from "./table.js";
-import { parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp } from "./date-utils.js";
+import { parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp, validateTimestampMs } from "./date-utils.js";
 
 const execAsync = promisify(exec);
 
@@ -25,6 +25,7 @@ function getTimestampFilters(since?: string, until?: string): { sinceTs?: number
     const sinceDate = parseDateStringToLocal(since);
     if (sinceDate) {
       sinceTs = getStartOfDayTimestamp(sinceDate);
+      sinceTs = validateTimestampMs(sinceTs, '--since');
     }
   }
   
@@ -32,6 +33,7 @@ function getTimestampFilters(since?: string, until?: string): { sinceTs?: number
     const untilDate = parseDateStringToLocal(until);
     if (untilDate) {
       untilTs = getEndOfDayTimestamp(untilDate);
+      untilTs = validateTimestampMs(untilTs, '--until');
     }
   }
   

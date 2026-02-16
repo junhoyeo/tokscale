@@ -29,10 +29,22 @@ export function getEndOfDayTimestamp(date: Date): number {
   return end.getTime();
 }
 
-/** Derive local date from a contribution. Uses timestamp if available, falls back to UTC date. */
 export function getContributionLocalDate(contrib: { date: string; timestamp?: number }): string {
   if (contrib.timestamp != null) {
     return formatDateLocal(new Date(contrib.timestamp));
   }
   return contrib.date;
+}
+
+const MIN_VALID_TIMESTAMP_MS = 1_000_000_000_000;
+const MAX_VALID_TIMESTAMP_MS = 4_102_444_800_000;
+
+export function validateTimestampMs(ts: number, label: string): number {
+  if (!Number.isFinite(ts) || !Number.isSafeInteger(ts)) {
+    throw new Error(`${label} must be a finite safe integer, got ${ts}`);
+  }
+  if (ts < MIN_VALID_TIMESTAMP_MS || ts > MAX_VALID_TIMESTAMP_MS) {
+    throw new Error(`${label} out of valid range (${MIN_VALID_TIMESTAMP_MS}..${MAX_VALID_TIMESTAMP_MS}), got ${ts}`);
+  }
+  return ts;
 }

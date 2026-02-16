@@ -60,7 +60,7 @@ import { performance } from "node:perf_hooks";
 import type { SourceType } from "./graph-types.js";
 import type { TUIOptions, TabType } from "./tui/types/index.js";
 import { loadSettings } from "./tui/config/settings.js";
-import { formatDateLocal, parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp } from "./date-utils.js";
+import { formatDateLocal, parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp, validateTimestampMs } from "./date-utils.js";
 
 type LaunchTUIFunction = (options?: TUIOptions) => Promise<void>;
 
@@ -159,26 +159,38 @@ function getDateFilters(options: DateFilterOptions): DateFilters {
   const today = new Date();
   
   if (options.today) {
+    let sinceTs = getStartOfDayTimestamp(today);
+    let untilTs = getEndOfDayTimestamp(today);
+    sinceTs = validateTimestampMs(sinceTs, '--today (since)');
+    untilTs = validateTimestampMs(untilTs, '--today (until)');
     return {
-      sinceTs: getStartOfDayTimestamp(today),
-      untilTs: getEndOfDayTimestamp(today),
+      sinceTs,
+      untilTs,
     };
   }
   
   if (options.week) {
     const weekAgo = new Date(today);
     weekAgo.setDate(weekAgo.getDate() - 6);
+    let sinceTs = getStartOfDayTimestamp(weekAgo);
+    let untilTs = getEndOfDayTimestamp(today);
+    sinceTs = validateTimestampMs(sinceTs, '--week (since)');
+    untilTs = validateTimestampMs(untilTs, '--week (until)');
     return {
-      sinceTs: getStartOfDayTimestamp(weekAgo),
-      untilTs: getEndOfDayTimestamp(today),
+      sinceTs,
+      untilTs,
     };
   }
   
   if (options.month) {
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    let sinceTs = getStartOfDayTimestamp(startOfMonth);
+    let untilTs = getEndOfDayTimestamp(today);
+    sinceTs = validateTimestampMs(sinceTs, '--month (since)');
+    untilTs = validateTimestampMs(untilTs, '--month (until)');
     return {
-      sinceTs: getStartOfDayTimestamp(startOfMonth),
-      untilTs: getEndOfDayTimestamp(today),
+      sinceTs,
+      untilTs,
     };
   }
   
@@ -193,6 +205,7 @@ function getDateFilters(options: DateFilterOptions): DateFilters {
         process.exit(1);
       }
       sinceTs = getStartOfDayTimestamp(sinceDate);
+      sinceTs = validateTimestampMs(sinceTs, '--since');
     }
     
     if (options.until) {
@@ -202,6 +215,7 @@ function getDateFilters(options: DateFilterOptions): DateFilters {
         process.exit(1);
       }
       untilTs = getEndOfDayTimestamp(untilDate);
+      untilTs = validateTimestampMs(untilTs, '--until');
     }
     
     if (sinceTs !== undefined && untilTs !== undefined && sinceTs > untilTs) {
