@@ -30,7 +30,9 @@ const SourceContributionSchema = z.object({
 
 const DailyContributionSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  timestamp: z.number().int().positive().optional(),
+  // Must be Unix milliseconds (>= Sep 2001). Rejects seconds-epoch values
+  // to prevent permanent corruption via Math.min merge strategy.
+  timestamp: z.number().int().min(1_000_000_000_000).max(Number.MAX_SAFE_INTEGER).optional(),
   totals: z.object({
     tokens: z.number().int().min(0),
     cost: z.number().min(0),
