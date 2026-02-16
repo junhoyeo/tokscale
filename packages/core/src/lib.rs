@@ -1014,6 +1014,37 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     }
 }
 
+fn apply_date_filters<T>(
+    items: &mut Vec<T>,
+    since_ts: Option<i64>,
+    until_ts: Option<i64>,
+    since: &Option<String>,
+    until: &Option<String>,
+    year: &Option<String>,
+    get_timestamp: impl Fn(&T) -> i64,
+    get_date: impl Fn(&T) -> &str,
+) {
+    if since_ts.is_some() || until_ts.is_some() {
+        if let Some(since_ts) = since_ts {
+            items.retain(|item| get_timestamp(item) >= since_ts);
+        }
+        if let Some(until_ts) = until_ts {
+            items.retain(|item| get_timestamp(item) <= until_ts);
+        }
+    } else {
+        if let Some(year) = year {
+            let year_prefix = format!("{}-", year);
+            items.retain(|item| get_date(item).starts_with(&year_prefix));
+        }
+        if let Some(since) = since {
+            items.retain(|item| get_date(item) >= since.as_str());
+        }
+        if let Some(until) = until {
+            items.retain(|item| get_date(item) <= until.as_str());
+        }
+    }
+}
+
 /// Filter parsed messages by date range or timestamp range
 fn filter_parsed_messages(
     messages: Vec<ParsedMessage>,
@@ -1021,26 +1052,16 @@ fn filter_parsed_messages(
 ) -> Vec<ParsedMessage> {
     let mut filtered = messages;
 
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if options.since_ts.is_some() || options.until_ts.is_some() {
-        if let Some(since_ts) = options.since_ts {
-            filtered.retain(|m| m.timestamp >= since_ts);
-        }
-        if let Some(until_ts) = options.until_ts {
-            filtered.retain(|m| m.timestamp <= until_ts);
-        }
-    } else {
-        if let Some(since) = &options.since {
-            filtered.retain(|m| m.date.as_str() >= since.as_str());
-        }
-        if let Some(until) = &options.until {
-            filtered.retain(|m| m.date.as_str() <= until.as_str());
-        }
-    }
+    apply_date_filters(
+        &mut filtered,
+        options.since_ts,
+        options.until_ts,
+        &options.since,
+        &options.until,
+        &options.year,
+        |m| m.timestamp,
+        |m| m.date.as_str(),
+    );
 
     filtered
 }
@@ -1131,26 +1152,16 @@ pub async fn finalize_report(options: FinalizeReportOptions) -> napi::Result<Mod
 
     // Apply date filters to cursor messages (local already filtered)
     if options.include_cursor {
-        if let Some(year) = &options.year {
-            let year_prefix = format!("{}-", year);
-            all_messages.retain(|m| m.date.starts_with(&year_prefix));
-        }
-
-        if options.since_ts.is_some() || options.until_ts.is_some() {
-            if let Some(since_ts) = options.since_ts {
-                all_messages.retain(|m| m.timestamp >= since_ts);
-            }
-            if let Some(until_ts) = options.until_ts {
-                all_messages.retain(|m| m.timestamp <= until_ts);
-            }
-        } else {
-            if let Some(since) = &options.since {
-                all_messages.retain(|m| m.date.as_str() >= since.as_str());
-            }
-            if let Some(until) = &options.until {
-                all_messages.retain(|m| m.date.as_str() <= until.as_str());
-            }
-        }
+        apply_date_filters(
+            &mut all_messages,
+            options.since_ts,
+            options.until_ts,
+            &options.since,
+            &options.until,
+            &options.year,
+            |m| m.timestamp,
+            |m| m.date.as_str(),
+        );
     }
 
     // Aggregate by model
@@ -1289,26 +1300,16 @@ pub async fn finalize_monthly_report(options: FinalizeMonthlyOptions) -> napi::R
     }
 
     // Apply date filters
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        all_messages.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if options.since_ts.is_some() || options.until_ts.is_some() {
-        if let Some(since_ts) = options.since_ts {
-            all_messages.retain(|m| m.timestamp >= since_ts);
-        }
-        if let Some(until_ts) = options.until_ts {
-            all_messages.retain(|m| m.timestamp <= until_ts);
-        }
-    } else {
-        if let Some(since) = &options.since {
-            all_messages.retain(|m| m.date.as_str() >= since.as_str());
-        }
-        if let Some(until) = &options.until {
-            all_messages.retain(|m| m.date.as_str() <= until.as_str());
-        }
-    }
+    apply_date_filters(
+        &mut all_messages,
+        options.since_ts,
+        options.until_ts,
+        &options.since,
+        &options.until,
+        &options.year,
+        |m| m.timestamp,
+        |m| m.date.as_str(),
+    );
 
     // Aggregate by month
     let mut month_map: std::collections::HashMap<String, MonthAggregator> =
@@ -1433,26 +1434,16 @@ pub async fn finalize_graph(options: FinalizeGraphOptions) -> napi::Result<Graph
     }
 
     // Apply date filters
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        all_messages.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if options.since_ts.is_some() || options.until_ts.is_some() {
-        if let Some(since_ts) = options.since_ts {
-            all_messages.retain(|m| m.timestamp >= since_ts);
-        }
-        if let Some(until_ts) = options.until_ts {
-            all_messages.retain(|m| m.timestamp <= until_ts);
-        }
-    } else {
-        if let Some(since) = &options.since {
-            all_messages.retain(|m| m.date.as_str() >= since.as_str());
-        }
-        if let Some(until) = &options.until {
-            all_messages.retain(|m| m.date.as_str() <= until.as_str());
-        }
-    }
+    apply_date_filters(
+        &mut all_messages,
+        options.since_ts,
+        options.until_ts,
+        &options.since,
+        &options.until,
+        &options.year,
+        |m| m.timestamp,
+        |m| m.date.as_str(),
+    );
 
     // Aggregate by date
     let contributions = aggregator::aggregate_by_date(all_messages);
@@ -1537,26 +1528,16 @@ pub async fn finalize_report_and_graph(options: FinalizeReportOptions) -> napi::
     }
 
     // Apply date filters
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        all_messages.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if options.since_ts.is_some() || options.until_ts.is_some() {
-        if let Some(since_ts) = options.since_ts {
-            all_messages.retain(|m| m.timestamp >= since_ts);
-        }
-        if let Some(until_ts) = options.until_ts {
-            all_messages.retain(|m| m.timestamp <= until_ts);
-        }
-    } else {
-        if let Some(since) = &options.since {
-            all_messages.retain(|m| m.date.as_str() >= since.as_str());
-        }
-        if let Some(until) = &options.until {
-            all_messages.retain(|m| m.date.as_str() <= until.as_str());
-        }
-    }
+    apply_date_filters(
+        &mut all_messages,
+        options.since_ts,
+        options.until_ts,
+        &options.since,
+        &options.until,
+        &options.year,
+        |m| m.timestamp,
+        |m| m.date.as_str(),
+    );
 
     // Clone messages for graph aggregation (report consumes for model aggregation)
     let messages_for_graph = all_messages.clone();
