@@ -42,6 +42,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/droid.png";
       case "openclaw":
         return "/assets/logos/openclaw.jpg";
+      case "pi":
+        return "/assets/logos/pi.png";
       default:
         return null;
     }

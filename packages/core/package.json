@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/core",
-  "version": "1.2.0",
+  "version": "1.2.6",
   "description": "Native Rust core for tokscale CLI - high-performance session parsing",
   "main": "index.js",
   "types": "index.d.ts",

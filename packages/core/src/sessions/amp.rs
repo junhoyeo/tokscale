@@ -142,13 +142,13 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
                     thread_id.clone(),
                     timestamp,
                     TokenBreakdown {
-                        input: tokens.input.unwrap_or(0),
-                        output: tokens.output.unwrap_or(0),
-                        cache_read: tokens.cache_read_input_tokens.unwrap_or(0),
-                        cache_write: tokens.cache_creation_input_tokens.unwrap_or(0),
+                        input: tokens.input.unwrap_or(0).max(0),
+                        output: tokens.output.unwrap_or(0).max(0),
+                        cache_read: tokens.cache_read_input_tokens.unwrap_or(0).max(0),
+                        cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
                         reasoning: 0,
                     },
-                    event.credits.unwrap_or(0.0),
+                    event.credits.unwrap_or(0.0).max(0.0),
                 ));
             }
             if !messages.is_empty() {
@@ -186,13 +186,13 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
                 thread_id.clone(),
                 timestamp,
                 TokenBreakdown {
-                    input: usage.input_tokens.unwrap_or(0),
-                    output: usage.output_tokens.unwrap_or(0),
-                    cache_read: usage.cache_read_input_tokens.unwrap_or(0),
-                    cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
+                    input: usage.input_tokens.unwrap_or(0).max(0),
+                    output: usage.output_tokens.unwrap_or(0).max(0),
+                    cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+                    cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
                     reasoning: 0,
                 },
-                usage.credits.unwrap_or(0.0),
+                usage.credits.unwrap_or(0.0).max(0.0),
             ));
         }
     }

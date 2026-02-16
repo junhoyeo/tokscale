@@ -14,11 +14,16 @@ const MIN_AUTO_REFRESH_MS = 30000;
 const MAX_AUTO_REFRESH_MS = 3600000;
 const DEFAULT_AUTO_REFRESH_MS = 60000;
 
+const DEFAULT_NATIVE_TIMEOUT_MS = 300_000; // 5 minutes
+const MIN_NATIVE_TIMEOUT_MS = 5_000; // 5 seconds
+const MAX_NATIVE_TIMEOUT_MS = 3_600_000; // 1 hour
+
 export interface TokscaleSettings {
   colorPalette: string;
   autoRefreshEnabled?: boolean;
   autoRefreshMs?: number;
   includeUnusedModels?: boolean;
+  nativeTimeoutMs?: number;
 }
 
 function validateSettings(raw: unknown): TokscaleSettings {
@@ -27,6 +32,7 @@ function validateSettings(raw: unknown): TokscaleSettings {
     autoRefreshEnabled: false, 
     autoRefreshMs: DEFAULT_AUTO_REFRESH_MS,
     includeUnusedModels: false,
+    nativeTimeoutMs: DEFAULT_NATIVE_TIMEOUT_MS,
   };
   
   if (!raw || typeof raw !== "object") return defaults;
@@ -43,7 +49,12 @@ function validateSettings(raw: unknown): TokscaleSettings {
   
   const includeUnusedModels = typeof obj.includeUnusedModels === "boolean" ? obj.includeUnusedModels : defaults.includeUnusedModels;
   
-  return { colorPalette, autoRefreshEnabled, autoRefreshMs, includeUnusedModels };
+  let nativeTimeoutMs = defaults.nativeTimeoutMs;
+  if (typeof obj.nativeTimeoutMs === "number" && Number.isFinite(obj.nativeTimeoutMs)) {
+    nativeTimeoutMs = Math.min(MAX_NATIVE_TIMEOUT_MS, Math.max(MIN_NATIVE_TIMEOUT_MS, obj.nativeTimeoutMs));
+  }
+  
+  return { colorPalette, autoRefreshEnabled, autoRefreshMs, includeUnusedModels, nativeTimeoutMs };
 }
 
 interface CachedTUIData {
@@ -66,7 +77,7 @@ export function loadSettings(): TokscaleSettings {
     }
   } catch {
   }
-  return { colorPalette: "blue", autoRefreshEnabled: false, autoRefreshMs: DEFAULT_AUTO_REFRESH_MS, includeUnusedModels: false };
+  return { colorPalette: "blue", autoRefreshEnabled: false, autoRefreshMs: DEFAULT_AUTO_REFRESH_MS, includeUnusedModels: false, nativeTimeoutMs: DEFAULT_NATIVE_TIMEOUT_MS };
 }
 
 export function saveSettings(updates: Partial<TokscaleSettings>): void {

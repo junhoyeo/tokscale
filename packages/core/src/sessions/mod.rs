@@ -10,6 +10,7 @@ pub mod droid;
 pub mod gemini;
 pub mod openclaw;
 pub mod opencode;
+pub mod pi;
 pub(crate) mod utils;
 
 use crate::TokenBreakdown;

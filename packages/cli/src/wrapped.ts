@@ -65,6 +65,7 @@ const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   amp: "Amp",
   droid: "Droid",
   openclaw: "OpenClaw",
+  pi: "Pi",
 };
 
 const ASSETS_BASE_URL = "https://tokscale.ai/assets/logos";
@@ -97,6 +98,7 @@ const CLIENT_LOGO_URLS: Record<string, string> = {
   "Amp": `${ASSETS_BASE_URL}/amp.png`,
   "Droid": `${ASSETS_BASE_URL}/droid.png`,
   "OpenClaw": `${ASSETS_BASE_URL}/openclaw.png`,
+  "Pi": `${ASSETS_BASE_URL}/pi.png`,
 };
 
 const PROVIDER_LOGO_URLS: Record<string, string> = {
@@ -214,8 +216,8 @@ async function ensureFontsLoaded(): Promise<void> {
 
 async function loadWrappedData(options: WrappedOptions): Promise<WrappedData> {
   const year = options.year || new Date().getFullYear().toString();
-  const sources = options.sources || ["opencode", "claude", "codex", "gemini", "cursor", "amp", "droid", "openclaw"];
-  const localSources = sources.filter(s => s !== "cursor") as ("opencode" | "claude" | "codex" | "gemini" | "amp" | "droid" | "openclaw")[];
+  const sources = options.sources || ["opencode", "claude", "codex", "gemini", "cursor", "amp", "droid", "openclaw", "pi"];
+  const localSources = sources.filter(s => s !== "cursor") as ("opencode" | "claude" | "codex" | "gemini" | "amp" | "droid" | "openclaw" | "pi")[];
   const includeCursor = sources.includes("cursor");
 
   const since = `${year}-01-01`;
@@ -225,7 +227,7 @@ async function loadWrappedData(options: WrappedOptions): Promise<WrappedData> {
     includeCursor && isCursorLoggedIn() ? syncCursorCache() : Promise.resolve({ synced: false, rows: 0, error: undefined }),
     localSources.length > 0
       ? parseLocalSourcesAsync({ sources: localSources, since, until, year })
-      : Promise.resolve({ messages: [], opencodeCount: 0, claudeCount: 0, codexCount: 0, geminiCount: 0, ampCount: 0, droidCount: 0, openclawCount: 0, processingTimeMs: 0 } as ParsedMessages),
+      : Promise.resolve({ messages: [], opencodeCount: 0, claudeCount: 0, codexCount: 0, geminiCount: 0, ampCount: 0, droidCount: 0, openclawCount: 0, piCount: 0, processingTimeMs: 0 } as ParsedMessages),
   ]);
 
   const cursorSync = phase1Results[0].status === "fulfilled" 
@@ -249,6 +251,7 @@ async function loadWrappedData(options: WrappedOptions): Promise<WrappedData> {
     ampCount: 0,
     droidCount: 0,
     openclawCount: 0,
+    piCount: 0,
     processingTimeMs: 0,
   };
 

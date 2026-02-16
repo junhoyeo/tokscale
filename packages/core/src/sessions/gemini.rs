@@ -119,13 +119,13 @@ fn parse_gemini_session(session: GeminiSession, fallback_timestamp: i64) -> Vec<
             session_id.clone(),
             timestamp,
             TokenBreakdown {
-                input: tokens.input.unwrap_or(0),
-                output: tokens.output.unwrap_or(0),
-                cache_read: tokens.cached.unwrap_or(0),
+                input: tokens.input.unwrap_or(0).max(0),
+                output: tokens.output.unwrap_or(0).max(0),
+                cache_read: tokens.cached.unwrap_or(0).max(0),
                 cache_write: 0,
-                reasoning: tokens.thoughts.unwrap_or(0),
+                reasoning: tokens.thoughts.unwrap_or(0).max(0),
             },
-            0.0, // Cost calculated later
+            0.0,
         ));
     }
 
@@ -230,11 +230,11 @@ fn build_messages_from_stats(
                 session_id.to_string(),
                 timestamp,
                 TokenBreakdown {
-                    input: usage.input,
-                    output: usage.output,
-                    cache_read: usage.cached,
+                    input: usage.input.max(0),
+                    output: usage.output.max(0),
+                    cache_read: usage.cached.max(0),
                     cache_write: 0,
-                    reasoning: usage.reasoning,
+                    reasoning: usage.reasoning.max(0),
                 },
                 0.0,
             )

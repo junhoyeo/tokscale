@@ -156,3 +156,96 @@ export function getLeaderboardData(
     }
   )();
 }
+
+// ============================================================================
+// USER RANK
+// ============================================================================
+
+async function fetchUserRank(
+  username: string,
+  period: Period,
+  sortBy: SortBy
+): Promise<LeaderboardUser | null> {
+  const dateFilter = getDateFilter(period);
+
+  const userResult = await db
+    .select({ id: users.id, username: users.username, displayName: users.displayName, avatarUrl: users.avatarUrl })
+    .from(users)
+    .where(eq(users.username, username))
+    .limit(1);
+
+  if (userResult.length === 0) {
+    return null;
+  }
+
+  const user = userResult[0];
+
+  const userStatsResult = await db
+    .select({
+      totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
+      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+      submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
+      lastSubmission: sql<string>`MAX(${submissions.createdAt})`.as("last_submission"),
+    })
+    .from(submissions)
+    .where(and(eq(submissions.userId, user.id), dateFilter));
+
+  if (!userStatsResult[0] || userStatsResult[0].totalTokens == null) {
+    return null;
+  }
+
+  const userStats = userStatsResult[0];
+  const userTotalTokens = Number(userStats.totalTokens);
+  const userTotalCost = userStats.totalCost != null ? Number(userStats.totalCost) : 0;
+
+  const userCompareValue = sortBy === "cost" ? userTotalCost : userTotalTokens;
+  const compareColumn = sortBy === "cost"
+    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    : sql`SUM(${submissions.totalTokens})`;
+
+  const higherRankedResult = await db
+    .select({
+      count: sql<number>`COUNT(*)`.as("count"),
+    })
+    .from(
+      db
+        .select({
+          userId: submissions.userId,
+          total: compareColumn.as("total"),
+        })
+        .from(submissions)
+        .where(dateFilter)
+        .groupBy(submissions.userId)
+        .having(sql`${compareColumn} > ${userCompareValue}`)
+        .as("higher_ranked")
+    );
+
+  const rank = Number(higherRankedResult[0]?.count || 0) + 1;
+
+  return {
+    rank,
+    userId: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl,
+    totalTokens: userTotalTokens,
+    totalCost: userTotalCost,
+    submissionCount: Number(userStats.submissionCount) || 0,
+    lastSubmission: userStats.lastSubmission,
+  };
+}
+
+export function getUserRank(
+  username: string,
+  period: Period = "all",
+  sortBy: SortBy = "tokens"
+): Promise<LeaderboardUser | null> {
+  return unstable_cache(
+    () => fetchUserRank(username, period, sortBy),
+    [`user-rank:${username}:${period}:${sortBy}`],
+    {
+      tags: ["leaderboard", "user-rank", `user-rank:${username}`],
+      revalidate: 60,
+    }
+  )();
+}

@@ -124,10 +124,10 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     session_id.clone(),
                     timestamp,
                     TokenBreakdown {
-                        input: usage.input_tokens.unwrap_or(0),
-                        output: usage.output_tokens.unwrap_or(0),
-                        cache_read: usage.cache_read_input_tokens.unwrap_or(0),
-                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
+                        input: usage.input_tokens.unwrap_or(0).max(0),
+                        output: usage.output_tokens.unwrap_or(0).max(0),
+                        cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
                         reasoning: 0,
                     },
                     0.0,
@@ -261,10 +261,14 @@ fn extract_claude_headless_message(
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
-            input: extract_i64(usage.get("input_tokens")).unwrap_or(0),
-            output: extract_i64(usage.get("output_tokens")).unwrap_or(0),
-            cache_read: extract_i64(usage.get("cache_read_input_tokens")).unwrap_or(0),
-            cache_write: extract_i64(usage.get("cache_creation_input_tokens")).unwrap_or(0),
+            input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
+            output: extract_i64(usage.get("output_tokens")).unwrap_or(0).max(0),
+            cache_read: extract_i64(usage.get("cache_read_input_tokens"))
+                .unwrap_or(0)
+                .max(0),
+            cache_write: extract_i64(usage.get("cache_creation_input_tokens"))
+                .unwrap_or(0)
+                .max(0),
             reasoning: 0,
         },
         0.0,
@@ -321,10 +325,10 @@ fn finalize_headless_state(
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
-            input: state.input,
-            output: state.output,
-            cache_read: state.cache_read,
-            cache_write: state.cache_write,
+            input: state.input.max(0),
+            output: state.output.max(0),
+            cache_read: state.cache_read.max(0),
+            cache_write: state.cache_write.max(0),
             reasoning: 0,
         },
         0.0,

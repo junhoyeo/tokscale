@@ -290,6 +290,7 @@ export function App(props: AppProps) {
     if (key.name === "6") { handleSourceToggle("amp"); return; }
     if (key.name === "7") { handleSourceToggle("droid"); return; }
     if (key.name === "8") { handleSourceToggle("openclaw"); return; }
+    if (key.name === "9") { handleSourceToggle("pi"); return; }
 
     if (key.name === "up") {
       if (activeTab() === "overview") {

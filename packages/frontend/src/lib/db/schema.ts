@@ -186,6 +186,7 @@ export const submissions = pgTable(
     index("idx_submissions_total_tokens").on(table.totalTokens),
     index("idx_submissions_created_at").on(table.createdAt),
     index("idx_submissions_date_range").on(table.dateStart, table.dateEnd),
+    index("idx_submissions_leaderboard").on(table.userId, table.totalTokens, table.totalCost, table.createdAt),
     unique("submissions_user_id_unique").on(table.userId),
     unique("submissions_user_hash_unique").on(table.userId, table.submissionHash),
   ]

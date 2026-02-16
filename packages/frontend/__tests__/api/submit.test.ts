@@ -79,7 +79,7 @@ function createMockSubmissionData(overrides: Partial<{
         reasoning: 0,
       },
       sources: d.sources.map(src => ({
-        source: src.source as 'opencode' | 'claude' | 'codex' | 'gemini' | 'cursor' | 'amp' | 'droid',
+        source: src.source as 'opencode' | 'claude' | 'codex' | 'gemini' | 'cursor' | 'amp' | 'droid' | 'openclaw' | 'pi',
         modelId: src.modelId,
         tokens: src.tokens,
         cost: src.cost,
@@ -111,6 +111,13 @@ describe('POST /api/submit - Source-Level Merge', () => {
       
       expect(data.contributions.length).toBe(3);
       expect(data.contributions.map(c => c.date)).toEqual(['2024-12-01', '2024-12-02', '2024-12-03']);
+    });
+
+    it('should support pi source in submission payload', () => {
+      const data = createMockSubmissionData({ sources: ['pi'] });
+
+      expect(data.summary.sources).toContain('pi');
+      expect(data.contributions[0].sources[0].source).toBe('pi');
     });
   });
 
@@ -269,6 +276,35 @@ describe('POST /api/submit - Source-Level Merge', () => {
       // Both should be present after sequential processing
       const finalSources = new Set([...submission1Sources, ...submission2Sources]);
       expect(finalSources.size).toBe(2);
+    });
+
+    it('should treat contribution sources as submitted even if summary.sources is incomplete', () => {
+      const data = createMockSubmissionData({
+        sources: ['claude'],
+        contributions: [
+          {
+            date: '2024-12-01',
+            sources: [
+              {
+                source: 'pi',
+                modelId: 'pi-model',
+                cost: 1,
+                tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      });
+
+      const submittedSources = new Set(data.summary.sources);
+      for (const contribution of data.contributions) {
+        for (const source of contribution.sources) {
+          submittedSources.add(source.source);
+        }
+      }
+
+      expect(submittedSources.has('pi')).toBe(true);
     });
 
 

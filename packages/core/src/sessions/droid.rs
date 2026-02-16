@@ -241,13 +241,13 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         session_id,
         timestamp,
         TokenBreakdown {
-            input: usage.input_tokens.unwrap_or(0),
-            output: usage.output_tokens.unwrap_or(0),
-            cache_read: usage.cache_read_tokens.unwrap_or(0),
-            cache_write: usage.cache_creation_tokens.unwrap_or(0),
-            reasoning: usage.thinking_tokens.unwrap_or(0),
+            input: usage.input_tokens.unwrap_or(0).max(0),
+            output: usage.output_tokens.unwrap_or(0).max(0),
+            cache_read: usage.cache_read_tokens.unwrap_or(0).max(0),
+            cache_write: usage.cache_creation_tokens.unwrap_or(0).max(0),
+            reasoning: usage.thinking_tokens.unwrap_or(0).max(0),
         },
-        0.0, // Cost calculated later
+        0.0,
     )]
 }
 

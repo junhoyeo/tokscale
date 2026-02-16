@@ -73,6 +73,7 @@ pub struct ParsedMessages {
     pub amp_count: i32,
     pub droid_count: i32,
     pub openclaw_count: i32,
+    pub pi_count: i32,
     pub processing_time_ms: u32,
 }
 
@@ -279,13 +280,35 @@ fn parse_all_messages_with_pricing(
     let scan_result = scanner::scan_all_sources(home_dir, sources);
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
 
-    // Parse OpenCode files in parallel
+    // Parse OpenCode: read both SQLite (1.2+) and legacy JSON, deduplicate by message ID
+    let mut opencode_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Some(db_path) = &scan_result.opencode_db {
+        let sqlite_messages: Vec<UnifiedMessage> = sessions::opencode::parse_opencode_sqlite(db_path)
+            .into_iter()
+            .map(|mut msg| {
+                msg.cost = pricing.calculate_cost(
+                    &msg.model_id,
+                    msg.tokens.input,
+                    msg.tokens.output,
+                    msg.tokens.cache_read,
+                    msg.tokens.cache_write,
+                    msg.tokens.reasoning,
+                );
+                if let Some(ref key) = msg.dedup_key {
+                    opencode_seen.insert(key.clone());
+                }
+                msg
+            })
+            .collect();
+        all_messages.extend(sqlite_messages);
+    }
+
     let opencode_messages: Vec<UnifiedMessage> = scan_result
         .opencode_files
         .par_iter()
         .filter_map(|path| {
             let mut msg = sessions::opencode::parse_opencode_file(path)?;
-            // Recalculate cost using pricing data
             msg.cost = pricing.calculate_cost(
                 &msg.model_id,
                 msg.tokens.input,
@@ -297,7 +320,13 @@ fn parse_all_messages_with_pricing(
             Some(msg)
         })
         .collect();
-    all_messages.extend(opencode_messages);
+    all_messages.extend(
+        opencode_messages
+            .into_iter()
+            .filter(|msg| {
+                msg.dedup_key.as_ref().map_or(true, |key| opencode_seen.insert(key.clone()))
+            }),
+    );
 
     // Parse Claude files in parallel
     let claude_messages: Vec<UnifiedMessage> = scan_result
@@ -456,12 +485,12 @@ fn parse_all_messages_with_pricing(
         .collect();
     all_messages.extend(droid_messages);
 
-    // Parse OpenClaw index files
+    // Parse OpenClaw transcript JSONL files
     let openclaw_messages: Vec<UnifiedMessage> = scan_result
         .openclaw_files
         .par_iter()
         .flat_map(|path| {
-            sessions::openclaw::parse_openclaw_index(path)
+            sessions::openclaw::parse_openclaw_transcript(path)
                 .into_iter()
                 .map(|mut msg| {
                     msg.cost = pricing.calculate_cost(
@@ -478,6 +507,29 @@ fn parse_all_messages_with_pricing(
         })
         .collect();
     all_messages.extend(openclaw_messages);
+
+    // Parse Pi JSONL files
+    let pi_messages: Vec<UnifiedMessage> = scan_result
+        .pi_files
+        .par_iter()
+        .flat_map(|path| {
+            sessions::pi::parse_pi_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    msg.cost = pricing.calculate_cost(
+                        &msg.model_id,
+                        msg.tokens.input,
+                        msg.tokens.output,
+                        msg.tokens.cache_read,
+                        msg.tokens.cache_write,
+                        msg.tokens.reasoning,
+                    );
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(pi_messages);
 
     all_messages
 }
@@ -499,6 +551,7 @@ pub async fn get_model_report(options: ReportOptions) -> napi::Result<ModelRepor
             "amp".to_string(),
             "droid".to_string(),
             "openclaw".to_string(),
+            "pi".to_string(),
         ]
     });
 
@@ -601,6 +654,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> napi::Result<MonthlyR
             "amp".to_string(),
             "droid".to_string(),
             "openclaw".to_string(),
+            "pi".to_string(),
         ]
     });
 
@@ -678,6 +732,7 @@ pub async fn generate_graph_with_pricing(options: ReportOptions) -> napi::Result
             "amp".to_string(),
             "droid".to_string(),
             "openclaw".to_string(),
+            "pi".to_string(),
         ]
     });
 
@@ -757,6 +812,7 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
             "amp".to_string(),
             "droid".to_string(),
             "openclaw".to_string(),
+            "pi".to_string(),
         ]
     });
 
@@ -768,17 +824,48 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
 
     let mut messages: Vec<ParsedMessage> = Vec::new();
 
-    // Parse OpenCode files in parallel
-    let opencode_msgs: Vec<ParsedMessage> = scan_result
-        .opencode_files
-        .par_iter()
-        .filter_map(|path| {
-            let msg = sessions::opencode::parse_opencode_file(path)?;
-            Some(unified_to_parsed(&msg))
-        })
-        .collect();
-    let opencode_count = opencode_msgs.len() as i32;
-    messages.extend(opencode_msgs);
+    // Parse OpenCode: read both SQLite (1.2+) and legacy JSON, deduplicate by message ID
+    let opencode_count: i32 = {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut count: i32 = 0;
+
+        if let Some(db_path) = &scan_result.opencode_db {
+            let sqlite_msgs: Vec<(String, ParsedMessage)> =
+                sessions::opencode::parse_opencode_sqlite(db_path)
+                    .into_iter()
+                    .map(|msg| {
+                        let key = msg.dedup_key.clone().unwrap_or_default();
+                        (key, unified_to_parsed(&msg))
+                    })
+                    .collect();
+            count += sqlite_msgs.len() as i32;
+            for (key, parsed) in sqlite_msgs {
+                if !key.is_empty() {
+                    seen.insert(key);
+                }
+                messages.push(parsed);
+            }
+        }
+
+        let json_msgs: Vec<(String, ParsedMessage)> = scan_result
+            .opencode_files
+            .par_iter()
+            .filter_map(|path| {
+                let msg = sessions::opencode::parse_opencode_file(path)?;
+                let key = msg.dedup_key.clone().unwrap_or_default();
+                Some((key, unified_to_parsed(&msg)))
+            })
+            .collect();
+        let deduped: Vec<ParsedMessage> = json_msgs
+            .into_iter()
+            .filter(|(key, _)| key.is_empty() || seen.insert(key.clone()))
+            .map(|(_, msg)| msg)
+            .collect();
+        count += deduped.len() as i32;
+        messages.extend(deduped);
+
+        count
+    };
 
     // Parse Claude files in parallel, then deduplicate globally
     let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
@@ -865,12 +952,12 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
     let droid_count = droid_msgs.len() as i32;
     messages.extend(droid_msgs);
 
-    // Parse OpenClaw index files (each index points to session files)
+    // Parse OpenClaw transcript JSONL files
     let openclaw_msgs: Vec<ParsedMessage> = scan_result
         .openclaw_files
         .par_iter()
         .flat_map(|path| {
-            sessions::openclaw::parse_openclaw_index(path)
+            sessions::openclaw::parse_openclaw_transcript(path)
                 .into_iter()
                 .map(|msg| unified_to_parsed(&msg))
                 .collect::<Vec<_>>()
@@ -878,6 +965,20 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
         .collect();
     let openclaw_count = openclaw_msgs.len() as i32;
     messages.extend(openclaw_msgs);
+
+    // Parse Pi files in parallel
+    let pi_msgs: Vec<ParsedMessage> = scan_result
+        .pi_files
+        .par_iter()
+        .flat_map(|path| {
+            sessions::pi::parse_pi_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let pi_count = pi_msgs.len() as i32;
+    messages.extend(pi_msgs);
 
     // Apply date filters
     let filtered = filter_parsed_messages(messages, &options);
@@ -891,6 +992,7 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
         amp_count,
         droid_count,
         openclaw_count,
+        pi_count,
         processing_time_ms: start.elapsed().as_millis() as u32,
     })
 }

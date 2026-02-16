@@ -678,6 +678,7 @@ interface LeaderboardClientProps {
   initialData: LeaderboardData;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
   initialSortBy: 'tokens' | 'cost';
+  initialUserRank: LeaderboardUser | null;
 }
 
 function isValidLeaderboardData(data: unknown): data is LeaderboardData {
@@ -758,7 +759,7 @@ const LeaderboardRow = memo(function LeaderboardRow({
   );
 });
 
-export default function LeaderboardClient({ initialData, currentUser, initialSortBy }: LeaderboardClientProps) {
+export default function LeaderboardClient({ initialData, currentUser, initialSortBy, initialUserRank }: LeaderboardClientProps) {
   const router = useRouter();
   const [data, setData] = useState<LeaderboardData>(initialData);
   const [isLoading, setIsLoading] = useState(false);
@@ -766,7 +767,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const [period, setPeriod] = useState<Period>(initialData.period);
   const [page, setPage] = useState(initialData.pagination.page);
-  const [currentUserRank, setCurrentUserRank] = useState<LeaderboardUser | null>(null);
+  const [currentUserRank, setCurrentUserRank] = useState<LeaderboardUser | null>(initialUserRank);
   const [currentUserRankError, setCurrentUserRankError] = useState(false);
 
   const { leaderboardSortBy, setLeaderboardSort, mounted } = useSettings();
@@ -774,12 +775,21 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   const effectiveSortBy = mounted ? leaderboardSortBy : initialSortBy;
 
   const isFirstMount = useRef(true);
+  const prevPeriodRef = useRef<Period>(initialData.period);
+  const prevPageRef = useRef(initialData.pagination.page);
   const prevSortByRef = useRef(initialSortBy);
+
+  const isFirstRankFetch = useRef(true);
 
   useEffect(() => {
     if (!currentUser) {
       setCurrentUserRank(null);
       setCurrentUserRankError(false);
+      return;
+    }
+
+    if (isFirstRankFetch.current) {
+      isFirstRankFetch.current = false;
       return;
     }
 
@@ -837,15 +847,22 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       return;
     }
 
-    if (effectiveSortBy === prevSortByRef.current && period === initialData.period && page === initialData.pagination.page) {
+    const periodChanged = period !== prevPeriodRef.current;
+    const pageChanged = page !== prevPageRef.current;
+    const sortByChanged = effectiveSortBy !== prevSortByRef.current;
+
+    if (!periodChanged && !pageChanged && !sortByChanged) {
       return;
     }
+
+    prevPeriodRef.current = period;
+    prevPageRef.current = page;
     prevSortByRef.current = effectiveSortBy;
 
     const abortController = new AbortController();
     fetchData(period, page, effectiveSortBy, abortController.signal);
     return () => abortController.abort();
-  }, [period, page, effectiveSortBy, initialData.period, initialData.pagination.page]);
+  }, [period, page, effectiveSortBy]);
 
   useEffect(() => {
     if (data.pagination.totalPages > 0 && page > data.pagination.totalPages) {

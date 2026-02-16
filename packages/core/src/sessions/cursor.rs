@@ -191,13 +191,13 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             format!("cursor-{}-{}", account_id, date_str),
             timestamp,
             TokenBreakdown {
-                input,
-                output: output_tokens,
-                cache_read,
-                cache_write,
+                input: input.max(0),
+                output: output_tokens.max(0),
+                cache_read: cache_read.max(0),
+                cache_write, // Already clamped above with .max(0)
                 reasoning: 0,
             },
-            cost,
+            cost.max(0.0),
         ));
     }
 

@@ -192,13 +192,13 @@ pub fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
                         session_id.clone(),
                         timestamp,
                         TokenBreakdown {
-                            input,
-                            output,
-                            cache_read: cached,
+                            input: input.max(0),
+                            output: output.max(0),
+                            cache_read: cached.max(0),
                             cache_write: 0,
                             reasoning: 0,
                         },
-                        0.0, // Cost calculated later
+                        0.0,
                         agent,
                     ));
                     handled = true;
@@ -278,9 +278,9 @@ fn parse_codex_headless_line(
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
-            input: usage.input,
-            output: usage.output,
-            cache_read: usage.cached,
+            input: usage.input.max(0),
+            output: usage.output.max(0),
+            cache_read: usage.cached.max(0),
             cache_write: 0,
             reasoning: 0,
         },

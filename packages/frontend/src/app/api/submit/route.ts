@@ -118,7 +118,19 @@ export async function POST(request: Request) {
       );
     }
 
-    const submittedSources = new Set(data.summary.sources);
+    const submittedSources = new Set<SubmissionData["summary"]["sources"][number]>(data.summary.sources);
+    for (const contribution of data.contributions) {
+      for (const source of contribution.sources) {
+        submittedSources.add(source.source);
+      }
+    }
+    const hashData: SubmissionData = {
+      ...data,
+      summary: {
+        ...data.summary,
+        sources: Array.from(submittedSources).sort(),
+      },
+    };
 
     // ========================================
     // STEP 3: DATABASE OPERATIONS IN TRANSACTION
@@ -162,7 +174,7 @@ export async function POST(request: Request) {
             modelsUsed: [],
             status: "verified",
             cliVersion: data.meta.version,
-            submissionHash: generateSubmissionHash(data),
+            submissionHash: generateSubmissionHash(hashData),
           })
           .returning({ id: submissions.id });
 
@@ -389,7 +401,7 @@ export async function POST(request: Request) {
           sourcesUsed: Array.from(allSources),
           modelsUsed: Array.from(allModels),
           cliVersion: data.meta.version,
-          submissionHash: generateSubmissionHash(data),
+          submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
           schemaVersion: data.contributions.some((c: { timestamp?: number }) => c.timestamp != null) ? 1 : 0,
           updatedAt: new Date(),
@@ -415,6 +427,8 @@ export async function POST(request: Request) {
     try {
       revalidateTag("leaderboard", "max");
       revalidateTag(`user:${tokenRecord.username}`, "max");
+      revalidateTag("user-rank", "max");
+      revalidateTag(`user-rank:${tokenRecord.username}`, "max");
     } catch (e) {
       console.error("Cache invalidation failed:", e);
     }

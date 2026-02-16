@@ -17,12 +17,14 @@ pub enum SessionType {
     Amp,
     Droid,
     OpenClaw,
+    Pi,
 }
 
 /// Result of scanning all session directories
 #[derive(Debug, Default)]
 pub struct ScanResult {
     pub opencode_files: Vec<PathBuf>,
+    pub opencode_db: Option<PathBuf>,
     pub claude_files: Vec<PathBuf>,
     pub codex_files: Vec<PathBuf>,
     pub gemini_files: Vec<PathBuf>,
@@ -30,6 +32,7 @@ pub struct ScanResult {
     pub amp_files: Vec<PathBuf>,
     pub droid_files: Vec<PathBuf>,
     pub openclaw_files: Vec<PathBuf>,
+    pub pi_files: Vec<PathBuf>,
 }
 
 impl ScanResult {
@@ -43,6 +46,7 @@ impl ScanResult {
             + self.amp_files.len()
             + self.droid_files.len()
             + self.openclaw_files.len()
+            + self.pi_files.len()
     }
 
     /// Get all files as a single vector
@@ -72,6 +76,9 @@ impl ScanResult {
         }
         for path in &self.openclaw_files {
             result.push((SessionType::OpenClaw, path.clone()));
+        }
+        for path in &self.pi_files {
+            result.push((SessionType::Pi, path.clone()));
         }
 
         result
@@ -173,6 +180,7 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
     let include_amp = include_all || sources.iter().any(|s| s == "amp");
     let include_droid = include_all || sources.iter().any(|s| s == "droid");
     let include_openclaw = include_all || sources.iter().any(|s| s == "openclaw");
+    let include_pi = include_all || sources.iter().any(|s| s == "pi");
 
     let headless_roots = headless_roots(home_dir);
 
@@ -180,9 +188,16 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
     let mut tasks: Vec<(SessionType, String, &str)> = Vec::new();
 
     if include_opencode {
-        // OpenCode: ~/.local/share/opencode/storage/message/*/*.json
         let xdg_data =
             std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir));
+
+        // OpenCode 1.2+: SQLite database at ~/.local/share/opencode/opencode.db
+        let opencode_db_path = PathBuf::from(format!("{}/opencode/opencode.db", xdg_data));
+        if opencode_db_path.exists() {
+            result.opencode_db = Some(opencode_db_path);
+        }
+
+        // OpenCode legacy: JSON files at ~/.local/share/opencode/storage/message/*/*.json
         let opencode_path = format!("{}/opencode/storage/message", xdg_data);
         tasks.push((SessionType::OpenCode, opencode_path, "*.json"));
     }
@@ -236,16 +251,25 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
     }
 
     if include_openclaw {
-        // Current path
+        // OpenClaw transcripts: ~/.openclaw/agents/**/*.jsonl
         let openclaw_path = format!("{}/.openclaw/agents", home_dir);
-        tasks.push((SessionType::OpenClaw, openclaw_path, "sessions.json"));
+        tasks.push((SessionType::OpenClaw, openclaw_path, "*.jsonl"));
+
         // Legacy paths (Clawd -> Moltbot -> OpenClaw rebrand history)
         let clawdbot_path = format!("{}/.clawdbot/agents", home_dir);
-        tasks.push((SessionType::OpenClaw, clawdbot_path, "sessions.json"));
+        tasks.push((SessionType::OpenClaw, clawdbot_path, "*.jsonl"));
+
         let moltbot_path = format!("{}/.moltbot/agents", home_dir);
-        tasks.push((SessionType::OpenClaw, moltbot_path, "sessions.json"));
+        tasks.push((SessionType::OpenClaw, moltbot_path, "*.jsonl"));
+
         let moldbot_path = format!("{}/.moldbot/agents", home_dir);
-        tasks.push((SessionType::OpenClaw, moldbot_path, "sessions.json"));
+        tasks.push((SessionType::OpenClaw, moldbot_path, "*.jsonl"));
+    }
+
+    if include_pi {
+        // Pi (badlogic/pi-mono): ~/.pi/agent/sessions/**/*.jsonl
+        let pi_path = format!("{}/.pi/agent/sessions", home_dir);
+        tasks.push((SessionType::Pi, pi_path, "*.jsonl"));
     }
 
     // Execute scans in parallel
@@ -268,6 +292,7 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
             SessionType::Amp => result.amp_files.extend(files),
             SessionType::Droid => result.droid_files.extend(files),
             SessionType::OpenClaw => result.openclaw_files.extend(files),
+            SessionType::Pi => result.pi_files.extend(files),
         }
     }
 
@@ -293,6 +318,7 @@ mod tests {
     fn test_scan_result_total_files() {
         let result = ScanResult {
             opencode_files: vec![PathBuf::from("a.json"), PathBuf::from("b.json")],
+            opencode_db: None,
             claude_files: vec![PathBuf::from("c.jsonl")],
             codex_files: vec![],
             gemini_files: vec![PathBuf::from("d.json")],
@@ -300,14 +326,16 @@ mod tests {
             amp_files: vec![],
             droid_files: vec![],
             openclaw_files: vec![],
+            pi_files: vec![PathBuf::from("e.jsonl")],
         };
-        assert_eq!(result.total_files(), 4);
+        assert_eq!(result.total_files(), 5);
     }
 
     #[test]
     fn test_scan_result_all_files() {
         let result = ScanResult {
             opencode_files: vec![PathBuf::from("a.json")],
+            opencode_db: None,
             claude_files: vec![PathBuf::from("b.jsonl")],
             codex_files: vec![PathBuf::from("c.jsonl")],
             gemini_files: vec![PathBuf::from("d.json")],
@@ -315,15 +343,17 @@ mod tests {
             amp_files: vec![],
             droid_files: vec![],
             openclaw_files: vec![],
+            pi_files: vec![PathBuf::from("f.jsonl")],
         };
 
         let all = result.all_files();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         assert_eq!(all[0], (SessionType::OpenCode, PathBuf::from("a.json")));
         assert_eq!(all[1], (SessionType::Claude, PathBuf::from("b.jsonl")));
         assert_eq!(all[2], (SessionType::Codex, PathBuf::from("c.jsonl")));
         assert_eq!(all[3], (SessionType::Gemini, PathBuf::from("d.json")));
         assert_eq!(all[4], (SessionType::Cursor, PathBuf::from("e.csv")));
+        assert_eq!(all[5], (SessionType::Pi, PathBuf::from("f.jsonl")));
     }
 
     #[test]
@@ -463,6 +493,26 @@ mod tests {
         file.write_all(b"{}").unwrap();
     }
 
+    fn setup_mock_pi_dir(base: &std::path::Path) {
+        let pi_path = base.join(".pi/agent/sessions/--test--");
+        fs::create_dir_all(&pi_path).unwrap();
+        let mut file = File::create(pi_path.join("1733011200000_pi_ses_001.jsonl")).unwrap();
+        file.write_all(b"{}").unwrap();
+    }
+
+    fn setup_mock_openclaw_dir(base: &std::path::Path) {
+        // Mirror real OpenClaw layout: ~/.openclaw/agents/<agentId>/sessions/*.jsonl
+        let openclaw_sessions = base.join(".openclaw/agents/main/sessions");
+        fs::create_dir_all(&openclaw_sessions).unwrap();
+
+        let mut transcript = File::create(openclaw_sessions.join("session-abc.jsonl")).unwrap();
+        transcript.write_all(b"{}").unwrap();
+
+        // Even if an index exists, we should count JSONL transcripts (not sessions.json only)
+        let mut index = File::create(openclaw_sessions.join("sessions.json")).unwrap();
+        index.write_all(b"{}").unwrap();
+    }
+
     #[test]
     #[serial]
     fn test_headless_roots_default() {
@@ -518,6 +568,18 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_all_sources_pi() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_pi_dir(home);
+
+        let result = scan_all_sources(home.to_str().unwrap(), &["pi".to_string()]);
+        assert_eq!(result.pi_files.len(), 1);
+        assert!(result.opencode_files.is_empty());
+        assert!(result.claude_files.is_empty());
+    }
+
+    #[test]
     fn test_scan_all_sources_claude() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -537,6 +599,17 @@ mod tests {
         let result = scan_all_sources(home.to_str().unwrap(), &["gemini".to_string()]);
         assert_eq!(result.gemini_files.len(), 1);
         assert!(result.opencode_files.is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_sources_openclaw_jsonl_only() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_openclaw_dir(home);
+
+        let result = scan_all_sources(home.to_str().unwrap(), &["openclaw".to_string()]);
+        assert_eq!(result.openclaw_files.len(), 1);
+        assert!(result.openclaw_files[0].ends_with("session-abc.jsonl"));
     }
 
     #[test]

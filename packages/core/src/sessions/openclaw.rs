@@ -1,14 +1,14 @@
 //! OpenClaw session parser
 //!
-//! Parses JSONL files from ~/.openclaw/ or ~/.clawdbot/
-//! Uses sessions.json index to find actual session file paths
+//! Parses OpenClaw transcript JSONL files from agent directories.
+//! Supports legacy sessions.json index parsing for compatibility.
 
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct SessionIndex {
@@ -72,18 +72,49 @@ pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
     };
 
     let mut all_messages = Vec::new();
+    let index_dir = index_path.parent().unwrap_or_else(|| Path::new("."));
 
     for (_key, entry) in index.sessions {
-        if let Some(session_file) = entry.session_file {
-            let session_path = Path::new(&session_file);
-            if session_path.exists() {
-                let messages = parse_openclaw_session(session_path, &entry.session_id);
-                all_messages.extend(messages);
-            }
+        let session_path = resolve_session_path(index_dir, &entry);
+        if session_path.exists() {
+            let messages = parse_openclaw_session(&session_path, &entry.session_id);
+            all_messages.extend(messages);
         }
     }
 
     all_messages
+}
+
+pub fn parse_openclaw_transcript(transcript_path: &Path) -> Vec<UnifiedMessage> {
+    let session_id = match transcript_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .filter(|stem| !stem.is_empty())
+    {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+
+    parse_openclaw_session(transcript_path, &session_id)
+}
+
+fn resolve_session_path(index_dir: &Path, entry: &SessionEntry) -> PathBuf {
+    match entry
+        .session_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(session_file) => {
+            let path = Path::new(session_file);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                index_dir.join(path)
+            }
+        }
+        None => index_dir.join(format!("{}.jsonl", entry.session_id)),
+    }
 }
 
 fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedMessage> {
@@ -152,13 +183,13 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                         session_id.to_string(),
                         timestamp,
                         TokenBreakdown {
-                            input: usage.input.unwrap_or(0),
-                            output: usage.output.unwrap_or(0),
-                            cache_read: usage.cache_read.unwrap_or(0),
-                            cache_write: usage.cache_write.unwrap_or(0),
+                            input: usage.input.unwrap_or(0).max(0),
+                            output: usage.output.unwrap_or(0).max(0),
+                            cache_read: usage.cache_read.unwrap_or(0).max(0),
+                            cache_write: usage.cache_write.unwrap_or(0).max(0),
                             reasoning: 0,
                         },
-                        cost,
+                        cost.max(0.0),
                     ));
                 }
             }
@@ -227,7 +258,31 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_openclaw_index() {
+    fn test_parse_openclaw_transcript_derives_session_id_from_filename() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai-codex","modelId":"gpt-5.2"}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
+
+        let session_path = create_test_session(&dir, "my-session-123.jsonl", content);
+        let messages = parse_openclaw_transcript(Path::new(&session_path));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "my-session-123");
+        assert_eq!(messages[0].model_id, "gpt-5.2");
+        assert_eq!(messages[0].provider_id, "openai-codex");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 5);
+    }
+
+    fn create_test_index(dir: &TempDir, content: &str) -> PathBuf {
+        let index_path = dir.path().join("sessions.json");
+        let mut file = File::create(&index_path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        index_path
+    }
+
+    #[test]
+    fn test_parse_openclaw_index_absolute_session_file() {
         let dir = TempDir::new().unwrap();
 
         let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3.5-sonnet"}
@@ -243,14 +298,54 @@ mod tests {
         }}"#,
             session_path.replace('\\', "\\\\")
         );
-
-        let index_path = dir.path().join("sessions.json");
-        let mut file = File::create(&index_path).unwrap();
-        file.write_all(index_content.as_bytes()).unwrap();
+        let index_path = create_test_index(&dir, &index_content);
 
         let messages = parse_openclaw_index(&index_path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-3.5-sonnet");
         assert_eq!(messages[0].session_id, "abc-123");
+    }
+
+    #[test]
+    fn test_parse_openclaw_index_relative_session_file() {
+        let dir = TempDir::new().unwrap();
+
+        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3.5-sonnet"}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
+        create_test_session(&dir, "session-relative.jsonl", session_content);
+
+        let index_content = r#"{
+            "agent:main:main": {
+                "sessionId": "relative-123",
+                "sessionFile": "session-relative.jsonl"
+            }
+        }"#;
+        let index_path = create_test_index(&dir, index_content);
+
+        let messages = parse_openclaw_index(&index_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-3.5-sonnet");
+        assert_eq!(messages[0].session_id, "relative-123");
+    }
+
+    #[test]
+    fn test_parse_openclaw_index_missing_session_file_fallback() {
+        let dir = TempDir::new().unwrap();
+
+        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3.5-sonnet"}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
+        create_test_session(&dir, "fallback-123.jsonl", session_content);
+
+        let index_content = r#"{
+            "agent:main:main": {
+                "sessionId": "fallback-123"
+            }
+        }"#;
+        let index_path = create_test_index(&dir, index_content);
+
+        let messages = parse_openclaw_index(&index_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-3.5-sonnet");
+        assert_eq!(messages[0].session_id, "fallback-123");
     }
 }

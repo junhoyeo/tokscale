@@ -26,23 +26,26 @@ testFn("healthCheck returns expected message", (t) => {
   t.is(nativeModule.healthCheck(), "tokscale-core is healthy!");
 });
 
-testFn("scanSessions with empty directory returns zeros", (t) => {
+testFn("parseLocalSources with empty directory returns zeros", (t) => {
   const tmpDir = join(__dirname, "tmp-scan-test-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
 
   try {
-    const stats = nativeModule.scanSessions(tmpDir, ["opencode", "claude"]);
-    t.is(stats.totalFiles, 0);
-    t.is(stats.opencodeFiles, 0);
-    t.is(stats.claudeFiles, 0);
-    t.is(stats.codexFiles, 0);
-    t.is(stats.geminiFiles, 0);
+    const parsed = nativeModule.parseLocalSources({
+      homeDir: tmpDir,
+      sources: ["opencode", "claude"],
+    });
+    t.is(parsed.messages.length, 0);
+    t.is(parsed.opencodeCount, 0);
+    t.is(parsed.claudeCount, 0);
+    t.is(parsed.codexCount, 0);
+    t.is(parsed.geminiCount, 0);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-testFn("scanSessions finds OpenCode files in fixtures", (t) => {
+testFn("parseLocalSources finds OpenCode files in fixtures", (t) => {
   const fixturesDir = join(__dirname, "fixtures");
   
   if (!existsSync(fixturesDir)) {
@@ -50,31 +53,53 @@ testFn("scanSessions finds OpenCode files in fixtures", (t) => {
     return;
   }
 
-  const stats = nativeModule.scanSessions(fixturesDir, ["opencode"]);
-  t.true(stats.opencodeFiles >= 1, "Should find at least 1 OpenCode file");
+  const parsed = nativeModule.parseLocalSources({
+    homeDir: fixturesDir,
+    sources: ["opencode"],
+  });
+  t.true(parsed.opencodeCount >= 1, "Should find at least 1 OpenCode file");
 });
 
-testFn("scanSessions finds Claude files in fixtures", (t) => {
-  const fixturesDir = join(__dirname, "fixtures");
-  
-  if (!existsSync(fixturesDir)) {
-    t.pass("Fixtures directory not found, skipping");
-    return;
+testFn("parseLocalSources finds Claude files in mock session", (t) => {
+  const tmpDir = join(__dirname, "tmp-claude-test-" + Date.now());
+  setupMockClaudeSession(tmpDir);
+
+  try {
+    const parsed = nativeModule.parseLocalSources({
+      homeDir: tmpDir,
+      sources: ["claude"],
+    });
+    t.true(parsed.claudeCount >= 1, "Should find at least 1 Claude file");
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
   }
-
-  const stats = nativeModule.scanSessions(fixturesDir, ["claude"]);
-  t.true(stats.claudeFiles >= 1, "Should find at least 1 Claude file");
 });
 
-testFn("generateGraph returns valid structure", (t) => {
+async function generateGraph(homeDir, options = {}) {
+  const localMessages = nativeModule.parseLocalSources({
+    homeDir,
+    sources: ["opencode"],
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  });
+
+  return await nativeModule.finalizeGraph({
+    homeDir,
+    localMessages,
+    includeCursor: false,
+    since: options.since,
+    until: options.until,
+    year: options.year,
+  });
+}
+
+testFn("finalizeGraph returns valid structure", async (t) => {
   const tmpDir = join(__dirname, "tmp-graph-test-" + Date.now());
   setupMockOpenCodeSession(tmpDir);
 
   try {
-    const result = nativeModule.generateGraph({
-      homeDir: tmpDir,
-      sources: ["opencode"],
-    });
+    const result = await generateGraph(tmpDir);
 
     // Verify structure
     t.truthy(result.meta, "Should have meta");
@@ -91,14 +116,12 @@ testFn("generateGraph returns valid structure", (t) => {
   }
 });
 
-testFn("generateGraph with year filter", (t) => {
+testFn("finalizeGraph with year filter", async (t) => {
   const tmpDir = join(__dirname, "tmp-year-test-" + Date.now());
   setupMockOpenCodeSession(tmpDir);
 
   try {
-    const result = nativeModule.generateGraph({
-      homeDir: tmpDir,
-      sources: ["opencode"],
+    const result = await generateGraph(tmpDir, {
       year: "2024",
     });
 
@@ -111,14 +134,12 @@ testFn("generateGraph with year filter", (t) => {
   }
 });
 
-testFn("generateGraph with date range filter", (t) => {
+testFn("finalizeGraph with date range filter", async (t) => {
   const tmpDir = join(__dirname, "tmp-range-test-" + Date.now());
   setupMockOpenCodeSession(tmpDir);
 
   try {
-    const result = nativeModule.generateGraph({
-      homeDir: tmpDir,
-      sources: ["opencode"],
+    const result = await generateGraph(tmpDir, {
       since: "2024-12-01",
       until: "2024-12-31",
     });
@@ -133,15 +154,12 @@ testFn("generateGraph with date range filter", (t) => {
   }
 });
 
-testFn("generateGraph calculates token breakdown", (t) => {
+testFn("finalizeGraph calculates token breakdown", async (t) => {
   const tmpDir = join(__dirname, "tmp-tokens-test-" + Date.now());
   setupMockOpenCodeSession(tmpDir);
 
   try {
-    const result = nativeModule.generateGraph({
-      homeDir: tmpDir,
-      sources: ["opencode"],
-    });
+    const result = await generateGraph(tmpDir);
 
     if (result.contributions.length > 0) {
       const contrib = result.contributions[0];
@@ -156,14 +174,20 @@ testFn("generateGraph calculates token breakdown", (t) => {
   }
 });
 
-testFn("generateGraph handles empty directory gracefully", (t) => {
+testFn("finalizeGraph handles empty directory gracefully", async (t) => {
   const tmpDir = join(__dirname, "tmp-empty-test-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
 
   try {
-    const result = nativeModule.generateGraph({
+    const localMessages = nativeModule.parseLocalSources({
       homeDir: tmpDir,
       sources: ["opencode", "claude"],
+    });
+
+    const result = await nativeModule.finalizeGraph({
+      homeDir: tmpDir,
+      localMessages,
+      includeCursor: false,
     });
 
     t.truthy(result);
@@ -174,7 +198,7 @@ testFn("generateGraph handles empty directory gracefully", (t) => {
   }
 });
 
-testFn("generateGraph with fixtures directory", (t) => {
+testFn("finalizeGraph with fixtures directory", async (t) => {
   const fixturesDir = join(__dirname, "fixtures");
   
   if (!existsSync(fixturesDir)) {
@@ -182,9 +206,15 @@ testFn("generateGraph with fixtures directory", (t) => {
     return;
   }
 
-  const result = nativeModule.generateGraph({
+  const localMessages = nativeModule.parseLocalSources({
     homeDir: fixturesDir,
     sources: ["opencode", "claude"],
+  });
+
+  const result = await nativeModule.finalizeGraph({
+    homeDir: fixturesDir,
+    localMessages,
+    includeCursor: false,
   });
 
   t.truthy(result);
@@ -223,5 +253,32 @@ function setupMockOpenCodeSession(baseDir) {
   writeFileSync(
     join(sessionDir, "msg_mock001.json"),
     JSON.stringify(mockMessage, null, 2)
+  );
+}
+
+function setupMockClaudeSession(baseDir) {
+  const projectDir = join(baseDir, ".claude/projects/test-project");
+  mkdirSync(projectDir, { recursive: true });
+
+  const entry = {
+    type: "assistant",
+    timestamp: "2024-12-01T00:00:00.000Z",
+    requestId: "req_mock001",
+    message: {
+      id: "msg_mock001",
+      model: "claude-3-5-sonnet-20241022",
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_read_input_tokens: 200,
+        cache_creation_input_tokens: 50,
+      },
+    },
+  };
+
+  writeFileSync(
+    join(projectDir, "conversation.jsonl"),
+    `${JSON.stringify(entry)}\n`,
+    "utf-8"
   );
 }

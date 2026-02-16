@@ -4,7 +4,7 @@ import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
 import { BlackholeHero } from "@/components/BlackholeHero";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
-import { getLeaderboardData, type SortBy } from "@/lib/leaderboard/getLeaderboard";
+import { getLeaderboardData, getUserRank, type SortBy } from "@/lib/leaderboard/getLeaderboard";
 import { getSession } from "@/lib/auth/session";
 import { SORT_BY_COOKIE_NAME, isValidSortBy } from "@/lib/leaderboard/constants";
 import LeaderboardClient from "./LeaderboardClient";
@@ -43,11 +43,16 @@ async function LeaderboardWithPreferences() {
     getSession(),
   ]);
 
+  const initialUserRank = session
+    ? await getUserRank(session.username, "all", sortBy)
+    : null;
+
   return (
     <LeaderboardClient
       initialData={initialData}
       currentUser={session}
       initialSortBy={sortBy}
+      initialUserRank={initialUserRank}
     />
   );
 }

@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
 /**
  * Native Runner - Subprocess for non-blocking native Rust calls
- * 
+ *
  * This script runs in a separate process to keep the main event loop free
  * for UI rendering (e.g., spinner animation).
- * 
- * Communication: file (JSON input) -> stdout (JSON output)
+ *
+ * Communication: tmpfile (JSON input) -> tmpfile (JSON output)
  */
 
 import nativeCore from "@tokscale/core";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 interface NativeRunnerRequest {
   method: string;
@@ -18,29 +18,30 @@ interface NativeRunnerRequest {
 
 async function main() {
   const inputFile = process.argv[2];
-  
-  if (!inputFile) {
-    process.stderr.write(JSON.stringify({ error: "No input file provided" }));
+  const outputFile = process.argv[3];
+
+  if (!inputFile || !outputFile) {
+    process.stderr.write(JSON.stringify({ error: "Usage: native-runner <inputFile> <outputFile>" }));
     process.exit(1);
   }
-  
+
   const input = readFileSync(inputFile, "utf-8");
-  
+
   let request: NativeRunnerRequest;
   try {
     request = JSON.parse(input) as NativeRunnerRequest;
   } catch (e) {
     throw new Error(`Malformed JSON input: ${(e as Error).message}`);
   }
-  
+
   const { method, args } = request;
-  
+
   if (!Array.isArray(args) || args.length === 0) {
     throw new Error(`Invalid args for method '${method}': expected at least 1 argument`);
   }
-  
+
   let result: unknown;
-  
+
   switch (method) {
     case "parseLocalSources":
       result = nativeCore.parseLocalSources(args[0] as Parameters<typeof nativeCore.parseLocalSources>[0]);
@@ -60,14 +61,13 @@ async function main() {
     default:
       throw new Error(`Unknown method: ${method}`);
   }
-  
-  // Write result to stdout (no newline - pure JSON)
-  process.stdout.write(JSON.stringify(result));
+
+  writeFileSync(outputFile, JSON.stringify(result), "utf-8");
 }
 
 main().catch((e) => {
   const error = e as Error;
-  process.stderr.write(JSON.stringify({ 
+  process.stderr.write(JSON.stringify({
     error: error.message,
     stack: error.stack,
   }));

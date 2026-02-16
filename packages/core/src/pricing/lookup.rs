@@ -1026,12 +1026,20 @@ mod tests {
             },
         );
 
-        // === OpenCode Zen: Kimi family ===
         m.insert(
             "moonshotai/kimi-k2".into(),
             ModelPricing {
                 input_cost_per_token: Some(4.56e-7),
                 output_cost_per_token: Some(0.00000184),
+                cache_read_input_token_cost: None,
+                cache_creation_input_token_cost: None,
+            },
+        );
+        m.insert(
+            "moonshotai/kimi-k2.5".into(),
+            ModelPricing {
+                input_cost_per_token: Some(4.5e-7),
+                output_cost_per_token: Some(0.0000025),
                 cache_read_input_token_cost: None,
                 cache_creation_input_token_cost: None,
             },
@@ -1266,6 +1274,22 @@ mod tests {
         let lookup = create_lookup();
         let result = lookup.lookup("kimi-k2-thinking").unwrap();
         assert_eq!(result.matched_key, "moonshotai/kimi-k2-thinking");
+        assert_eq!(result.source, "OpenRouter");
+    }
+
+    #[test]
+    fn test_opencode_zen_kimi_k2_5() {
+        let lookup = create_lookup();
+        let result = lookup.lookup("kimi-k2.5").unwrap();
+        assert_eq!(result.matched_key, "moonshotai/kimi-k2.5");
+        assert_eq!(result.source, "OpenRouter");
+    }
+
+    #[test]
+    fn test_opencode_zen_kimi_k2_5_free() {
+        let lookup = create_lookup();
+        let result = lookup.lookup("kimi-k2.5-free").unwrap();
+        assert_eq!(result.matched_key, "moonshotai/kimi-k2.5");
         assert_eq!(result.source, "OpenRouter");
     }
 
@@ -1795,14 +1819,18 @@ mod tests {
     #[test]
     fn test_prefix_and_suffix_combined() {
         let lookup = create_lookup();
-        let result = lookup.lookup("antigravity-claude-opus-4-5-thinking").unwrap();
+        let result = lookup
+            .lookup("antigravity-claude-opus-4-5-thinking")
+            .unwrap();
         assert_eq!(result.matched_key, "claude-opus-4-5");
     }
 
     #[test]
     fn test_prefix_and_suffix_with_tier() {
         let lookup = create_lookup();
-        let result = lookup.lookup("antigravity-claude-opus-4-5-thinking-high").unwrap();
+        let result = lookup
+            .lookup("antigravity-claude-opus-4-5-thinking-high")
+            .unwrap();
         assert_eq!(result.matched_key, "claude-opus-4-5");
     }
 

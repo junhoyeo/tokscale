@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 env:
   DEBUG: napi:*
@@ -342,7 +343,7 @@ jobs:
           NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   finalize:
-    name: Commit version bump
+    name: Commit version bump and create release
     needs: [bump-versions, publish-alias]
     runs-on: ubuntu-latest
 
@@ -351,6 +352,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Download bumped package.json files
         uses: actions/download-artifact@v4
@@ -379,3 +382,42 @@ jobs:
           git push
           
           echo "✅ Successfully published and committed version $NEW_VERSION"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.38
+
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          NEW_VERSION="${{ needs.bump-versions.outputs.version }}"
+          
+          if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
+            echo "🏷️ Tag v$NEW_VERSION already exists"
+          else
+            git tag "v$NEW_VERSION"
+            git push origin "v$NEW_VERSION"
+            echo "🏷️ Created tag v$NEW_VERSION"
+          fi
+
+          NOTES_FILE=$(mktemp)
+          bun scripts/generate-release-notes.ts "$NEW_VERSION" > "$NOTES_FILE"
+
+          if gh release view "v$NEW_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "v$NEW_VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "v$NEW_VERSION" \
+              --notes-file "$NOTES_FILE"
+            echo "♻️ Updated existing GitHub release v$NEW_VERSION"
+          else
+            gh release create "v$NEW_VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "v$NEW_VERSION" \
+              --notes-file "$NOTES_FILE"
+            echo "🎉 Created GitHub release: https://github.com/${{ github.repository }}/releases/tag/v$NEW_VERSION"
+          fi
+          
+          rm -f "$NOTES_FILE"
