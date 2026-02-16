@@ -5,11 +5,11 @@ import type { TokenContributionData, GraphColorPalette } from "@/lib/types";
 import {
   formatCurrency,
   formatTokenCount,
-  formatDate,
   calculateCurrentStreak,
   calculateLongestStreak,
   findBestDay,
 } from "@/lib/utils";
+import { formatContributionDate } from "@/lib/date-utils";
 
 interface StatsPanelProps {
   data: TokenContributionData;
@@ -158,7 +158,7 @@ export function StatsPanel({ data, palette }: StatsPanelProps) {
         <StatItem label="Current Streak" value={`${currentStreak} day${currentStreak !== 1 ? "s" : ""}`} />
         <StatItem label="Longest Streak" value={`${longestStreak} day${longestStreak !== 1 ? "s" : ""}`} />
         {bestDay && bestDay.totals.cost > 0 && (
-          <StatItem label="Best Day" value={formatDate(bestDay.date)} subValue={formatCurrency(bestDay.totals.cost)} />
+          <StatItem label="Best Day" value={formatContributionDate(bestDay)} subValue={formatCurrency(bestDay.totals.cost)} />
         )}
         <StatItem label="Models" value={summary.models.length.toString()} />
       </Grid>

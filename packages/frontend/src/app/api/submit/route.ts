@@ -279,7 +279,7 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
-            timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestamp),
+            timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestamp ?? null),
             sourceBreakdown: mergedSourceBreakdown,
             modelBreakdown,
           });

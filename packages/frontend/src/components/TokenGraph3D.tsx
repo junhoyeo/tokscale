@@ -5,7 +5,8 @@ import styled, { keyframes } from "styled-components";
 import type { DailyContribution, GraphColorPalette, TooltipPosition } from "@/lib/types";
 import { getGradeColor } from "@/lib/themes";
 import { useSystemDarkMode } from "@/lib/useMediaQuery";
-import { groupByWeek, hexToNumber, formatCurrency, formatDate, formatTokenCount } from "@/lib/utils";
+import { groupByWeek, hexToNumber, formatCurrency, formatTokenCount } from "@/lib/utils";
+import { formatContributionDate } from "@/lib/date-utils";
 import { CUBE_SIZE, MAX_CUBE_HEIGHT, MIN_CUBE_HEIGHT, ISO_CANVAS_WIDTH, ISO_CANVAS_HEIGHT } from "@/lib/constants";
 
 const pulse = keyframes`
@@ -221,7 +222,7 @@ export function TokenGraph3D({
         pixelView.renderObject(cube, p3d);
       }
     }
-  }, [obeliskLoaded, palette, year, maxTokens, weeksData, isDark]);
+  }, [obeliskLoaded, palette, maxTokens, weeksData, isDark]);
 
   const getDayAtPosition = useCallback(
     (clientX: number, clientY: number): { day: DailyContribution | null; position: TooltipPosition } | null => {
@@ -308,7 +309,7 @@ export function TokenGraph3D({
             <StatItem>
               <StatValue style={{ color: palette.grade1 }}>{formatCurrency(bestDay.totals.cost)}</StatValue>
               <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Best day</StatLabel>
-              <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{formatDate(bestDay.date).split(",")[0]}</StatSubtext>
+              <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{formatContributionDate(bestDay).split(",")[0]}</StatSubtext>
             </StatItem>
           )}
         </StatsBox>
