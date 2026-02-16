@@ -176,6 +176,7 @@ export async function POST(request: Request) {
         .select({
           id: dailyBreakdown.id,
           date: dailyBreakdown.date,
+          timestampMs: dailyBreakdown.timestampMs,
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
         })
         .from(dailyBreakdown)
@@ -196,6 +197,7 @@ export async function POST(request: Request) {
         cost: string;
         inputTokens: number;
         outputTokens: number;
+        timestampMs: number | null;
         sourceBreakdown: Record<string, SourceBreakdownData>;
         modelBreakdown: Record<string, number>;
       }> = [];
@@ -206,6 +208,7 @@ export async function POST(request: Request) {
         cost: string;
         inputTokens: number;
         outputTokens: number;
+        timestampMs: number | null;
         sourceBreakdown: Record<string, SourceBreakdownData>;
         modelBreakdown: Record<string, number>;
       }> = [];
@@ -263,6 +266,12 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
+            timestampMs:
+              incomingDay.timestamp != null
+                ? existingDay.timestampMs != null
+                  ? Math.min(existingDay.timestampMs, incomingDay.timestamp)
+                  : incomingDay.timestamp
+                : existingDay.timestampMs ?? null,
             sourceBreakdown: mergedSourceBreakdown,
             modelBreakdown,
           });
@@ -277,6 +286,7 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
+            timestampMs: incomingDay.timestamp ?? null,
             sourceBreakdown: incomingSourceBreakdown,
             modelBreakdown,
           });
@@ -292,7 +302,7 @@ export async function POST(request: Request) {
       if (toUpdate.length > 0) {
         const valuesClauses = toUpdate.map(
           (row) =>
-            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb, ${JSON.stringify(row.modelBreakdown)}::jsonb)`
+            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb, ${JSON.stringify(row.modelBreakdown)}::jsonb)`
         );
 
         const valuesList = sql.join(valuesClauses, sql`, `);
@@ -303,10 +313,11 @@ export async function POST(request: Request) {
             cost = batch.cost,
             input_tokens = batch.input_tokens,
             output_tokens = batch.output_tokens,
+            timestamp_ms = batch.timestamp_ms,
             source_breakdown = batch.source_breakdown,
             model_breakdown = batch.model_breakdown
           FROM (VALUES ${valuesList})
-            AS batch(id, tokens, cost, input_tokens, output_tokens, source_breakdown, model_breakdown)
+            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, source_breakdown, model_breakdown)
           WHERE d.id = batch.id
         `);
       }
@@ -380,6 +391,7 @@ export async function POST(request: Request) {
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(data),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
+          schemaVersion: data.contributions.some((c: { timestamp?: number }) => c.timestamp != null) ? 1 : 0,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));

@@ -20,7 +20,7 @@ const TokenBreakdownSchema = z.object({
 });
 
 const SourceContributionSchema = z.object({
-  source: z.enum(["opencode", "claude", "codex", "gemini", "cursor", "amp", "droid", "openclaw"]),
+  source: z.enum(["opencode", "claude", "codex", "gemini", "cursor", "amp", "droid", "openclaw", "pi"]),
   modelId: z.string().min(1),
   providerId: z.string().optional(),
   tokens: TokenBreakdownSchema,
@@ -30,6 +30,7 @@ const SourceContributionSchema = z.object({
 
 const DailyContributionSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  timestamp: z.number().int().positive().optional(),
   totals: z.object({
     tokens: z.number().int().min(0),
     cost: z.number().min(0),
@@ -57,7 +58,7 @@ const DataSummarySchema = z.object({
   activeDays: z.number().int().min(0),
   averagePerDay: z.number().min(0),
   maxCostInSingleDay: z.number().min(0),
-  sources: z.array(z.enum(["opencode", "claude", "codex", "gemini", "cursor", "amp", "droid", "openclaw"])),
+  sources: z.array(z.enum(["opencode", "claude", "codex", "gemini", "cursor", "amp", "droid", "openclaw", "pi"])),
   models: z.array(z.string()),
 });
 

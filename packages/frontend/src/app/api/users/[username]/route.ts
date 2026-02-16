@@ -80,6 +80,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       db
         .select({
           date: dailyBreakdown.date,
+          timestampMs: dailyBreakdown.timestampMs,
           tokens: dailyBreakdown.tokens,
           cost: dailyBreakdown.cost,
           inputTokens: dailyBreakdown.inputTokens,
@@ -130,6 +131,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       string,
       {
         date: string;
+        timestampMs: number | null;
         tokens: number;
         cost: number;
         inputTokens: number;
@@ -142,6 +144,12 @@ export async function GET(_request: Request, { params }: RouteParams) {
     for (const day of dailyData) {
       const existing = aggregatedDaily.get(day.date);
       if (existing) {
+        if (day.timestampMs != null) {
+          existing.timestampMs =
+            existing.timestampMs != null
+              ? Math.min(existing.timestampMs, day.timestampMs)
+              : day.timestampMs;
+        }
         existing.tokens += Number(day.tokens);
         existing.cost += Number(day.cost);
         existing.inputTokens += Number(day.inputTokens);
@@ -256,6 +264,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
         }
         aggregatedDaily.set(day.date, {
           date: day.date,
+          timestampMs: day.timestampMs ?? null,
           tokens: Number(day.tokens),
           cost: Number(day.cost),
           inputTokens: Number(day.inputTokens),
@@ -296,6 +305,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
 
       return {
         date: day.date,
+        timestampMs: day.timestampMs ?? null,
         totals: {
           tokens: day.tokens,
           cost: day.cost,
