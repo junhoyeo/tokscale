@@ -217,12 +217,7 @@ async function loadData(
 
   const dailyMap = new Map<string, DailyEntry>();
   for (const contrib of graph.contributions) {
-    let dateStr = contrib.date;
-    
-    if (contrib.timestamp != null) {
-      const localDate = new Date(contrib.timestamp);
-      dateStr = formatDateLocal(localDate);
-    }
+    const dateStr = contrib.date;
     
     if (!dailyMap.has(dateStr)) {
       dailyMap.set(dateStr, {
@@ -338,13 +333,9 @@ async function loadData(
     peakHour: calculatePeakHour(localMessages?.messages || []),
   };
 
-   const dailyModelMap = new Map<string, Map<string, number>>();
-   for (const contrib of graph.contributions) {
-     let dateStr = contrib.date;
-     if (contrib.timestamp != null) {
-       const localDate = new Date(contrib.timestamp);
-       dateStr = formatDateLocal(localDate);
-     }
+  const dailyModelMap = new Map<string, Map<string, number>>();
+  for (const contrib of graph.contributions) {
+    const dateStr = contrib.date;
     if (!dailyModelMap.has(dateStr)) {
       dailyModelMap.set(dateStr, new Map());
     }
@@ -411,13 +402,9 @@ async function loadData(
     cost: report.totalCost,
   };
 
-   const dailyBreakdowns = new Map<string, DailyModelBreakdown>();
-   for (const contrib of graph.contributions) {
-     let dateStr = contrib.date;
-     if (contrib.timestamp != null) {
-       const localDate = new Date(contrib.timestamp);
-       dateStr = formatDateLocal(localDate);
-     }
+  const dailyBreakdowns = new Map<string, DailyModelBreakdown>();
+  for (const contrib of graph.contributions) {
+    const dateStr = contrib.date;
     
     const models = contrib.sources.map((source: { modelId: string; source: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning?: number }; cost: number; messages: number }) => ({
       modelId: source.modelId,

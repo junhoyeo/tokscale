@@ -28,3 +28,11 @@ export function getEndOfDayTimestamp(date: Date): number {
   const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
   return end.getTime();
 }
+
+/** Derive local date from a contribution. Uses timestamp if available, falls back to UTC date. */
+export function getContributionLocalDate(contrib: { date: string; timestamp?: number }): string {
+  if (contrib.timestamp != null) {
+    return formatDateLocal(new Date(contrib.timestamp));
+  }
+  return contrib.date;
+}
