@@ -403,7 +403,7 @@ export async function POST(request: Request) {
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
-          schemaVersion: data.contributions.some((c: { timestamp?: number }) => c.timestamp != null) ? 1 : 0,
+          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c: { timestamp?: number }) => c.timestamp != null) ? 1 : 0})`,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
