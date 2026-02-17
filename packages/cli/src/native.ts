@@ -7,7 +7,6 @@
 
 import type {
   TokenContributionData,
-  GraphOptions as TSGraphOptions,
   SourceType,
 } from "./graph-types.js";
 import { loadSettings } from "./tui/config/settings.js";
@@ -79,14 +78,6 @@ interface NativeGraphResult {
   summary: NativeDataSummary;
   years: NativeYearSummary[];
   contributions: NativeDailyContribution[];
-}
-
-interface NativeReportOptions {
-  homeDir?: string;
-  sources?: string[];
-  since?: string;
-  until?: string;
-  year?: string;
 }
 
 interface NativeModelUsage {
@@ -190,7 +181,6 @@ interface NativeCore {
 // =============================================================================
 
 let nativeCore: NativeCore | null = null;
-let loadError: Error | null = null;
 
 try {
   // Type assertion needed because dynamic import returns module namespace
@@ -199,7 +189,7 @@ try {
     (m) => (m.default || m) as unknown as NativeCore
   );
 } catch (e) {
-  loadError = e as Error;
+  void e;
 }
 
 // =============================================================================
