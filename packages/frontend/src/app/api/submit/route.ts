@@ -279,7 +279,7 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
-            timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestamp ?? null),
+            timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestampMs ?? null),
             sourceBreakdown: mergedSourceBreakdown,
             modelBreakdown,
           });
@@ -294,7 +294,7 @@ export async function POST(request: Request) {
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
-            timestampMs: incomingDay.timestamp ?? null,
+            timestampMs: incomingDay.timestampMs ?? null,
             sourceBreakdown: incomingSourceBreakdown,
             modelBreakdown,
           });
@@ -399,7 +399,7 @@ export async function POST(request: Request) {
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
-          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c: { timestamp?: number }) => c.timestamp != null) ? 1 : 0})`,
+          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c) => c.timestampMs != null) ? 1 : 0})`,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
