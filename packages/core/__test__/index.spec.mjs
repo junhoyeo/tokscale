@@ -22,10 +22,6 @@ testFn("version returns semver string", (t) => {
   t.regex(v, /^\d+\.\d+\.\d+$/);
 });
 
-testFn("healthCheck returns expected message", (t) => {
-  t.is(nativeModule.healthCheck(), "tokscale-core is healthy!");
-});
-
 testFn("parseLocalSources with empty directory returns zeros", (t) => {
   const tmpDir = join(__dirname, "tmp-scan-test-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });

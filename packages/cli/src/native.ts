@@ -169,7 +169,6 @@ interface NativeFinalizeReportOptions {
 
 interface NativeCore {
   version(): string;
-  healthCheck(): string;
   parseLocalSources(options: NativeLocalParseOptions): NativeParsedMessages;
   finalizeReport(options: NativeFinalizeReportOptions): NativeModelReport;
   finalizeMonthlyReport(options: NativeFinalizeReportOptions): NativeMonthlyReport;

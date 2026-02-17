@@ -90,9 +90,6 @@ export interface GraphResult {
   contributions: Array<DailyContribution>
 }
 
-/** Simple health check to verify the native module is working */
-export declare function healthCheck(): string
-
 /** Options for parsing local sources only (no Cursor) */
 export interface LocalParseOptions {
   homeDir?: string

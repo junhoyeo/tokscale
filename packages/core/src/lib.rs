@@ -23,12 +23,6 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Simple health check to verify the native module is working
-#[napi]
-pub fn health_check() -> String {
-    "tokscale-core is healthy!".to_string()
-}
-
 /// Token breakdown by type
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
