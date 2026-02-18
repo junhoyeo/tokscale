@@ -31,7 +31,7 @@
     "build": "napi build --platform --release",
     "build:platform": "napi build --platform --release",
     "build:debug": "napi build",
-    "prepublishOnly": "napi prepublish -t npm",
+    "create-npm-dirs": "napi create-npm-dirs",
     "test": "ava",
     "test:rust": "cargo test --features noop",
     "test:all": "bun run test:rust && bun run test",
@@ -48,8 +48,7 @@
   },
   "files": [
     "index.js",
-    "index.d.ts",
-    "*.node"
+    "index.d.ts"
   ],
   "engines": {
     "node": ">= 16"
@@ -65,5 +64,15 @@
     "tokscale",
     "performance",
     "native"
-  ]
+  ],
+  "optionalDependencies": {
+    "@tokscale/core-darwin-x64": "1.2.10",
+    "@tokscale/core-darwin-arm64": "1.2.10",
+    "@tokscale/core-linux-x64-gnu": "1.2.10",
+    "@tokscale/core-linux-arm64-gnu": "1.2.10",
+    "@tokscale/core-linux-x64-musl": "1.2.10",
+    "@tokscale/core-linux-arm64-musl": "1.2.10",
+    "@tokscale/core-win32-x64-msvc": "1.2.10",
+    "@tokscale/core-win32-arm64-msvc": "1.2.10"
+  }
 }

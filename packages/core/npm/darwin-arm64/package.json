@@ -1,0 +1,35 @@
+{
+  "name": "@tokscale/core-darwin-arm64",
+  "version": "1.2.10",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "tokscale-core.darwin-arm64.node",
+  "files": [
+    "tokscale-core.darwin-arm64.node"
+  ],
+  "description": "Native Rust core for tokscale CLI - high-performance session parsing",
+  "keywords": [
+    "napi-rs",
+    "rust",
+    "tokscale",
+    "performance",
+    "native"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">= 16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/junhoyeo/tokscale.git",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "os": [
+    "darwin"
+  ]
+}
