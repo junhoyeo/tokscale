@@ -4,7 +4,7 @@ pub mod litellm;
 pub mod lookup;
 pub mod openrouter;
 
-use lookup::{PricingLookup, LookupResult};
+use lookup::{PricingLookup, LookupResult, compute_cost};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -95,8 +95,11 @@ impl PricingService {
     }
 
     pub fn lookup_with_source(&self, model_id: &str, force_source: Option<&str>) -> Option<LookupResult> {
-        self.lookup.lookup_with_source(model_id, force_source)
-            .or_else(|| self.lookup_fallback(model_id))
+        let result = self.lookup.lookup_with_source(model_id, force_source);
+        if result.is_some() || force_source.is_some() {
+            return result;
+        }
+        self.lookup_fallback(model_id)
     }
     
     pub fn calculate_cost(&self, model_id: &str, input: i64, output: i64, cache_read: i64, cache_write: i64, reasoning: i64) -> f64 {
@@ -104,17 +107,7 @@ impl PricingService {
             Some(r) => r,
             None => return 0.0,
         };
-
-        let p = &result.pricing;
-        let safe_price =
-            |opt: Option<f64>| opt.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
-
-        let input_cost = input as f64 * safe_price(p.input_cost_per_token);
-        let output_cost = (output + reasoning) as f64 * safe_price(p.output_cost_per_token);
-        let cache_read_cost = cache_read as f64 * safe_price(p.cache_read_input_token_cost);
-        let cache_write_cost = cache_write as f64 * safe_price(p.cache_creation_input_token_cost);
-
-        input_cost + output_cost + cache_read_cost + cache_write_cost
+        compute_cost(&result.pricing, input, output, cache_read, cache_write, reasoning)
     }
 }
 
@@ -181,6 +174,17 @@ mod tests {
         let result = service.lookup_with_source("gpt-5.3-codex", None).unwrap();
         assert_eq!(result.source, "OpenRouter");
         assert_eq!(result.pricing.input_cost_per_token, Some(0.003));
+    }
+
+    #[test]
+    fn test_fallback_skipped_when_force_source_set() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+
+        let result = service.lookup_with_source("gpt-5.3-codex", Some("litellm"));
+        assert!(result.is_none());
+
+        let result = service.lookup_with_source("gpt-5.3-codex", Some("openrouter"));
+        assert!(result.is_none());
     }
 
     #[test]

@@ -451,17 +451,33 @@ impl PricingLookup {
             None => return 0.0,
         };
 
-        let p = &result.pricing;
-        let safe_price =
-            |opt: Option<f64>| opt.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
-
-        let input_cost = input as f64 * safe_price(p.input_cost_per_token);
-        let output_cost = (output + reasoning) as f64 * safe_price(p.output_cost_per_token);
-        let cache_read_cost = cache_read as f64 * safe_price(p.cache_read_input_token_cost);
-        let cache_write_cost = cache_write as f64 * safe_price(p.cache_creation_input_token_cost);
-
-        input_cost + output_cost + cache_read_cost + cache_write_cost
+        compute_cost(
+            &result.pricing,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+        )
     }
+}
+
+pub fn compute_cost(
+    pricing: &ModelPricing,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+) -> f64 {
+    let safe_price = |opt: Option<f64>| opt.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+
+    let input_cost = input as f64 * safe_price(pricing.input_cost_per_token);
+    let output_cost = (output + reasoning) as f64 * safe_price(pricing.output_cost_per_token);
+    let cache_read_cost = cache_read as f64 * safe_price(pricing.cache_read_input_token_cost);
+    let cache_write_cost = cache_write as f64 * safe_price(pricing.cache_creation_input_token_cost);
+
+    input_cost + output_cost + cache_read_cost + cache_write_cost
 }
 
 fn extract_model_family(model_id: &str) -> String {
