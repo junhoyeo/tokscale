@@ -17,7 +17,6 @@
 [![GitHub Stars](https://img.shields.io/github/stars/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/issues)
 [![License](https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/blob/master/LICENSE)
-![Coverage](https://github.com/junhoyeo/tokscale/blob/main/.github/badges/coverage.svg?raw=true)
 
 [🇺🇸 English](README.md) | [🇰🇷 한국어](README.ko.md) | [🇯🇵 日本語](README.ja.md) | [🇨🇳 简体中文](README.zh-cn.md)
 
@@ -54,6 +53,7 @@
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | `~/.kimi/sessions/` | ✅ Yes |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
 
@@ -72,12 +72,12 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - [Quick Start](#quick-start)
   - [Prerequisites](#prerequisites)
   - [Development Setup](#development-setup)
+  - [Building the Native Module](#building-the-native-module)
 - [Usage](#usage)
   - [Basic Commands](#basic-commands)
   - [TUI Features](#tui-features)
   - [Filtering by Platform](#filtering-by-platform)
   - [Date Filtering](#date-filtering)
-  - [Model Grouping](#model-grouping)
   - [Pricing Lookup](#pricing-lookup)
   - [Social](#social)
   - [Cursor IDE Commands](#cursor-ide-commands)
@@ -94,10 +94,6 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 - [Wrapped 2025](#wrapped-2025)
   - [Command](#command)
   - [What's Included](#whats-included)
-- [Code Coverage](#code-coverage)
-  - [Running Coverage Locally](#running-coverage-locally)
-  - [Coverage Reports](#coverage-reports)
-  - [Coverage Goals](#coverage-goals)
 - [Development](#development)
   - [Prerequisites](#prerequisites-1)
   - [How to Run](#how-to-run)
@@ -120,10 +116,10 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
   - Zero flicker rendering (native Zig engine)
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, and Pi
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, Pi, and Kimi CLI
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
-- **100% Rust CLI** - Entire CLI written in Rust for maximum performance and minimal dependencies
+- **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
 - **Web visualization** - Interactive contribution graph with 2D and 3D views
 - **Flexible filtering** - Filter by platform, date range, or year
 - **Export to JSON** - Generate data for external visualization tools
@@ -148,13 +144,13 @@ That's it! This gives you the full interactive TUI experience with zero setup.
 
 > **Requires [Bun](https://bun.sh/)**: The interactive TUI uses OpenTUI's native Zig modules for zero-flicker rendering, which requires the Bun runtime.
 
-> **Package Structure**: `tokscale` is an alias package (like [`swc`](https://www.npmjs.com/package/swc)) that installs `@tokscale/cli`. The CLI is a pure Rust binary distributed via platform-specific npm packages.
+> **Package Structure**: `tokscale` is an alias package (like [`swc`](https://www.npmjs.com/package/swc)) that installs `@tokscale/cli`. Both install the same CLI with the native Rust core (`@tokscale/core`) included.
 
 
 ### Prerequisites
 
 - [Bun](https://bun.sh/) (required)
-- (Optional) Rust toolchain for building the CLI from source
+- (Optional) Rust toolchain for building native module from source
 
 ### Development Setup
 
@@ -176,6 +172,17 @@ bun run cli
 ```
 
 > **Note**: `bun run cli` is for local development. When installed via `bunx tokscale`, the command runs directly. The Usage section below shows the installed binary commands.
+
+### Building the Native Module
+
+The native Rust module is **required** for CLI operation. It provides ~10x faster processing through parallel file scanning and SIMD JSON parsing:
+
+```bash
+# Build the native core (run from repository root)
+bun run build:core
+```
+
+> **Note**: Native binaries are pre-built and included when you install via `bunx tokscale@latest`. Building from source is only needed for local development.
 
 ## Usage
 
@@ -215,7 +222,7 @@ The interactive TUI mode provides:
   - `1-4` or `←/→/Tab`: Switch views
   - `↑/↓`: Navigate lists
   - `c/n/t`: Sort by cost/name/tokens
-  - `1-9`: Toggle sources (OpenCode/Claude/Codex/Cursor/Gemini/Amp/Droid/OpenClaw/Pi)
+  - `1-0`: Toggle sources (OpenCode/Claude/Codex/Cursor/Gemini/Amp/Droid/OpenClaw/Pi/Kimi)
   - `p`: Cycle through 9 color themes
   - `r`: Refresh data
   - `e`: Export to JSON
@@ -223,26 +230,6 @@ The interactive TUI mode provides:
 - **Mouse Support**: Click tabs, buttons, and filters
 - **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu
 - **Settings Persistence**: Preferences saved to `~/.config/tokscale/settings.json` (see [Configuration](#configuration))
-
-### Launching TUI with Filters
-
-You can launch the TUI with pre-applied filters using the explicit `tui` command:
-
-```bash
-# Launch TUI with only OpenCode data
-tokscale tui --opencode
-
-# Launch TUI with last week's data
-tokscale tui --week
-
-# Combine multiple filters
-tokscale tui --opencode --claude --month
-
-# Launch TUI with custom date range
-tokscale tui --since 2024-01-01 --until 2024-12-31
-```
-
-All source filters (`--opencode`, `--claude`, `--codex`, `--gemini`, `--cursor`, `--amp`, `--droid`, `--openclaw`) and date filters (`--today`, `--week`, `--month`, `--since`, `--until`, `--year`) are supported.
 
 ### Filtering by Platform
 
@@ -274,8 +261,11 @@ tokscale --openclaw
 # Show only Pi usage
 tokscale --pi
 
+# Show only Kimi CLI usage
+tokscale --kimi
+
 # Combine filters
-tokscale --opencode --claude --pi
+tokscale --opencode --claude
 ```
 
 ### Date Filtering
@@ -301,29 +291,6 @@ tokscale monthly --month --benchmark
 
 > **Note**: Date filters use your local timezone. Both `--since` and `--until` are inclusive.
 
-### Model Grouping
-
-Control how models are grouped in `--light` and `--json` output using the `--group-by` flag:
-
-```bash
-# Group by model only (merge across clients/providers)
-tokscale models --light --group-by model
-
-# Group by client + model (default)
-tokscale models --light --group-by client,model
-
-# Group by client + provider + model (most detailed)
-tokscale models --light --group-by client,provider,model
-```
-
-| Strategy | Columns | Description |
-|----------|---------|-------------|
-| `model` | Clients, Providers, Model | Merges usage across all clients and providers for each model |
-| `client,model` | Client, Provider, Model, Resolved, Input, Output, Cache, Total, Cost | Default. Shows per-client model breakdown |
-| `client,provider,model` | Client, Provider, Model, Resolved, Input, Output, Cache, Total, Cost | Most granular. Separates by provider within each client |
-
-> **Note**: Models with different date suffixes (e.g., `claude-sonnet-4-20250514` vs `claude-sonnet-4-20250415`) or version separators (`3.5` vs `3-5`) are automatically normalized and consolidated during aggregation.
-
 ### Pricing Lookup
 
 Look up real-time pricing for any model:
@@ -337,10 +304,6 @@ tokscale pricing "grok-code"
 # Force specific provider source
 tokscale pricing "grok-code" --provider openrouter
 tokscale pricing "claude-3-5-sonnet" --provider litellm
-
-# Output as JSON (for scripting)
-tokscale pricing "claude-3-5-sonnet-20241022" --json
-tokscale pricing "grok-code" --provider openrouter --json
 ```
 
 **Lookup Strategy:**
@@ -440,8 +403,6 @@ When you log out, tokscale keeps your cached usage history by moving it to `curs
 
 ### Example Output (`--light` version)
 
-The `--light` table displays columns based on your `--group-by` strategy. The default (`client,model`) shows: **Client**, **Provider**, **Model**, **Resolved** (normalized model name used for pricing), **Input**, **Output**, **Cache Write**, **Cache Read**, **Total**, and **Cost**.
-
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
 
 ### Configuration
@@ -462,32 +423,6 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `autoRefreshEnabled` | boolean | `false` | Enable auto-refresh in TUI |
 | `autoRefreshMs` | number | `60000` | Auto-refresh interval (30000-3600000ms) |
 | `nativeTimeoutMs` | number | `300000` | Maximum time for native subprocess processing (5000-3600000ms) |
-
-### Advanced Configuration
-
-For advanced customization (colors and display names), create `~/.tokscale` with TOML format:
-
-```toml
-# Custom colors (hex format)
-[colors.providers]
-anthropic = "#DA7756"
-openai = "#10B981"
-
-[colors.sources]
-opencode = "#22c55e"
-claude = "#DA7756"
-
-# Custom display names
-[display_names.providers]
-anthropic = "Anthropic"
-openai = "OpenAI"
-github-copilot = "GitHub Copilot"
-
-[display_names.sources]
-openclaw = "OpenClaw"  # Default shows "🦞 OpenClaw", override to remove emoji
-```
-
-**Display Names**: By default, OpenClaw shows as "🦞 OpenClaw". Use the `display_names` section to customize how providers and sources appear in the TUI.
 
 ### Environment Variables
 
@@ -527,26 +462,11 @@ Tokscale automatically scans this directory structure:
 export TOKSCALE_HEADLESS_DIR="$HOME/my-custom-logs"
 ```
 
-**Command Options:**
+**Recommended (automatic capture):**
 
-```bash
-# Basic usage (auto-adds --json for codex)
-tokscale headless codex exec -m gpt-5 "implement feature"
-
-# Custom output path
-tokscale headless codex exec -m gpt-5 "prompt" --output /tmp/output.jsonl
-
-# Override format (json or jsonl)
-tokscale headless codex exec -m gpt-5 "prompt" --format json
-
-# Disable auto-flags (don't add --json automatically)
-tokscale headless codex exec --json "prompt" --no-auto-flags
-```
-
-**Options:**
-- `--output <file>` - Write captured output to specific file path
-- `--format <json|jsonl>` - Override output format (default: jsonl)
-- `--no-auto-flags` - Do not automatically add `--json` flag to codex command
+| Tool | Command Example |
+|------|-----------------|
+| **Codex CLI** | `tokscale headless codex exec -m gpt-5 "implement feature"` |
 
 **Manual redirect (optional):**
 
@@ -593,7 +513,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Cursor, Gemini, Amp, Droid, OpenClaw, Pi)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Cursor, Gemini, Amp, Droid, OpenClaw, Pi, Kimi)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -668,42 +588,6 @@ The generated image includes:
 
 The generated PNG is optimized for sharing on social media. Share your coding journey with the community!
 
-## Code Coverage
-
-This project maintains automated code coverage tracking. Coverage reports are automatically generated on every PR and push to main.
-
-**Current Coverage:** 22.11% (baseline established)
-
-### Running Coverage Locally
-
-```bash
-# Install cargo-tarpaulin (if not already installed)
-cargo install cargo-tarpaulin
-
-# Generate HTML coverage report
-cargo tarpaulin --workspace --out Html --output-dir target/coverage
-
-# Open the report
-open target/coverage/tarpaulin-report.html  # macOS
-xdg-open target/coverage/tarpaulin-report.html  # Linux
-```
-
-### Coverage Reports
-
-- **HTML Report:** Generated at `target/coverage/tarpaulin-report.html`
-- **Coverage Badge:** Automatically updated on every push to main via GitHub Actions
-- **CI Integration:** Coverage runs automatically on all PRs via GitHub Actions
-
-### Coverage Goals
-
-| Component | Current | Target |
-|-----------|---------|--------|
-| Core Library | ~70% | 80% |
-| Session Parsers | ~70% | 80% |
-| CLI Commands | ~14% | 50% |
-| TUI (ratatui) | 0% | 30% |
-| **Overall** | **22.11%** | **25%** |
-
 ## Development
 
 > **Quick setup**: If you just want to get started quickly, see [Development Setup](#development-setup) in the Installation section above.
@@ -724,8 +608,8 @@ cargo --version
 After following the [Development Setup](#development-setup), you can:
 
 ```bash
-# Build the Rust CLI (optional - only needed for local development)
-cargo build --release -p tokscale-cli
+# Build native module (optional but recommended)
+bun run build:core
 
 # Run in development mode (launches TUI)
 cd packages/cli && bun src/cli.ts
@@ -742,21 +626,40 @@ cd packages/cli && bun src/cli.ts --light
 | Script | Description |
 |--------|-------------|
 | `bun run cli` | Run CLI in development mode (TUI with Bun) |
+| `bun run build:core` | Build native Rust module (release) |
 | `bun run build:cli` | Build CLI TypeScript to dist/ |
+| `bun run build` | Build both core and CLI |
 | `bun run dev:frontend` | Run frontend development server |
-| `cargo build -p tokscale-cli` | Build Rust CLI binary |
 
 **Package-specific scripts** (from within package directories):
 - `packages/cli`: `bun run dev`, `bun run tui`
-- `crates/tokscale-cli`: `cargo build`, `cargo test`, `cargo bench`
+- `packages/core`: `bun run build:debug`, `bun run test`, `bun run bench`
 
 **Note**: This project uses **Bun** as the package manager and runtime. TUI requires Bun due to OpenTUI's native modules.
 
 ### Testing
 
 ```bash
-# Test Rust workspace
-cargo test --workspace
+# Test native module (Rust)
+cd packages/core
+bun run test:rust      # Cargo tests
+bun run test           # Node.js integration tests
+bun run test:all       # Both
+```
+
+### Native Module Development
+
+```bash
+cd packages/core
+
+# Build in debug mode (faster compilation)
+bun run build:debug
+
+# Build in release mode (optimized)
+bun run build
+
+# Run Rust benchmarks
+bun run bench
 ```
 
 ### Graph Command Options
@@ -798,20 +701,20 @@ tokscale graph --output packages/frontend/public/my-data.json
 
 ### Performance
 
-The Rust CLI provides significant performance improvements:
+The native Rust module provides significant performance improvements:
 
-| Operation | Pure Rust | Speedup vs JS |
-|-----------|-----------|---------------|
-| File Discovery | ~50ms | **10x** |
-| JSON Parsing | ~100ms | **8x** |
-| Aggregation | ~25ms | **8x** |
-| **Total** | **~175ms** | **~8.5x** |
+| Operation | TypeScript | Rust Native | Speedup |
+|-----------|------------|-------------|---------|
+| File Discovery | ~500ms | ~50ms | **10x** |
+| JSON Parsing | ~800ms | ~100ms | **8x** |
+| Aggregation | ~200ms | ~25ms | **8x** |
+| **Total** | **~1.5s** | **~175ms** | **~8.5x** |
 
 *Benchmarks for ~1000 session files, 100k messages*
 
 #### Memory Optimization
 
-The Rust implementation provides ~45% memory reduction through:
+The native module also provides ~45% memory reduction through:
 
 - Streaming JSON parsing (no full file buffering)
 - Zero-copy string handling
@@ -824,14 +727,14 @@ The Rust implementation provides ~45% memory reduction through:
 cd packages/benchmarks && bun run generate
 
 # Run Rust benchmarks
-cd crates/tokscale-cli && cargo bench
+cd packages/core && bun run bench
 ```
 
 </details>
 
 ## Supported Platforms
 
-### Binary Targets
+### Native Module Targets
 
 | Platform | Architecture | Status |
 |----------|--------------|--------|
@@ -872,6 +775,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Cursor | API sync | API sync | Data fetched via API, cached in `%USERPROFILE%\.config\tokscale\cursor-cache\` |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | Same path on all platforms |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | Same path on all platforms |
+| Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | Same path on all platforms |
 
 > **Note**: On Windows, `~` expands to `%USERPROFILE%` (e.g., `C:\Users\YourName`). These tools intentionally use Unix-style paths (like `.local/share`) even on Windows for cross-platform consistency, rather than Windows-native paths like `%APPDATA%`.
 
@@ -1044,6 +948,16 @@ JSONL format with session header and message entries:
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
 ```
 
+### Kimi CLI
+
+Location: `~/.kimi/sessions/{GROUP_ID}/{SESSION_UUID}/wire.jsonl`
+
+wire.jsonl format with StatusUpdate messages:
+```json
+{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1770983426.420942, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1562, "output": 2463, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "chatcmpl-xxx"}}}
+```
+
 ## Pricing
 
 Tokscale fetches real-time pricing from [LiteLLM's pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
@@ -1071,7 +985,7 @@ Contributions are welcome! Please follow these steps:
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Run tests (`cargo test --workspace`)
+4. Run tests (`cd packages/core && bun run test:all`)
 5. Commit your changes (`git commit -m 'Add amazing feature'`)
 6. Push to the branch (`git push origin feature/amazing-feature`)
 7. Open a Pull Request
@@ -1089,6 +1003,7 @@ Contributions are welcome! Please follow these steps:
 - [OpenTUI](https://github.com/sst/opentui) for zero-flicker terminal UI framework
 - [Solid.js](https://www.solidjs.com/) for reactive rendering
 - [LiteLLM](https://github.com/BerriAI/litellm) for pricing data
+- [napi-rs](https://napi.rs/) for Rust/Node.js bindings
 - [github-contributions-canvas](https://github.com/sallar/github-contributions-canvas) for 2D graph reference
 
 ## License

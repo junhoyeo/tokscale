@@ -832,6 +832,7 @@ const MODEL_COLORS: Record<string, string> = {
   "gemini": "#3B82F6",
   "deepseek": "#06B6D4",
   "codex": "#F59E0B",
+  "kimi": "#A855F7",
 };
 
 function getModelColor(modelName: string): string {

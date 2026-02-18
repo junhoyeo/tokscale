@@ -53,6 +53,7 @@
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | `~/.kimi/sessions/` | ✅ 支持 |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
 
@@ -77,7 +78,6 @@
   - [TUI 功能](#tui-功能)
   - [按平台筛选](#按平台筛选)
   - [日期筛选](#日期筛选)
-  - [模型分组](#模型分组)
   - [价格查询](#价格查询)
   - [社交平台命令](#社交平台命令)
   - [Cursor IDE 命令](#cursor-ide-命令)
@@ -115,10 +115,10 @@
   - 9 种颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染（原生 Zig 引擎）
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw 和 Pi 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw、Pi 和 Kimi CLI 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
-- **100% Rust CLI** - 整个 CLI 由 Rust 编写，提供最佳性能和最少依赖
+- **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
 - **Web 可视化** - 带 2D 和 3D 视图的交互式贡献图
 - **灵活筛选** - 按平台、日期范围或年份筛选
 - **导出为 JSON** - 为外部可视化工具生成数据
@@ -140,13 +140,13 @@ bunx tokscale@latest
 
 > **需要 [Bun](https://bun.sh/)**：交互式 TUI 使用 OpenTUI 的原生 Zig 模块实现零闪烁渲染，这需要 Bun 运行时。
 
-> **包结构**：`tokscale` 是一个别名包（类似 [`swc`](https://www.npmjs.com/package/swc)），它安装 `@tokscale/cli`。CLI 是通过平台特定的 npm 包分发的纯 Rust 二进制文件。
+> **包结构**：`tokscale` 是一个别名包（类似 [`swc`](https://www.npmjs.com/package/swc)），它安装 `@tokscale/cli`。两者都安装包含原生 Rust 核心（`@tokscale/core`）的相同 CLI。
 
 
 ### 先决条件
 
 - [Bun](https://bun.sh/)（必需）
-- （可选）从源码构建 CLI 的 Rust 工具链
+- （可选）从源码构建原生模块的 Rust 工具链
 
 ### 开发环境设置
 
@@ -168,6 +168,17 @@ bun run cli
 ```
 
 > **注意**：`bun run cli` 用于本地开发。通过 `bunx tokscale` 安装后，命令直接运行。下面的使用部分显示已安装的二进制命令。
+
+### 构建原生模块
+
+原生 Rust 模块是 CLI 操作**必需**的。它通过并行文件扫描和 SIMD JSON 解析提供约 10 倍的处理速度：
+
+```bash
+# 构建原生核心（从仓库根目录运行）
+bun run build:core
+```
+
+> **注意**：通过 `bunx tokscale@latest` 安装时，原生二进制文件已预构建并包含在内。仅在本地开发时才需要从源码构建。
 
 ## 使用方法
 
@@ -207,7 +218,7 @@ tokscale models --json > report.json   # 保存到文件
   - `1-4` 或 `←/→/Tab`：切换视图
   - `↑/↓`：导航列表
   - `c/n/t`：按成本/名称/Token 排序
-  - `1-9`：切换来源（OpenCode/Claude/Codex/Cursor/Gemini/Amp/Droid/OpenClaw/Pi）
+  - `1-0`：切换来源（OpenCode/Claude/Codex/Cursor/Gemini/Amp/Droid/OpenClaw/Pi/Kimi）
   - `p`：循环 9 种颜色主题
   - `r`：刷新数据
   - `e`：导出为 JSON
@@ -233,6 +244,9 @@ tokscale --gemini
 
 # 仅显示 Cursor IDE 使用量（需要先 `tokscale cursor login`）
 tokscale --cursor
+
+# 仅显示 Kimi CLI 使用量
+tokscale --kimi
 
 # 组合筛选
 tokscale --opencode --claude
@@ -260,29 +274,6 @@ tokscale monthly --month --benchmark
 ```
 
 > **注意**：日期筛选器使用本地时区。`--since` 和 `--until` 都是包含的。
-
-### 模型分组
-
-通过 `--group-by` 标志控制 `--light` 和 `--json` 输出中的模型分组方式：
-
-```bash
-# 仅按模型分组（合并所有客户端/提供商）
-tokscale models --light --group-by model
-
-# 按客户端 + 模型分组（默认）
-tokscale models --light --group-by client,model
-
-# 按客户端 + 提供商 + 模型分组（最详细）
-tokscale models --light --group-by client,provider,model
-```
-
-| 策略 | 列 | 描述 |
-|----------|---------|-------------|
-| `model` | Clients, Providers, Model | 合并每个模型在所有客户端和提供商中的使用量 |
-| `client,model` | Client, Provider, Model, Resolved, Input, Output, Cache, Total, Cost | 默认。显示每个客户端的模型细分 |
-| `client,provider,model` | Client, Provider, Model, Resolved, Input, Output, Cache, Total, Cost | 最精细。在每个客户端内按提供商分离 |
-
-> **注意**：具有不同日期后缀的模型（如 `claude-sonnet-4-20250514` vs `claude-sonnet-4-20250415`）或版本分隔符不同的模型（`3.5` vs `3-5`）在聚合时会自动标准化和合并。
 
 ### 价格查询
 
@@ -396,8 +387,6 @@ tokscale cursor logout --all --purge-cache
 
 ### 示例输出（`--light` 版本）
 
-`--light` 表格根据 `--group-by` 策略显示不同的列。默认（`client,model`）显示：**Client**、**Provider**、**Model**、**Resolved**（用于定价的标准化模型名称）、**Input**、**Output**、**Cache Write**、**Cache Read**、**Total** 和 **Cost**。
-
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
 
 ### 环境变量
@@ -489,7 +478,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Cursor、Gemini、Amp、Droid、OpenClaw、Pi）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Cursor、Gemini、Amp、Droid、OpenClaw、Pi、Kimi）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -584,8 +573,8 @@ cargo --version
 按照[开发环境设置](#开发环境设置)后，您可以：
 
 ```bash
-# 构建 Rust CLI（可选 - 仅本地开发需要）
-cargo build --release -p tokscale-cli
+# 构建原生模块（可选但推荐）
+bun run build:core
 
 # 以开发模式运行（启动 TUI）
 cd packages/cli && bun src/cli.ts
@@ -602,21 +591,40 @@ cd packages/cli && bun src/cli.ts --light
 | 脚本 | 描述 |
 |--------|-------------|
 | `bun run cli` | 开发模式运行 CLI（使用 Bun 的 TUI） |
+| `bun run build:core` | 构建原生 Rust 模块（发布版） |
 | `bun run build:cli` | 将 CLI TypeScript 构建到 dist/ |
+| `bun run build` | 同时构建 core 和 CLI |
 | `bun run dev:frontend` | 运行前端开发服务器 |
-| `cargo build -p tokscale-cli` | 构建 Rust CLI 二进制文件 |
 
 **特定包脚本**（从包目录内）：
 - `packages/cli`：`bun run dev`、`bun run tui`
-- `crates/tokscale-cli`：`cargo build`、`cargo test`、`cargo bench`
+- `packages/core`：`bun run build:debug`、`bun run test`、`bun run bench`
 
 **注意**：此项目使用 **Bun** 作为包管理器和运行时。TUI 需要 Bun，因为 OpenTUI 的原生模块。
 
 ### 测试
 
 ```bash
-# 测试 Rust 工作区
-cargo test --workspace
+# 测试原生模块（Rust）
+cd packages/core
+bun run test:rust      # Cargo 测试
+bun run test           # Node.js 集成测试
+bun run test:all       # 两者都
+```
+
+### 原生模块开发
+
+```bash
+cd packages/core
+
+# 调试模式构建（编译更快）
+bun run build:debug
+
+# 发布模式构建（优化版）
+bun run build
+
+# 运行 Rust 基准测试
+bun run bench
 ```
 
 ### 图表命令选项
@@ -684,7 +692,7 @@ tokscale graph --output packages/frontend/public/my-data.json
 cd packages/benchmarks && bun run generate
 
 # 运行 Rust 基准测试
-cd crates/tokscale-cli && cargo bench
+cd packages/core && bun run bench
 ```
 
 </details>
@@ -732,6 +740,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Cursor | API 同步 | API 同步 | 通过 API 获取数据，缓存在 `%USERPROFILE%\.config\tokscale\cursor-cache\` |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 所有平台使用相同路径 |
 | Pi | `~/.pi/` | `%USERPROFILE%\.pi\` | 所有平台使用相同路径 |
+| Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | 所有平台使用相同路径 |
 
 > **注意**：在 Windows 上，`~` 扩展为 `%USERPROFILE%`（例如 `C:\Users\用户名`）。这些工具故意使用 Unix 风格的路径（如 `.local/share`）而不是 Windows 原生路径（如 `%APPDATA%`），以实现跨平台一致性。
 
@@ -904,6 +913,16 @@ Cursor 数据使用您的会话令牌从 Cursor API 获取并本地缓存。运�
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
 ```
 
+### Kimi CLI
+
+位置：`~/.kimi/sessions/{GROUP_ID}/{SESSION_UUID}/wire.jsonl`
+
+包含 StatusUpdate 消息的 wire.jsonl 格式：
+```json
+{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1770983426.420942, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1562, "output": 2463, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "chatcmpl-xxx"}}}
+```
+
 ## 定价
 
 Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)获取实时价格。
@@ -931,7 +950,7 @@ Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blo
 1. Fork 仓库
 2. 创建功能分支（`git checkout -b feature/amazing-feature`）
 3. 进行更改
-4. 运行测试（`cargo test --workspace`）
+4. 运行测试（`cd packages/core && bun run test:all`）
 5. 提交更改（`git commit -m 'Add amazing feature'`）
 6. 推送到分支（`git push origin feature/amazing-feature`）
 7. 打开 Pull Request
@@ -949,6 +968,7 @@ Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blo
 - [OpenTUI](https://github.com/sst/opentui) 零闪烁终端 UI 框架
 - [Solid.js](https://www.solidjs.com/) 响应式渲染
 - [LiteLLM](https://github.com/BerriAI/litellm) 价格数据
+- [napi-rs](https://napi.rs/) Rust/Node.js 绑定
 - [github-contributions-canvas](https://github.com/sallar/github-contributions-canvas) 2D 图表参考
 
 ## 许可证

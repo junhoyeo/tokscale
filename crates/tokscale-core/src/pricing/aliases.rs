@@ -9,6 +9,7 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("k2p5", "kimi-k2-thinking");
     m.insert("k2-p5", "kimi-k2-thinking");
     m.insert("kimi-k2.5-thinking", "kimi-k2-thinking");
+    m.insert("kimi-for-coding", "kimi-k2.5");
     m
 });
 

@@ -79,7 +79,7 @@ function createMockSubmissionData(overrides: Partial<{
         reasoning: 0,
       },
       sources: d.sources.map(src => ({
-        source: src.source as 'opencode' | 'claude' | 'codex' | 'gemini' | 'cursor' | 'amp' | 'droid' | 'openclaw' | 'pi',
+        source: src.source as 'opencode' | 'claude' | 'codex' | 'gemini' | 'cursor' | 'amp' | 'droid' | 'openclaw' | 'pi' | 'kimi',
         modelId: src.modelId,
         tokens: src.tokens,
         cost: src.cost,
@@ -118,6 +118,13 @@ describe('POST /api/submit - Source-Level Merge', () => {
 
       expect(data.summary.sources).toContain('pi');
       expect(data.contributions[0].sources[0].source).toBe('pi');
+    });
+
+    it('should support kimi source in submission payload', () => {
+      const data = createMockSubmissionData({ sources: ['kimi'] });
+
+      expect(data.summary.sources).toContain('kimi');
+      expect(data.contributions[0].sources[0].source).toBe('kimi');
     });
   });
 
