@@ -116,7 +116,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링 (네이티브 Zig 엔진)
 - **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, Pi 사용량 통합 추적
-- **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산
+- **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **100% Rust CLI** - 전체 CLI가 Rust로 작성되어 최고의 성능과 최소한의 의존성
 - **웹 시각화** - 2D 및 3D 뷰의 인터랙티브 기여 그래프
@@ -307,7 +307,8 @@ tokscale pricing "claude-3-5-sonnet" --provider litellm
 3. **티어 접미사 제거** - 품질 티어 제거 (`gpt-5.2-xhigh` → `gpt-5.2`)
 4. **버전 정규화** - 버전 형식 처리 (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
 5. **프로바이더 접두사 매칭** - 일반 접두사 시도 (`anthropic/`, `openai/` 등)
-6. **퍼지 매칭** - 부분 모델 이름에 대한 단어 경계 매칭
+6. **Cursor 모델 가격** - LiteLLM/OpenRouter에 아직 없는 모델의 하드코딩 가격 (예: `gpt-5.3-codex`)
+7. **퍼지 매칭** - 부분 모델 이름에 대한 단어 경계 매칭
 
 **프로바이더 우선순위:**
 
@@ -905,6 +906,10 @@ model_change 이벤트와 어시스턴트 메시지가 포함된 세션 JSONL �
 ## 가격
 
 Tokscale은 [LiteLLM의 가격 데이터베이스](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)에서 실시간 가격을 가져옵니다.
+
+**동적 폴백**: LiteLLM에 아직 없는 모델(예: 최근 출시된 모델)은 [OpenRouter의 엔드포인트 API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)에서 자동으로 가격을 가져옵니다.
+
+**Cursor 모델 가격**: LiteLLM과 OpenRouter 모두에 없는 최신 모델(예: `gpt-5.3-codex`)은 [Cursor 모델 문서](https://cursor.com/en-US/docs/models)에서 가져온 하드코딩 가격을 사용합니다. 이 오버라이드는 모든 업스트림 소스 다음에, 퍼지 매칭 이전에 확인되므로 실제 업스트림 가격이 사용 가능해지면 자동으로 양보합니다.
 
 **캐싱**: 가격 데이터는 1시간 TTL로 디스크에 캐시되어 빠른 시작을 보장합니다:
 - LiteLLM 캐시: `~/.cache/tokscale/pricing-litellm.json`

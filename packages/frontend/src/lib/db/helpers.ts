@@ -125,3 +125,15 @@ export function sourceContributionToBreakdownData(
     messages: source.messages,
   };
 }
+
+/**
+ * Merge two nullable timestamps, keeping the earliest non-null value.
+ * Used by both submit and profile aggregation to maintain consistent merge semantics.
+ */
+export function mergeTimestampMs(
+  existing: number | null | undefined,
+  incoming: number | null | undefined,
+): number | null {
+  if (incoming != null && existing != null) return Math.min(existing, incoming);
+  return incoming ?? existing ?? null;
+}

@@ -1,0 +1,38 @@
+{
+  "name": "@tokscale/core-linux-x64-gnu",
+  "version": "1.3.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "tokscale-core.linux-x64-gnu.node",
+  "files": [
+    "tokscale-core.linux-x64-gnu.node"
+  ],
+  "description": "Native Rust core for tokscale CLI - high-performance session parsing",
+  "keywords": [
+    "napi-rs",
+    "rust",
+    "tokscale",
+    "performance",
+    "native"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">= 16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/junhoyeo/tokscale.git",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

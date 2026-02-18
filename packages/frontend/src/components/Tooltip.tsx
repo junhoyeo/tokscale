@@ -3,7 +3,8 @@
 import { useRef } from "react";
 import styled from "styled-components";
 import type { DailyContribution, TooltipPosition, GraphColorPalette } from "@/lib/types";
-import { formatDate, formatCurrency, formatTokenCount } from "@/lib/utils";
+import { formatCurrency, formatTokenCount } from "@/lib/utils";
+import { formatContributionDate } from "@/lib/date-utils";
 
 interface TooltipProps {
   day: DailyContribution | null;
@@ -146,7 +147,7 @@ export function Tooltip({ day, position, visible, palette }: TooltipProps) {
         }}
       >
         <DateText style={{ color: "var(--color-fg-default)" }}>
-          {formatDate(day.date)}
+          {formatContributionDate(day)}
         </DateText>
 
         <Divider style={{ borderColor: "var(--color-border-default)" }} />

@@ -121,7 +121,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - Real-time filtering and sorting
   - Zero flicker rendering (native Zig engine)
 - **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, and Pi
-- **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback for new models
+- **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **100% Rust CLI** - Entire CLI written in Rust for maximum performance and minimal dependencies
 - **Web visualization** - Interactive contribution graph with 2D and 3D views
@@ -352,7 +352,8 @@ The pricing lookup uses a multi-step resolution strategy:
 3. **Tier Suffix Stripping** - Removes quality tiers (`gpt-5.2-xhigh` → `gpt-5.2`)
 4. **Version Normalization** - Handles version formats (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
 5. **Provider Prefix Matching** - Tries common prefixes (`anthropic/`, `openai/`, etc.)
-6. **Fuzzy Matching** - Word-boundary matching for partial model names
+6. **Cursor Model Pricing** - Hardcoded pricing for models not yet in LiteLLM/OpenRouter (e.g., `gpt-5.3-codex`)
+7. **Fuzzy Matching** - Word-boundary matching for partial model names
 
 **Provider Preference:**
 
@@ -1048,6 +1049,8 @@ JSONL format with session header and message entries:
 Tokscale fetches real-time pricing from [LiteLLM's pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
 
 **Dynamic Fallback**: For models not yet available in LiteLLM (e.g., recently released models), Tokscale automatically fetches pricing from [OpenRouter's endpoints API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints). This ensures you get accurate pricing from the model's author provider (e.g., Z.AI for glm-4.7) without waiting for LiteLLM updates.
+
+**Cursor Model Pricing**: For very recently released models not yet in either LiteLLM or OpenRouter (e.g., `gpt-5.3-codex`), Tokscale includes hardcoded pricing sourced from [Cursor's model docs](https://cursor.com/en-US/docs/models). These overrides are checked after all upstream sources but before fuzzy matching, so they automatically yield once real upstream pricing becomes available.
 
 **Caching**: Pricing data is cached to disk with 1-hour TTL for fast startup:
 - LiteLLM cache: `~/.cache/tokscale/pricing-litellm.json`

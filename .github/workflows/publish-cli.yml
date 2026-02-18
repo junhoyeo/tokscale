@@ -99,6 +99,12 @@ jobs:
           echo "  tokscale:        $(jq -r '.version' packages/tokscale/package.json)"
           echo "  cli -> darwin arm64: $(jq -r '.optionalDependencies["@tokscale/cli-darwin-arm64"]' packages/cli/package.json)"
           echo "  tokscale -> cli: $(jq -r '.dependencies["@tokscale/cli"]' packages/tokscale/package.json)"
+          echo "  Platform packages:"
+          for dir in packages/core/npm/*/; do
+            if [ -f "${dir}package.json" ]; then
+              echo "    $(basename $dir): $(jq -r '.version' "${dir}package.json")"
+            fi
+          done
           
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "📝 Version bump prepared (will commit after successful publish)"

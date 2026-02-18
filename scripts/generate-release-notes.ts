@@ -18,6 +18,7 @@ interface Commit {
 
 interface PRInfo {
   number: number;
+  title: string;
   authorLogin: string;
 }
 
@@ -101,7 +102,7 @@ function resolveGitHubUsername(email: string, fallbackName: string): string {
 }
 
 function findAssociatedPR(commitHash: string): PRInfo | null {
-  const result = runJson<Array<{ number: number; author?: { login?: string } }>>(
+  const result = runJson<Array<{ number: number; title: string; author?: { login?: string } }>>(
     "gh",
     [
       "pr",
@@ -113,7 +114,7 @@ function findAssociatedPR(commitHash: string): PRInfo | null {
       "--search",
       commitHash,
       "--json",
-      "number,author",
+      "number,title,author",
       "--limit",
       "1",
     ],
@@ -121,7 +122,7 @@ function findAssociatedPR(commitHash: string): PRInfo | null {
   );
   const pr = result?.[0];
   if (!pr?.number || !pr.author?.login) return null;
-  return { number: pr.number, authorLogin: pr.author.login };
+  return { number: pr.number, title: pr.title, authorLogin: pr.author.login };
 }
 
 function isFirstContributionAfter(login: string, thresholdDate: string): ContributorInfo | null {
@@ -163,15 +164,27 @@ function generateReleaseNotes(version: string): string {
   const entries: ChangeEntry[] = [];
   const candidateLogins = new Set<string>();
 
+  const seenPRs = new Set<number>();
+
   for (const commit of commits) {
     const prInfo = findAssociatedPR(commit.hash);
+
+    if (prInfo?.number && seenPRs.has(prInfo.number)) {
+      // Skip duplicate commits from the same PR
+      continue;
+    }
+
+    if (prInfo?.number) {
+      seenPRs.add(prInfo.number);
+    }
+
     const author = prInfo
       ? `@${prInfo.authorLogin}`
       : resolveGitHubUsername(commit.authorEmail, commit.authorName);
 
     entries.push({
       hash: commit.hash,
-      message: commit.message,
+      message: prInfo?.title || commit.message,
       author,
       prNumber: prInfo?.number,
     });

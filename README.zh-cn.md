@@ -116,7 +116,7 @@
   - 实时筛选和排序
   - 零闪烁渲染（原生 Zig 引擎）
 - **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw 和 Pi 的使用情况
-- **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存
+- **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **100% Rust CLI** - 整个 CLI 由 Rust 编写，提供最佳性能和最少依赖
 - **Web 可视化** - 带 2D 和 3D 视图的交互式贡献图
@@ -308,7 +308,8 @@ tokscale pricing "claude-3-5-sonnet" --provider litellm
 3. **层级后缀剥离** - 移除质量层级（`gpt-5.2-xhigh` → `gpt-5.2`）
 4. **版本标准化** - 处理版本格式（`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`）
 5. **提供商前缀匹配** - 尝试常见前缀（`anthropic/`、`openai/` 等）
-6. **模糊匹配** - 部分模型名称的词边界匹配
+6. **Cursor 模型定价** - LiteLLM/OpenRouter 中尚未收录的模型的硬编码定价（例如：`gpt-5.3-codex`）
+7. **模糊匹配** - 部分模型名称的词边界匹配
 
 **提供商优先级：**
 
@@ -906,6 +907,10 @@ Cursor 数据使用您的会话令牌从 Cursor API 获取并本地缓存。运�
 ## 定价
 
 Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)获取实时价格。
+
+**动态回退**：对于 LiteLLM 中尚未收录的模型（例如最近发布的模型），Tokscale 会自动从 [OpenRouter 的端点 API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints) 获取定价。
+
+**Cursor 模型定价**：对于 LiteLLM 和 OpenRouter 中都尚未收录的最新模型（例如 `gpt-5.3-codex`），Tokscale 使用从 [Cursor 模型文档](https://cursor.com/en-US/docs/models)获取的硬编码定价。这些覆盖在所有上游来源之后、模糊匹配之前检查，因此当真正的上游定价可用时会自动让步。
 
 **缓存**：价格数据以 1 小时 TTL 缓存到磁盘，确保快速启动：
 - LiteLLM 缓存：`~/.cache/tokscale/pricing-litellm.json`

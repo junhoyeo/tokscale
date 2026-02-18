@@ -2,7 +2,8 @@
 
 import styled from "styled-components";
 import type { DailyContribution, GraphColorPalette, SourceType } from "@/lib/types";
-import { formatDateFull, formatCurrency, formatTokenCount, groupSourcesByType, sortSourcesByCost } from "@/lib/utils";
+import { formatCurrency, formatTokenCount, groupSourcesByType, sortSourcesByCost } from "@/lib/utils";
+import { formatContributionDateFull } from "@/lib/date-utils";
 import { SOURCE_DISPLAY_NAMES, SOURCE_COLORS } from "@/lib/constants";
 import { SourceLogo } from "./SourceLogo";
 
@@ -128,7 +129,7 @@ export function BreakdownPanel({ day, onClose, palette }: BreakdownPanelProps) {
     >
       <PanelHeader style={{ borderColor: "var(--color-border-default)" }}>
         <PanelTitle style={{ color: "var(--color-fg-default)" }}>
-          {formatDateFull(day.date)} - Detailed Breakdown
+          {formatContributionDateFull(day)} - Detailed Breakdown
         </PanelTitle>
         <CloseButton
           onClick={onClose}

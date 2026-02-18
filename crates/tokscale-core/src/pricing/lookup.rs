@@ -71,11 +71,13 @@ struct CachedResult {
 pub struct PricingLookup {
     litellm: HashMap<String, ModelPricing>,
     openrouter: HashMap<String, ModelPricing>,
+    cursor: HashMap<String, ModelPricing>,
     litellm_keys: Vec<String>,
     openrouter_keys: Vec<String>,
     litellm_lower: HashMap<String, String>,
     openrouter_lower: HashMap<String, String>,
     openrouter_model_part: HashMap<String, String>,
+    cursor_lower: HashMap<String, String>,
     lookup_cache: RwLock<HashMap<String, Option<CachedResult>>>,
 }
 
@@ -89,6 +91,7 @@ impl PricingLookup {
     pub fn new(
         litellm: HashMap<String, ModelPricing>,
         openrouter: HashMap<String, ModelPricing>,
+        cursor: HashMap<String, ModelPricing>,
     ) -> Self {
         let mut litellm_keys: Vec<String> = litellm.keys().cloned().collect();
         litellm_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
@@ -113,14 +116,21 @@ impl PricingLookup {
             }
         }
 
+        let mut cursor_lower = HashMap::with_capacity(cursor.len());
+        for key in cursor.keys() {
+            cursor_lower.insert(key.to_lowercase(), key.clone());
+        }
+
         Self {
             litellm,
             openrouter,
+            cursor,
             litellm_keys,
             openrouter_keys,
             litellm_lower,
             openrouter_lower,
             openrouter_model_part,
+            cursor_lower,
             lookup_cache: RwLock::new(HashMap::with_capacity(64)),
         }
     }
@@ -231,6 +241,15 @@ impl PricingLookup {
                 return Some(result);
             }
             if let Some(result) = self.prefix_match_openrouter(&version_normalized) {
+                return Some(result);
+            }
+        }
+
+        if let Some(result) = self.exact_match_cursor(model_id) {
+            return Some(result);
+        }
+        if let Some(version_normalized) = normalize_version_separator(model_id) {
+            if let Some(result) = self.exact_match_cursor(&version_normalized) {
                 return Some(result);
             }
         }
@@ -361,6 +380,28 @@ impl PricingLookup {
         None
     }
 
+    fn exact_match_cursor(&self, model_id: &str) -> Option<LookupResult> {
+        if let Some(key) = self.cursor_lower.get(model_id) {
+            return Some(LookupResult {
+                pricing: self.cursor.get(key).unwrap().clone(),
+                source: "Cursor".into(),
+                matched_key: key.clone(),
+            });
+        }
+        if let Some(model_part) = model_id.split('/').last() {
+            if model_part != model_id {
+                if let Some(key) = self.cursor_lower.get(model_part) {
+                    return Some(LookupResult {
+                        pricing: self.cursor.get(key).unwrap().clone(),
+                        source: "Cursor".into(),
+                        matched_key: key.clone(),
+                    });
+                }
+            }
+        }
+        None
+    }
+
     fn prefix_match_litellm(&self, model_id: &str) -> Option<LookupResult> {
         for prefix in PROVIDER_PREFIXES {
             let key = format!("{}{}", prefix, model_id);
@@ -480,6 +521,24 @@ impl PricingLookup {
 
         input_cost + output_cost + cache_read_cost + cache_write_cost
     }
+}
+
+pub fn compute_cost(
+    pricing: &ModelPricing,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+) -> f64 {
+    let safe_price = |opt: Option<f64>| opt.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+
+    let input_cost = input as f64 * safe_price(pricing.input_cost_per_token);
+    let output_cost = (output + reasoning) as f64 * safe_price(pricing.output_cost_per_token);
+    let cache_read_cost = cache_read as f64 * safe_price(pricing.cache_read_input_token_cost);
+    let cache_write_cost = cache_write as f64 * safe_price(pricing.cache_creation_input_token_cost);
+
+    input_cost + output_cost + cache_read_cost + cache_write_cost
 }
 
 fn extract_model_family(model_id: &str) -> String {
@@ -1091,7 +1150,7 @@ mod tests {
     }
 
     fn create_lookup() -> PricingLookup {
-        PricingLookup::new(mock_litellm(), mock_openrouter())
+        PricingLookup::new(mock_litellm(), mock_openrouter(), HashMap::new())
     }
 
     // =========================================================================
@@ -1490,7 +1549,7 @@ mod tests {
         );
         // Note: gpt-5-codex is NOT in the pricing data
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         // Looking up gpt-5-codex should fall back to gpt-5
         let result = lookup.lookup("gpt-5-codex").unwrap();
@@ -1517,7 +1576,7 @@ mod tests {
             },
         );
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         // gpt-5-codex-high should strip -high first, then fall back from gpt-5-codex to gpt-5
         let result = lookup.lookup("gpt-5-codex-high").unwrap();
@@ -1553,7 +1612,7 @@ mod tests {
             },
         );
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         // Should use the exact match, not fall back
         let result = lookup.lookup("gpt-5-codex").unwrap();
@@ -1657,7 +1716,7 @@ mod tests {
             },
         );
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
         let result = lookup.lookup("grok-code").unwrap();
 
         // Must prefer xai (original provider) over azure_ai (reseller)
