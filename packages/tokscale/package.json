@@ -1,6 +1,6 @@
 {
   "name": "tokscale",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "description": "Alias for @tokscale/cli — A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
   "type": "module",
   "main": "index.js",
@@ -27,7 +27,7 @@
     "cli"
   ],
   "dependencies": {
-    "@tokscale/cli": "1.2.9"
+    "@tokscale/cli": "1.2.10"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",

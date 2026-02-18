@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/cli",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "description": "A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
   "license": "MIT",
   "type": "module",
@@ -31,7 +31,7 @@
     "@opentui/core": "0.1.60",
     "@opentui/solid": "^0.1.60",
     "@resvg/resvg-js": "^2.6.2",
-    "@tokscale/core": "1.2.9",
+    "@tokscale/core": "1.2.10",
     "cli-table3": "^0.6.5",
     "clipboardy": "^5.0.2",
     "commander": "^14.0.2",
