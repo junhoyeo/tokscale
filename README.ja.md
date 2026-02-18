@@ -115,7 +115,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - リアルタイムフィルタリングとソート
   - ゼロフリッカーレンダリング（ネイティブZigエンジン）
 - **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw、Pi全体の使用量追跡
-- **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得
+- **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得；OpenRouter自動フォールバックと新規モデル向けCursor価格サポート
 - **詳細な内訳** - 入力、出力、キャッシュ読み書き、推論トークン追跡
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
 - **Web可視化** - 2Dと3Dビューのインタラクティブ貢献グラフ
@@ -295,7 +295,8 @@ tokscale pricing "claude-3-5-sonnet" --provider litellm
 3. **ティアサフィックス除去** - 品質ティアを削除（`gpt-5.2-xhigh` → `gpt-5.2`）
 4. **バージョン正規化** - バージョン形式を処理（`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`）
 5. **プロバイダープレフィックスマッチング** - 一般的なプレフィックスを試行（`anthropic/`、`openai/`など）
-6. **ファジーマッチング** - 部分モデル名の単語境界マッチング
+6. **Cursorモデル価格** - LiteLLM/OpenRouterにまだ存在しないモデルのハードコード価格（例：`gpt-5.3-codex`）
+7. **ファジーマッチング** - 部分モデル名の単語境界マッチング
 
 **プロバイダー優先順位：**
 
@@ -910,6 +911,10 @@ model_changeイベントとアシスタントメッセージを含むセッシ�
 ## 価格
 
 Tokscaleは[LiteLLMの価格データベース](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)からリアルタイム価格を取得します。
+
+**ダイナミックフォールバック**: LiteLLMにまだ存在しないモデル（例：最近リリースされたモデル）は、[OpenRouterのエンドポイントAPI](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)から自動的に価格を取得します。
+
+**Cursorモデル価格**: LiteLLMとOpenRouterの両方にまだ存在しない最新モデル（例：`gpt-5.3-codex`）は、[Cursorモデルドキュメント](https://cursor.com/en-US/docs/models)から取得したハードコード価格を使用します。これらのオーバーライドはすべてのアップストリームソースの後、ファジーマッチングの前にチェックされるため、実際のアップストリーム価格が利用可能になると自動的に優先されます。
 
 **キャッシュ**: 価格データは1時間TTLでディスクにキャッシュされ、高速な起動を確保します：
 - LiteLLMキャッシュ: `~/.cache/tokscale/pricing-litellm.json`
