@@ -1629,7 +1629,7 @@ async function handlePricingCommand(modelId: string, options: { json?: boolean; 
       }, null, 2));
     } else {
       const sourceLower = result.source.toLowerCase();
-      const sourceLabel = sourceLower === "litellm" ? pc.blue("LiteLLM") : sourceLower === "fallback" ? pc.yellow("Fallback") : pc.magenta("OpenRouter");
+      const sourceLabel = sourceLower === "litellm" ? pc.blue("LiteLLM") : sourceLower === "cursor" ? pc.yellow("Cursor") : pc.magenta("OpenRouter");
       const inputCost = result.pricing.input_cost_per_token ?? 0;
       const outputCost = result.pricing.output_cost_per_token ?? 0;
       const cacheReadCost = result.pricing.cache_read_input_token_cost;

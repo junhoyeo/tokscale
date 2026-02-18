@@ -69,13 +69,13 @@ struct CachedResult {
 pub struct PricingLookup {
     litellm: HashMap<String, ModelPricing>,
     openrouter: HashMap<String, ModelPricing>,
-    fallback: HashMap<String, ModelPricing>,
+    cursor: HashMap<String, ModelPricing>,
     litellm_keys: Vec<String>,
     openrouter_keys: Vec<String>,
     litellm_lower: HashMap<String, String>,
     openrouter_lower: HashMap<String, String>,
     openrouter_model_part: HashMap<String, String>,
-    fallback_lower: HashMap<String, String>,
+    cursor_lower: HashMap<String, String>,
     lookup_cache: RwLock<HashMap<String, Option<CachedResult>>>,
 }
 
@@ -89,7 +89,7 @@ impl PricingLookup {
     pub fn new(
         litellm: HashMap<String, ModelPricing>,
         openrouter: HashMap<String, ModelPricing>,
-        fallback: HashMap<String, ModelPricing>,
+        cursor: HashMap<String, ModelPricing>,
     ) -> Self {
         let mut litellm_keys: Vec<String> = litellm.keys().cloned().collect();
         litellm_keys.sort_by(|a, b| b.len().cmp(&a.len()));
@@ -114,21 +114,21 @@ impl PricingLookup {
             }
         }
 
-        let mut fallback_lower = HashMap::with_capacity(fallback.len());
-        for key in fallback.keys() {
-            fallback_lower.insert(key.to_lowercase(), key.clone());
+        let mut cursor_lower = HashMap::with_capacity(cursor.len());
+        for key in cursor.keys() {
+            cursor_lower.insert(key.to_lowercase(), key.clone());
         }
 
         Self {
             litellm,
             openrouter,
-            fallback,
+            cursor,
             litellm_keys,
             openrouter_keys,
             litellm_lower,
             openrouter_lower,
             openrouter_model_part,
-            fallback_lower,
+            cursor_lower,
             lookup_cache: RwLock::new(HashMap::with_capacity(64)),
         }
     }
@@ -240,8 +240,13 @@ impl PricingLookup {
             }
         }
 
-        if let Some(result) = self.exact_match_fallback(model_id) {
+        if let Some(result) = self.exact_match_cursor(model_id) {
             return Some(result);
+        }
+        if let Some(version_normalized) = normalize_version_separator(model_id) {
+            if let Some(result) = self.exact_match_cursor(&version_normalized) {
+                return Some(result);
+            }
         }
 
         if !is_fuzzy_eligible(model_id) {
@@ -367,11 +372,11 @@ impl PricingLookup {
         None
     }
 
-    fn exact_match_fallback(&self, model_id: &str) -> Option<LookupResult> {
-        if let Some(key) = self.fallback_lower.get(model_id) {
+    fn exact_match_cursor(&self, model_id: &str) -> Option<LookupResult> {
+        if let Some(key) = self.cursor_lower.get(model_id) {
             return Some(LookupResult {
-                pricing: self.fallback.get(key).unwrap().clone(),
-                source: "Fallback".into(),
+                pricing: self.cursor.get(key).unwrap().clone(),
+                source: "Cursor".into(),
                 matched_key: key.clone(),
             });
         }

@@ -29,7 +29,7 @@ pub struct PricingService {
 impl PricingService {
     pub fn new(litellm_data: HashMap<String, ModelPricing>, openrouter_data: HashMap<String, ModelPricing>) -> Self {
         Self {
-            lookup: PricingLookup::new(litellm_data, openrouter_data, Self::build_fallback_overrides()),
+            lookup: PricingLookup::new(litellm_data, openrouter_data, Self::build_cursor_overrides()),
         }
     }
 
@@ -45,11 +45,11 @@ impl PricingService {
         data
     }
 
-    // @keep: fallback pricing for models not yet in LiteLLM/OpenRouter.
+    // @keep: Cursor-sourced pricing for models not yet in LiteLLM/OpenRouter.
     // Checked after exact/prefix matches but before fuzzy matching in PricingLookup,
     // so real upstream entries (including provider-prefixed like openai/gpt-5.3-codex)
     // always win. Source citations are required for audit trail.
-    fn build_fallback_overrides() -> HashMap<String, ModelPricing> {
+    fn build_cursor_overrides() -> HashMap<String, ModelPricing> {
         let entries: &[(&str, f64, f64, Option<f64>)] = &[
             // GPT-5.3 family: $1.75/$14.00 per 1M tokens, $0.175 cache read
             // Source: Cursor docs (cursor.com/en-US/docs/models), llm-stats.com
@@ -120,17 +120,17 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_returns_pricing_when_not_in_upstream() {
+    fn test_cursor_returns_pricing_when_not_in_upstream() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         let result = service.lookup_with_source("gpt-5.3-codex", None).unwrap();
-        assert_eq!(result.source, "Fallback");
+        assert_eq!(result.source, "Cursor");
         assert_eq!(result.pricing.input_cost_per_token, Some(0.00000175));
         assert_eq!(result.pricing.output_cost_per_token, Some(0.000014));
         assert_eq!(result.pricing.cache_read_input_token_cost, Some(1.75e-7));
     }
 
     #[test]
-    fn test_fallback_yields_to_litellm_exact() {
+    fn test_cursor_yields_to_litellm_exact() {
         let mut litellm = HashMap::new();
         litellm.insert("gpt-5.3-codex".into(), ModelPricing {
             input_cost_per_token: Some(0.002),
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_yields_to_openrouter_prefix() {
+    fn test_cursor_yields_to_openrouter_prefix() {
         let mut openrouter = HashMap::new();
         openrouter.insert("openai/gpt-5.3-codex".into(), ModelPricing {
             input_cost_per_token: Some(0.003),
@@ -158,14 +158,23 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_skipped_when_force_source_set() {
+    fn test_cursor_skipped_when_force_source_set() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         assert!(service.lookup_with_source("gpt-5.3-codex", Some("litellm")).is_none());
         assert!(service.lookup_with_source("gpt-5.3-codex", Some("openrouter")).is_none());
     }
 
     #[test]
-    fn test_fallback_calculate_cost() {
+    fn test_cursor_matches_after_version_normalization() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let result = service.lookup_with_source("gpt-5-3-codex", None).unwrap();
+        assert_eq!(result.source, "Cursor");
+        assert_eq!(result.matched_key, "gpt-5.3-codex");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.00000175));
+    }
+
+    #[test]
+    fn test_cursor_calculate_cost() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         let cost = service.calculate_cost("gpt-5.3-codex", 1_000_000, 100_000, 0, 0, 0);
         let expected = 1_000_000.0 * 0.00000175 + 100_000.0 * 0.000014;
