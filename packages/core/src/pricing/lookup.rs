@@ -69,11 +69,13 @@ struct CachedResult {
 pub struct PricingLookup {
     litellm: HashMap<String, ModelPricing>,
     openrouter: HashMap<String, ModelPricing>,
+    fallback: HashMap<String, ModelPricing>,
     litellm_keys: Vec<String>,
     openrouter_keys: Vec<String>,
     litellm_lower: HashMap<String, String>,
     openrouter_lower: HashMap<String, String>,
     openrouter_model_part: HashMap<String, String>,
+    fallback_lower: HashMap<String, String>,
     lookup_cache: RwLock<HashMap<String, Option<CachedResult>>>,
 }
 
@@ -87,6 +89,7 @@ impl PricingLookup {
     pub fn new(
         litellm: HashMap<String, ModelPricing>,
         openrouter: HashMap<String, ModelPricing>,
+        fallback: HashMap<String, ModelPricing>,
     ) -> Self {
         let mut litellm_keys: Vec<String> = litellm.keys().cloned().collect();
         litellm_keys.sort_by(|a, b| b.len().cmp(&a.len()));
@@ -111,14 +114,21 @@ impl PricingLookup {
             }
         }
 
+        let mut fallback_lower = HashMap::with_capacity(fallback.len());
+        for key in fallback.keys() {
+            fallback_lower.insert(key.to_lowercase(), key.clone());
+        }
+
         Self {
             litellm,
             openrouter,
+            fallback,
             litellm_keys,
             openrouter_keys,
             litellm_lower,
             openrouter_lower,
             openrouter_model_part,
+            fallback_lower,
             lookup_cache: RwLock::new(HashMap::with_capacity(64)),
         }
     }
@@ -228,6 +238,10 @@ impl PricingLookup {
             if let Some(result) = self.prefix_match_openrouter(&version_normalized) {
                 return Some(result);
             }
+        }
+
+        if let Some(result) = self.exact_match_fallback(model_id) {
+            return Some(result);
         }
 
         if !is_fuzzy_eligible(model_id) {
@@ -347,6 +361,17 @@ impl PricingLookup {
             return Some(LookupResult {
                 pricing: self.openrouter.get(key).unwrap().clone(),
                 source: "OpenRouter".into(),
+                matched_key: key.clone(),
+            });
+        }
+        None
+    }
+
+    fn exact_match_fallback(&self, model_id: &str) -> Option<LookupResult> {
+        if let Some(key) = self.fallback_lower.get(model_id) {
+            return Some(LookupResult {
+                pricing: self.fallback.get(key).unwrap().clone(),
+                source: "Fallback".into(),
                 matched_key: key.clone(),
             });
         }
@@ -1085,7 +1110,7 @@ mod tests {
     }
 
     fn create_lookup() -> PricingLookup {
-        PricingLookup::new(mock_litellm(), mock_openrouter())
+        PricingLookup::new(mock_litellm(), mock_openrouter(), HashMap::new())
     }
 
     // =========================================================================
@@ -1484,7 +1509,7 @@ mod tests {
         );
         // Note: gpt-5-codex is NOT in the pricing data
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         // Looking up gpt-5-codex should fall back to gpt-5
         let result = lookup.lookup("gpt-5-codex").unwrap();
@@ -1511,7 +1536,7 @@ mod tests {
             },
         );
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         // gpt-5-codex-high should strip -high first, then fall back from gpt-5-codex to gpt-5
         let result = lookup.lookup("gpt-5-codex-high").unwrap();
@@ -1547,7 +1572,7 @@ mod tests {
             },
         );
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         // Should use the exact match, not fall back
         let result = lookup.lookup("gpt-5-codex").unwrap();
@@ -1651,7 +1676,7 @@ mod tests {
             },
         );
 
-        let lookup = PricingLookup::new(litellm, HashMap::new());
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
         let result = lookup.lookup("grok-code").unwrap();
 
         // Must prefer xai (original provider) over azure_ai (reseller)
