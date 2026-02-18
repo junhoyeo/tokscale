@@ -349,7 +349,7 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
                         cache.migration_complete
                             && file_count == cache.json_file_count
                             && sessions::opencode::get_json_dir_mtime(json_dir)
-                                .map_or(false, |m| m <= cache.json_dir_mtime_secs)
+                                .map_or(false, |m| m == cache.json_dir_mtime_secs)
                     })
                 })
                 .is_some();
@@ -381,7 +381,7 @@ pub fn parse_local_sources(options: LocalParseOptions) -> napi::Result<ParsedMes
                     if let Some(mtime) = sessions::opencode::get_json_dir_mtime(json_dir) {
                         sessions::opencode::save_opencode_migration_cache(
                             &sessions::opencode::OpenCodeMigrationCache {
-                                migration_complete: json_survived == 0,
+                                migration_complete: !scan_result.opencode_files.is_empty() && json_survived == 0,
                                 json_file_count: scan_result.opencode_files.len() as u64,
                                 json_dir_mtime_secs: mtime,
                                 checked_at_secs: sessions::opencode::now_secs(),
