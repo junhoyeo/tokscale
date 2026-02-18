@@ -504,22 +504,14 @@ impl PricingLookup {
             None => return 0.0,
         };
 
-        let p = &result.pricing;
-        let safe_price =
-            |opt: Option<f64>| opt.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
-
-        // Clamp negative tokens to 0 to prevent negative costs
-        let input_clamped = input.max(0) as f64;
-        let output_clamped = output.max(0).saturating_add(reasoning.max(0)) as f64;
-        let cache_read_clamped = cache_read.max(0) as f64;
-        let cache_write_clamped = cache_write.max(0) as f64;
-
-        let input_cost = input_clamped * safe_price(p.input_cost_per_token);
-        let output_cost = output_clamped * safe_price(p.output_cost_per_token);
-        let cache_read_cost = cache_read_clamped * safe_price(p.cache_read_input_token_cost);
-        let cache_write_cost = cache_write_clamped * safe_price(p.cache_creation_input_token_cost);
-
-        input_cost + output_cost + cache_read_cost + cache_write_cost
+        compute_cost(
+            &result.pricing,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+        )
     }
 }
 

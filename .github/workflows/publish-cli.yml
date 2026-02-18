@@ -200,6 +200,11 @@ jobs:
           name: bumped-packages
           path: .
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -217,13 +222,13 @@ jobs:
           key: cli-${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('Cargo.lock') }}
 
       - uses: mlugg/setup-zig@v2
-        if: ${{ startsWith(matrix.settings.target, 'x86_64-unknown-linux') || startsWith(matrix.settings.target, 'aarch64-unknown-linux') }}
+        if: ${{ contains(matrix.settings.target, 'linux') }}
         with:
           version: 0.13.0
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
-        if: ${{ startsWith(matrix.settings.target, 'x86_64-unknown-linux') || startsWith(matrix.settings.target, 'aarch64-unknown-linux') }}
+        if: ${{ contains(matrix.settings.target, 'linux') }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:

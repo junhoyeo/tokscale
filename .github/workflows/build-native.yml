@@ -1,0 +1,125 @@
+name: Build Native (Test Only)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packages/core/**"
+      - "!packages/core/package.json"
+
+env:
+  DEBUG: napi:*
+  APP_NAME: tokscale-core
+  MACOSX_DEPLOYMENT_TARGET: "10.13"
+
+jobs:
+  build:
+    name: Build - ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: |
+              cd packages/core
+              bun run build:platform --target x86_64-apple-darwin
+              strip -x *.node
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: |
+              cd packages/core
+              bun run build:platform --target aarch64-apple-darwin
+              strip -x *.node
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: |
+              cd packages/core
+              cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17
+              cp target/x86_64-unknown-linux-gnu/release/libtokscale_core.so tokscale-core.linux-x64-gnu.node
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: |
+              cd packages/core
+              bun run build:platform --target x86_64-unknown-linux-musl -x
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: |
+              cd packages/core
+              cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.17
+              cp target/aarch64-unknown-linux-gnu/release/libtokscale_core.so tokscale-core.linux-arm64-gnu.node
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build: |
+              cd packages/core
+              bun run build:platform --target aarch64-unknown-linux-musl -x
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: |
+              cd packages/core
+              bun run build:platform
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            build: |
+              cd packages/core
+              bun run build:platform --target aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.38
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.napi-rs
+            .cargo-cache
+            packages/core/target/
+          key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('packages/core/Cargo.lock') }}
+
+      - uses: mlugg/setup-zig@v2
+        if: ${{ contains(matrix.settings.target, 'linux') }}
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        if: ${{ contains(matrix.settings.target, 'linux') }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: packages/core
+
+      - name: Build
+        run: ${{ matrix.settings.build }}
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: packages/core/*.node
+          if-no-files-found: error

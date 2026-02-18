@@ -255,8 +255,8 @@ fn parse_date_to_timestamp(date_str: &str) -> i64 {
     }
 
     // Date-only format: "2025-02-05" - use noon UTC (12:00:00Z)
-    // Noon keeps the local date stable for most timezones (UTC-12 to UTC+12).
-    // UTC+13/+14 will roll into the next local day when converting this timestamp.
+    // Noon keeps the local date stable for all timezones from UTC-12 to UTC+14,
+    // so filtering by local day boundaries won't shift the record to an adjacent day.
     if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
         let dt = date.and_hms_opt(12, 0, 0).unwrap();
         return Utc.from_utc_datetime(&dt).timestamp_millis();

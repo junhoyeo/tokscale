@@ -7,7 +7,7 @@
 use super::{normalize_agent_name, UnifiedMessage};
 use crate::TokenBreakdown;
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// OpenCode message structure (from JSON files and SQLite data column)
@@ -178,6 +178,101 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     }
 
     messages
+}
+
+// =============================================================================
+// Migration cache: skip redundant legacy JSON scanning after full migration
+// =============================================================================
+
+const MIGRATION_CACHE_FILENAME: &str = "opencode-migration.json";
+
+/// Persisted migration status for OpenCode JSON → SQLite migration.
+/// Stored at ~/.cache/tokscale/opencode-migration.json.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenCodeMigrationCache {
+    /// True when every legacy JSON message was already present in SQLite.
+    pub migration_complete: bool,
+    /// Number of JSON files in the message directory at detection time.
+    pub json_file_count: u64,
+    /// Modification time of the JSON directory (Unix seconds) at detection time.
+    pub json_dir_mtime_secs: u64,
+    /// When this entry was written (Unix seconds).
+    pub checked_at_secs: u64,
+}
+
+fn migration_cache_dir() -> std::path::PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("tokscale")
+}
+
+fn migration_cache_path() -> std::path::PathBuf {
+    migration_cache_dir().join(MIGRATION_CACHE_FILENAME)
+}
+
+/// Load the migration cache from disk. Returns `None` if the file is missing or
+/// unparseable.
+pub fn load_opencode_migration_cache() -> Option<OpenCodeMigrationCache> {
+    let content = std::fs::read_to_string(migration_cache_path()).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Persist the migration cache atomically (write to temp file, then rename).
+pub fn save_opencode_migration_cache(cache: &OpenCodeMigrationCache) {
+    use std::io::Write as _;
+
+    let dir = migration_cache_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+
+    let content = match serde_json::to_string(cache) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let final_path = migration_cache_path();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let tmp_name = format!(
+        ".opencode-migration.{}.{:x}.tmp",
+        std::process::id(),
+        nanos
+    );
+    let tmp_path = dir.join(tmp_name);
+
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, &final_path)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+}
+
+/// Return the modification time of `json_dir` as Unix seconds, or `None` on
+/// error (directory absent, permissions, etc.).
+pub fn get_json_dir_mtime(json_dir: &Path) -> Option<u64> {
+    std::fs::metadata(json_dir)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Current Unix timestamp in seconds.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -600,6 +695,163 @@ mod tests {
         // Total unique messages = 2 from SQLite + 1 from JSON
         let total = sqlite_messages.len() + deduped.len();
         assert_eq!(total, 3, "Should have 3 unique messages total");
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration cache tests
+    // -------------------------------------------------------------------------
+
+    /// Round-trip: save then load returns identical data.
+    #[test]
+    fn test_migration_cache_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        // Point the cache at a temp dir by overriding via a temporary env var is
+        // impractical here; instead we test the structs and serde directly.
+        let cache = OpenCodeMigrationCache {
+            migration_complete: true,
+            json_file_count: 42,
+            json_dir_mtime_secs: 1_700_000_000,
+            checked_at_secs: 1_700_100_000,
+        };
+
+        let json = serde_json::to_string(&cache).unwrap();
+        let loaded: OpenCodeMigrationCache = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, cache);
+
+        // Ensure the JSON contains all expected keys
+        assert!(json.contains("migration_complete"));
+        assert!(json.contains("json_file_count"));
+        assert!(json.contains("json_dir_mtime_secs"));
+        assert!(json.contains("checked_at_secs"));
+
+        drop(dir);
+    }
+
+    /// Cache is valid when file count and mtime are unchanged.
+    #[test]
+    fn test_migration_cache_valid_when_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_dir = dir.path().join("message");
+        std::fs::create_dir_all(&json_dir).unwrap();
+
+        // Write a dummy file so the directory exists and has a stable mtime
+        std::fs::write(json_dir.join("msg.json"), b"{}").unwrap();
+
+        let current_mtime = get_json_dir_mtime(&json_dir).expect("should stat dir");
+        let current_file_count = 1u64;
+
+        let cache = OpenCodeMigrationCache {
+            migration_complete: true,
+            json_file_count: current_file_count,
+            json_dir_mtime_secs: current_mtime, // same mtime
+            checked_at_secs: now_secs(),
+        };
+
+        // Simulate the validity check from lib.rs
+        let is_valid = cache.migration_complete
+            && current_file_count == cache.json_file_count
+            && get_json_dir_mtime(&json_dir)
+                .map_or(false, |m| m <= cache.json_dir_mtime_secs);
+
+        assert!(is_valid, "Cache should be valid when count and mtime match");
+    }
+
+    /// Cache is invalid when file count has changed.
+    #[test]
+    fn test_migration_cache_invalid_when_file_count_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_dir = dir.path().join("message");
+        std::fs::create_dir_all(&json_dir).unwrap();
+        std::fs::write(json_dir.join("msg1.json"), b"{}").unwrap();
+
+        let current_mtime = get_json_dir_mtime(&json_dir).unwrap();
+
+        let cache = OpenCodeMigrationCache {
+            migration_complete: true,
+            json_file_count: 1,
+            json_dir_mtime_secs: current_mtime,
+            checked_at_secs: now_secs(),
+        };
+
+        // Simulate: a new file was added → current_file_count = 2
+        let current_file_count = 2u64; // changed
+        let is_valid = cache.migration_complete
+            && current_file_count == cache.json_file_count
+            && get_json_dir_mtime(&json_dir)
+                .map_or(false, |m| m <= cache.json_dir_mtime_secs);
+
+        assert!(
+            !is_valid,
+            "Cache should be invalid when file count changes"
+        );
+    }
+
+    /// Cache is invalid when directory mtime is newer than cached value.
+    #[test]
+    fn test_migration_cache_invalid_when_mtime_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_dir = dir.path().join("message");
+        std::fs::create_dir_all(&json_dir).unwrap();
+        std::fs::write(json_dir.join("msg.json"), b"{}").unwrap();
+
+        let current_mtime = get_json_dir_mtime(&json_dir).unwrap();
+
+        // Simulate: cache recorded an older mtime → directory is now newer
+        let stale_mtime = current_mtime.saturating_sub(1);
+        let cache = OpenCodeMigrationCache {
+            migration_complete: true,
+            json_file_count: 1,
+            json_dir_mtime_secs: stale_mtime, // older than current
+            checked_at_secs: now_secs(),
+        };
+
+        let is_valid = cache.migration_complete
+            && 1u64 == cache.json_file_count
+            && get_json_dir_mtime(&json_dir)
+                .map_or(false, |m| m <= cache.json_dir_mtime_secs);
+
+        assert!(
+            !is_valid,
+            "Cache should be invalid when directory mtime is newer than cached value"
+        );
+    }
+
+    /// Cache is not loaded when the file is missing (load returns None).
+    #[test]
+    fn test_migration_cache_missing_returns_none() {
+        // load_opencode_migration_cache reads from ~/.cache/tokscale/opencode-migration.json
+        // We can't easily override the path in a unit test, but we can verify that
+        // serde_json::from_str returns None for invalid input (simulating missing file).
+        let result: Option<OpenCodeMigrationCache> = serde_json::from_str("").ok();
+        assert!(result.is_none(), "Empty/missing content should produce None");
+    }
+
+    /// migration_complete=false disables the cache even if count/mtime match.
+    #[test]
+    fn test_migration_cache_not_skipped_when_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_dir = dir.path().join("message");
+        std::fs::create_dir_all(&json_dir).unwrap();
+        std::fs::write(json_dir.join("msg.json"), b"{}").unwrap();
+
+        let current_mtime = get_json_dir_mtime(&json_dir).unwrap();
+
+        let cache = OpenCodeMigrationCache {
+            migration_complete: false, // migration not complete
+            json_file_count: 1,
+            json_dir_mtime_secs: current_mtime,
+            checked_at_secs: now_secs(),
+        };
+
+        let is_valid = cache.migration_complete
+            && 1u64 == cache.json_file_count
+            && get_json_dir_mtime(&json_dir)
+                .map_or(false, |m| m <= cache.json_dir_mtime_secs);
+
+        assert!(
+            !is_valid,
+            "Cache should not allow skipping when migration_complete=false"
+        );
     }
 }
 

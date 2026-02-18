@@ -25,6 +25,8 @@ pub enum SessionType {
 pub struct ScanResult {
     pub opencode_files: Vec<PathBuf>,
     pub opencode_db: Option<PathBuf>,
+    /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
+    pub opencode_json_dir: Option<PathBuf>,
     pub claude_files: Vec<PathBuf>,
     pub codex_files: Vec<PathBuf>,
     pub gemini_files: Vec<PathBuf>,
@@ -199,6 +201,7 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
 
         // OpenCode legacy: JSON files at ~/.local/share/opencode/storage/message/*/*.json
         let opencode_path = format!("{}/opencode/storage/message", xdg_data);
+        result.opencode_json_dir = Some(PathBuf::from(&opencode_path));
         tasks.push((SessionType::OpenCode, opencode_path, "*.json"));
     }
 
@@ -214,6 +217,10 @@ pub fn scan_all_sources(home_dir: &str, sources: &[String]) -> ScanResult {
             std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir));
         let codex_path = format!("{}/sessions", codex_home);
         tasks.push((SessionType::Codex, codex_path, "*.jsonl"));
+
+        // Codex archived sessions: ~/.codex/archived_sessions/**/*.jsonl
+        let codex_archived_path = format!("{}/archived_sessions", codex_home);
+        tasks.push((SessionType::Codex, codex_archived_path, "*.jsonl"));
 
         // Codex headless: <headless_root>/codex/*.jsonl
         for root in &headless_roots {
@@ -319,6 +326,7 @@ mod tests {
         let result = ScanResult {
             opencode_files: vec![PathBuf::from("a.json"), PathBuf::from("b.json")],
             opencode_db: None,
+            opencode_json_dir: None,
             claude_files: vec![PathBuf::from("c.jsonl")],
             codex_files: vec![],
             gemini_files: vec![PathBuf::from("d.json")],
@@ -336,6 +344,7 @@ mod tests {
         let result = ScanResult {
             opencode_files: vec![PathBuf::from("a.json")],
             opencode_db: None,
+            opencode_json_dir: None,
             claude_files: vec![PathBuf::from("b.jsonl")],
             codex_files: vec![PathBuf::from("c.jsonl")],
             gemini_files: vec![PathBuf::from("d.json")],
@@ -483,6 +492,13 @@ mod tests {
         let codex_path = base.join(".codex/sessions");
         fs::create_dir_all(&codex_path).unwrap();
         let mut file = File::create(codex_path.join("session.jsonl")).unwrap();
+        file.write_all(b"").unwrap();
+    }
+
+    fn setup_mock_codex_archived_dir(base: &std::path::Path) {
+        let archived_path = base.join(".codex/archived_sessions");
+        fs::create_dir_all(&archived_path).unwrap();
+        let mut file = File::create(archived_path.join("archived.jsonl")).unwrap();
         file.write_all(b"").unwrap();
     }
 
@@ -679,6 +695,42 @@ mod tests {
 
         let result = scan_all_sources(home.to_str().unwrap(), &["codex".to_string()]);
         assert_eq!(result.codex_files.len(), 1);
+
+        restore_env("CODEX_HOME", previous_codex);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_sources_codex_archived_sessions() {
+        let previous_codex = std::env::var("CODEX_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codex_archived_dir(home);
+
+        std::env::set_var("CODEX_HOME", home.join(".codex"));
+
+        let result = scan_all_sources(home.to_str().unwrap(), &["codex".to_string()]);
+        assert_eq!(result.codex_files.len(), 1);
+        assert!(result.codex_files[0].ends_with("archived.jsonl"));
+
+        restore_env("CODEX_HOME", previous_codex);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_sources_codex_sessions_and_archived() {
+        let previous_codex = std::env::var("CODEX_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codex_dir(home);
+        setup_mock_codex_archived_dir(home);
+
+        std::env::set_var("CODEX_HOME", home.join(".codex"));
+
+        let result = scan_all_sources(home.to_str().unwrap(), &["codex".to_string()]);
+        assert_eq!(result.codex_files.len(), 2);
 
         restore_env("CODEX_HOME", previous_codex);
     }
