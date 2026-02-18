@@ -174,6 +174,36 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_matches_provider_prefixed_input() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let result = service.lookup_with_source("openai/gpt-5.3-codex", None).unwrap();
+        assert_eq!(result.source, "Cursor");
+        assert_eq!(result.matched_key, "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn test_cursor_provider_prefix_yields_to_upstream() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert("openai/gpt-5.3-codex".into(), ModelPricing {
+            input_cost_per_token: Some(0.003),
+            output_cost_per_token: Some(0.012),
+            ..Default::default()
+        });
+        let service = PricingService::new(HashMap::new(), openrouter);
+        let result = service.lookup_with_source("openai/gpt-5.3-codex", None).unwrap();
+        assert_eq!(result.source, "OpenRouter");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.003));
+    }
+
+    #[test]
+    fn test_cursor_matches_via_suffix_stripping() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let result = service.lookup_with_source("gpt-5.3-codex-high", None).unwrap();
+        assert_eq!(result.source, "Cursor");
+        assert_eq!(result.matched_key, "gpt-5.3-codex");
+    }
+
+    #[test]
     fn test_cursor_calculate_cost() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         let cost = service.calculate_cost("gpt-5.3-codex", 1_000_000, 100_000, 0, 0, 0);

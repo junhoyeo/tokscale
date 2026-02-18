@@ -380,6 +380,17 @@ impl PricingLookup {
                 matched_key: key.clone(),
             });
         }
+        if let Some(model_part) = model_id.split('/').last() {
+            if model_part != model_id {
+                if let Some(key) = self.cursor_lower.get(model_part) {
+                    return Some(LookupResult {
+                        pricing: self.cursor.get(key).unwrap().clone(),
+                        source: "Cursor".into(),
+                        matched_key: key.clone(),
+                    });
+                }
+            }
+        }
         None
     }
 
