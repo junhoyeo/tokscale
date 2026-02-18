@@ -51,6 +51,8 @@ export function App(props: AppProps) {
     since: props.since,
     until: props.until,
     year: props.year,
+    sinceTs: props.sinceTs,
+    untilTs: props.untilTs,
   };
 
   const { data, loading, error, refresh, loadingPhase, isRefreshing } = useData(() => enabledSources(), dateFilters);

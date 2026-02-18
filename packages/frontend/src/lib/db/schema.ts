@@ -170,6 +170,8 @@ export const submissions = pgTable(
     cliVersion: varchar("cli_version", { length: 20 }),
     submissionHash: varchar("submission_hash", { length: 64 }),
     submitCount: integer("submit_count").notNull().default(1),
+    /** 0=legacy (no timestamps), 1=timestamp-aware CLI */
+    schemaVersion: integer("schema_version").notNull().default(0),
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -214,6 +216,8 @@ export const dailyBreakdown = pgTable(
     cost: decimal("cost", { precision: 10, scale: 4 }).notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
+    /** Unix ms timestamp of earliest message in this UTC day bucket. NULL for legacy data. */
+    timestampMs: bigint("timestamp_ms", { mode: "number" }),
 
     providerBreakdown: jsonb("provider_breakdown").$type<
       Record<string, number>

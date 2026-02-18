@@ -13,8 +13,32 @@ import { parseLocalSourcesAsync, finalizeReportAndGraphAsync, type ParsedMessage
 import { syncCursorCache, isCursorLoggedIn, hasCursorUsageCache } from "./cursor.js";
 import type { TokenContributionData } from "./graph-types.js";
 import { formatCurrency } from "./table.js";
+import { parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp, validateTimestampMs } from "./date-utils.js";
 
 const execAsync = promisify(exec);
+
+function getTimestampFilters(since?: string, until?: string): { sinceTs?: number; untilTs?: number } {
+  let sinceTs: number | undefined;
+  let untilTs: number | undefined;
+  
+  if (since) {
+    const sinceDate = parseDateStringToLocal(since);
+    if (sinceDate) {
+      sinceTs = getStartOfDayTimestamp(sinceDate);
+      sinceTs = validateTimestampMs(sinceTs, '--since');
+    }
+  }
+  
+  if (until) {
+    const untilDate = parseDateStringToLocal(until);
+    if (untilDate) {
+      untilTs = getEndOfDayTimestamp(untilDate);
+      untilTs = validateTimestampMs(untilTs, '--until');
+    }
+  }
+  
+  return { sinceTs, untilTs };
+}
 
 interface SubmitOptions {
   opencode?: boolean;
@@ -213,6 +237,7 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
 
   // Filter out cursor from local sources (it's handled separately via sync)
   const localSources = sources?.filter((s): s is Exclude<SourceType, "cursor"> => s !== "cursor");
+  const { sinceTs, untilTs } = getTimestampFilters(options.since, options.until);
 
   let data: TokenContributionData;
   try {
@@ -224,6 +249,8 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
         since: options.since,
         until: options.until,
         year: options.year,
+        sinceTs,
+        untilTs,
       }),
       includeCursor && isCursorLoggedIn()
         ? syncCursorCache()
@@ -243,6 +270,8 @@ export async function submit(options: SubmitOptions = {}): Promise<void> {
       since: options.since,
       until: options.until,
       year: options.year,
+      sinceTs,
+      untilTs,
     });
 
     // Use graph structure for submission, report's cost for display

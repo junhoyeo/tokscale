@@ -23,6 +23,7 @@ import {
 import { syncCursorCache, isCursorLoggedIn, hasCursorUsageCache } from "../../cursor.js";
 import { getModelColor } from "../utils/colors.js";
 import { loadCachedData, saveCachedData, isCacheStale, loadSettings } from "../config/settings.js";
+import { formatDateLocal } from "../../date-utils.js";
 
 export type {
   SortType,
@@ -41,13 +42,15 @@ export interface DateFilters {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
   const grid: GridCell[][] = Array.from({ length: 7 }, () => []);
 
   const today = new Date();
-  const todayStr = today.toISOString().split("T")[0];
+  const todayStr = formatDateLocal(today);
   
   const startDate = new Date(today);
   startDate.setDate(startDate.getDate() - 364);
@@ -64,10 +67,7 @@ function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
 
   const currentDate = new Date(startDate);
   while (currentDate <= endDate) {
-    const year = currentDate.getFullYear();
-    const month = String(currentDate.getMonth() + 1).padStart(2, "0");
-    const day = String(currentDate.getDate()).padStart(2, "0");
-    const dateStr = `${year}-${month}-${day}`;
+    const dateStr = formatDateLocal(currentDate);
     const dayOfWeek = currentDate.getDay();
     
     const isFuture = dateStr > todayStr;
@@ -80,12 +80,12 @@ function buildContributionGrid(contributions: ContributionDay[]): GridCell[][] {
   return grid;
 }
 
-function calculatePeakHour(messages: Array<{ timestamp: number }>): string {
+function calculatePeakHour(messages: Array<{ timestampMs: number }>): string {
   if (messages.length === 0) return "N/A";
   
   const hourCounts = new Array(24).fill(0);
   for (const msg of messages) {
-    const hour = new Date(msg.timestamp).getHours();
+    const hour = new Date(msg.timestampMs).getHours();
     hourCounts[hour]++;
   }
   
@@ -105,14 +105,14 @@ function calculatePeakHour(messages: Array<{ timestamp: number }>): string {
   return `${displayHour}${suffix}`;
 }
 
-function calculateLongestSession(messages: Array<{ sessionId: string; timestamp: number }>): string {
+function calculateLongestSession(messages: Array<{ sessionId: string; timestampMs: number }>): string {
   if (messages.length === 0) return "N/A";
   
   const sessions = new Map<string, number[]>();
   for (const msg of messages) {
     if (!msg.sessionId) continue;
     const timestamps = sessions.get(msg.sessionId) || [];
-    timestamps.push(msg.timestamp);
+    timestamps.push(msg.timestampMs);
     sessions.set(msg.sessionId, timestamps);
   }
   
@@ -151,14 +151,14 @@ async function loadData(
   const sources = Array.from(enabledSources);
   const localSources = sources.filter(s => s !== "cursor");
   const includeCursor = sources.includes("cursor");
-  const { since, until, year } = dateFilters ?? {};
+  const { since, until, year, sinceTs, untilTs } = dateFilters ?? {};
 
   setPhase?.("parsing-sources");
   
   const phase1Results = await Promise.allSettled([
     includeCursor && isCursorLoggedIn() ? syncCursorCache() : Promise.resolve({ synced: false, rows: 0, error: undefined }),
     localSources.length > 0
-      ? parseLocalSourcesAsync({ sources: localSources as ("opencode" | "claude" | "codex" | "gemini" | "amp" | "droid" | "openclaw" | "pi")[], since, until, year })
+      ? parseLocalSourcesAsync({ sources: localSources as ("opencode" | "claude" | "codex" | "gemini" | "amp" | "droid" | "openclaw" | "pi")[], since, until, year, sinceTs, untilTs })
       : Promise.resolve({ messages: [], opencodeCount: 0, claudeCount: 0, codexCount: 0, geminiCount: 0, ampCount: 0, droidCount: 0, openclawCount: 0, piCount: 0, processingTimeMs: 0 } as ParsedMessages),
   ]);
 
@@ -189,13 +189,14 @@ async function loadData(
   };
 
   setPhase?.("finalizing-report");
-  // Single call ensures consistent pricing between report and graph
   const { report, graph } = await finalizeReportAndGraphAsync({
     localMessages: localMessages || emptyMessages,
     includeCursor: includeCursor && (cursorSync.synced || hasCursorUsageCache()),
     since,
     until,
     year,
+    sinceTs,
+    untilTs,
   });
 
   const settings = loadSettings();
@@ -217,6 +218,7 @@ async function loadData(
   const dailyMap = new Map<string, DailyEntry>();
   for (const contrib of graph.contributions) {
     const dateStr = contrib.date;
+    
     if (!dailyMap.has(dateStr)) {
       dailyMap.set(dateStr, {
         date: dateStr,
@@ -323,12 +325,17 @@ async function loadData(
     favoriteModel,
     totalTokens: report.totalInput + report.totalOutput + report.totalCacheRead + report.totalCacheWrite,
     sessions: report.totalMessages,
-    longestSession: calculateLongestSession(localMessages?.messages || []),
+    longestSession: calculateLongestSession((localMessages?.messages || []).map((m) => ({
+      sessionId: m.sessionId,
+      timestampMs: m.timestamp,
+    }))),
     currentStreak,
     longestStreak,
     activeDays: dailyEntries.length,
     totalDays: graph.summary.totalDays,
-    peakHour: calculatePeakHour(localMessages?.messages || []),
+    peakHour: calculatePeakHour((localMessages?.messages || []).map((m) => ({
+      timestampMs: m.timestamp,
+    }))),
   };
 
   const dailyModelMap = new Map<string, Map<string, number>>();
@@ -402,6 +409,8 @@ async function loadData(
 
   const dailyBreakdowns = new Map<string, DailyModelBreakdown>();
   for (const contrib of graph.contributions) {
+    const dateStr = contrib.date;
+    
     const models = contrib.sources.map((source: { modelId: string; source: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning?: number }; cost: number; messages: number }) => ({
       modelId: source.modelId,
       source: source.source,
@@ -416,12 +425,20 @@ async function loadData(
       messages: source.messages,
     }));
     
-    dailyBreakdowns.set(contrib.date, {
-      date: contrib.date,
-      cost: contrib.totals.cost,
-      totalTokens: contrib.totals.tokens,
-      models: models.sort((a, b) => b.cost - a.cost),
-    });
+    const existing = dailyBreakdowns.get(dateStr);
+    if (existing) {
+      existing.cost += contrib.totals.cost;
+      existing.totalTokens += contrib.totals.tokens;
+      existing.models.push(...models);
+      existing.models.sort((a, b) => b.cost - a.cost);
+    } else {
+      dailyBreakdowns.set(dateStr, {
+        date: dateStr,
+        cost: contrib.totals.cost,
+        totalTokens: contrib.totals.tokens,
+        models: models.sort((a, b) => b.cost - a.cost),
+      });
+    }
   }
 
   return {

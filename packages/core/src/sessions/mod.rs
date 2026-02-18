@@ -142,7 +142,7 @@ impl UnifiedMessage {
     }
 }
 
-/// Convert Unix milliseconds timestamp to YYYY-MM-DD date string
+/// Convert Unix milliseconds timestamp to YYYY-MM-DD date string in UTC
 fn timestamp_to_date(timestamp_ms: i64) -> String {
     use chrono::{TimeZone, Utc};
 

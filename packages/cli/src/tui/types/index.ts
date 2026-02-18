@@ -137,6 +137,8 @@ export interface TUIOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
   colorPalette?: ColorPaletteName;
 }
 

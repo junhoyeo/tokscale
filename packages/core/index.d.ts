@@ -3,6 +3,7 @@
 /** Daily contribution data */
 export interface DailyContribution {
   date: string
+  timestampMs?: number
   totals: DailyTotals
   intensity: number
   tokenBreakdown: TokenBreakdown
@@ -39,6 +40,8 @@ export interface FinalizeGraphOptions {
   since?: string
   until?: string
   year?: string
+  sinceTs?: number
+  untilTs?: number
 }
 
 /** Options for finalizing monthly report */
@@ -49,6 +52,8 @@ export interface FinalizeMonthlyOptions {
   since?: string
   until?: string
   year?: string
+  sinceTs?: number
+  untilTs?: number
 }
 
 /** Finalize monthly report */
@@ -71,6 +76,8 @@ export interface FinalizeReportOptions {
   since?: string
   until?: string
   year?: string
+  sinceTs?: number
+  untilTs?: number
 }
 
 /** Metadata about the graph generation */
@@ -97,6 +104,8 @@ export interface LocalParseOptions {
   since?: string
   until?: string
   year?: string
+  sinceTs?: number
+  untilTs?: number
 }
 
 export declare function lookupPricing(modelId: string, provider?: string | undefined | null): Promise<PricingLookupResult>

@@ -60,6 +60,7 @@ import { performance } from "node:perf_hooks";
 import type { SourceType } from "./graph-types.js";
 import type { TUIOptions, TabType } from "./tui/types/index.js";
 import { loadSettings } from "./tui/config/settings.js";
+import { formatDateLocal, parseDateStringToLocal, getStartOfDayTimestamp, getEndOfDayTimestamp, validateTimestampMs } from "./date-utils.js";
 
 type LaunchTUIFunction = (options?: TUIOptions) => Promise<void>;
 
@@ -144,40 +145,94 @@ interface CursorSyncResult {
   error?: string;
 }
 
-// =============================================================================
-// Date Helpers
-// =============================================================================
 
-function formatDate(date: Date): string {
-  return date.toISOString().split("T")[0];
+
+interface DateFilters {
+  since?: string;
+  until?: string;
+  year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
-function getDateFilters(options: DateFilterOptions): { since?: string; until?: string; year?: string } {
+function getDateFilters(options: DateFilterOptions): DateFilters {
   const today = new Date();
   
-  // --today: just today
   if (options.today) {
-    const todayStr = formatDate(today);
-    return { since: todayStr, until: todayStr };
+    let sinceTs = getStartOfDayTimestamp(today);
+    let untilTs = getEndOfDayTimestamp(today);
+    sinceTs = validateTimestampMs(sinceTs, '--today (since)');
+    untilTs = validateTimestampMs(untilTs, '--today (until)');
+    return {
+      sinceTs,
+      untilTs,
+    };
   }
   
-  // --week: last 7 days
   if (options.week) {
     const weekAgo = new Date(today);
-    weekAgo.setDate(weekAgo.getDate() - 6); // Include today = 7 days
-    return { since: formatDate(weekAgo), until: formatDate(today) };
+    weekAgo.setDate(weekAgo.getDate() - 6);
+    let sinceTs = getStartOfDayTimestamp(weekAgo);
+    let untilTs = getEndOfDayTimestamp(today);
+    sinceTs = validateTimestampMs(sinceTs, '--week (since)');
+    untilTs = validateTimestampMs(untilTs, '--week (until)');
+    return {
+      sinceTs,
+      untilTs,
+    };
   }
   
-  // --month: current calendar month
   if (options.month) {
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    return { since: formatDate(startOfMonth), until: formatDate(today) };
+    let sinceTs = getStartOfDayTimestamp(startOfMonth);
+    let untilTs = getEndOfDayTimestamp(today);
+    sinceTs = validateTimestampMs(sinceTs, '--month (since)');
+    untilTs = validateTimestampMs(untilTs, '--month (until)');
+    return {
+      sinceTs,
+      untilTs,
+    };
   }
   
-  // Explicit filters
+  if (options.since || options.until) {
+    let sinceTs: number | undefined;
+    let untilTs: number | undefined;
+    
+    if (options.since) {
+      const sinceDate = parseDateStringToLocal(options.since);
+      if (!sinceDate) {
+        console.error(pc.red(`\n  Error: Invalid --since date '${options.since}'. Use YYYY-MM-DD format with valid date.\n`));
+        process.exit(1);
+      }
+      sinceTs = getStartOfDayTimestamp(sinceDate);
+      sinceTs = validateTimestampMs(sinceTs, '--since');
+    }
+    
+    if (options.until) {
+      const untilDate = parseDateStringToLocal(options.until);
+      if (!untilDate) {
+        console.error(pc.red(`\n  Error: Invalid --until date '${options.until}'. Use YYYY-MM-DD format with valid date.\n`));
+        process.exit(1);
+      }
+      untilTs = getEndOfDayTimestamp(untilDate);
+      untilTs = validateTimestampMs(untilTs, '--until');
+    }
+    
+    if (sinceTs !== undefined && untilTs !== undefined && sinceTs > untilTs) {
+      console.error(pc.red(`\n  Error: --since date must be before --until date.\n`));
+      process.exit(1);
+    }
+    
+    return {
+      since: options.since,
+      until: options.until,
+      year: options.year,
+      sinceTs,
+      untilTs,
+    };
+  }
+  
   return {
-    since: options.since,
-    until: options.until,
     year: options.year,
   };
 }
@@ -423,6 +478,8 @@ function buildTUIOptions(
     since: dateFilters.since,
     until: dateFilters.until,
     year: dateFilters.year,
+    sinceTs: dateFilters.sinceTs,
+    untilTs: dateFilters.untilTs,
   };
 }
 
@@ -1048,7 +1105,7 @@ interface LoadedDataSources {
 
 async function loadDataSourcesParallel(
   localSources: SourceType[],
-  dateFilters: { since?: string; until?: string; year?: string },
+  dateFilters: DateFilters,
   onPhase?: (phase: string) => void
 ): Promise<LoadedDataSources> {
   const shouldParseLocal = localSources.length > 0;
@@ -1061,6 +1118,8 @@ async function loadDataSourcesParallel(
           since: dateFilters.since,
           until: dateFilters.until,
           year: dateFilters.year,
+          sinceTs: dateFilters.sinceTs,
+          untilTs: dateFilters.untilTs,
         })
       : Promise.resolve(null),
   ]);
@@ -1142,6 +1201,8 @@ async function showModelReport(options: FilterOptions & DateFilterOptions & { be
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
   } catch (e) {
     if (spinner) {
@@ -1274,6 +1335,8 @@ async function showMonthlyReport(options: FilterOptions & DateFilterOptions & { 
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
   } catch (e) {
     if (spinner) {
@@ -1373,6 +1436,8 @@ async function outputJsonReport(
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
     console.log(JSON.stringify(report, null, 2));
   } else {
@@ -1382,6 +1447,8 @@ async function outputJsonReport(
       since: dateFilters.since,
       until: dateFilters.until,
       year: dateFilters.year,
+      sinceTs: dateFilters.sinceTs,
+      untilTs: dateFilters.untilTs,
     });
     console.log(JSON.stringify(report, null, 2));
   }
@@ -1425,6 +1492,8 @@ async function handleGraphCommand(options: GraphCommandOptions) {
     since: dateFilters.since,
     until: dateFilters.until,
     year: dateFilters.year,
+    sinceTs: dateFilters.sinceTs,
+    untilTs: dateFilters.untilTs,
   });
 
   const processingTime = performance.now() - startTime;

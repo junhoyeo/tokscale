@@ -40,6 +40,7 @@ interface NativeSourceContribution {
 
 interface NativeDailyContribution {
   date: string;
+  timestampMs?: number;
   totals: NativeDailyTotals;
   intensity: number;
   tokenBreakdown: NativeTokenBreakdown;
@@ -156,6 +157,8 @@ interface NativeLocalParseOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 interface NativeFinalizeReportOptions {
@@ -165,6 +168,8 @@ interface NativeFinalizeReportOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 interface NativeCore {
@@ -243,6 +248,7 @@ function fromNativeResult(result: NativeGraphResult): TokenContributionData {
     })),
     contributions: result.contributions.map((c) => ({
       date: c.date,
+      timestampMs: c.timestampMs ?? undefined,
       totals: {
         tokens: c.totals.tokens,
         cost: c.totals.cost,
@@ -355,6 +361,8 @@ export interface LocalParseOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 export interface FinalizeOptions {
@@ -363,6 +371,8 @@ export interface FinalizeOptions {
   since?: string;
   until?: string;
   year?: string;
+  sinceTs?: number;
+  untilTs?: number;
 }
 
 
@@ -512,6 +522,8 @@ export async function parseLocalSourcesAsync(options: LocalParseOptions): Promis
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   return runInSubprocess<ParsedMessages>("parseLocalSources", [nativeOptions]);
@@ -529,6 +541,8 @@ export async function finalizeReportAsync(options: FinalizeOptions): Promise<Mod
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   return runInSubprocess<ModelReport>("finalizeReport", [nativeOptions]);
@@ -546,6 +560,8 @@ export async function finalizeMonthlyReportAsync(options: FinalizeOptions): Prom
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   return runInSubprocess<MonthlyReport>("finalizeMonthlyReport", [nativeOptions]);
@@ -563,6 +579,8 @@ export async function finalizeGraphAsync(options: FinalizeOptions): Promise<Toke
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   const result = await runInSubprocess<NativeGraphResult>("finalizeGraph", [nativeOptions]);
@@ -591,6 +609,8 @@ export async function finalizeReportAndGraphAsync(options: FinalizeOptions): Pro
     since: options.since,
     until: options.until,
     year: options.year,
+    sinceTs: options.sinceTs,
+    untilTs: options.untilTs,
   };
 
   const result = await runInSubprocess<NativeReportAndGraph>("finalizeReportAndGraph", [nativeOptions]);

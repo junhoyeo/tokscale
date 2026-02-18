@@ -163,6 +163,7 @@ struct DayAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
     sources: HashMap<String, SourceContribution>,
+    min_timestamp: i64,
 }
 
 impl Default for DayAccumulator {
@@ -171,6 +172,7 @@ impl Default for DayAccumulator {
             totals: DailyTotals::default(),
             token_breakdown: TokenBreakdown::default(),
             sources: HashMap::with_capacity(8),
+            min_timestamp: i64::MAX,
         }
     }
 }
@@ -188,6 +190,10 @@ impl DayAccumulator {
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
         self.totals.cost += msg.cost;
         self.totals.messages = self.totals.messages.saturating_add(1);
+
+        if msg.timestamp < self.min_timestamp {
+            self.min_timestamp = msg.timestamp;
+        }
 
         self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
         self.token_breakdown.output = self
@@ -292,6 +298,10 @@ impl DayAccumulator {
             entry.cost += source.cost;
             entry.messages = entry.messages.saturating_add(source.messages);
         }
+
+        if other.min_timestamp < self.min_timestamp {
+            self.min_timestamp = other.min_timestamp;
+        }
     }
 
     fn into_contribution(self, date: String) -> DailyContribution {
@@ -321,6 +331,11 @@ impl DayAccumulator {
 
         DailyContribution {
             date,
+            timestamp_ms: if self.min_timestamp == i64::MAX {
+                None
+            } else {
+                Some(self.min_timestamp)
+            },
             totals: DailyTotals {
                 tokens: self.totals.tokens.max(0),
                 cost: self.totals.cost.max(0.0),
