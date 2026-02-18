@@ -73,15 +73,6 @@ export interface FinalizeReportOptions {
   year?: string
 }
 
-/** Generate graph data with pricing calculation */
-export declare function generateGraphWithPricing(options: ReportOptions): Promise<GraphResult>
-
-/** Get model usage report with pricing calculation */
-export declare function getModelReport(options: ReportOptions): Promise<ModelReport>
-
-/** Get monthly usage report with pricing calculation */
-export declare function getMonthlyReport(options: ReportOptions): Promise<MonthlyReport>
-
 /** Metadata about the graph generation */
 export interface GraphMeta {
   generatedAt: string
@@ -98,9 +89,6 @@ export interface GraphResult {
   years: Array<YearSummary>
   contributions: Array<DailyContribution>
 }
-
-/** Simple health check to verify the native module is working */
-export declare function healthCheck(): string
 
 /** Options for parsing local sources only (no Cursor) */
 export interface LocalParseOptions {
@@ -211,15 +199,6 @@ export interface PricingLookupResult {
 export interface ReportAndGraph {
   report: ModelReport
   graph: GraphResult
-}
-
-/** Options for reports */
-export interface ReportOptions {
-  homeDir?: string
-  sources?: Array<string>
-  since?: string
-  until?: string
-  year?: string
 }
 
 /** Source contribution for a specific day */

@@ -158,23 +158,6 @@ export interface TokenContributionData {
 }
 
 /**
- * Options for graph data generation
- */
-export interface GraphOptions {
-  /** Filter to specific sources */
-  sources?: SourceType[];
-
-  /** Start date filter (ISO format) */
-  since?: string;
-
-  /** End date filter (ISO format) */
-  until?: string;
-
-  /** Filter to specific year */
-  year?: string;
-}
-
-/**
  * Unified message format for aggregation
  * Used internally to normalize data from different sources
  */
