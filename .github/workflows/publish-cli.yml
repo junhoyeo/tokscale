@@ -143,7 +143,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
             build: |
               cd packages/core
-              bun run build:platform --target x86_64-unknown-linux-gnu --use-napi-cross
+              cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17
+              cp target/x86_64-unknown-linux-gnu/release/libtokscale_core.so tokscale-core.linux-x64-gnu.node
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build: |
@@ -153,7 +154,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
             build: |
               cd packages/core
-              bun run build:platform --target aarch64-unknown-linux-gnu --use-napi-cross
+              cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.17
+              cp target/aarch64-unknown-linux-gnu/release/libtokscale_core.so tokscale-core.linux-arm64-gnu.node
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
             build: |
@@ -216,13 +218,13 @@ jobs:
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('packages/core/Cargo.lock') }}
 
       - uses: mlugg/setup-zig@v2
-        if: ${{ contains(matrix.settings.target, 'musl') }}
+        if: ${{ contains(matrix.settings.target, 'linux') }}
         with:
           version: 0.13.0
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
-        if: ${{ contains(matrix.settings.target, 'musl') }}
+        if: ${{ contains(matrix.settings.target, 'linux') }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
