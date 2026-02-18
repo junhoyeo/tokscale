@@ -94,6 +94,14 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
+    // Get file mtime as last-resort timestamp fallback
+    let file_mtime_ms = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
     let mut bytes = content;
     let thread: AmpThread = match simd_json::from_slice(&mut bytes) {
         Ok(t) => t,
@@ -106,6 +114,9 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
             .unwrap_or("unknown")
             .to_string()
     });
+
+    // Extract thread created time before consuming usage_ledger, for use as timestamp fallback
+    let thread_created_ms = thread.created.unwrap_or(0);
 
     let mut messages = Vec::new();
 
@@ -124,9 +135,15 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
                     .map(|dt| dt.timestamp_millis())
                     .unwrap_or(0);
 
-                if timestamp == 0 {
-                    continue;
-                }
+                // Use fallbacks when timestamp is missing: thread created time, then file mtime.
+                // Never skip events solely because of a missing timestamp.
+                let timestamp = if timestamp != 0 {
+                    timestamp
+                } else if thread_created_ms != 0 {
+                    thread_created_ms
+                } else {
+                    file_mtime_ms
+                };
 
                 let tokens = event.tokens.unwrap_or(AmpTokens {
                     input: Some(0),
@@ -158,7 +175,7 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 
     // Fallback: parse from individual message usage
-    let created = thread.created.unwrap_or(0);
+    let created = thread_created_ms;
     if let Some(thread_messages) = thread.messages {
         for msg in thread_messages {
             if msg.role.as_deref() != Some("assistant") {
