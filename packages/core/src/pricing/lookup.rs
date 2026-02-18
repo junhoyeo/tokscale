@@ -772,33 +772,6 @@ mod tests {
 
         // === OpenCode Zen: GPT-5 family ===
         m.insert(
-            "gpt-5.3".into(),
-            ModelPricing {
-                input_cost_per_token: Some(0.00000175),
-                output_cost_per_token: Some(0.000014),
-                cache_read_input_token_cost: Some(1.75e-7),
-                cache_creation_input_token_cost: None,
-            },
-        );
-        m.insert(
-            "gpt-5.3-codex".into(),
-            ModelPricing {
-                input_cost_per_token: Some(0.00000175),
-                output_cost_per_token: Some(0.000014),
-                cache_read_input_token_cost: Some(1.75e-7),
-                cache_creation_input_token_cost: None,
-            },
-        );
-        m.insert(
-            "gpt-5.3-codex-spark".into(),
-            ModelPricing {
-                input_cost_per_token: Some(0.00000175),
-                output_cost_per_token: Some(0.000014),
-                cache_read_input_token_cost: Some(1.75e-7),
-                cache_creation_input_token_cost: None,
-            },
-        );
-        m.insert(
             "gpt-5.2".into(),
             ModelPricing {
                 input_cost_per_token: Some(0.00000175),
@@ -1109,30 +1082,6 @@ mod tests {
         let lookup = create_lookup();
         let result = lookup.lookup("gpt-5.2").unwrap();
         assert_eq!(result.matched_key, "gpt-5.2");
-        assert_eq!(result.source, "LiteLLM");
-    }
-
-    #[test]
-    fn test_opencode_zen_gpt_5_3() {
-        let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.3").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.3");
-        assert_eq!(result.source, "LiteLLM");
-    }
-
-    #[test]
-    fn test_opencode_zen_gpt_5_3_codex() {
-        let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.3-codex").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.3-codex");
-        assert_eq!(result.source, "LiteLLM");
-    }
-
-    #[test]
-    fn test_opencode_zen_gpt_5_3_codex_spark() {
-        let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.3-codex-spark").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.3-codex-spark");
         assert_eq!(result.source, "LiteLLM");
     }
 

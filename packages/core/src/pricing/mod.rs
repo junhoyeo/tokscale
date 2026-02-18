@@ -21,12 +21,17 @@ const EXCLUDED_LITELLM_PREFIXES: &[&str] = &[
 
 pub struct PricingService {
     lookup: PricingLookup,
+    /// Lowest-priority fallback pricing for models not yet in LiteLLM/OpenRouter.
+    /// Only checked AFTER both upstream sources return no match, so real entries
+    /// (including provider-prefixed ones like `openai/gpt-5.3-codex`) always win.
+    fallback_overrides: HashMap<String, ModelPricing>,
 }
 
 impl PricingService {
     pub fn new(litellm_data: HashMap<String, ModelPricing>, openrouter_data: HashMap<String, ModelPricing>) -> Self {
         Self {
             lookup: PricingLookup::new(litellm_data, openrouter_data),
+            fallback_overrides: Self::build_fallback_overrides(),
         }
     }
 
@@ -40,11 +45,8 @@ impl PricingService {
         data
     }
 
-    /// Inject hardcoded pricing overrides for models not yet available on the API
-    /// but with known pricing from first-party sources (e.g. Cursor docs).
-    /// These are inserted with lower priority — they won't overwrite existing entries.
-    fn inject_pricing_overrides(data: &mut HashMap<String, ModelPricing>) {
-        let overrides: &[(&str, f64, f64, Option<f64>)] = &[
+    fn build_fallback_overrides() -> HashMap<String, ModelPricing> {
+        let entries: &[(&str, f64, f64, Option<f64>)] = &[
             // GPT-5.3 family: $1.75/$14.00 per 1M tokens, $0.175 cache read
             // Source: Cursor docs (cursor.com/en-US/docs/models), llm-stats.com
             // Pattern: codex variants match base model pricing (gpt-5.2-codex = gpt-5.2)
@@ -53,14 +55,25 @@ impl PricingService {
             ("gpt-5.3-codex-spark", 0.00000175, 0.000014, Some(1.75e-7)),
         ];
 
-        for (model_id, input, output, cache_read) in overrides {
-            data.entry(model_id.to_string()).or_insert_with(|| ModelPricing {
+        let mut overrides = HashMap::with_capacity(entries.len());
+        for (model_id, input, output, cache_read) in entries {
+            overrides.insert(model_id.to_string(), ModelPricing {
                 input_cost_per_token: Some(*input),
                 output_cost_per_token: Some(*output),
                 cache_read_input_token_cost: *cache_read,
                 cache_creation_input_token_cost: None,
             });
         }
+        overrides
+    }
+
+    fn lookup_fallback(&self, model_id: &str) -> Option<LookupResult> {
+        let lower = model_id.to_lowercase();
+        self.fallback_overrides.get(&lower).map(|pricing| LookupResult {
+            pricing: pricing.clone(),
+            source: "Fallback".to_string(),
+            matched_key: lower,
+        })
     }
     
     async fn fetch_inner() -> Result<Self, String> {
@@ -69,9 +82,8 @@ impl PricingService {
             openrouter::fetch_all_mapped()
         );
         
-        let mut litellm_data = litellm_result.map_err(|e| e.to_string())?;
-        litellm_data = Self::filter_litellm_data(litellm_data);
-        Self::inject_pricing_overrides(&mut litellm_data);
+        let litellm_data = litellm_result.map_err(|e| e.to_string())?;
+        let litellm_data = Self::filter_litellm_data(litellm_data);
         
         Ok(Self::new(litellm_data, openrouter_data))
     }
@@ -84,10 +96,25 @@ impl PricingService {
 
     pub fn lookup_with_source(&self, model_id: &str, force_source: Option<&str>) -> Option<LookupResult> {
         self.lookup.lookup_with_source(model_id, force_source)
+            .or_else(|| self.lookup_fallback(model_id))
     }
     
     pub fn calculate_cost(&self, model_id: &str, input: i64, output: i64, cache_read: i64, cache_write: i64, reasoning: i64) -> f64 {
-        self.lookup.calculate_cost(model_id, input, output, cache_read, cache_write, reasoning)
+        let result = match self.lookup.lookup(model_id).or_else(|| self.lookup_fallback(model_id)) {
+            Some(r) => r,
+            None => return 0.0,
+        };
+
+        let p = &result.pricing;
+        let safe_price =
+            |opt: Option<f64>| opt.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+
+        let input_cost = input as f64 * safe_price(p.input_cost_per_token);
+        let output_cost = (output + reasoning) as f64 * safe_price(p.output_cost_per_token);
+        let cache_read_cost = cache_read as f64 * safe_price(p.cache_read_input_token_cost);
+        let cache_write_cost = cache_write as f64 * safe_price(p.cache_creation_input_token_cost);
+
+        input_cost + output_cost + cache_read_cost + cache_write_cost
     }
 }
 
@@ -114,34 +141,53 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_overrides_adds_missing_models() {
-        let mut data = HashMap::new();
-        PricingService::inject_pricing_overrides(&mut data);
+    fn test_fallback_returns_pricing_when_not_in_upstream() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
 
-        assert!(data.contains_key("gpt-5.3"));
-        assert!(data.contains_key("gpt-5.3-codex"));
-        assert!(data.contains_key("gpt-5.3-codex-spark"));
-
-        let pricing = &data["gpt-5.3-codex"];
-        assert_eq!(pricing.input_cost_per_token, Some(0.00000175));
-        assert_eq!(pricing.output_cost_per_token, Some(0.000014));
-        assert_eq!(pricing.cache_read_input_token_cost, Some(1.75e-7));
+        let result = service.lookup_with_source("gpt-5.3-codex", None).unwrap();
+        assert_eq!(result.source, "Fallback");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.00000175));
+        assert_eq!(result.pricing.output_cost_per_token, Some(0.000014));
+        assert_eq!(result.pricing.cache_read_input_token_cost, Some(1.75e-7));
     }
 
     #[test]
-    fn test_inject_overrides_does_not_overwrite_existing() {
-        let mut data = HashMap::new();
-        data.insert("gpt-5.3-codex".into(), ModelPricing {
+    fn test_fallback_yields_to_litellm_entry() {
+        let mut litellm = HashMap::new();
+        litellm.insert("gpt-5.3-codex".into(), ModelPricing {
             input_cost_per_token: Some(0.002),
             output_cost_per_token: Some(0.016),
             cache_read_input_token_cost: None,
             cache_creation_input_token_cost: None,
         });
 
-        PricingService::inject_pricing_overrides(&mut data);
+        let service = PricingService::new(litellm, HashMap::new());
+        let result = service.lookup_with_source("gpt-5.3-codex", None).unwrap();
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.002));
+    }
 
-        let pricing = &data["gpt-5.3-codex"];
-        assert_eq!(pricing.input_cost_per_token, Some(0.002));
-        assert_eq!(pricing.output_cost_per_token, Some(0.016));
+    #[test]
+    fn test_fallback_yields_to_openrouter_prefixed_entry() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert("openai/gpt-5.3-codex".into(), ModelPricing {
+            input_cost_per_token: Some(0.003),
+            output_cost_per_token: Some(0.012),
+            cache_read_input_token_cost: None,
+            cache_creation_input_token_cost: None,
+        });
+
+        let service = PricingService::new(HashMap::new(), openrouter);
+        let result = service.lookup_with_source("gpt-5.3-codex", None).unwrap();
+        assert_eq!(result.source, "OpenRouter");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.003));
+    }
+
+    #[test]
+    fn test_fallback_calculate_cost() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let cost = service.calculate_cost("gpt-5.3-codex", 1_000_000, 100_000, 0, 0, 0);
+        let expected = 1_000_000.0 * 0.00000175 + 100_000.0 * 0.000014;
+        assert!((cost - expected).abs() < 1e-10);
     }
 }
