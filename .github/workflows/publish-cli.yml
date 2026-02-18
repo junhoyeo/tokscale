@@ -67,9 +67,20 @@ jobs:
           fi
           echo "🚀 New version: $NEW_VERSION"
           
-          # Update packages/core/package.json
-          jq --arg v "$NEW_VERSION" '.version = $v' packages/core/package.json > tmp.json && mv tmp.json packages/core/package.json
+          # Update packages/core/package.json (version + optionalDependencies versions)
+          jq --arg v "$NEW_VERSION" '
+            .version = $v |
+            .optionalDependencies = (.optionalDependencies | to_entries | map(.value = $v) | from_entries)
+          ' packages/core/package.json > tmp.json && mv tmp.json packages/core/package.json
           echo "✅ Updated packages/core/package.json"
+          
+          # Update all platform package.json files in npm/
+          for dir in packages/core/npm/*/; do
+            if [ -f "${dir}package.json" ]; then
+              jq --arg v "$NEW_VERSION" '.version = $v' "${dir}package.json" > tmp.json && mv tmp.json "${dir}package.json"
+              echo "✅ Updated ${dir}package.json"
+            fi
+          done
           
           # Update packages/cli/package.json (version + @tokscale/core dependency)
           jq --arg v "$NEW_VERSION" '.version = $v | .dependencies["@tokscale/core"] = $v' packages/cli/package.json > tmp.json && mv tmp.json packages/cli/package.json
@@ -87,6 +98,12 @@ jobs:
           echo "  tokscale:        $(jq -r '.version' packages/tokscale/package.json)"
           echo "  cli -> core dep: $(jq -r '.dependencies["@tokscale/core"]' packages/cli/package.json)"
           echo "  tokscale -> cli: $(jq -r '.dependencies["@tokscale/cli"]' packages/tokscale/package.json)"
+          echo "  Platform packages:"
+          for dir in packages/core/npm/*/; do
+            if [ -f "${dir}package.json" ]; then
+              echo "    $(basename $dir): $(jq -r '.version' "${dir}package.json")"
+            fi
+          done
           
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "📝 Version bump prepared (will commit after successful publish)"
@@ -97,6 +114,7 @@ jobs:
           name: bumped-packages
           path: |
             packages/core/package.json
+            packages/core/npm/*/package.json
             packages/cli/package.json
             packages/tokscale/package.json
           retention-days: 1
@@ -164,10 +182,15 @@ jobs:
       - name: Restore package.json structure
         shell: bash
         run: |
-          mv packages/core/package.json packages/core/package.json 2>/dev/null || true
-          mv packages/cli/package.json packages/cli/package.json 2>/dev/null || true
-          mv packages/tokscale/package.json packages/tokscale/package.json 2>/dev/null || true
+          # Restore main package.json files (already in correct location from download)
           echo "📦 Using version: $(jq -r '.version' packages/core/package.json)"
+          
+          # Restore platform package.json files
+          for dir in packages/core/npm/*/; do
+            if [ -f "${dir}package.json" ]; then
+              echo "  Platform $(basename $dir): $(jq -r '.version' "${dir}package.json")"
+            fi
+          done
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -230,9 +253,66 @@ jobs:
             packages/core/index.d.ts
           if-no-files-found: error
 
+  publish-platform-packages:
+    name: Publish platform packages
+    needs: [bump-versions, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - target: x86_64-apple-darwin
+            npm-dir: darwin-x64
+          - target: aarch64-apple-darwin
+            npm-dir: darwin-arm64
+          - target: x86_64-unknown-linux-gnu
+            npm-dir: linux-x64-gnu
+          - target: aarch64-unknown-linux-gnu
+            npm-dir: linux-arm64-gnu
+          - target: x86_64-unknown-linux-musl
+            npm-dir: linux-x64-musl
+          - target: aarch64-unknown-linux-musl
+            npm-dir: linux-arm64-musl
+          - target: x86_64-pc-windows-msvc
+            npm-dir: win32-x64-msvc
+          - target: aarch64-pc-windows-msvc
+            npm-dir: win32-arm64-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bumped package.json files
+        uses: actions/download-artifact@v4
+        with:
+          name: bumped-packages
+          path: packages/
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.38
+
+      - name: Download platform binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-${{ matrix.platform.target }}
+          path: packages/core/npm/${{ matrix.platform.npm-dir }}/
+
+      - name: Verify binary exists
+        working-directory: packages/core/npm/${{ matrix.platform.npm-dir }}
+        run: |
+          ls -la *.node
+          echo "📦 Publishing $(jq -r '.name' package.json)@$(jq -r '.version' package.json)"
+
+      - name: Publish platform package
+        working-directory: packages/core/npm/${{ matrix.platform.npm-dir }}
+        run: bun publish --access public
+        env:
+          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   publish-core:
     name: Publish @tokscale/core
-    needs: [bump-versions, build]
+    needs: [bump-versions, build, publish-platform-packages]
     runs-on: ubuntu-latest
 
     steps:
@@ -249,23 +329,6 @@ jobs:
         with:
           bun-version: 1.1.38
 
-      - name: Install napi-rs CLI
-        run: bun add -g @napi-rs/cli
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: packages/core/artifacts
-          pattern: bindings-*
-
-      - name: Move artifacts
-        working-directory: packages/core
-        run: |
-          for dir in artifacts/bindings-*/; do
-            cp "$dir"*.node . 2>/dev/null || true
-          done
-          ls -la *.node
-
       - name: Download generated NAPI files
         uses: actions/download-artifact@v4
         with:
@@ -276,6 +339,8 @@ jobs:
         working-directory: packages/core
         run: |
           echo "📦 Publishing version: $(jq -r '.version' package.json)"
+          echo "📋 optionalDependencies:"
+          jq '.optionalDependencies' package.json
           bun publish --access public
         env:
           NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -377,7 +442,7 @@ jobs:
           NEW_VERSION="${{ needs.bump-versions.outputs.version }}"
           echo "📦 Committing version bump to $NEW_VERSION"
           
-          git add packages/core/package.json packages/core/index.js packages/core/index.d.ts packages/cli/package.json packages/tokscale/package.json
+          git add packages/core/package.json packages/core/index.js packages/core/index.d.ts packages/core/npm/*/package.json packages/cli/package.json packages/tokscale/package.json
           git commit -m "chore: bump version to $NEW_VERSION"
           git push
           
