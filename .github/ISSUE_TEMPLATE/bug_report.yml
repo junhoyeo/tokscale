@@ -8,6 +8,11 @@ body:
       value: |
         Thanks for taking the time to report a bug! Please fill out the form below to help us understand and fix the issue.
 
+        **Before submitting**, please check:
+        - You're using the latest version (`bunx tokscale@latest --version`)
+        - You've searched [existing issues](https://github.com/junhoyeo/tokscale/issues)
+        - You've checked the [Common Issues FAQ](https://github.com/junhoyeo/tokscale/blob/main/CONTRIBUTING.md#common-issues--faq)
+
   - type: dropdown
     id: os
     attributes:
@@ -15,8 +20,11 @@ body:
       description: What operating system are you using?
       options:
         - macOS
-        - Linux
-        - Windows
+        - Linux (Ubuntu/Debian)
+        - Linux (Other)
+        - Windows 11
+        - Windows 10
+        - WSL/WSL2
         - Other
     validations:
       required: true
@@ -43,7 +51,21 @@ body:
         - bash
         - fish
         - PowerShell
+        - Windows Terminal
         - cmd
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Installation Method
+      description: How did you install/run tokscale?
+      options:
+        - bunx tokscale@latest
+        - Cloned repo + bun run cli
+        - npm install -g tokscale
         - Other
     validations:
       required: true
@@ -62,7 +84,7 @@ body:
     attributes:
       label: Bun Version
       description: Run `bun --version` to get this
-      placeholder: "1.1.0"
+      placeholder: "1.2.0"
     validations:
       required: true
 
@@ -75,12 +97,60 @@ body:
     validations:
       required: false
 
+  - type: dropdown
+    id: command-category
+    attributes:
+      label: Command Category
+      description: What type of command were you running?
+      options:
+        - TUI (default `tokscale` command)
+        - CLI with --light flag
+        - tokscale submit
+        - tokscale pricing
+        - tokscale login/whoami
+        - tokscale cursor (Cursor commands)
+        - tokscale wrapped
+        - tokscale graph
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: sources
+    attributes:
+      label: AI Sources Enabled
+      description: Which AI client sources were you trying to use? (Check all that apply)
+      options:
+        - label: OpenCode
+        - label: Claude Code
+        - label: Codex CLI
+        - label: Cursor IDE
+        - label: Gemini CLI
+        - label: Amp (AmpCode)
+        - label: Droid (Factory)
+        - label: OpenClaw
+        - label: Pi
+        - label: Kimi CLI
+        - label: Not applicable / All sources
+
   - type: textarea
     id: description
     attributes:
       label: Bug Description
       description: A clear and concise description of what the bug is
-      placeholder: Describe the bug...
+      placeholder: |
+        Example: When running `tokscale submit`, the command fails with a validation error 
+        about negative token values, even though all my session data looks valid.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact Command Run
+      description: The exact command you ran (copy-paste from terminal)
+      placeholder: "bunx tokscale@latest submit --dry-run"
+      render: shell
     validations:
       required: true
 
@@ -90,8 +160,9 @@ body:
       label: Steps to Reproduce
       description: Steps to reproduce the behavior
       placeholder: |
-        1. Run `tokscale ...`
-        2. See error...
+        1. Have OpenCode and Claude Code session data
+        2. Run `bunx tokscale@latest submit`
+        3. See validation error about negative values
     validations:
       required: true
 
@@ -100,7 +171,7 @@ body:
     attributes:
       label: Expected Behavior
       description: What did you expect to happen?
-      placeholder: I expected...
+      placeholder: "Usage data should be submitted successfully to the leaderboard."
     validations:
       required: true
 
@@ -109,16 +180,24 @@ body:
     attributes:
       label: Actual Behavior
       description: What actually happened?
-      placeholder: Instead, what happened was...
+      placeholder: |
+        Command failed with:
+        Error: Validation failed
+          - contributions.39.tokenBreakdown.input: Number must be greater than or equal to 0
     validations:
       required: true
 
   - type: textarea
     id: logs
     attributes:
-      label: Error Logs
-      description: If applicable, paste any error messages or logs
+      label: Error Logs / Stack Trace
+      description: Paste the full error output. Don't truncate - we need the complete message.
       render: shell
+      placeholder: |
+        Paste the full error output here. Include:
+        - Complete error message
+        - Stack trace (if any)
+        - Exit codes
     validations:
       required: false
 
@@ -126,7 +205,12 @@ body:
     id: context
     attributes:
       label: Additional Context
-      description: Add any other context about the problem here (screenshots, related issues, etc.)
+      description: |
+        Add any other context that might help:
+        - Screenshots of the issue
+        - Related issues you've found
+        - Workarounds you've tried
+        - Root cause analysis (if you've investigated)
     validations:
       required: false
 
@@ -137,5 +221,7 @@ body:
       options:
         - label: I have searched existing issues to ensure this bug hasn't been reported
           required: true
-        - label: I am using the latest version of tokscale
+        - label: I am using the latest version of tokscale (`bunx tokscale@latest`)
+          required: true
+        - label: I have included the full error output (not truncated)
           required: false

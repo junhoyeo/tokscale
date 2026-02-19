@@ -16,6 +16,104 @@ We're excited to have you here. Whether you're fixing a bug, adding a new featur
 2. **New features / architecture changes** - Start a [GitHub Discussion](https://github.com/junhoyeo/tokscale/discussions) first
 3. **Questions** - Open a Discussion or Issue
 
+## Before Opening an Issue
+
+Please check these common solutions first:
+
+### Checklist
+
+- [ ] **Check you're on the latest version**: `bunx tokscale@latest --version`
+- [ ] **Search existing issues**: Your problem may already have a solution
+- [ ] **Try with `--light` flag**: If TUI crashes, try `tokscale --light` for simpler output
+- [ ] **Verify AI client data exists**: Check that session files exist in the expected locations
+
+### Required Information for Bug Reports
+
+To help us resolve issues quickly, please include:
+
+| Required | How to Get |
+|----------|------------|
+| **tokscale version** | `tokscale --version` |
+| **Bun version** | `bun --version` |
+| **OS + Architecture** | e.g., "macOS arm64", "Ubuntu 22.04 x64", "Windows 11" |
+| **Installation method** | `bunx tokscale@latest` or cloned from repo |
+| **Exact command run** | The full command that caused the issue |
+| **Full error output** | Complete error message and stack trace |
+
+### Example of a Good Bug Report
+
+See [#208](https://github.com/junhoyeo/tokscale/issues/208) for an excellent example that includes:
+- Clear title with the error message
+- Root cause analysis
+- Full environment details
+- Steps to reproduce
+- Expected vs actual behavior
+
+## Common Issues & FAQ
+
+### "Native module required. Run: bun run build:core"
+
+**Cause**: The pre-built native binary for your platform isn't available.
+
+**Solutions**:
+1. Make sure you're using `bunx tokscale@latest` (not an older cached version)
+2. If on Linux x64/arm64 or Windows, this should work automatically — please [open an issue](https://github.com/junhoyeo/tokscale/issues/new)
+3. If building from source: run `bun run build:core` (requires Rust toolchain)
+
+### Windows: "HOME directory not specified"
+
+**Cause**: Windows environment missing `HOME` or `USERPROFILE` variable.
+
+**Solution**: Run in PowerShell (not cmd.exe) or set the HOME environment variable:
+```powershell
+$env:HOME = $env:USERPROFILE
+bunx tokscale@latest
+```
+
+### Model pricing shows $0.00
+
+**Common causes**:
+1. **New model not yet in pricing database**: Very recently released models may not have pricing data yet
+2. **GitHub Copilot resolution**: Some models incorrectly resolve to `github_copilot/*` entries which have $0 pricing
+
+**Solution**: Check the model pricing directly:
+```bash
+tokscale pricing "model-name"
+```
+If the price is wrong, [open an issue](https://github.com/junhoyeo/tokscale/issues/new) with the model name and expected price.
+
+### Submit fails with validation errors
+
+**Common causes**:
+1. **Unsupported source**: New AI client not yet supported by the server
+2. **Negative values**: Edge case in parsing produced negative token counts
+3. **Payload too large**: Very large datasets exceeding limits
+
+**Solutions**:
+- Update to latest version: `bunx tokscale@latest submit`
+- Try with filters: `tokscale submit --claude --since 2024-01-01`
+- Use `--dry-run` to preview: `tokscale submit --dry-run`
+
+### OpenCode usage missing after v1.2+
+
+**Cause**: OpenCode 1.2+ stores sessions in SQLite instead of JSON files.
+
+**Solution**: Update tokscale to v1.2.1+ which reads from both SQLite and legacy JSON.
+
+### `--today` shows wrong date (timezone issue)
+
+**Cause**: Date filtering was using UTC instead of local timezone.
+
+**Solution**: Update to v1.2.2+ which uses local timezone for all date operations.
+
+### TUI shows blank/garbled screen on Windows
+
+**Cause**: Windows Terminal compatibility issues with some rendering modes.
+
+**Solution**: 
+- Try `tokscale --light` for table output without TUI
+- Use Windows Terminal (not cmd.exe or older PowerShell)
+
 ## Development Setup
 
 ### Prerequisites

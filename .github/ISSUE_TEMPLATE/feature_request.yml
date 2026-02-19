@@ -8,32 +8,10 @@ body:
       value: |
         Thanks for suggesting a feature! Please fill out the form below to help us understand your request.
 
-  - type: textarea
-    id: problem
-    attributes:
-      label: Problem Statement
-      description: Is your feature request related to a problem? Please describe.
-      placeholder: I'm always frustrated when...
-    validations:
-      required: true
-
-  - type: textarea
-    id: solution
-    attributes:
-      label: Proposed Solution
-      description: Describe the solution you'd like to see
-      placeholder: I would like tokscale to...
-    validations:
-      required: true
-
-  - type: textarea
-    id: alternatives
-    attributes:
-      label: Alternatives Considered
-      description: Describe any alternative solutions or features you've considered
-      placeholder: I also considered...
-    validations:
-      required: false
+        **For new AI client support**, please include:
+        - Session data location (e.g., `~/.example/sessions/`)
+        - Session file format (JSON, JSONL, SQLite, etc.)
+        - Example of the token/usage data structure
 
   - type: dropdown
     id: category
@@ -41,9 +19,9 @@ body:
       label: Feature Category
       description: What area of tokscale does this feature relate to?
       options:
+        - New AI Client Support
         - CLI / Commands
         - TUI / Interface
-        - New AI Client Support
         - Pricing / Cost Calculation
         - Data Export / Visualization
         - Social Platform / Leaderboard
@@ -52,6 +30,70 @@ body:
         - Other
     validations:
       required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Is your feature request related to a problem? Please describe.
+      placeholder: |
+        Example: I use [AI Client] heavily but tokscale doesn't track its usage, 
+        so I'm missing a significant portion of my token consumption data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: Describe your specific use case for this feature
+      placeholder: |
+        Example: I want to see my combined usage across Claude Code and [New Client] 
+        to understand my total monthly AI coding costs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like to see
+      placeholder: |
+        Example: Add a new parser for [Client] that reads session data from 
+        `~/.client/sessions/` and extracts token usage from the JSON files.
+    validations:
+      required: true
+
+  - type: textarea
+    id: client-details
+    attributes:
+      label: AI Client Details (for New Client Support)
+      description: |
+        If requesting support for a new AI client, please provide:
+        - Data location path
+        - File format and structure
+        - Example snippet of session/usage data
+      placeholder: |
+        **Data Location:** `~/.example-ai/sessions/`
+        **File Format:** JSONL
+        **Example Data:**
+        ```json
+        {"role": "assistant", "usage": {"input_tokens": 100, "output_tokens": 50}}
+        ```
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or workarounds you've tried
+      placeholder: |
+        Example: I tried manually exporting the data, but it's tedious and 
+        doesn't integrate with the contribution graph.
+    validations:
+      required: false
 
   - type: dropdown
     id: priority
@@ -66,10 +108,25 @@ body:
       required: true
 
   - type: textarea
+    id: technical
+    attributes:
+      label: Technical Implementation Ideas (optional)
+      description: |
+        If you've investigated implementation, share your findings:
+        - Relevant source files
+        - API endpoints or data sources
+        - Potential challenges
+      placeholder: |
+        Example: The data is stored in SQLite at `~/.client/db.sqlite`. 
+        The schema has a `messages` table with `input_tokens` and `output_tokens` columns.
+    validations:
+      required: false
+
+  - type: textarea
     id: context
     attributes:
       label: Additional Context
-      description: Add any other context, mockups, or screenshots about the feature request
+      description: Add any other context, mockups, screenshots, or links
     validations:
       required: false
 
@@ -77,10 +134,11 @@ body:
     id: contribution
     attributes:
       label: Contribution
-      description: Would you be willing to contribute to this feature?
+      description: Would you be willing to help implement this feature?
       options:
         - label: I would be willing to submit a PR to implement this feature
-          required: false
+        - label: I can provide test data or help with testing
+        - label: I can help document this feature
 
   - type: checkboxes
     id: checklist
@@ -89,3 +147,5 @@ body:
       options:
         - label: I have searched existing issues to ensure this feature hasn't been requested
           required: true
+        - label: I have checked the README for similar existing functionality
+          required: false
