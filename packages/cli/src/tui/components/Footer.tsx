@@ -1,19 +1,8 @@
-import {
-  Show,
-  createSignal,
-  createEffect,
-  onMount,
-  onCleanup,
-} from "solid-js";
-import type {
-  SourceType,
-  SortType,
-  TabType,
-  LoadingPhase,
-} from "../types/index.js";
+import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { ColorPaletteName } from "../config/themes.js";
-import type { TotalBreakdown } from "../hooks/useData.js";
 import { getPalette } from "../config/themes.js";
+import type { TotalBreakdown } from "../hooks/useData.js";
+import type { LoadingPhase, SortType, SourceType, TabType } from "../types/index.js";
 import { formatTokens } from "../utils/format.js";
 import { isVeryNarrow } from "../utils/responsive.js";
 
@@ -161,7 +150,7 @@ export function Footer(props: FooterProps) {
             enabled={props.enabledSources.has("kimi")}
             onToggle={props.onSourceToggle}
           />
-          <Show when={!isVeryNarrowTerminal()}>
+          <Show when={!isVeryNarrowTerminal()} fallback={<></>}>
             <text dim>|</text>
             <SortButton
               label="Date"
@@ -182,7 +171,7 @@ export function Footer(props: FooterProps) {
               onClick={props.onSortChange}
             />
           </Show>
-          <Show when={showScrollInfo() && !isVeryNarrowTerminal()}>
+          <Show when={showScrollInfo() && !isVeryNarrowTerminal()} fallback={<></>}>
             <text dim>|</text>
             <text
               dim
@@ -194,7 +183,7 @@ export function Footer(props: FooterProps) {
           <text dim>tokens</text>
           <text dim>|</text>
           <text fg="green" bold>{`$${totals().cost.toFixed(2)}`}</text>
-          <Show when={!isVeryNarrowTerminal()}>
+          <Show when={!isVeryNarrowTerminal()} fallback={<></>}>
             <text dim>({props.modelCount} models)</text>
           </Show>
         </box>
@@ -242,18 +231,14 @@ export function Footer(props: FooterProps) {
           </text>
         </Show>
       </box>
-      <Show when={props.isRefreshing}>
+      <Show when={props.isRefreshing} fallback={<></>}>
         <LoadingStatusLine phase={props.loadingPhase} />
       </Show>
-      <Show when={!props.isRefreshing && props.cacheTimestamp}>
+      <Show when={!props.isRefreshing && props.cacheTimestamp} fallback={<></>}>
         <box flexDirection="row" gap={1}>
-          <text
-            dim
-          >{`Last updated: ${formatTimeAgo(props.cacheTimestamp!, now())}`}</text>
-          <Show when={props.autoRefreshEnabled}>
-            <text
-              dim
-            >{`• Auto: ${formatIntervalSeconds(props.autoRefreshMs)}`}</text>
+          <text dim>{`Last updated: ${formatTimeAgo(props.cacheTimestamp!, now())}`}</text>
+          <Show when={props.autoRefreshEnabled} fallback={<></>}>
+            <text dim>{`• Auto: ${formatIntervalSeconds(props.autoRefreshMs)}`}</text>
           </Show>
         </box>
       </Show>
@@ -299,14 +284,7 @@ function SortButton(props: SortButtonProps) {
   );
 }
 
-const SPINNER_COLORS = [
-  "#00FFFF",
-  "#00D7D7",
-  "#00AFAF",
-  "#008787",
-  "#666666",
-  "#666666",
-];
+const SPINNER_COLORS = ["#00FFFF", "#00D7D7", "#00AFAF", "#008787", "#666666", "#666666"];
 const SPINNER_WIDTH = 6;
 const SPINNER_HOLD_START = 20;
 const SPINNER_HOLD_END = 6;
@@ -336,8 +314,7 @@ function LoadingStatusLine(props: LoadingStatusLineProps) {
   const getSpinnerState = () => {
     const forwardFrames = SPINNER_WIDTH;
     const backwardFrames = SPINNER_WIDTH - 1;
-    const totalCycle =
-      forwardFrames + SPINNER_HOLD_END + backwardFrames + SPINNER_HOLD_START;
+    const totalCycle = forwardFrames + SPINNER_HOLD_END + backwardFrames + SPINNER_HOLD_START;
     const normalized = frame() % totalCycle;
 
     if (normalized < forwardFrames) {
@@ -346,8 +323,7 @@ function LoadingStatusLine(props: LoadingStatusLineProps) {
       return { position: SPINNER_WIDTH - 1, forward: true };
     } else if (normalized < forwardFrames + SPINNER_HOLD_END + backwardFrames) {
       return {
-        position:
-          SPINNER_WIDTH - 2 - (normalized - forwardFrames - SPINNER_HOLD_END),
+        position: SPINNER_WIDTH - 2 - (normalized - forwardFrames - SPINNER_HOLD_END),
         forward: false,
       };
     }
@@ -363,8 +339,7 @@ function LoadingStatusLine(props: LoadingStatusLineProps) {
     return { char: "⬝", color: "#444444" };
   };
 
-  const message = () =>
-    props.phase ? PHASE_MESSAGES[props.phase] : "Refreshing...";
+  const message = () => (props.phase ? PHASE_MESSAGES[props.phase] : "Refreshing...");
 
   return (
     <box flexDirection="row" gap={1}>

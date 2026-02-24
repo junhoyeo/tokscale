@@ -26,12 +26,12 @@ export function ModelRow(props: ModelRowProps) {
   return (
     <box flexDirection="column">
       <box flexDirection="row" backgroundColor={bgColor()}>
-        <Show when={props.indent}>
+        <Show when={props.indent} fallback={<></>}>
           <text>{indentStr()}</text>
         </Show>
         <text fg={color()} bg={bgColor()}>●</text>
         <text fg={props.isActive ? "white" : undefined} bg={bgColor()}>{` ${truncateName(props.modelId)}`}</text>
-        <Show when={props.percentage !== undefined}>
+        <Show when={props.percentage !== undefined} fallback={<></>}>
           <text dim bg={bgColor()}>{` (${props.percentage!.toFixed(1)}%)`}</text>
         </Show>
       </box>

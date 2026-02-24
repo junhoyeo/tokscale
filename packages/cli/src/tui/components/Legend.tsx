@@ -27,7 +27,7 @@ export function Legend(props: LegendProps) {
             <box flexDirection="row" gap={0}>
               <text fg={getModelColor(modelId)}>●</text>
               <text>{` ${truncateModelName(modelId)}`}</text>
-              <Show when={i() < models().length - 1}>
+              <Show when={i() < models().length - 1} fallback={<></>}>
                 <text dim>{isVeryNarrowTerminal() ? " " : "  ·"}</text>
               </Show>
             </box>

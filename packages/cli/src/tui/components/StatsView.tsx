@@ -1,8 +1,8 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
-import type { TUIData } from "../hooks/useData.js";
 import type { ColorPaletteName } from "../config/themes.js";
-import type { SortType, GridCell } from "../types/index.js";
-import { getPalette, getGradeColor } from "../config/themes.js";
+import { getGradeColor, getPalette } from "../config/themes.js";
+import type { TUIData } from "../hooks/useData.js";
+import type { GridCell, SortType } from "../types/index.js";
 import { getModelColor } from "../utils/colors.js";
 import { formatTokens } from "../utils/format.js";
 import { isNarrow } from "../utils/responsive.js";
@@ -35,27 +35,27 @@ export function StatsView(props: StatsViewProps) {
   const grid = createMemo((): GridCell[][] => {
     const contributions = props.data.contributions;
     const baseGrid = props.data.contributionGrid;
-    
-    const values = contributions.map(c => metric() === "tokens" ? c.tokens : c.cost);
+
+    const values = contributions.map((c) => (metric() === "tokens" ? c.tokens : c.cost));
     const maxValue = Math.max(1, ...values);
-    
+
     const levelMap = new Map<string, number>();
     for (const c of contributions) {
       const value = metric() === "tokens" ? c.tokens : c.cost;
       const level = value === 0 ? 0 : Math.min(4, Math.ceil((value / maxValue) * 4));
       levelMap.set(c.date, level);
     }
-    
-    return baseGrid.map(row => 
-      row.map(cell => ({
+
+    return baseGrid.map((row) =>
+      row.map((cell) => ({
         date: cell.date,
         level: cell.date ? (levelMap.get(cell.date) ?? 0) : 0,
-      }))
+      })),
     );
   });
-  
+
   const [clickedCell, setClickedCell] = createSignal<string | null>(null);
-  
+
   const selectedBreakdown = createMemo(() => {
     const date = clickedCell();
     if (!date) return null;
@@ -63,15 +63,15 @@ export function StatsView(props: StatsViewProps) {
     if (!(props.data.dailyBreakdowns instanceof Map)) return null;
     return props.data.dailyBreakdowns.get(date) || null;
   });
-  
+
   const monthPositions = createMemo(() => {
     const sundayRow = grid()[0] || [];
     if (sundayRow.length === 0) return [];
-    
+
     const positions: MonthLabel[] = [];
     let lastMonth = -1;
     const monthNames = isNarrowTerminal() ? MONTHS_SHORT : MONTHS;
-    
+
     for (let weekIdx = 0; weekIdx < sundayRow.length; weekIdx++) {
       const cell = sundayRow[weekIdx];
       if (!cell.date) continue;
@@ -90,7 +90,7 @@ export function StatsView(props: StatsViewProps) {
     const weeks = totalWeeks();
     const positions = monthPositions();
     const chars: string[] = new Array(weeks * cellWidth).fill(" ");
-    
+
     for (const pos of positions) {
       const startIdx = pos.weekIndex * cellWidth;
       const monthChars = pos.month.split("");
@@ -98,19 +98,17 @@ export function StatsView(props: StatsViewProps) {
         chars[startIdx + i] = monthChars[i];
       }
     }
-    
+
     return chars.join("");
   });
 
-  const dayLabelWidth = () => isNarrowTerminal() ? 2 : 4;
+  const dayLabelWidth = () => (isNarrowTerminal() ? 2 : 4);
 
-  const isSelected = (cellDate: string | null) => 
+  const isSelected = (cellDate: string | null) =>
     cellDate && (clickedCell() === cellDate || props.selectedDate === cellDate);
-  
-  const getCellColor = (level: number) => 
+
+  const getCellColor = (level: number) =>
     level === 0 ? "#666666" : getGradeColor(palette(), level as 0 | 1 | 2 | 3 | 4);
-
-
 
   return (
     <box flexDirection="column" gap={1}>
@@ -120,43 +118,45 @@ export function StatsView(props: StatsViewProps) {
           <text dim>{monthLabelRow()}</text>
         </box>
 
-        <box onMouseDown={(e: { x: number; y: number }) => {
-          const labelW = dayLabelWidth();
-          const col = Math.floor((e.x - labelW) / cellWidth);
-          const row = e.y - 2;
-          const gridRows = grid().length;
-          
-          if (row < 0 || row >= gridRows) {
-            return;
-          }
-          if (col < 0) {
-            return;
-          }
-          
-          const rowData = grid()[row];
-          if (!rowData || col >= rowData.length) {
-            return;
-          }
-          
-          const cell = rowData[col];
-          if (!cell?.date) {
-            return;
-          }
-          
-          const newDate = clickedCell() === cell.date ? null : cell.date;
-          setClickedCell(newDate);
-        }}>
+        <box
+          onMouseDown={(e: { x: number; y: number }) => {
+            const labelW = dayLabelWidth();
+            const col = Math.floor((e.x - labelW) / cellWidth);
+            const row = e.y - 2;
+            const gridRows = grid().length;
+
+            if (row < 0 || row >= gridRows) {
+              return;
+            }
+            if (col < 0) {
+              return;
+            }
+
+            const rowData = grid()[row];
+            if (!rowData || col >= rowData.length) {
+              return;
+            }
+
+            const cell = rowData[col];
+            if (!cell?.date) {
+              return;
+            }
+
+            const newDate = clickedCell() === cell.date ? null : cell.date;
+            setClickedCell(newDate);
+          }}
+        >
           <For each={DAYS}>
             {(day, dayIndex) => (
               <box flexDirection="row">
                 <text dim>{isNarrowTerminal() ? "  " : day.padStart(3) + " "}</text>
                 <For each={grid()[dayIndex()] || []}>
                   {(cell) => (
-                    <text 
-                      fg={isSelected(cell.date) ? "#ffffff" : getCellColor(cell.level)} 
+                    <text
+                      fg={isSelected(cell.date) ? "#ffffff" : getCellColor(cell.level)}
                       bg={isSelected(cell.date) ? getCellColor(cell.level) : undefined}
                     >
-                      {isSelected(cell.date) ? "▓▓" : (cell.level === 0 ? "· " : "██")}
+                      {isSelected(cell.date) ? "▓▓" : cell.level === 0 ? "· " : "██"}
                     </text>
                   )}
                 </For>
@@ -180,69 +180,74 @@ export function StatsView(props: StatsViewProps) {
           </For>
         </box>
         <text dim>More</text>
-        <Show when={!isNarrowTerminal()}>
+        <Show when={!isNarrowTerminal()} fallback={<></>}>
           <text dim>|</text>
           <text dim>Click on a day to see breakdown</text>
         </Show>
       </box>
 
-      <Show when={selectedBreakdown()}>
+      <Show
+        when={selectedBreakdown()}
+        fallback={
+          <>
+            <box flexDirection="column" marginTop={1}>
+              <box
+                flexDirection={isNarrowTerminal() ? "column" : "row"}
+                gap={isNarrowTerminal() ? 0 : 4}
+              >
+                <box flexDirection="column">
+                  <box flexDirection="row" gap={1}>
+                    <text dim>{isNarrowTerminal() ? "Model:" : "Favorite model:"}</text>
+                    <text fg={getModelColor(props.data.stats.favoriteModel)}>
+                      {props.data.stats.favoriteModel}
+                    </text>
+                  </box>
+                  <box flexDirection="row" gap={1}>
+                    <text dim>Sessions:</text>
+                    <text fg="cyan">{props.data.stats.sessions.toLocaleString()}</text>
+                  </box>
+                  <box flexDirection="row" gap={1}>
+                    <text dim>{isNarrowTerminal() ? "Streak:" : "Current streak:"}</text>
+                    <text fg="cyan">{`${props.data.stats.currentStreak} days`}</text>
+                  </box>
+                  <box flexDirection="row" gap={1}>
+                    <text dim>{isNarrowTerminal() ? "Active:" : "Active days:"}</text>
+                    <text fg="cyan">{`${props.data.stats.activeDays}/${props.data.stats.totalDays}`}</text>
+                  </box>
+                </box>
+
+                <box flexDirection="column">
+                  <box flexDirection="row" gap={1}>
+                    <text dim>{isNarrowTerminal() ? "Tokens:" : "Total tokens:"}</text>
+                    <text fg="cyan">{formatTokens(props.data.stats.totalTokens)}</text>
+                  </box>
+                  <box flexDirection="row" gap={1}>
+                    <text dim>{isNarrowTerminal() ? "Session:" : "Longest session:"}</text>
+                    <text fg="cyan">{props.data.stats.longestSession}</text>
+                  </box>
+                  <box flexDirection="row" gap={1}>
+                    <text dim>{isNarrowTerminal() ? "Max streak:" : "Longest streak:"}</text>
+                    <text fg="cyan">{`${props.data.stats.longestStreak} days`}</text>
+                  </box>
+                  <box flexDirection="row" gap={1}>
+                    <text dim>{isNarrowTerminal() ? "Peak:" : "Peak hour:"}</text>
+                    <text fg="cyan">{props.data.stats.peakHour}</text>
+                  </box>
+                </box>
+              </box>
+            </box>
+
+            <box marginTop={1}>
+              <text fg="yellow" italic>
+                {isNarrowTerminal()
+                  ? `Total: $${props.data.totalCost.toFixed(2)}`
+                  : `Your total spending is $${props.data.totalCost.toFixed(2)} on AI coding assistants!`}
+              </text>
+            </box>
+          </>
+        }
+      >
         <DateBreakdownPanel breakdown={selectedBreakdown()!} isNarrow={isNarrowTerminal()} />
-      </Show>
-
-      <Show when={!selectedBreakdown()}>
-        <box flexDirection="column" marginTop={1}>
-          <box flexDirection={isNarrowTerminal() ? "column" : "row"} gap={isNarrowTerminal() ? 0 : 4}>
-            <box flexDirection="column">
-              <box flexDirection="row" gap={1}>
-                <text dim>{isNarrowTerminal() ? "Model:" : "Favorite model:"}</text>
-                <text fg={getModelColor(props.data.stats.favoriteModel)}>{props.data.stats.favoriteModel}</text>
-              </box>
-              <box flexDirection="row" gap={1}>
-                <text dim>Sessions:</text>
-                <text fg="cyan">{props.data.stats.sessions.toLocaleString()}</text>
-              </box>
-              <box flexDirection="row" gap={1}>
-                <text dim>{isNarrowTerminal() ? "Streak:" : "Current streak:"}</text>
-                <text fg="cyan">{`${props.data.stats.currentStreak} days`}</text>
-              </box>
-              <box flexDirection="row" gap={1}>
-                <text dim>{isNarrowTerminal() ? "Active:" : "Active days:"}</text>
-                <text fg="cyan">{`${props.data.stats.activeDays}/${props.data.stats.totalDays}`}</text>
-              </box>
-            </box>
-
-            <box flexDirection="column">
-              <box flexDirection="row" gap={1}>
-                <text dim>{isNarrowTerminal() ? "Tokens:" : "Total tokens:"}</text>
-                <text fg="cyan">{formatTokens(props.data.stats.totalTokens)}</text>
-              </box>
-              <box flexDirection="row" gap={1}>
-                <text dim>{isNarrowTerminal() ? "Session:" : "Longest session:"}</text>
-                <text fg="cyan">{props.data.stats.longestSession}</text>
-              </box>
-              <box flexDirection="row" gap={1}>
-                <text dim>{isNarrowTerminal() ? "Max streak:" : "Longest streak:"}</text>
-                <text fg="cyan">{`${props.data.stats.longestStreak} days`}</text>
-              </box>
-              <box flexDirection="row" gap={1}>
-                <text dim>{isNarrowTerminal() ? "Peak:" : "Peak hour:"}</text>
-                <text fg="cyan">{props.data.stats.peakHour}</text>
-              </box>
-            </box>
-          </box>
-        </box>
-
-        <Show when={!isNarrowTerminal()}>
-          <box marginTop={1}>
-            <text fg="yellow" italic>{`Your total spending is $${props.data.totalCost.toFixed(2)} on AI coding assistants!`}</text>
-          </box>
-        </Show>
-        <Show when={isNarrowTerminal()}>
-          <box marginTop={1}>
-            <text fg="yellow" italic>{`Total: $${props.data.totalCost.toFixed(2)}`}</text>
-          </box>
-        </Show>
       </Show>
     </box>
   );
