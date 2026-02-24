@@ -69,6 +69,7 @@
 - [Session Data Retention](#session-data-retention)
 - [Data Sources](#data-sources)
 - [Pricing](#pricing)
+- [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [Acknowledgments](#acknowledgments)
 - [License](#license)
@@ -807,6 +808,120 @@ Pricing includes:
 - Cache write tokens
 - Reasoning tokens (for models like o1)
 - Tiered pricing (above 200k tokens)
+
+## Troubleshooting
+
+### Installation Failures
+
+**`cargo not found` / Rust toolchain missing**
+
+The native Rust module is pre-built for all supported platforms and bundled with the npm package — you do **not** need Rust installed for normal use. If you're building from source and see this error:
+
+```bash
+# Install Rust via rustup
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Then retry
+bun run build:core
+```
+
+**Missing build tools on Linux**
+
+If `bun run build:core` fails with errors about `cc`, `linker`, or `OpenSSL`:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install build-essential pkg-config libssl-dev
+
+# Fedora / RHEL / CentOS
+sudo dnf install gcc make openssl-devel pkgconfig
+
+# Arch Linux
+sudo pacman -S base-devel openssl
+```
+
+**Missing build tools on macOS**
+
+```bash
+xcode-select --install
+```
+
+**`bunx tokscale` not found / Bun not installed**
+
+Tokscale requires [Bun](https://bun.sh/) as its runtime. If the `bunx` command is not found:
+
+```bash
+# Install Bun
+curl -fsSL https://bun.sh/install | bash
+
+# Reload your shell (or open a new terminal), then verify
+bun --version
+```
+
+> **Windows**: Use the [official Bun installer for Windows](https://bun.sh/docs/installation) or install via `npm install -g bun`.
+
+---
+
+### Authentication Issues
+
+**Re-authenticate with Tokscale social platform**
+
+If `tokscale submit` fails with an authentication error, or `tokscale whoami` shows unexpected output:
+
+```bash
+# Log out and log back in
+tokscale logout
+tokscale login
+```
+
+This opens a browser window for GitHub OAuth. After completing auth, your credentials are saved to `~/.config/tokscale/`.
+
+**Re-authenticate with Cursor IDE**
+
+If `tokscale --cursor` shows no data or `tokscale cursor status` reports an expired/invalid session:
+
+```bash
+# Remove old credentials and log in again
+tokscale cursor logout
+tokscale cursor login
+```
+
+Cursor uses a separate session token from your browser (not GitHub OAuth). See [Cursor IDE Commands](#cursor-ide-commands) for step-by-step instructions on obtaining your session token.
+
+> **Note**: Cursor session tokens expire periodically. If data stops syncing, re-run `tokscale cursor login` to refresh.
+
+---
+
+### Missing Data / Empty Output
+
+**No data shown for a platform**
+
+First, check that the tool is supported and confirm the expected log path exists on your machine:
+
+| Client | Required Log Path |
+|--------|-------------------|
+| OpenCode | `~/.local/share/opencode/storage/message/` |
+| Claude Code | `~/.claude/projects/` |
+| Codex CLI | `~/.codex/sessions/` |
+| Gemini CLI | `~/.gemini/tmp/*/chats/` |
+| Cursor IDE | `~/.config/tokscale/cursor-cache/` (requires `tokscale cursor login`) |
+
+```bash
+# Verify the directory exists and contains session files
+ls ~/.claude/projects/
+ls ~/.local/share/opencode/storage/message/
+```
+
+If the directory is empty or missing, the AI tool may not have created any sessions yet, or sessions may have been cleaned up. See [Session Data Retention](#session-data-retention) to prevent future data loss.
+
+**Data exists but tokscale shows nothing**
+
+- Make sure you're not applying a date filter that excludes your data (e.g. `--today` when the sessions are older).
+- Run without filters first: `tokscale --light` to verify the raw output.
+- For Cursor, run `tokscale cursor status` to confirm the sync is active.
+
+---
 
 ## Contributing
 
