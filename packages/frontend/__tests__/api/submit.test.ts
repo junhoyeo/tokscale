@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  mergeClientBreakdowns,
+  type ClientBreakdownData,
+} from '../../src/lib/db/helpers';
 
 /**
  * Test suite for POST /api/submit - Client-Level Merge
@@ -405,6 +409,183 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(modelBreakdown['claude-sonnet-4']).toBe(950);
       expect(modelBreakdown['claude-opus-4']).toBe(1600);
       expect(modelBreakdown['gpt-4o']).toBe(375);
+    });
+  });
+
+  describe('Device-Level Deduplication', () => {
+    const makeClientData = (tokens: number, cost: number, modelId: string): ClientBreakdownData => ({
+      tokens,
+      cost,
+      input: Math.floor(tokens * 0.6),
+      output: Math.floor(tokens * 0.4),
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+      models: {
+        [modelId]: {
+          tokens,
+          cost,
+          input: Math.floor(tokens * 0.6),
+          output: Math.floor(tokens * 0.4),
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 1,
+        },
+      },
+    });
+
+    it('should replace device data on resubmit without double-counting', () => {
+      // First submit from device-A
+      const existing: Record<string, ClientBreakdownData> = {};
+      const incoming1 = { claude: makeClientData(1000, 10, 'claude-sonnet-4') };
+      const after1 = mergeClientBreakdowns(existing, incoming1, new Set(['claude']), 'device-A');
+
+      expect(after1.claude.tokens).toBe(1000);
+      expect(after1.claude.devices!['device-A'].tokens).toBe(1000);
+
+      // Same device resubmits with updated data
+      const incoming2 = { claude: makeClientData(1500, 15, 'claude-sonnet-4') };
+      const after2 = mergeClientBreakdowns(after1, incoming2, new Set(['claude']), 'device-A');
+
+      // Should be 1500, NOT 1000 + 1500 = 2500
+      expect(after2.claude.tokens).toBe(1500);
+      expect(after2.claude.devices!['device-A'].tokens).toBe(1500);
+    });
+
+    it('should aggregate data from multiple devices correctly', () => {
+      const existing: Record<string, ClientBreakdownData> = {};
+
+      // Device A submits
+      const incomingA = { claude: makeClientData(1000, 10, 'claude-sonnet-4') };
+      const afterA = mergeClientBreakdowns(existing, incomingA, new Set(['claude']), 'device-A');
+
+      // Device B submits
+      const incomingB = { claude: makeClientData(500, 5, 'claude-sonnet-4') };
+      const afterBoth = mergeClientBreakdowns(afterA, incomingB, new Set(['claude']), 'device-B');
+
+      // Total should be sum of both devices
+      expect(afterBoth.claude.tokens).toBe(1500);
+      expect(afterBoth.claude.devices!['device-A'].tokens).toBe(1000);
+      expect(afterBoth.claude.devices!['device-B'].tokens).toBe(500);
+    });
+
+    it('should preserve other devices when one device resubmits', () => {
+      const existing: Record<string, ClientBreakdownData> = {};
+
+      // Two devices submit
+      const incomingA = { claude: makeClientData(1000, 10, 'claude-sonnet-4') };
+      const afterA = mergeClientBreakdowns(existing, incomingA, new Set(['claude']), 'device-A');
+      const incomingB = { claude: makeClientData(500, 5, 'claude-sonnet-4') };
+      const afterBoth = mergeClientBreakdowns(afterA, incomingB, new Set(['claude']), 'device-B');
+
+      // Device A resubmits with new data
+      const incomingA2 = { claude: makeClientData(2000, 20, 'claude-sonnet-4') };
+      const afterResubmit = mergeClientBreakdowns(afterBoth, incomingA2, new Set(['claude']), 'device-A');
+
+      // Device B is preserved, device A is replaced
+      expect(afterResubmit.claude.devices!['device-A'].tokens).toBe(2000);
+      expect(afterResubmit.claude.devices!['device-B'].tokens).toBe(500);
+      expect(afterResubmit.claude.tokens).toBe(2500);
+    });
+
+    it('should migrate legacy data (no devices) to __legacy__ key', () => {
+      // Simulate existing data without devices field (pre-device-tracking)
+      const existing: Record<string, ClientBreakdownData> = {
+        claude: {
+          tokens: 800,
+          cost: 8,
+          input: 480,
+          output: 320,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 3,
+          models: {
+            'claude-sonnet-4': { tokens: 800, cost: 8, input: 480, output: 320, cacheRead: 0, cacheWrite: 0, reasoning: 0, messages: 3 },
+          },
+        },
+      };
+
+      const incoming = { claude: makeClientData(1000, 10, 'claude-sonnet-4') };
+      const merged = mergeClientBreakdowns(existing, incoming, new Set(['claude']), 'device-A');
+
+      // Legacy data preserved under __legacy__
+      expect(merged.claude.devices!['__legacy__']).toBeDefined();
+      expect(merged.claude.devices!['__legacy__'].tokens).toBe(800);
+      // New device data present
+      expect(merged.claude.devices!['device-A'].tokens).toBe(1000);
+      // Total is sum of legacy + new device
+      expect(merged.claude.tokens).toBe(1800);
+    });
+
+    it('should handle device removal when client declared but no data', () => {
+      const existing: Record<string, ClientBreakdownData> = {};
+
+      // Two devices submit
+      const incomingA = { claude: makeClientData(1000, 10, 'claude-sonnet-4') };
+      const afterA = mergeClientBreakdowns(existing, incomingA, new Set(['claude']), 'device-A');
+      const incomingB = { claude: makeClientData(500, 5, 'claude-sonnet-4') };
+      const afterBoth = mergeClientBreakdowns(afterA, incomingB, new Set(['claude']), 'device-B');
+
+      // Device A submits with claude declared but no claude data
+      const incomingEmpty: Record<string, ClientBreakdownData> = {};
+      const afterRemove = mergeClientBreakdowns(afterBoth, incomingEmpty, new Set(['claude']), 'device-A');
+
+      // Device A removed, device B preserved
+      expect(afterRemove.claude.devices!['device-A']).toBeUndefined();
+      expect(afterRemove.claude.devices!['device-B'].tokens).toBe(500);
+      expect(afterRemove.claude.tokens).toBe(500);
+    });
+
+    it('should delete client entirely when last device is removed', () => {
+      const existing: Record<string, ClientBreakdownData> = {};
+
+      const incomingA = { claude: makeClientData(1000, 10, 'claude-sonnet-4') };
+      const afterA = mergeClientBreakdowns(existing, incomingA, new Set(['claude']), 'device-A');
+
+      // Device A submits with claude declared but no data
+      const incomingEmpty: Record<string, ClientBreakdownData> = {};
+      const afterRemove = mergeClientBreakdowns(afterA, incomingEmpty, new Set(['claude']), 'device-A');
+
+      expect(afterRemove.claude).toBeUndefined();
+    });
+
+    it('should aggregate models across devices correctly', () => {
+      const existing: Record<string, ClientBreakdownData> = {};
+
+      // Device A uses sonnet
+      const incomingA = { claude: makeClientData(1000, 10, 'claude-sonnet-4') };
+      const afterA = mergeClientBreakdowns(existing, incomingA, new Set(['claude']), 'device-A');
+
+      // Device B uses opus
+      const incomingB = { claude: makeClientData(500, 5, 'claude-opus-4') };
+      const afterBoth = mergeClientBreakdowns(afterA, incomingB, new Set(['claude']), 'device-B');
+
+      // Both models present at client level
+      expect(afterBoth.claude.models['claude-sonnet-4'].tokens).toBe(1000);
+      expect(afterBoth.claude.models['claude-opus-4'].tokens).toBe(500);
+      expect(afterBoth.claude.tokens).toBe(1500);
+    });
+
+    it('should handle multiple clients across multiple devices', () => {
+      const existing: Record<string, ClientBreakdownData> = {};
+
+      // Device A: claude + cursor
+      const incomingA = {
+        claude: makeClientData(1000, 10, 'claude-sonnet-4'),
+        cursor: makeClientData(300, 3, 'gpt-4o'),
+      };
+      const afterA = mergeClientBreakdowns(existing, incomingA, new Set(['claude', 'cursor']), 'device-A');
+
+      // Device B: only claude
+      const incomingB = { claude: makeClientData(500, 5, 'claude-sonnet-4') };
+      const afterBoth = mergeClientBreakdowns(afterA, incomingB, new Set(['claude']), 'device-B');
+
+      expect(afterBoth.claude.tokens).toBe(1500);
+      expect(afterBoth.cursor.tokens).toBe(300);
+      expect(afterBoth.cursor.devices!['device-A'].tokens).toBe(300);
     });
   });
 

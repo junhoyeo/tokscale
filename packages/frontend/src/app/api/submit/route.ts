@@ -272,7 +272,8 @@ export async function POST(request: Request) {
            const mergedClientBreakdown = mergeClientBreakdowns(
              existingClientBreakdown,
              incomingClientBreakdown,
-             submittedClients
+             submittedClients,
+             tokenRecord.tokenId
            );
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
           const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);
@@ -288,8 +289,30 @@ export async function POST(request: Request) {
             modelBreakdown,
           });
         } else {
-          const dayTotals = recalculateDayTotals(incomingClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingClientBreakdown);
+          // Initialize with devices[tokenId] from the start to prevent
+          // double-counting on resubmit (avoids __legacy__ migration path)
+          const incomingWithDevices: Record<string, ClientBreakdownData> = {};
+          for (const [clientName, clientData] of Object.entries(incomingClientBreakdown)) {
+            incomingWithDevices[clientName] = {
+              ...clientData,
+              devices: {
+                [tokenRecord.tokenId]: {
+                  tokens: clientData.tokens,
+                  cost: clientData.cost,
+                  input: clientData.input,
+                  output: clientData.output,
+                  cacheRead: clientData.cacheRead,
+                  cacheWrite: clientData.cacheWrite,
+                  reasoning: Number(clientData.reasoning) || 0,
+                  messages: clientData.messages,
+                  models: { ...clientData.models },
+                },
+              },
+            };
+          }
+
+          const dayTotals = recalculateDayTotals(incomingWithDevices);
+          const modelBreakdown = buildModelBreakdown(incomingWithDevices);
 
           toInsert.push({
             submissionId,
@@ -299,7 +322,7 @@ export async function POST(request: Request) {
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: incomingDay.timestampMs ?? null,
-            sourceBreakdown: incomingClientBreakdown,
+            sourceBreakdown: incomingWithDevices,
             modelBreakdown,
           });
         }
