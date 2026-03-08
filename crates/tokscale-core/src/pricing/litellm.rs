@@ -26,6 +26,10 @@ pub fn load_cached() -> Option<PricingDataset> {
     cache::load_cache(CACHE_FILENAME)
 }
 
+pub fn load_cached_any_age() -> Option<PricingDataset> {
+    cache::load_cache_any_age(CACHE_FILENAME)
+}
+
 pub async fn fetch() -> Result<PricingDataset, reqwest::Error> {
     if let Some(cached) = load_cached() {
         return Ok(cached);

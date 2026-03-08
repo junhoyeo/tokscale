@@ -292,9 +292,10 @@ pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, S
 fn parse_all_messages_with_pricing(
     home_dir: &str,
     clients: &[String],
-    pricing: &pricing::PricingService,
+    pricing: Option<&pricing::PricingService>,
 ) -> Vec<UnifiedMessage> {
     let scan_result = scanner::scan_all_clients(home_dir, clients);
+    let headless_roots = scanner::headless_roots(home_dir);
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
@@ -307,14 +308,7 @@ fn parse_all_messages_with_pricing(
             sessions::opencode::parse_opencode_sqlite(db_path)
                 .into_iter()
                 .map(|mut msg| {
-                    msg.cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
+                    apply_pricing_if_available(&mut msg, pricing);
                     if let Some(ref key) = msg.dedup_key {
                         opencode_seen.insert(key.clone());
                     }
@@ -329,14 +323,7 @@ fn parse_all_messages_with_pricing(
         .par_iter()
         .filter_map(|path| {
             let mut msg = sessions::opencode::parse_opencode_file(path)?;
-            msg.cost = pricing.calculate_cost(
-                &msg.model_id,
-                msg.tokens.input,
-                msg.tokens.output,
-                msg.tokens.cache_read,
-                msg.tokens.cache_write,
-                msg.tokens.reasoning,
-            );
+            apply_pricing_if_available(&mut msg, pricing);
             Some(msg)
         })
         .collect();
@@ -354,14 +341,7 @@ fn parse_all_messages_with_pricing(
                 .into_iter()
                 .map(|mut msg| {
                     let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-                    msg.cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
+                    apply_pricing_if_available(&mut msg, pricing);
                     (dedup_key, msg)
                 })
                 .collect::<Vec<_>>()
@@ -380,23 +360,12 @@ fn parse_all_messages_with_pricing(
         .get(ClientId::Codex)
         .par_iter()
         .flat_map(|path| {
+            let is_headless = is_headless_path(path, &headless_roots);
             sessions::codex::parse_codex_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_headless_agent(&mut msg, is_headless);
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -411,14 +380,7 @@ fn parse_all_messages_with_pricing(
             sessions::gemini::parse_gemini_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    msg.cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output + msg.tokens.reasoning,
-                        0,
-                        0,
-                        0,
-                    );
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -433,20 +395,7 @@ fn parse_all_messages_with_pricing(
             sessions::cursor::parse_cursor_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let csv_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        csv_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -461,20 +410,7 @@ fn parse_all_messages_with_pricing(
             sessions::amp::parse_amp_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let credits = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        credits
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -489,20 +425,7 @@ fn parse_all_messages_with_pricing(
             sessions::droid::parse_droid_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -517,20 +440,7 @@ fn parse_all_messages_with_pricing(
             sessions::openclaw::parse_openclaw_transcript(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -545,20 +455,7 @@ fn parse_all_messages_with_pricing(
             sessions::pi::parse_pi_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -573,20 +470,7 @@ fn parse_all_messages_with_pricing(
             sessions::kimi::parse_kimi_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -602,20 +486,7 @@ fn parse_all_messages_with_pricing(
             sessions::qwen::parse_qwen_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -630,20 +501,7 @@ fn parse_all_messages_with_pricing(
             sessions::roocode::parse_roocode_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -658,20 +516,7 @@ fn parse_all_messages_with_pricing(
             sessions::kilocode::parse_kilocode_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -686,20 +531,7 @@ fn parse_all_messages_with_pricing(
             sessions::mux::parse_mux_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    let source_cost = msg.cost;
-                    let calculated_cost = pricing.calculate_cost(
-                        &msg.model_id,
-                        msg.tokens.input,
-                        msg.tokens.output,
-                        msg.tokens.cache_read,
-                        msg.tokens.cache_write,
-                        msg.tokens.reasoning,
-                    );
-                    msg.cost = if calculated_cost > 0.0 {
-                        calculated_cost
-                    } else {
-                        source_cost
-                    };
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -713,14 +545,7 @@ fn parse_all_messages_with_pricing(
                 sessions::synthetic::parse_octofriend_sqlite(db_path)
                     .into_iter()
                     .map(|mut msg| {
-                        msg.cost = pricing.calculate_cost(
-                            &msg.model_id,
-                            msg.tokens.input,
-                            msg.tokens.output,
-                            msg.tokens.cache_read,
-                            msg.tokens.cache_write,
-                            msg.tokens.reasoning,
-                        );
+                        apply_pricing_if_available(&mut msg, pricing);
                         msg
                     })
                     .collect();
@@ -752,6 +577,28 @@ fn parse_all_messages_with_pricing(
     all_messages
 }
 
+fn filter_unified_messages(
+    messages: Vec<UnifiedMessage>,
+    options: &LocalParseOptions,
+) -> Vec<UnifiedMessage> {
+    let mut filtered = messages;
+
+    if let Some(year) = &options.year {
+        let year_prefix = format!("{}-", year);
+        filtered.retain(|m| m.date.starts_with(&year_prefix));
+    }
+
+    if let Some(since) = &options.since {
+        filtered.retain(|m| m.date.as_str() >= since.as_str());
+    }
+
+    if let Some(until) = &options.until {
+        filtered.retain(|m| m.date.as_str() <= until.as_str());
+    }
+
+    filtered
+}
+
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
     let start = Instant::now();
 
@@ -767,7 +614,7 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, &pricing);
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -894,7 +741,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, &pricing);
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -960,7 +807,7 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, &pricing);
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1001,6 +848,39 @@ fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
 fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     if is_headless && message.agent.is_none() {
         message.agent = Some("headless".to_string());
+    }
+}
+
+fn apply_pricing_if_available(
+    message: &mut UnifiedMessage,
+    pricing: Option<&pricing::PricingService>,
+) {
+    let Some(pricing) = pricing else {
+        return;
+    };
+
+    let calculated_cost = if message.client.eq_ignore_ascii_case("gemini") {
+        pricing.calculate_cost(
+            &message.model_id,
+            message.tokens.input,
+            message.tokens.output + message.tokens.reasoning,
+            0,
+            0,
+            0,
+        )
+    } else {
+        pricing.calculate_cost(
+            &message.model_id,
+            message.tokens.input,
+            message.tokens.output,
+            message.tokens.cache_read,
+            message.tokens.cache_write,
+            message.tokens.reasoning,
+        )
+    };
+
+    if calculated_cost > 0.0 {
+        message.cost = calculated_cost;
     }
 }
 
@@ -1314,6 +1194,26 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     })
 }
 
+pub async fn parse_local_unified_messages(
+    options: LocalParseOptions,
+) -> Result<Vec<UnifiedMessage>, String> {
+    let home_dir = get_home_dir_string(&options.home_dir)?;
+
+    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
+        let mut clients: Vec<String> = ClientId::iter()
+            .filter(|c| c.parse_local())
+            .map(|c| c.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+        clients
+    });
+
+    let pricing = pricing::PricingService::load_cached_any_age();
+    let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_ref());
+
+    Ok(filter_unified_messages(messages, &options))
+}
+
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
         client: msg.client.clone(),
@@ -1376,7 +1276,11 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_model_for_grouping, GroupBy};
+    use super::{
+        apply_pricing_if_available, normalize_model_for_grouping, pricing, GroupBy, TokenBreakdown,
+        UnifiedMessage,
+    };
+    use std::collections::HashMap;
     use std::str::FromStr;
 
     #[test]
@@ -1497,5 +1401,97 @@ mod tests {
             GroupBy::from_str("client , provider , model").unwrap(),
             GroupBy::ClientProviderModel
         );
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_keeps_existing_cost_without_pricing() {
+        let mut msg = UnifiedMessage::new_with_agent(
+            "roocode",
+            "gpt-4o",
+            "provider",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.42,
+            Some("planner".to_string()),
+        );
+
+        apply_pricing_if_available(&mut msg, None);
+
+        assert_eq!(msg.cost, 0.42);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_overrides_cost_when_pricing_exists() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4o".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "codex",
+            "gpt-4o",
+            "provider",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.02);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_uses_reasoning_for_gemini() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gemini-2.5-pro".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "gemini",
+            "gemini-2.5-pro",
+            "google",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 7,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.034);
     }
 }

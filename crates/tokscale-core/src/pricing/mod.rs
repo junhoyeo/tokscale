@@ -92,6 +92,27 @@ impl PricingService {
         Ok(Self::new(litellm_data, openrouter_data))
     }
 
+    fn from_cached_datasets(
+        litellm_data: Option<HashMap<String, ModelPricing>>,
+        openrouter_data: Option<HashMap<String, ModelPricing>>,
+    ) -> Option<Self> {
+        if litellm_data.is_none() && openrouter_data.is_none() {
+            return None;
+        }
+
+        Some(Self::new(
+            Self::filter_litellm_data(litellm_data.unwrap_or_default()),
+            openrouter_data.unwrap_or_default(),
+        ))
+    }
+
+    pub fn load_cached_any_age() -> Option<Self> {
+        Self::from_cached_datasets(
+            litellm::load_cached_any_age(),
+            openrouter::load_cached_any_age(),
+        )
+    }
+
     pub async fn get_or_init() -> Result<Arc<PricingService>, String> {
         PRICING_SERVICE
             .get_or_try_init(|| async { Self::fetch_inner().await.map(Arc::new) })
@@ -258,5 +279,38 @@ mod tests {
         let cost = service.calculate_cost("gpt-5.3-codex", 1_000_000, 100_000, 0, 0, 0);
         let expected = 1_000_000.0 * 0.00000175 + 100_000.0 * 0.000014;
         assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_from_cached_datasets_returns_none_when_both_sources_missing() {
+        assert!(PricingService::from_cached_datasets(None, None).is_none());
+    }
+
+    #[test]
+    fn test_from_cached_datasets_filters_subscription_only_litellm_entries() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "github_copilot/gpt-5.3-codex".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "gpt-5.2".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.00000175),
+                ..Default::default()
+            },
+        );
+
+        let service = PricingService::from_cached_datasets(Some(litellm), None).unwrap();
+
+        assert!(service
+            .lookup_with_source("github_copilot/gpt-5.3-codex", Some("litellm"))
+            .is_none());
+        assert!(service
+            .lookup_with_source("gpt-5.2", Some("litellm"))
+            .is_some());
     }
 }

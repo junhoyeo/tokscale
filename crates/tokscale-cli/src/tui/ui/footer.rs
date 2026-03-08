@@ -134,10 +134,14 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     ));
 
-    // Model count
+    // Current list count
     if !is_very_narrow {
+        let count_label = match app.current_tab {
+            Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
+            _ => format!(" ({} models)", app.data.models.len()),
+        };
         right_spans.push(Span::styled(
-            format!(" ({} models)", app.data.models.len()),
+            count_label,
             Style::default().fg(app.theme.muted),
         ));
     }
@@ -236,7 +240,7 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
 fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
 
-    if app.data.loading || app.background_loading {
+    if app.data.loading {
         let scanner_spans = get_scanner_spans(app.spinner_frame);
         spans.extend(scanner_spans);
         spans.push(Span::raw(" "));
@@ -244,6 +248,21 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             get_phase_message("parsing-sources"),
             Style::default().fg(app.theme.muted),
         ));
+    } else if app.background_loading {
+        if app.has_visible_data() {
+            spans.push(Span::styled(
+                "Refreshing cached data in background...",
+                Style::default().fg(app.theme.muted),
+            ));
+        } else {
+            let scanner_spans = get_scanner_spans(app.spinner_frame);
+            spans.extend(scanner_spans);
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                get_phase_message("parsing-sources"),
+                Style::default().fg(app.theme.muted),
+            ));
+        }
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
             msg.clone(),

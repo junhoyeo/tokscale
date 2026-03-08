@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
-use super::data::{DailyUsage, DataLoader, ModelUsage, UsageData};
+use super::data::{AgentUsage, DailyUsage, DataLoader, ModelUsage, UsageData};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
@@ -31,11 +31,18 @@ pub enum Tab {
     Models,
     Daily,
     Stats,
+    Agents,
 }
 
 impl Tab {
     pub fn all() -> &'static [Tab] {
-        &[Tab::Overview, Tab::Models, Tab::Daily, Tab::Stats]
+        &[
+            Tab::Overview,
+            Tab::Models,
+            Tab::Daily,
+            Tab::Stats,
+            Tab::Agents,
+        ]
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -44,6 +51,7 @@ impl Tab {
             Tab::Models => "Models",
             Tab::Daily => "Daily",
             Tab::Stats => "Stats",
+            Tab::Agents => "Agents",
         }
     }
 
@@ -53,6 +61,7 @@ impl Tab {
             Tab::Models => "Mod",
             Tab::Daily => "Day",
             Tab::Stats => "Sta",
+            Tab::Agents => "Agt",
         }
     }
 
@@ -61,16 +70,18 @@ impl Tab {
             Tab::Overview => Tab::Models,
             Tab::Models => Tab::Daily,
             Tab::Daily => Tab::Stats,
-            Tab::Stats => Tab::Overview,
+            Tab::Stats => Tab::Agents,
+            Tab::Agents => Tab::Overview,
         }
     }
 
     pub fn prev(self) -> Tab {
         match self {
-            Tab::Overview => Tab::Stats,
+            Tab::Overview => Tab::Agents,
             Tab::Models => Tab::Overview,
             Tab::Daily => Tab::Models,
             Tab::Stats => Tab::Daily,
+            Tab::Agents => Tab::Stats,
         }
     }
 }
@@ -240,6 +251,15 @@ impl App {
         self.clamp_selection();
     }
 
+    pub fn has_visible_data(&self) -> bool {
+        !self.data.models.is_empty()
+            || !self.data.daily.is_empty()
+            || !self.data.agents.is_empty()
+            || self.data.graph.is_some()
+            || self.data.total_tokens > 0
+            || self.data.total_cost > 0.0
+    }
+
     pub fn set_error(&mut self, error: Option<String>) {
         self.data.error = error;
     }
@@ -333,7 +353,11 @@ impl App {
                 self.cycle_theme();
             }
             KeyCode::Char('r') => {
-                self.needs_reload = true;
+                if self.background_loading {
+                    self.set_status("Refresh already in progress");
+                } else {
+                    self.needs_reload = true;
+                }
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.toggle_auto_refresh();
@@ -571,6 +595,7 @@ impl App {
     fn get_current_list_len(&self) -> usize {
         match self.current_tab {
             Tab::Overview | Tab::Models => self.data.models.len(),
+            Tab::Agents => self.data.agents.len(),
             Tab::Daily => self.data.daily.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
@@ -717,6 +742,10 @@ impl App {
                 .get_sorted_models()
                 .get(self.selected_index)
                 .map(|m| format!("{}: {} tokens, ${:.4}", m.model, m.tokens.total(), m.cost)),
+            Tab::Agents => self
+                .get_sorted_agents()
+                .get(self.selected_index)
+                .map(|a| format!("{}: {} tokens, ${:.4}", a.agent, a.tokens.total(), a.cost)),
             Tab::Daily => self
                 .get_sorted_daily()
                 .get(self.selected_index)
@@ -747,6 +776,19 @@ impl App {
                 },
                 "cost": m.cost,
                 "sessionCount": m.session_count
+            })).collect::<Vec<_>>(),
+            "agents": self.data.agents.iter().map(|a| serde_json::json!({
+                "agent": a.agent,
+                "clients": a.clients,
+                "tokens": {
+                    "input": a.tokens.input,
+                    "output": a.tokens.output,
+                    "cacheRead": a.tokens.cache_read,
+                    "cacheWrite": a.tokens.cache_write,
+                    "total": a.tokens.total()
+                },
+                "cost": a.cost,
+                "messageCount": a.message_count
             })).collect::<Vec<_>>(),
             "daily": self.data.daily.iter().map(|d| serde_json::json!({
                 "date": d.date.to_string(),
@@ -827,6 +869,42 @@ impl App {
         models
     }
 
+    pub fn get_sorted_agents(&self) -> Vec<&AgentUsage> {
+        let mut agents: Vec<&AgentUsage> = self.data.agents.iter().collect();
+
+        let tie_breaker = |a: &&AgentUsage, b: &&AgentUsage| {
+            a.agent
+                .cmp(&b.agent)
+                .then_with(|| a.clients.cmp(&b.clients))
+        };
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => {
+                agents.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Cost, SortDirection::Ascending) => {
+                agents.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Tokens, SortDirection::Descending) => agents.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => agents.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Date, _) => {
+                agents.sort_by(|a, b| tie_breaker(a, b));
+            }
+        }
+
+        agents
+    }
+
     pub fn get_sorted_daily(&self) -> Vec<&DailyUsage> {
         let mut daily: Vec<&DailyUsage> = self.data.daily.iter().collect();
 
@@ -877,11 +955,12 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs.len(), 5);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Models);
         assert_eq!(tabs[2], Tab::Daily);
         assert_eq!(tabs[3], Tab::Stats);
+        assert_eq!(tabs[4], Tab::Agents);
     }
 
     #[test]
@@ -889,21 +968,24 @@ mod tests {
         assert_eq!(Tab::Overview.next(), Tab::Models);
         assert_eq!(Tab::Models.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Stats);
-        assert_eq!(Tab::Stats.next(), Tab::Overview);
+        assert_eq!(Tab::Stats.next(), Tab::Agents);
+        assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
 
     #[test]
     fn test_tab_prev() {
-        assert_eq!(Tab::Overview.prev(), Tab::Stats);
+        assert_eq!(Tab::Overview.prev(), Tab::Agents);
         assert_eq!(Tab::Models.prev(), Tab::Overview);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
         assert_eq!(Tab::Stats.prev(), Tab::Daily);
+        assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
     #[test]
     fn test_tab_as_str() {
         assert_eq!(Tab::Overview.as_str(), "Overview");
         assert_eq!(Tab::Models.as_str(), "Models");
+        assert_eq!(Tab::Agents.as_str(), "Agents");
         assert_eq!(Tab::Daily.as_str(), "Daily");
         assert_eq!(Tab::Stats.as_str(), "Stats");
     }
@@ -912,6 +994,7 @@ mod tests {
     fn test_tab_short_name() {
         assert_eq!(Tab::Overview.short_name(), "Ovw");
         assert_eq!(Tab::Models.short_name(), "Mod");
+        assert_eq!(Tab::Agents.short_name(), "Agt");
         assert_eq!(Tab::Daily.short_name(), "Day");
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
@@ -1189,6 +1272,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Agents);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Overview);
     }
 
@@ -1198,10 +1284,92 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Overview);
 
         app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Agents);
+
+        app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Daily);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Models);
+    }
+
+    #[test]
+    fn test_get_sorted_agents_by_cost_desc() {
+        let mut app = make_app();
+        app.data.agents = vec![
+            AgentUsage {
+                agent: "builder".to_string(),
+                clients: "opencode".to_string(),
+                tokens: TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 3.0,
+                message_count: 1,
+            },
+            AgentUsage {
+                agent: "reviewer".to_string(),
+                clients: "roocode".to_string(),
+                tokens: TokenBreakdown {
+                    input: 50,
+                    output: 20,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 7.0,
+                message_count: 2,
+            },
+        ];
+
+        let agents = app.get_sorted_agents();
+        assert_eq!(agents[0].agent, "reviewer");
+        assert_eq!(agents[1].agent, "builder");
+    }
+
+    #[test]
+    fn test_get_sorted_agents_by_tokens_asc() {
+        let mut app = make_app();
+        app.sort_field = SortField::Tokens;
+        app.sort_direction = SortDirection::Ascending;
+        app.data.agents = vec![
+            AgentUsage {
+                agent: "builder".to_string(),
+                clients: "opencode".to_string(),
+                tokens: TokenBreakdown {
+                    input: 100,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 1.0,
+                message_count: 1,
+            },
+            AgentUsage {
+                agent: "reviewer".to_string(),
+                clients: "roocode".to_string(),
+                tokens: TokenBreakdown {
+                    input: 20,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 5.0,
+                message_count: 1,
+            },
+        ];
+
+        let agents = app.get_sorted_agents();
+        assert_eq!(agents[0].agent, "reviewer");
+        assert_eq!(agents[1].agent, "builder");
     }
 
     #[test]
@@ -1402,7 +1570,21 @@ mod tests {
         let mut app = make_app();
         std::thread::sleep(Duration::from_millis(5));
         app.handle_key_event(key(KeyCode::Char('r')));
-        assert!(app.status_message.is_some());
+        assert!(app.needs_reload);
+    }
+
+    #[test]
+    fn test_handle_key_refresh_while_loading_does_not_queue_reload() {
+        let mut app = make_app();
+        app.background_loading = true;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+
+        assert!(!app.needs_reload);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Refresh already in progress")
+        );
     }
 
     // ── handle_key_event: misc keys ─────────────────────────────────

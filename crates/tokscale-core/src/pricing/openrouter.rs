@@ -88,6 +88,10 @@ pub fn load_cached() -> Option<HashMap<String, ModelPricing>> {
     cache::load_cache(CACHE_FILENAME)
 }
 
+pub fn load_cached_any_age() -> Option<HashMap<String, ModelPricing>> {
+    cache::load_cache_any_age(CACHE_FILENAME)
+}
+
 fn parse_price(s: &str) -> Option<f64> {
     s.trim()
         .parse::<f64>()

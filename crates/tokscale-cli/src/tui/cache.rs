@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use tokscale_core::ClientId;
 
 use super::data::{
-    ContributionDay, DailyModelInfo, DailyUsage, GraphData, ModelUsage, TokenBreakdown, UsageData,
+    AgentUsage, ContributionDay, DailyModelInfo, DailyUsage, GraphData, ModelUsage, TokenBreakdown,
+    UsageData,
 };
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
@@ -46,6 +47,8 @@ struct CachedTUIData {
 #[serde(rename_all = "camelCase")]
 struct CachedUsageData {
     models: Vec<CachedModelUsage>,
+    #[serde(default)]
+    agents: Vec<CachedAgentUsage>,
     daily: Vec<CachedDailyUsage>,
     graph: Option<CachedGraphData>,
     total_tokens: u64,
@@ -73,6 +76,16 @@ struct CachedModelUsage {
     tokens: CachedTokenBreakdown,
     cost: f64,
     session_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedAgentUsage {
+    agent: String,
+    clients: String,
+    tokens: CachedTokenBreakdown,
+    cost: f64,
+    message_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +168,30 @@ impl From<CachedModelUsage> for ModelUsage {
             tokens: m.tokens.into(),
             cost: m.cost,
             session_count: m.session_count,
+        }
+    }
+}
+
+impl From<&AgentUsage> for CachedAgentUsage {
+    fn from(a: &AgentUsage) -> Self {
+        Self {
+            agent: a.agent.clone(),
+            clients: a.clients.clone(),
+            tokens: (&a.tokens).into(),
+            cost: a.cost,
+            message_count: a.message_count,
+        }
+    }
+}
+
+impl From<CachedAgentUsage> for AgentUsage {
+    fn from(a: CachedAgentUsage) -> Self {
+        Self {
+            agent: a.agent,
+            clients: a.clients,
+            tokens: a.tokens.into(),
+            cost: a.cost,
+            message_count: a.message_count,
         }
     }
 }
@@ -270,6 +307,7 @@ impl From<&UsageData> for CachedUsageData {
     fn from(u: &UsageData) -> Self {
         Self {
             models: u.models.iter().map(|m| m.into()).collect(),
+            agents: u.agents.iter().map(|a| a.into()).collect(),
             daily: u.daily.iter().map(|d| d.into()).collect(),
             graph: u.graph.as_ref().map(|g| g.into()),
             total_tokens: u.total_tokens,
@@ -289,6 +327,7 @@ impl TryFrom<CachedUsageData> for UsageData {
 
         Ok(Self {
             models: u.models.into_iter().map(|m| m.into()).collect(),
+            agents: u.agents.into_iter().map(|a| a.into()).collect(),
             daily: daily?,
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,

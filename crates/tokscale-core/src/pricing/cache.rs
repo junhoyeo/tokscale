@@ -21,7 +21,10 @@ pub struct CachedData<T> {
     pub data: T,
 }
 
-pub fn load_cache<T: for<'de> Deserialize<'de>>(filename: &str) -> Option<T> {
+fn load_cache_with_policy<T: for<'de> Deserialize<'de>>(
+    filename: &str,
+    allow_stale: bool,
+) -> Option<T> {
     let path = get_cache_path(filename);
     let content = fs::read_to_string(&path).ok()?;
     let cached: CachedData<T> = serde_json::from_str(&content).ok()?;
@@ -31,11 +34,23 @@ pub fn load_cache<T: for<'de> Deserialize<'de>>(filename: &str) -> Option<T> {
         .ok()?
         .as_secs();
 
-    if cached.timestamp > now || now.saturating_sub(cached.timestamp) > CACHE_TTL_SECS {
+    if cached.timestamp > now {
+        return None;
+    }
+
+    if !allow_stale && now.saturating_sub(cached.timestamp) > CACHE_TTL_SECS {
         return None;
     }
 
     Some(cached.data)
+}
+
+pub fn load_cache<T: for<'de> Deserialize<'de>>(filename: &str) -> Option<T> {
+    load_cache_with_policy(filename, false)
+}
+
+pub fn load_cache_any_age<T: for<'de> Deserialize<'de>>(filename: &str) -> Option<T> {
+    load_cache_with_policy(filename, true)
 }
 
 pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io::Error> {

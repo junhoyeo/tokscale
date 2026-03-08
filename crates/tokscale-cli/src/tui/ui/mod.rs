@@ -1,3 +1,4 @@
+mod agents;
 mod bar_chart;
 mod daily;
 pub mod dialog;
@@ -42,6 +43,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         match app.current_tab {
             Tab::Overview => overview::render(frame, app, chunks[1]),
             Tab::Models => models::render(frame, app, chunks[1]),
+            Tab::Agents => agents::render(frame, app, chunks[1]),
             Tab::Daily => daily::render(frame, app, chunks[1]),
             Tab::Stats => stats::render(frame, app, chunks[1]),
         }
