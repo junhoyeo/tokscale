@@ -41,7 +41,35 @@ export interface AuthenticatePersonalTokenOptions {
   touchLastUsedAt?: boolean;
 }
 
+export class PersonalTokenNameConflictError extends Error {
+  constructor(name: string) {
+    super(`A personal token named "${name}" already exists`);
+    this.name = "PersonalTokenNameConflictError";
+  }
+}
+
 const TOKEN_NAME_LOCK_NAMESPACE = "personal_token_names";
+
+function isTokenNameConflict(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const databaseError = error as {
+    code?: string;
+    constraint?: string;
+    message?: string;
+  };
+
+  if (databaseError.code !== "23505") {
+    return false;
+  }
+
+  return (
+    databaseError.constraint === "api_tokens_user_name_unique" ||
+    databaseError.message?.includes("api_tokens_user_name_unique") === true
+  );
+}
 
 function getUniqueTokenName(baseName: string, existingNames: Iterable<string>): string {
   const names = new Set(existingNames);
@@ -65,27 +93,36 @@ export async function issuePersonalToken({
   if (!ensureUniqueName) {
     const token = generateApiToken();
     const tokenHashed = hashToken(token);
-    const [createdToken] = await db
-      .insert(apiTokens)
-      .values({
-        userId,
-        token: tokenHashed,
-        name,
-        expiresAt,
-      })
-      .returning({
-        id: apiTokens.id,
-        userId: apiTokens.userId,
-        name: apiTokens.name,
-        createdAt: apiTokens.createdAt,
-        lastUsedAt: apiTokens.lastUsedAt,
-        expiresAt: apiTokens.expiresAt,
-      });
 
-    return {
-      ...createdToken,
-      token,
-    };
+    try {
+      const [createdToken] = await db
+        .insert(apiTokens)
+        .values({
+          userId,
+          token: tokenHashed,
+          name,
+          expiresAt,
+        })
+        .returning({
+          id: apiTokens.id,
+          userId: apiTokens.userId,
+          name: apiTokens.name,
+          createdAt: apiTokens.createdAt,
+          lastUsedAt: apiTokens.lastUsedAt,
+          expiresAt: apiTokens.expiresAt,
+        });
+
+      return {
+        ...createdToken,
+        token,
+      };
+    } catch (error) {
+      if (isTokenNameConflict(error)) {
+        throw new PersonalTokenNameConflictError(name);
+      }
+
+      throw error;
+    }
   }
 
   return db.transaction(async (tx) => {

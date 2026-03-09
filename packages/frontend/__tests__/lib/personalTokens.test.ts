@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockState = vi.hoisted(() => {
   const selectResults: Array<Array<Record<string, unknown>>> = [];
-  const insertResults: Array<Array<Record<string, unknown>>> = [];
+  const insertResults: Array<Array<Record<string, unknown>> | Error> = [];
   const updateResults: Array<Array<Record<string, unknown>>> = [];
   const deleteResults: Array<Array<Record<string, unknown>>> = [];
   const insertValues: Array<Record<string, unknown>> = [];
@@ -37,8 +37,13 @@ const mockState = vi.hoisted(() => {
     values,
   }));
 
-  function nextResult<T>(queue: T[][]): T[] {
-    return queue.shift() ?? [];
+  function nextResult<T>(queue: Array<T[] | Error>): T[] {
+    const next = queue.shift();
+    if (next instanceof Error) {
+      throw next;
+    }
+
+    return next ?? [];
   }
 
   const execute = vi.fn(async (statement: unknown) => {
@@ -137,6 +142,9 @@ const mockState = vi.hoisted(() => {
     pushInsertResult(rows: Array<Record<string, unknown>>) {
       insertResults.push(rows);
     },
+    pushInsertError(error: Error) {
+      insertResults.push(error);
+    },
     pushUpdateResult(rows: Array<Record<string, unknown>> = []) {
       updateResults.push(rows);
     },
@@ -174,6 +182,7 @@ let issuePersonalToken: ModuleExports["issuePersonalToken"];
 let authenticatePersonalToken: ModuleExports["authenticatePersonalToken"];
 let listPersonalTokens: ModuleExports["listPersonalTokens"];
 let revokePersonalToken: ModuleExports["revokePersonalToken"];
+let PersonalTokenNameConflictError: ModuleExports["PersonalTokenNameConflictError"];
 
 beforeAll(async () => {
   const personalTokensModule = await import("../../src/lib/auth/personalTokens");
@@ -181,6 +190,7 @@ beforeAll(async () => {
   authenticatePersonalToken = personalTokensModule.authenticatePersonalToken;
   listPersonalTokens = personalTokensModule.listPersonalTokens;
   revokePersonalToken = personalTokensModule.revokePersonalToken;
+  PersonalTokenNameConflictError = personalTokensModule.PersonalTokenNameConflictError;
 });
 
 beforeEach(() => {
@@ -313,6 +323,22 @@ describe("personal token service", () => {
     expect(mockState.insertValues[0]).toMatchObject({
       name: "CLI raw",
     });
+  });
+
+  it("throws a conflict error for duplicate manually named tokens", async () => {
+    mockState.pushInsertError(
+      Object.assign(new Error("duplicate key value violates unique constraint"), {
+        code: "23505",
+        constraint: "api_tokens_user_name_unique",
+      })
+    );
+
+    await expect(
+      issuePersonalToken({
+        userId: "user-1",
+        name: "GitHub Actions CI",
+      })
+    ).rejects.toBeInstanceOf(PersonalTokenNameConflictError);
   });
 
   it("returns invalid for malformed tokens without hitting the database", async () => {
