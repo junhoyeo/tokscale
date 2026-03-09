@@ -19,6 +19,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -35,6 +36,7 @@ fn cache_file() -> Option<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedTUIData {
+    schema_version: u32,
     timestamp: u64,
     enabled_clients: Vec<String>,
     #[serde(default)]
@@ -381,6 +383,9 @@ pub fn load_cache(enabled_clients: &HashSet<ClientId>, include_synthetic: bool) 
         Ok(c) => c,
         Err(_) => return CacheResult::Miss,
     };
+    if cached.schema_version != CACHE_SCHEMA_VERSION {
+        return CacheResult::Miss;
+    }
 
     // Check how cached clients relate to enabled clients
     let client_match = check_client_match(
@@ -479,6 +484,7 @@ pub fn save_cached_data(
         .as_millis() as u64;
 
     let cached = CachedTUIData {
+        schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
         enabled_clients: enabled_clients
             .iter()
@@ -511,6 +517,9 @@ pub fn save_cached_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::{env, fs};
+    use tempfile::TempDir;
 
     fn make_clients(ids: &[ClientId]) -> HashSet<ClientId> {
         ids.iter().copied().collect()
@@ -611,5 +620,44 @@ mod tests {
             check_client_match(&enabled, false, &cached, false),
             ClientMatch::Subset,
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_legacy_schema_without_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "data": {
+    "models": [],
+    "daily": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_clients(&[ClientId::Claude]);
+        assert!(matches!(load_cache(&clients, false), CacheResult::Miss));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
     }
 }
