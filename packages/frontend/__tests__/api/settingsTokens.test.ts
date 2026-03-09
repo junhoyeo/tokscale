@@ -59,6 +59,16 @@ beforeEach(() => {
 });
 
 describe("/api/settings/tokens", () => {
+  it("rejects unauthenticated token listing", async () => {
+    mockState.getSession.mockResolvedValue(null);
+
+    const response = await GET();
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.listPersonalTokens).not.toHaveBeenCalled();
+  });
+
   it("lists tokens for the current user and includes expiresAt", async () => {
     mockState.getSession.mockResolvedValue({ id: "user-1" });
     mockState.listPersonalTokens.mockResolvedValue([
@@ -150,6 +160,24 @@ describe("/api/settings/tokens", () => {
     });
   });
 
+  it("rejects invalid JSON request bodies", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/settings/tokens", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: "{not valid json",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid JSON body" });
+    expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
+  });
+
   it("returns a conflict for duplicate token names", async () => {
     mockState.getSession.mockResolvedValue({ id: "user-1" });
     mockState.issuePersonalToken.mockRejectedValue(
@@ -191,6 +219,29 @@ describe("/api/settings/tokens", () => {
     expect(response.status).toBe(422);
     expect(await response.json()).toEqual({
       error: "Expiration must be in the future",
+    });
+    expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-string expirations before touching the token service", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/settings/tokens", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: "GitHub Actions CI",
+          expiresAt: 12345,
+        }),
+      })
+    );
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      error: "Expiration must be an ISO date string",
     });
     expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
   });
