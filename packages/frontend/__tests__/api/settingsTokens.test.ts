@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
@@ -45,6 +45,7 @@ type DeleteModuleExports = typeof import("../../src/app/api/settings/tokens/[tok
 let GET: ModuleExports["GET"];
 let POST: ModuleExports["POST"];
 let DELETE: DeleteModuleExports["DELETE"];
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
 beforeAll(async () => {
   const routeModule = await import("../../src/app/api/settings/tokens/route");
@@ -56,6 +57,11 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockState.reset();
+  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  consoleErrorSpy.mockRestore();
 });
 
 describe("/api/settings/tokens", () => {
@@ -98,6 +104,17 @@ describe("/api/settings/tokens", () => {
         },
       ],
     });
+  });
+
+  it("returns a server error when token listing fails", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+    mockState.listPersonalTokens.mockRejectedValue(new Error("db is down"));
+
+    const response = await GET();
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Failed to fetch tokens" });
+    expect(consoleErrorSpy).toHaveBeenCalled();
   });
 
   it("rejects unauthenticated token creation", async () => {
@@ -200,6 +217,25 @@ describe("/api/settings/tokens", () => {
     });
   });
 
+  it("returns a server error when token creation fails unexpectedly", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+    mockState.issuePersonalToken.mockRejectedValue(new Error("db is down"));
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/settings/tokens", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: "GitHub Actions CI" }),
+      })
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Failed to create token" });
+    expect(consoleErrorSpy).toHaveBeenCalled();
+  });
+
   it("rejects past expirations before touching the token service", async () => {
     mockState.getSession.mockResolvedValue({ id: "user-1" });
 
@@ -281,5 +317,18 @@ describe("/api/settings/tokens", () => {
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "Token not found" });
+  });
+
+  it("returns a server error when token revocation fails unexpectedly", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+    mockState.revokePersonalToken.mockRejectedValue(new Error("db is down"));
+
+    const response = await DELETE(new Request("http://localhost:3000/api/settings/tokens/token-1"), {
+      params: Promise.resolve({ tokenId: "token-1" }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Failed to delete token" });
+    expect(consoleErrorSpy).toHaveBeenCalled();
   });
 });
