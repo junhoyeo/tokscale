@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
   const listPersonalTokens = vi.fn();
   const issuePersonalToken = vi.fn();
+  const revokePersonalToken = vi.fn();
 
   class PersonalTokenNameConflictError extends Error {
     constructor(name: string) {
@@ -16,11 +17,13 @@ const mockState = vi.hoisted(() => {
     getSession,
     listPersonalTokens,
     issuePersonalToken,
+    revokePersonalToken,
     PersonalTokenNameConflictError,
     reset() {
       getSession.mockReset();
       listPersonalTokens.mockReset();
       issuePersonalToken.mockReset();
+      revokePersonalToken.mockReset();
     },
   };
 });
@@ -32,18 +35,23 @@ vi.mock("@/lib/auth/session", () => ({
 vi.mock("@/lib/auth/personalTokens", () => ({
   listPersonalTokens: mockState.listPersonalTokens,
   issuePersonalToken: mockState.issuePersonalToken,
+  revokePersonalToken: mockState.revokePersonalToken,
   PersonalTokenNameConflictError: mockState.PersonalTokenNameConflictError,
 }));
 
 type ModuleExports = typeof import("../../src/app/api/settings/tokens/route");
+type DeleteModuleExports = typeof import("../../src/app/api/settings/tokens/[tokenId]/route");
 
 let GET: ModuleExports["GET"];
 let POST: ModuleExports["POST"];
+let DELETE: DeleteModuleExports["DELETE"];
 
 beforeAll(async () => {
   const routeModule = await import("../../src/app/api/settings/tokens/route");
+  const deleteRouteModule = await import("../../src/app/api/settings/tokens/[tokenId]/route");
   GET = routeModule.GET;
   POST = routeModule.POST;
+  DELETE = deleteRouteModule.DELETE;
 });
 
 beforeEach(() => {
@@ -185,5 +193,42 @@ describe("/api/settings/tokens", () => {
       error: "Expiration must be in the future",
     });
     expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
+  });
+
+  it("rejects unauthenticated token revocation", async () => {
+    mockState.getSession.mockResolvedValue(null);
+
+    const response = await DELETE(new Request("http://localhost:3000/api/settings/tokens/token-1"), {
+      params: Promise.resolve({ tokenId: "token-1" }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.revokePersonalToken).not.toHaveBeenCalled();
+  });
+
+  it("revokes a token for the current user", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+    mockState.revokePersonalToken.mockResolvedValue(true);
+
+    const response = await DELETE(new Request("http://localhost:3000/api/settings/tokens/token-1"), {
+      params: Promise.resolve({ tokenId: "token-1" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true });
+    expect(mockState.revokePersonalToken).toHaveBeenCalledWith("user-1", "token-1");
+  });
+
+  it("returns 404 when the token does not exist", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+    mockState.revokePersonalToken.mockResolvedValue(false);
+
+    const response = await DELETE(new Request("http://localhost:3000/api/settings/tokens/token-1"), {
+      params: Promise.resolve({ tokenId: "token-1" }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Token not found" });
   });
 });
