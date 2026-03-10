@@ -51,6 +51,17 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
     name
 }
 
+fn retain_for_requested_clients(
+    client: &str,
+    model_id: &str,
+    provider_id: &str,
+    requested: &HashSet<&str>,
+) -> bool {
+    requested.contains(client)
+        || (requested.contains("synthetic")
+            && sessions::synthetic::matches_synthetic_filter(client, model_id, provider_id))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub enum GroupBy {
     Model,
@@ -553,25 +564,18 @@ fn parse_all_messages_with_pricing(
         }
 
         for msg in &mut all_messages {
-            if msg.client == "synthetic" {
-                continue;
-            }
-
-            if sessions::synthetic::is_synthetic_model(&msg.model_id)
-                || sessions::synthetic::is_synthetic_provider(&msg.provider_id)
-            {
-                msg.client = "synthetic".to_string();
-                msg.model_id = sessions::synthetic::normalize_synthetic_model(&msg.model_id);
-                if msg.provider_id.is_empty() || msg.provider_id == "unknown" {
-                    msg.provider_id = "synthetic".to_string();
-                }
-            }
+            sessions::synthetic::normalize_synthetic_gateway_fields(
+                &mut msg.model_id,
+                &mut msg.provider_id,
+            );
         }
     }
 
     if !include_all {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
-        all_messages.retain(|msg| requested.contains(msg.client.as_str()));
+        all_messages.retain(|msg| {
+            retain_for_requested_clients(&msg.client, &msg.model_id, &msg.provider_id, &requested)
+        });
     }
 
     all_messages
@@ -1135,7 +1139,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Mux, mux_count);
     messages.extend(mux_msgs);
 
-    let mut synthetic_count: i32 = 0;
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let synthetic_msgs: Vec<ParsedMessage> =
@@ -1143,47 +1146,23 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                     .into_iter()
                     .map(|msg| unified_to_parsed(&msg))
                     .collect();
-            synthetic_count += synthetic_msgs.len() as i32;
             messages.extend(synthetic_msgs);
         }
 
-        let mut deltas = [0_i32; ClientId::COUNT];
         for msg in &mut messages {
-            if msg.client == "synthetic" {
-                continue;
-            }
-
-            if sessions::synthetic::is_synthetic_model(&msg.model_id)
-                || sessions::synthetic::is_synthetic_provider(&msg.provider_id)
-            {
-                if let Some(client_id) = ClientId::from_str(&msg.client) {
-                    deltas[client_id as usize] += 1;
-                }
-
-                msg.client = "synthetic".to_string();
-                msg.model_id = sessions::synthetic::normalize_synthetic_model(&msg.model_id);
-                if msg.provider_id.is_empty() || msg.provider_id == "unknown" {
-                    msg.provider_id = "synthetic".to_string();
-                }
-
-                synthetic_count += 1;
-            }
-        }
-
-        for client_id in ClientId::iter() {
-            let delta = deltas[client_id as usize];
-            if delta > 0 {
-                counts.add(client_id, -delta);
-            }
+            sessions::synthetic::normalize_synthetic_gateway_fields(
+                &mut msg.model_id,
+                &mut msg.provider_id,
+            );
         }
     }
 
     if !include_all {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
-        messages.retain(|msg| requested.contains(msg.client.as_str()));
+        messages.retain(|msg| {
+            retain_for_requested_clients(&msg.client, &msg.model_id, &msg.provider_id, &requested)
+        });
     }
-
-    let _ = synthetic_count;
 
     let filtered = filter_parsed_messages(messages, &options);
 
@@ -1277,10 +1256,10 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pricing_if_available, normalize_model_for_grouping, pricing, GroupBy, TokenBreakdown,
-        UnifiedMessage,
+        apply_pricing_if_available, normalize_model_for_grouping, pricing,
+        retain_for_requested_clients, GroupBy, TokenBreakdown, UnifiedMessage,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::str::FromStr;
 
     #[test]
@@ -1493,5 +1472,36 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.034);
+    }
+
+    #[test]
+    fn test_retain_for_requested_clients_keeps_original_client_matches() {
+        let requested: HashSet<&str> = HashSet::from(["opencode"]);
+        assert!(retain_for_requested_clients(
+            "opencode", "gpt-5.2", "openai", &requested
+        ));
+        assert!(!retain_for_requested_clients(
+            "claude", "gpt-5.2", "openai", &requested
+        ));
+    }
+
+    #[test]
+    fn test_retain_for_requested_clients_accepts_synthetic_gateway_traffic() {
+        let requested: HashSet<&str> = HashSet::from(["synthetic"]);
+        assert!(retain_for_requested_clients(
+            "opencode",
+            "hf:deepseek-ai/DeepSeek-V3-0324",
+            "unknown",
+            &requested
+        ));
+        assert!(retain_for_requested_clients(
+            "synthetic",
+            "deepseek-v3-0324",
+            "synthetic",
+            &requested
+        ));
+        assert!(!retain_for_requested_clients(
+            "opencode", "gpt-5.2", "openai", &requested
+        ));
     }
 }

@@ -929,4 +929,16 @@ after"#,
         assert_eq!(current, 2);
         assert_eq!(longest, 2);
     }
+
+    #[test]
+    fn test_synthetic_filter_match_keeps_gateway_messages_with_original_client() {
+        assert!(sessions::synthetic::matches_synthetic_filter(
+            "opencode",
+            "hf:deepseek-ai/DeepSeek-V3-0324",
+            "unknown"
+        ));
+        assert!(!sessions::synthetic::matches_synthetic_filter(
+            "opencode", "gpt-5.2", "openai"
+        ));
+    }
 }

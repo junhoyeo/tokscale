@@ -45,6 +45,11 @@ pub fn is_synthetic_provider(provider_id: &str) -> bool {
     )
 }
 
+/// Check if a message appears to have been routed through Synthetic's gateway.
+pub fn is_synthetic_gateway(model_id: &str, provider_id: &str) -> bool {
+    is_synthetic_model(model_id) || is_synthetic_provider(provider_id)
+}
+
 // =============================================================================
 // Model name normalization (strip synthetic.new prefixes for pricing lookup)
 // =============================================================================
@@ -73,6 +78,25 @@ pub fn normalize_synthetic_model(model_id: &str) -> String {
     }
 
     lower
+}
+
+/// Normalize synthetic gateway fields without changing the originating client.
+pub fn normalize_synthetic_gateway_fields(model_id: &mut String, provider_id: &mut String) -> bool {
+    if !is_synthetic_gateway(model_id, provider_id) {
+        return false;
+    }
+
+    *model_id = normalize_synthetic_model(model_id);
+    if provider_id.is_empty() || provider_id.eq_ignore_ascii_case("unknown") {
+        *provider_id = "synthetic".to_string();
+    }
+
+    true
+}
+
+/// Compatibility matcher for `--synthetic` / synthetic source selection.
+pub fn matches_synthetic_filter(client: &str, model_id: &str, provider_id: &str) -> bool {
+    client.eq_ignore_ascii_case("synthetic") || is_synthetic_gateway(model_id, provider_id)
 }
 
 // =============================================================================
@@ -295,6 +319,45 @@ mod tests {
             "claude-sonnet-4-5"
         );
         assert_eq!(normalize_synthetic_model("gpt-4o"), "gpt-4o");
+    }
+
+    #[test]
+    fn test_normalize_synthetic_gateway_fields_sets_provider_when_unknown() {
+        let mut model_id = "hf:deepseek-ai/DeepSeek-V3-0324".to_string();
+        let mut provider_id = "unknown".to_string();
+
+        let matched = normalize_synthetic_gateway_fields(&mut model_id, &mut provider_id);
+
+        assert!(matched);
+        assert_eq!(model_id, "deepseek-v3-0324");
+        assert_eq!(provider_id, "synthetic");
+    }
+
+    #[test]
+    fn test_normalize_synthetic_gateway_fields_preserves_existing_provider() {
+        let mut model_id = "accounts/fireworks/models/deepseek-v3-0324".to_string();
+        let mut provider_id = "fireworks".to_string();
+
+        let matched = normalize_synthetic_gateway_fields(&mut model_id, &mut provider_id);
+
+        assert!(matched);
+        assert_eq!(model_id, "deepseek-v3-0324");
+        assert_eq!(provider_id, "fireworks");
+    }
+
+    #[test]
+    fn test_matches_synthetic_filter_accepts_gateway_traffic_without_rewriting_client() {
+        assert!(matches_synthetic_filter(
+            "opencode",
+            "hf:deepseek-ai/DeepSeek-V3-0324",
+            "unknown"
+        ));
+        assert!(matches_synthetic_filter(
+            "claude",
+            "claude-sonnet-4-5",
+            "glhf"
+        ));
+        assert!(!matches_synthetic_filter("opencode", "gpt-5.2", "openai"));
     }
 
     #[test]
