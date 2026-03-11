@@ -693,6 +693,44 @@ describe('POST /api/submit merge behavior', () => {
       expect(toDelete).toEqual(['day-1']);
     });
 
+    it('removes stale omitted clients for disappeared days inside the submitted range', () => {
+      const dateRange = { start: '2024-12-01', end: '2024-12-02' };
+      const incomingDates = new Set(['2024-12-02']);
+
+      const existingDay = {
+        id: 'day-1',
+        date: '2024-12-01',
+        sourceBreakdown: mergeClientBreakdowns(
+          {},
+          {
+            claude: makeClientData(1000, 10, 'claude-sonnet-4'),
+            cursor: makeClientData(300, 3, 'gpt-4o'),
+          },
+          new Set(['claude', 'cursor']),
+          'device-a'
+        ),
+      };
+
+      const isWithinSubmittedRange =
+        existingDay.date >= dateRange.start &&
+        existingDay.date <= dateRange.end;
+
+      expect(isWithinSubmittedRange).toBe(true);
+      expect(incomingDates.has(existingDay.date)).toBe(false);
+
+      const existingClientBreakdown =
+        existingDay.sourceBreakdown as Record<string, ClientBreakdownData>;
+      const staleClients = new Set(Object.keys(existingClientBreakdown));
+      const prunedClientBreakdown = mergeClientBreakdowns(
+        existingClientBreakdown,
+        {},
+        staleClients,
+        'device-a'
+      );
+
+      expect(prunedClientBreakdown).toEqual({});
+    });
+
     it('preserves days outside the submitted date range even when they are absent from the payload', () => {
       const submittedClients = new Set(['claude']);
       const dateRange = { start: '2024-12-02', end: '2024-12-03' };

@@ -321,10 +321,11 @@ export async function POST(request: Request) {
 
         const existingClientBreakdown =
           (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>;
+        const staleClients = new Set(Object.keys(existingClientBreakdown));
         const prunedClientBreakdown = mergeClientBreakdowns(
           existingClientBreakdown,
           {},
-          submittedClients,
+          staleClients,
           tokenRecord.tokenId
         );
 
