@@ -133,6 +133,9 @@ describe("/api/settings/tokens", () => {
   });
 
   it("creates a token with the requested expiry", async () => {
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const expiresAtIso = expiresAt.toISOString();
+
     mockState.getSession.mockResolvedValue({ id: "user-1" });
     mockState.issuePersonalToken.mockResolvedValue({
       id: "token-1",
@@ -141,7 +144,7 @@ describe("/api/settings/tokens", () => {
       token: "tt_created_token",
       createdAt: new Date("2026-03-08T18:00:00.000Z"),
       lastUsedAt: null,
-      expiresAt: new Date("2026-04-07T18:00:00.000Z"),
+      expiresAt,
     });
 
     const response = await POST(
@@ -152,7 +155,7 @@ describe("/api/settings/tokens", () => {
         },
         body: JSON.stringify({
           name: "  GitHub Actions CI  ",
-          expiresAt: "2026-04-07T18:00:00.000Z",
+          expiresAt: expiresAtIso,
         }),
       })
     );
@@ -163,7 +166,7 @@ describe("/api/settings/tokens", () => {
     expect(mockState.issuePersonalToken).toHaveBeenCalledWith({
       userId: "user-1",
       name: "GitHub Actions CI",
-      expiresAt: new Date("2026-04-07T18:00:00.000Z"),
+      expiresAt,
     });
     expect(body).toEqual({
       token: {
@@ -171,7 +174,7 @@ describe("/api/settings/tokens", () => {
         name: "GitHub Actions CI",
         createdAt: new Date("2026-03-08T18:00:00.000Z").toISOString(),
         lastUsedAt: null,
-        expiresAt: new Date("2026-04-07T18:00:00.000Z").toISOString(),
+        expiresAt: expiresAtIso,
       },
       plainTextToken: "tt_created_token",
     });
@@ -271,6 +274,29 @@ describe("/api/settings/tokens", () => {
         body: JSON.stringify({
           name: "GitHub Actions CI",
           expiresAt: 12345,
+        }),
+      })
+    );
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      error: "Expiration must be an ISO date string",
+    });
+    expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-ISO expiration strings before touching the token service", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1" });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/settings/tokens", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: "GitHub Actions CI",
+          expiresAt: "04/07/2026",
         }),
       })
     );

@@ -68,7 +68,7 @@ describe("GET /api/settings/tokens", () => {
     expect(await response.json()).toEqual({ tokens: [] });
   });
 
-  it("returns 200 with mapped token list (excluding token, expiresAt, userId fields)", async () => {
+  it("returns 200 with mapped token list (excluding token and userId fields)", async () => {
     mockState.getSession.mockResolvedValue({
       id: "user-1",
       username: "alice",
@@ -109,18 +109,19 @@ describe("GET /api/settings/tokens", () => {
           name: "My Token",
           createdAt: "2024-01-01T00:00:00.000Z",
           lastUsedAt: "2024-01-15T00:00:00.000Z",
+          expiresAt: "2025-01-01T00:00:00.000Z",
         },
         {
           id: "token-2",
           name: "Another Token",
           createdAt: "2024-02-01T00:00:00.000Z",
           lastUsedAt: null,
+          expiresAt: null,
         },
       ],
     });
-    // Verify that token, expiresAt, and userId are not in the response
+    // Verify that token and userId are not in the response
     expect(data.tokens[0]).not.toHaveProperty("token");
-    expect(data.tokens[0]).not.toHaveProperty("expiresAt");
     expect(data.tokens[0]).not.toHaveProperty("userId");
   });
 
@@ -188,20 +189,21 @@ describe("POST /api/settings/tokens", () => {
     expect(mockState.issuePersonalToken).toHaveBeenCalledWith({
       userId: "user-1",
       name: "GitHub Actions",
-      ensureUniqueName: true,
+      expiresAt: null,
     });
     expect(await response.json()).toEqual({
       token: {
         id: "token-1",
         name: "GitHub Actions",
-        token: "tt_raw_token",
         createdAt: "2026-05-01T10:00:00.000Z",
         lastUsedAt: null,
+        expiresAt: null,
       },
+      plainTextToken: "tt_raw_token",
     });
   });
 
-  it("uses a safe default name when the request name is blank", async () => {
+  it("rejects blank token names", async () => {
     mockState.getSession.mockResolvedValue({
       id: "user-1",
       username: "alice",
@@ -209,16 +211,6 @@ describe("POST /api/settings/tokens", () => {
       avatarUrl: null,
       isAdmin: false,
     });
-    mockState.issuePersonalToken.mockResolvedValue({
-      id: "token-1",
-      userId: "user-1",
-      name: "CI token",
-      token: "tt_raw_token",
-      createdAt: new Date("2026-05-01T10:00:00.000Z"),
-      lastUsedAt: null,
-      expiresAt: null,
-    });
-
     const response = await POST(
       new Request("http://localhost:3000/api/settings/tokens", {
         method: "POST",
@@ -226,11 +218,8 @@ describe("POST /api/settings/tokens", () => {
       })
     );
 
-    expect(response.status).toBe(201);
-    expect(mockState.issuePersonalToken).toHaveBeenCalledWith({
-      userId: "user-1",
-      name: "CI token",
-      ensureUniqueName: true,
-    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "Token name is required" });
+    expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
   });
 });
