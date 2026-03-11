@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { db, apiTokens, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
@@ -9,6 +9,7 @@ import {
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import {
+  attachDeviceContributions,
   mergeClientBreakdowns,
   recalculateDayTotals,
   buildModelBreakdown,
@@ -49,10 +50,11 @@ function normalizeSubmissionData(data: unknown): void {
  * POST /api/submit
  * Submit token usage data from CLI
  * 
- * IMPLEMENTS CLIENT-LEVEL MERGE:
- * - Only updates clients present in submission
- * - Preserves data for clients NOT in submission
- * - Recalculates totals from dailyBreakdown
+ * IMPLEMENTS DEVICE-SCOPED CLIENT MERGE:
+ * - Stores per-device contributions inside each client bucket
+ * - Replaces only the current device contribution on resubmit
+ * - Preserves other devices and unrelated clients
+ * - Recalculates totals from merged dailyBreakdown state
  *
  * Headers:
  *   Authorization: Bearer <api_token>
@@ -212,6 +214,9 @@ export async function POST(request: Request) {
         sourceBreakdown: Record<string, ClientBreakdownData>;
         modelBreakdown: Record<string, number>;
       }> = [];
+      const toDelete: string[] = [];
+      const incomingDates = new Set(data.contributions.map((day) => day.date));
+      const submittedDateRange = data.meta.dateRange;
 
       const toUpdate: Array<{
         id: string;
@@ -266,7 +271,8 @@ export async function POST(request: Request) {
            const mergedClientBreakdown = mergeClientBreakdowns(
              existingClientBreakdown,
              incomingClientBreakdown,
-             submittedClients
+             submittedClients,
+             tokenRecord.tokenId
            );
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
           const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);
@@ -282,8 +288,13 @@ export async function POST(request: Request) {
             modelBreakdown,
           });
         } else {
-          const dayTotals = recalculateDayTotals(incomingClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingClientBreakdown);
+          const incomingWithDevices = attachDeviceContributions(
+            incomingClientBreakdown,
+            tokenRecord.tokenId
+          );
+
+          const dayTotals = recalculateDayTotals(incomingWithDevices);
+          const modelBreakdown = buildModelBreakdown(incomingWithDevices);
 
           toInsert.push({
             submissionId,
@@ -293,15 +304,59 @@ export async function POST(request: Request) {
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: incomingDay.timestampMs ?? null,
-            sourceBreakdown: incomingClientBreakdown,
+            sourceBreakdown: incomingWithDevices,
             modelBreakdown,
           });
         }
       }
 
+      for (const existingDay of existingDays) {
+        const isWithinSubmittedRange =
+          existingDay.date >= submittedDateRange.start &&
+          existingDay.date <= submittedDateRange.end;
+
+        if (!isWithinSubmittedRange || incomingDates.has(existingDay.date)) {
+          continue;
+        }
+
+        const existingClientBreakdown =
+          (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>;
+        const prunedClientBreakdown = mergeClientBreakdowns(
+          existingClientBreakdown,
+          {},
+          submittedClients,
+          tokenRecord.tokenId
+        );
+
+        if (Object.keys(prunedClientBreakdown).length === 0) {
+          toDelete.push(existingDay.id);
+          continue;
+        }
+
+        const dayTotals = recalculateDayTotals(prunedClientBreakdown);
+        const modelBreakdown = buildModelBreakdown(prunedClientBreakdown);
+
+        toUpdate.push({
+          id: existingDay.id,
+          tokens: dayTotals.tokens,
+          cost: dayTotals.cost.toFixed(4),
+          inputTokens: dayTotals.inputTokens,
+          outputTokens: dayTotals.outputTokens,
+          timestampMs: existingDay.timestampMs ?? null,
+          sourceBreakdown: prunedClientBreakdown,
+          modelBreakdown,
+        });
+      }
+
       // Batch INSERT new days
       if (toInsert.length > 0) {
         await tx.insert(dailyBreakdown).values(toInsert);
+      }
+
+      if (toDelete.length > 0) {
+        await tx
+          .delete(dailyBreakdown)
+          .where(inArray(dailyBreakdown.id, toDelete));
       }
 
       // Batch UPDATE existing days via raw SQL VALUES list
