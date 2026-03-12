@@ -869,8 +869,9 @@ fn apply_pricing_if_available(
     };
 
     let calculated_cost = if message.client.eq_ignore_ascii_case("gemini") {
-        pricing.calculate_cost(
+        pricing.calculate_cost_with_provider(
             &message.model_id,
+            Some(&message.provider_id),
             message.tokens.input,
             message.tokens.output + message.tokens.reasoning,
             0,
@@ -878,8 +879,9 @@ fn apply_pricing_if_available(
             0,
         )
     } else {
-        pricing.calculate_cost(
+        pricing.calculate_cost_with_provider(
             &message.model_id,
+            Some(&message.provider_id),
             message.tokens.input,
             message.tokens.output,
             message.tokens.cache_read,
@@ -1544,6 +1546,82 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.034);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_does_not_price_paid_base_for_free_variant() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "z-ai/glm-4.7".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(HashMap::new(), openrouter);
+
+        let mut msg = UnifiedMessage::new(
+            "opencode",
+            "glm-4.7-free",
+            "modal",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.0);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_prefers_provider_aware_match() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "xai/grok-code-fast-1-0825".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "azure_ai/grok-code-fast-1".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.01),
+                output_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "opencode",
+            "grok-code",
+            "azure",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
