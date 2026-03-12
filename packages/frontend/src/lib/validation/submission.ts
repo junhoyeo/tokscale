@@ -170,15 +170,23 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   const submission = parseResult.data;
 
-  // Step 2: No future dates (using UTC since DailyContribution.date is in UTC)
-  const todayStr = new Date().toISOString().split("T")[0];
+  // Step 2: No future dates
+  // The CLI generates dates using the user's local timezone, but the server
+  // runs in UTC. For users in UTC+ timezones (e.g. UTC+8), their local date
+  // can be ahead of UTC — causing valid submissions to be rejected as
+  // "future dates". Adding a 1-day buffer accommodates all timezones (UTC-12
+  // to UTC+14).
+  // See: https://github.com/junhoyeo/tokscale/issues/318
+  const now = new Date();
+  const maxDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const maxDateStr = maxDate.toISOString().split("T")[0];
 
-  if (submission.meta.dateRange.end > todayStr) {
+  if (submission.meta.dateRange.end > maxDateStr) {
     errors.push(`Date range extends into the future: ${submission.meta.dateRange.end}`);
   }
 
   for (const day of submission.contributions) {
-    if (day.date > todayStr) {
+    if (day.date > maxDateStr) {
       errors.push(`Future date found in contributions: ${day.date}`);
     }
   }
