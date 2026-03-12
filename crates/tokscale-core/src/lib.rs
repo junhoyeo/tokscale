@@ -869,24 +869,19 @@ fn apply_pricing_if_available(
     };
 
     let calculated_cost = if message.client.eq_ignore_ascii_case("gemini") {
-        pricing.calculate_cost_with_provider(
-            &message.model_id,
-            Some(&message.provider_id),
-            message.tokens.input,
-            message.tokens.output + message.tokens.reasoning,
-            0,
-            0,
-            0,
-        )
+        let usage = TokenBreakdown {
+            input: message.tokens.input,
+            output: message.tokens.output + message.tokens.reasoning,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        pricing.calculate_cost_with_provider(&message.model_id, Some(&message.provider_id), &usage)
     } else {
         pricing.calculate_cost_with_provider(
             &message.model_id,
             Some(&message.provider_id),
-            message.tokens.input,
-            message.tokens.output,
-            message.tokens.cache_read,
-            message.tokens.cache_write,
-            message.tokens.reasoning,
+            &message.tokens,
         )
     };
 

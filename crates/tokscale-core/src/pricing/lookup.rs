@@ -1,4 +1,5 @@
 use super::{aliases, litellm::ModelPricing};
+use crate::TokenBreakdown;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -651,26 +652,21 @@ impl PricingLookup {
         cache_write: i64,
         reasoning: i64,
     ) -> f64 {
-        self.calculate_cost_with_provider(
-            model_id,
-            None,
+        let usage = TokenBreakdown {
             input,
             output,
             cache_read,
             cache_write,
             reasoning,
-        )
+        };
+        self.calculate_cost_with_provider(model_id, None, &usage)
     }
 
     pub fn calculate_cost_with_provider(
         &self,
         model_id: &str,
         provider_id: Option<&str>,
-        input: i64,
-        output: i64,
-        cache_read: i64,
-        cache_write: i64,
-        reasoning: i64,
+        usage: &TokenBreakdown,
     ) -> f64 {
         let result = match self.lookup_with_provider(model_id, provider_id) {
             Some(r) => r,
@@ -679,11 +675,11 @@ impl PricingLookup {
 
         compute_cost(
             &result.pricing,
-            input,
-            output,
-            cache_read,
-            cache_write,
-            reasoning,
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+            usage.reasoning,
         )
     }
 }
