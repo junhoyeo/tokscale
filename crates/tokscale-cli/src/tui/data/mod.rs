@@ -925,6 +925,7 @@ mod tests {
     fn test_data_loader_loads_agent_usage_from_roocode_files() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
+        let previous_disable_fresh_pricing = env::var_os("TOKSCALE_DISABLE_FRESH_PRICING_FETCH");
         let task_root = temp_dir
             .path()
             .join(".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks");
@@ -995,6 +996,7 @@ after"#,
 
         unsafe {
             env::set_var("HOME", temp_dir.path());
+            env::set_var("TOKSCALE_DISABLE_FRESH_PRICING_FETCH", "1");
         }
 
         let loader = DataLoader::new(None);
@@ -1018,6 +1020,10 @@ after"#,
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
         }
+        match previous_disable_fresh_pricing {
+            Some(value) => unsafe { env::set_var("TOKSCALE_DISABLE_FRESH_PRICING_FETCH", value) },
+            None => unsafe { env::remove_var("TOKSCALE_DISABLE_FRESH_PRICING_FETCH") },
+        }
     }
 
     #[test]
@@ -1025,6 +1031,7 @@ after"#,
     fn test_data_loader_keeps_synthetic_gateway_messages_under_original_client() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
+        let previous_disable_fresh_pricing = env::var_os("TOKSCALE_DISABLE_FRESH_PRICING_FETCH");
         let message_dir = temp_dir
             .path()
             .join(".local/share/opencode/storage/message/project-1");
@@ -1037,6 +1044,7 @@ after"#,
 
         unsafe {
             env::set_var("HOME", temp_dir.path());
+            env::set_var("TOKSCALE_DISABLE_FRESH_PRICING_FETCH", "1");
         }
 
         let loader = DataLoader::new(None);
@@ -1054,6 +1062,10 @@ after"#,
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_disable_fresh_pricing {
+            Some(value) => unsafe { env::set_var("TOKSCALE_DISABLE_FRESH_PRICING_FETCH", value) },
+            None => unsafe { env::remove_var("TOKSCALE_DISABLE_FRESH_PRICING_FETCH") },
         }
     }
 

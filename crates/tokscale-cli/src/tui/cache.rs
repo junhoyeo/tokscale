@@ -19,7 +19,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 2;
+const CACHE_SCHEMA_VERSION: u32 = 3;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -387,7 +387,9 @@ pub fn load_cache(enabled_clients: &HashSet<ClientId>, include_synthetic: bool) 
     if cached.schema_version > CACHE_SCHEMA_VERSION {
         return CacheResult::Miss;
     }
-    let schema_outdated = cached.schema_version < CACHE_SCHEMA_VERSION;
+    if cached.schema_version < CACHE_SCHEMA_VERSION {
+        return CacheResult::Miss;
+    }
 
     // Check how cached clients relate to enabled clients
     let client_match = check_client_match(
@@ -406,7 +408,7 @@ pub fn load_cache(enabled_clients: &HashSet<ClientId>, include_synthetic: bool) 
         Err(_) => return CacheResult::Miss,
     };
 
-    if schema_outdated || client_match == ClientMatch::Subset {
+    if client_match == ClientMatch::Subset {
         return CacheResult::Stale(data);
     }
 
@@ -624,7 +626,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_load_cache_returns_stale_for_legacy_schema_without_version() {
+    fn test_load_cache_returns_miss_for_legacy_schema_without_version() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {
@@ -653,7 +655,7 @@ mod tests {
         .unwrap();
 
         let clients = make_clients(&[ClientId::Claude]);
-        assert!(matches!(load_cache(&clients, false), CacheResult::Stale(_)));
+        assert!(matches!(load_cache(&clients, false), CacheResult::Miss));
 
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },

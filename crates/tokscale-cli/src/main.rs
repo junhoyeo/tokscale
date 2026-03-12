@@ -2417,6 +2417,98 @@ fn get_headless_roots(home_dir: &Path) -> Vec<PathBuf> {
     roots
 }
 
+fn build_codex_headless_preamble(args: &[String]) -> String {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let mut lines = vec![serde_json::json!({
+        "timestamp": timestamp,
+        "type": "session_meta",
+        "payload": {
+            "originator": "tokscale_headless",
+            "source": "exec",
+        }
+    })
+    .to_string()];
+
+    if let Some(model) = infer_codex_model_from_args(args) {
+        lines.push(
+            serde_json::json!({
+                "timestamp": timestamp,
+                "type": "turn_context",
+                "payload": {
+                    "model": model,
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn infer_codex_model_from_args(args: &[String]) -> Option<String> {
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+
+        match arg {
+            "-m" | "--model" => {
+                return args
+                    .get(index + 1)
+                    .and_then(|value| normalize_codex_model_arg(value));
+            }
+            "-c" | "--config" => {
+                if let Some(value) = args.get(index + 1) {
+                    if let Some(model) = parse_codex_model_override(value) {
+                        return Some(model);
+                    }
+                }
+                index += 1;
+            }
+            _ => {
+                if let Some(value) = arg.strip_prefix("--model=") {
+                    return normalize_codex_model_arg(value);
+                }
+                if let Some(value) = arg.strip_prefix("-m=") {
+                    return normalize_codex_model_arg(value);
+                }
+                if let Some(value) = arg.strip_prefix("--config=") {
+                    if let Some(model) = parse_codex_model_override(value) {
+                        return Some(model);
+                    }
+                }
+                if let Some(value) = arg.strip_prefix("-c=") {
+                    if let Some(model) = parse_codex_model_override(value) {
+                        return Some(model);
+                    }
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
+fn parse_codex_model_override(value: &str) -> Option<String> {
+    let (key, raw_value) = value.split_once('=')?;
+    if key.trim() != "model" {
+        return None;
+    }
+    normalize_codex_model_arg(raw_value)
+}
+
+fn normalize_codex_model_arg(value: &str) -> Option<String> {
+    let normalized = value.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+}
+
 fn describe_path(path: &str, exists: bool) -> String {
     let path_display = if let Some(home) = dirs::home_dir() {
         path.replace(&home.to_string_lossy().to_string(), "~")
@@ -3259,6 +3351,12 @@ fn run_headless_command(
     let mut output_file = std::fs::File::create(&output_path)
         .map_err(|e| anyhow::anyhow!("Failed to create output file '{}': {}", output_path, e))?;
 
+    if source_lower == "codex" {
+        output_file
+            .write_all(build_codex_headless_preamble(&args).as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to write headless metadata: {}", e))?;
+    }
+
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out_clone = Arc::clone(&timed_out);
     let child_id = child.id();
@@ -3805,5 +3903,54 @@ mod tests {
         let (position2, forward2) = LightSpinner::scanner_state(54);
         assert_eq!(position1, position2);
         assert_eq!(forward1, forward2);
+    }
+
+    #[test]
+    fn test_infer_codex_model_from_args_short_flag() {
+        let args = vec![
+            "exec".to_string(),
+            "-m".to_string(),
+            "gpt-5.4".to_string(),
+            "say hi".to_string(),
+        ];
+
+        assert_eq!(
+            infer_codex_model_from_args(&args),
+            Some("gpt-5.4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_codex_model_from_args_config_override() {
+        let args = vec![
+            "exec".to_string(),
+            "--config".to_string(),
+            "model=\"gpt-5.4-codex\"".to_string(),
+        ];
+
+        assert_eq!(
+            infer_codex_model_from_args(&args),
+            Some("gpt-5.4-codex".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_codex_headless_preamble_includes_headless_metadata_and_model() {
+        let preamble = build_codex_headless_preamble(&[
+            "exec".to_string(),
+            "--model".to_string(),
+            "gpt-5.4".to_string(),
+        ]);
+
+        let lines: Vec<&str> = preamble.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let session_meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(session_meta["type"], "session_meta");
+        assert_eq!(session_meta["payload"]["source"], "exec");
+
+        let turn_context: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(turn_context["type"], "turn_context");
+        assert_eq!(turn_context["payload"]["model"], "gpt-5.4");
     }
 }

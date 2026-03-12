@@ -16,6 +16,7 @@ pub use sessions::UnifiedMessage;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
@@ -893,6 +894,33 @@ fn apply_pricing_if_available(
     }
 }
 
+async fn resolve_pricing_for_local_parse<F, Fut, G>(
+    fresh_loader: F,
+    cached_loader: G,
+) -> Option<Arc<pricing::PricingService>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Arc<pricing::PricingService>, String>>,
+    G: FnOnce() -> Option<pricing::PricingService>,
+{
+    match fresh_loader().await {
+        Ok(pricing) => Some(pricing),
+        Err(_) => cached_loader().map(Arc::new),
+    }
+}
+
+async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+    if std::env::var_os("TOKSCALE_DISABLE_FRESH_PRICING_FETCH").is_some() {
+        return pricing::PricingService::load_cached_any_age().map(Arc::new);
+    }
+
+    resolve_pricing_for_local_parse(
+        pricing::PricingService::get_or_init,
+        pricing::PricingService::load_cached_any_age,
+    )
+    .await
+}
+
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
     let start = Instant::now();
 
@@ -1195,8 +1223,8 @@ pub async fn parse_local_unified_messages(
         clients
     });
 
-    let pricing = pricing::PricingService::load_cached_any_age();
-    let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_ref());
+    let pricing = load_pricing_for_local_parse().await;
+    let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
 
     Ok(filter_unified_messages(messages, &options))
 }
@@ -1265,11 +1293,13 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         apply_pricing_if_available, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, pricing, retain_for_requested_clients, ClientId, GroupBy,
-        LocalParseOptions, TokenBreakdown, UnifiedMessage,
+        parse_local_clients, pricing, resolve_pricing_for_local_parse,
+        retain_for_requested_clients, ClientId, GroupBy, LocalParseOptions, TokenBreakdown,
+        UnifiedMessage,
     };
     use std::collections::{HashMap, HashSet};
     use std::str::FromStr;
+    use std::sync::Arc;
 
     #[test]
     fn test_normalize_model_for_grouping() {
@@ -1455,6 +1485,49 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_headless_preamble_enables_pricing_for_turn_completed_output() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let headless_dir = temp_dir.path().join(".config/tokscale/headless/codex");
+        std::fs::create_dir_all(&headless_dir).unwrap();
+        std::fs::write(
+            headless_dir.join("gpt-5.4.jsonl"),
+            r#"{"timestamp":"2026-03-12T00:00:00Z","type":"session_meta","payload":{"originator":"tokscale_headless","source":"exec"}}
+{"timestamp":"2026-03-12T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
+{"type":"thread.started","thread_id":"019ce3bc-33ed-7990-a38c-88feb5dd0554"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":18475,"cached_input_tokens":5504,"output_tokens":25}}"#,
+        )
+        .unwrap();
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.4".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.0000025),
+                output_cost_per_token: Some(0.000015),
+                cache_read_input_token_cost: Some(0.00000025),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let messages = parse_all_messages_with_pricing(
+            temp_dir.path().to_str().unwrap(),
+            &["codex".to_string()],
+            Some(&pricing),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "codex");
+        assert_eq!(messages[0].model_id, "gpt-5.4");
+        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+        assert_eq!(messages[0].tokens.input, 12971);
+        assert_eq!(messages[0].tokens.output, 25);
+        assert_eq!(messages[0].tokens.cache_read, 5504);
+        assert!((messages[0].cost - 0.0341785).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_apply_pricing_if_available_keeps_existing_cost_without_pricing() {
         let mut msg = UnifiedMessage::new_with_agent(
             "roocode",
@@ -1544,6 +1617,72 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.034);
+    }
+
+    #[test]
+    fn test_resolve_pricing_for_local_parse_prefers_fresh_pricing() {
+        let expected = Arc::new(pricing::PricingService::new(HashMap::new(), HashMap::new()));
+        let cached_called = std::cell::Cell::new(false);
+
+        let resolved =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(resolve_pricing_for_local_parse(
+                    || {
+                        let expected = Arc::clone(&expected);
+                        async move { Ok(expected) }
+                    },
+                    || {
+                        cached_called.set(true);
+                        Some(pricing::PricingService::new(HashMap::new(), HashMap::new()))
+                    },
+                ));
+
+        let resolved = resolved.expect("fresh pricing should be available");
+        assert!(Arc::ptr_eq(&resolved, &expected));
+        assert!(!cached_called.get());
+    }
+
+    #[test]
+    fn test_resolve_pricing_for_local_parse_falls_back_to_cached_pricing() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.4".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                ..Default::default()
+            },
+        );
+
+        let resolved =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(resolve_pricing_for_local_parse(
+                    || async { Err("offline".to_string()) },
+                    || {
+                        Some(pricing::PricingService::new(
+                            litellm.clone(),
+                            HashMap::new(),
+                        ))
+                    },
+                ));
+
+        let resolved = resolved.expect("cached pricing should be used");
+        let result = resolved.lookup_with_source("gpt-5.4", None).unwrap();
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.001));
+    }
+
+    #[test]
+    fn test_resolve_pricing_for_local_parse_returns_none_when_unavailable() {
+        let resolved =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(resolve_pricing_for_local_parse(
+                    || async { Err("offline".to_string()) },
+                    || None,
+                ));
+
+        assert!(resolved.is_none());
     }
 
     #[test]

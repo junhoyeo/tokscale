@@ -524,6 +524,26 @@ mod tests {
     }
 
     #[test]
+    fn test_headless_turn_completed_uses_preamble_turn_context_for_model() {
+        let content = r#"{"timestamp":"2026-03-12T00:00:00Z","type":"session_meta","payload":{"originator":"tokscale_headless","source":"exec"}}
+{"timestamp":"2026-03-12T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
+{"type":"thread.started","thread_id":"019ce3bc-33ed-7990-a38c-88feb5dd0554"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":18475,"cached_input_tokens":5504,"output_tokens":25}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.4");
+        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+        assert_eq!(messages[0].tokens.input, 12971);
+        assert_eq!(messages[0].tokens.output, 25);
+        assert_eq!(messages[0].tokens.cache_read, 5504);
+    }
+
+    #[test]
     fn test_session_meta_exec_marks_headless() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"originator":"codex_exec","source":"exec"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
