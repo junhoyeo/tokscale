@@ -48,6 +48,7 @@ describe("renderProfileEmbedSvg", () => {
     expect(svg).toContain('width="460"');
     expect(svg).toContain('height="162"');
     expect(svg).toContain("README EMBED");
+    expect(svg).toContain("@octocat");
     expect(svg).toContain('stop-color="#F6FAFF"');
     expect(svg).not.toContain("Submissions");
   });

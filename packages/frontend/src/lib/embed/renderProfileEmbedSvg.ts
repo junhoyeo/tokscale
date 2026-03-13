@@ -139,6 +139,9 @@ function formatDateLabel(value: string | null): string {
 // Approximate average character width for Figtree 15px semibold (weight 600).
 // Used to estimate rendered username width for dynamic display-name positioning.
 const APPROX_CHAR_WIDTH_15_SEMIBOLD = 9;
+// Approximate average character width for Figtree 13px (weight 400).
+// Used to estimate rendered display name width for collision detection.
+const APPROX_CHAR_WIDTH_13 = 8;
 
 function getRankColor(rank: number | null, palette: ThemePalette): string {
   if (rank === 1) return "#EAB308";
@@ -202,7 +205,8 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
   const displayNameX = paddingX + 18 + usernameEstimatedWidth + 8;
   const badgeWidth = compact ? 92 : 110;
   const badgeX = width - paddingX - badgeWidth;
-  const showDisplayName = Boolean(displayName) && displayNameX + 48 < badgeX - 12;
+  const displayNameEstimatedWidth = displayName ? displayName.length * APPROX_CHAR_WIDTH_13 : 0;
+  const showDisplayName = Boolean(displayName) && displayNameX + displayNameEstimatedWidth < badgeX - 12;
 
   const metricsGap = 12;
   const metricsWidth = width - paddingX * 2;
@@ -251,7 +255,7 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
     <clipPath id="card-clip">
       <rect width="${width}" height="${height}" rx="${rx}"/>
     </clipPath>
-    <filter id="soft-glow" x="-20%" y="-20%" width="140%" height="160%" color-interpolation-filters="sRGB">
+    <filter id="soft-glow" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB">
       <feGaussianBlur stdDeviation="20"/>
     </filter>
   </defs>
