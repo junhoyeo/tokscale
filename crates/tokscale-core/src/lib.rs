@@ -1544,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pricing_if_available_does_not_price_paid_base_for_free_variant() {
+    fn test_apply_pricing_if_available_uses_market_rate_for_free_variant() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "z-ai/glm-4.7".into(),
@@ -1574,7 +1574,7 @@ mod tests {
 
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
-        assert_eq!(msg.cost, 0.0);
+        assert_eq!(msg.cost, 0.02);
     }
 
     #[test]

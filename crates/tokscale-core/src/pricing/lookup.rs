@@ -62,7 +62,6 @@ const MAX_PREFIX_STRIP_SEGMENTS: usize = 2;
 /// Maximum number of trailing segments that can be treated as a routing suffix.
 /// Handles tier suffixes (-high, -low) and variant suffixes (-thinking, -codex, -codex-max-xhigh).
 const MAX_SUFFIX_STRIP_SEGMENTS: usize = 4;
-const PROTECTED_VARIANT_SUFFIXES: &[&str] = &["free"];
 
 #[derive(Clone)]
 struct CachedResult {
@@ -822,10 +821,6 @@ fn contains_model_id(key: &str, model_id: &str) -> bool {
 }
 
 fn normalize_model_name(model_id: &str) -> Option<String> {
-    if contains_protected_variant_fragment(model_id) {
-        return None;
-    }
-
     let lower = model_id.to_lowercase();
 
     if lower.contains("opus") {
@@ -976,9 +971,6 @@ fn is_fuzzy_eligible(model_id: &str) -> bool {
     if model_id.len() < MIN_FUZZY_MATCH_LEN {
         return false;
     }
-    if contains_protected_variant_fragment(model_id) {
-        return false;
-    }
     !FUZZY_BLOCKLIST.contains(&model_id)
 }
 
@@ -989,10 +981,6 @@ fn try_strip_unknown_suffix<F>(model_id: &str, do_lookup: F) -> Option<LookupRes
 where
     F: Fn(&str) -> Option<LookupResult>,
 {
-    if contains_protected_variant_fragment(model_id) {
-        return None;
-    }
-
     let parts: Vec<&str> = model_id.split('-').collect();
 
     if parts.len() < 2 {
@@ -1120,14 +1108,6 @@ fn build_lookup_cache_key(model_id: &str, provider_id: Option<&str>) -> String {
         }
         _ => model_id.to_lowercase(),
     }
-}
-
-fn contains_protected_variant_fragment(model_id: &str) -> bool {
-    model_id.split(['-', '_', '.', '/']).any(|part| {
-        PROTECTED_VARIANT_SUFFIXES
-            .iter()
-            .any(|suffix| part.eq_ignore_ascii_case(suffix))
-    })
 }
 
 fn canonical_provider_tag(provider: &str) -> String {
@@ -1735,13 +1715,9 @@ mod tests {
     #[test]
     fn test_opencode_zen_glm_4_7_free() {
         let lookup = create_lookup();
-        assert!(lookup.lookup("glm-4.7-free").is_none());
-    }
-
-    #[test]
-    fn test_opencode_zen_glm_4_7_free_with_extra_suffix_stays_unpriced() {
-        let lookup = create_lookup();
-        assert!(lookup.lookup("glm-4.7-free-high").is_none());
+        let result = lookup.lookup("glm-4.7-free").unwrap();
+        assert_eq!(result.matched_key, "z-ai/glm-4.7");
+        assert_eq!(result.source, "OpenRouter");
     }
 
     #[test]
@@ -1827,7 +1803,9 @@ mod tests {
     #[test]
     fn test_opencode_zen_kimi_k2_5_free() {
         let lookup = create_lookup();
-        assert!(lookup.lookup("kimi-k2.5-free").is_none());
+        let result = lookup.lookup("kimi-k2.5-free").unwrap();
+        assert_eq!(result.matched_key, "moonshotai/kimi-k2.5");
+        assert_eq!(result.source, "OpenRouter");
     }
 
     // =========================================================================
@@ -1911,7 +1889,9 @@ mod tests {
     #[test]
     fn test_tier_suffix_free() {
         let lookup = create_lookup();
-        assert!(lookup.lookup("glm-4.7-free").is_none());
+        let result = lookup.lookup("glm-4.7-free").unwrap();
+        assert_eq!(result.matched_key, "z-ai/glm-4.7");
+        assert_eq!(result.source, "OpenRouter");
     }
 
     #[test]
@@ -1939,15 +1919,19 @@ mod tests {
     }
 
     #[test]
-    fn test_free_variant_does_not_normalize_to_paid_claude_model() {
+    fn test_free_variant_normalizes_to_market_priced_claude_model() {
         let lookup = create_lookup();
-        assert!(lookup.lookup("claude-sonnet-4-5-free").is_none());
+        let result = lookup.lookup("claude-sonnet-4-5-free").unwrap();
+        assert_eq!(result.matched_key, "claude-sonnet-4-5");
+        assert_eq!(result.source, "LiteLLM");
     }
 
     #[test]
-    fn test_free_variant_with_extra_suffix_does_not_normalize_to_paid_claude_model() {
+    fn test_free_variant_with_extra_suffix_falls_back_to_market_priced_model() {
         let lookup = create_lookup();
-        assert!(lookup.lookup("claude-sonnet-4-5-free-high").is_none());
+        let result = lookup.lookup("claude-sonnet-4-5-free-high").unwrap();
+        assert_eq!(result.matched_key, "claude-sonnet-4-5");
+        assert_eq!(result.source, "LiteLLM");
     }
 
     #[test]
