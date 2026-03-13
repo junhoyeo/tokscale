@@ -140,6 +140,32 @@ describe("renderProfileEmbedSvg", () => {
     );
     expect(svg).not.toContain("Should Be Hidden");
   });
+
+  it("computes display name collision width from raw text, not XML-escaped", () => {
+    // Display name with special chars: "A & B" should be treated as 5 chars, not 9
+    const svg = renderProfileEmbedSvg({
+      ...mockStats,
+      user: {
+        ...mockStats.user,
+        username: "short",
+        displayName: "A & B",
+      },
+    });
+
+    // The display name should be visible (not hidden due to overestimated width)
+    expect(svg).toContain("A &amp; B");
+    
+    // Verify that a similar-length name without special chars also shows
+    const svgNoSpecial = renderProfileEmbedSvg({
+      ...mockStats,
+      user: {
+        ...mockStats.user,
+        username: "short",
+        displayName: "ABCDE",
+      },
+    });
+    expect(svgNoSpecial).toContain("ABCDE");
+  });
 });
 
 describe("renderProfileEmbedErrorSvg", () => {

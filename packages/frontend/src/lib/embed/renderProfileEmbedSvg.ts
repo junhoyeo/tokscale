@@ -194,7 +194,8 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
   const userY = headerY + (compact ? 54 : 64);
 
   const username = `@${data.user.username}`;
-  const displayName = data.user.displayName ? escapeXml(data.user.displayName) : null;
+  const displayNameRaw = data.user.displayName;
+  const displayName = displayNameRaw ? escapeXml(displayNameRaw) : null;
   const tokens = formatNumber(data.stats.totalTokens, compactNumbers);
   const cost = formatCurrency(data.stats.totalCost, compactNumbers);
   const rank = data.stats.rank ? `#${data.stats.rank}` : "N/A";
@@ -205,7 +206,7 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
   const displayNameX = paddingX + 18 + usernameEstimatedWidth + 8;
   const badgeWidth = compact ? 92 : 110;
   const badgeX = width - paddingX - badgeWidth;
-  const displayNameEstimatedWidth = displayName ? displayName.length * APPROX_CHAR_WIDTH_13 : 0;
+  const displayNameEstimatedWidth = displayNameRaw ? displayNameRaw.length * APPROX_CHAR_WIDTH_13 : 0;
   const showDisplayName = Boolean(displayName) && displayNameX + displayNameEstimatedWidth < badgeX - 12;
 
   const metricsGap = 12;
