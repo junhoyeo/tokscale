@@ -822,7 +822,7 @@ fn contains_model_id(key: &str, model_id: &str) -> bool {
 }
 
 fn normalize_model_name(model_id: &str) -> Option<String> {
-    if has_protected_variant_suffix(model_id) {
+    if contains_protected_variant_fragment(model_id) {
         return None;
     }
 
@@ -976,7 +976,7 @@ fn is_fuzzy_eligible(model_id: &str) -> bool {
     if model_id.len() < MIN_FUZZY_MATCH_LEN {
         return false;
     }
-    if has_protected_variant_suffix(model_id) {
+    if contains_protected_variant_fragment(model_id) {
         return false;
     }
     !FUZZY_BLOCKLIST.contains(&model_id)
@@ -989,7 +989,7 @@ fn try_strip_unknown_suffix<F>(model_id: &str, do_lookup: F) -> Option<LookupRes
 where
     F: Fn(&str) -> Option<LookupResult>,
 {
-    if has_protected_variant_suffix(model_id) {
+    if contains_protected_variant_fragment(model_id) {
         return None;
     }
 
@@ -1122,14 +1122,11 @@ fn build_lookup_cache_key(model_id: &str, provider_id: Option<&str>) -> String {
     }
 }
 
-fn has_protected_variant_suffix(model_id: &str) -> bool {
-    let lower = model_id.to_lowercase();
-    PROTECTED_VARIANT_SUFFIXES.iter().any(|suffix| {
-        lower == *suffix
-            || lower.ends_with(&format!("-{suffix}"))
-            || lower.ends_with(&format!("_{suffix}"))
-            || lower.ends_with(&format!(".{suffix}"))
-            || lower.ends_with(&format!("/{suffix}"))
+fn contains_protected_variant_fragment(model_id: &str) -> bool {
+    model_id.split(['-', '_', '.', '/']).any(|part| {
+        PROTECTED_VARIANT_SUFFIXES
+            .iter()
+            .any(|suffix| part.eq_ignore_ascii_case(suffix))
     })
 }
 
@@ -1742,6 +1739,12 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_zen_glm_4_7_free_with_extra_suffix_stays_unpriced() {
+        let lookup = create_lookup();
+        assert!(lookup.lookup("glm-4.7-free-high").is_none());
+    }
+
+    #[test]
     fn test_opencode_zen_glm_4_6() {
         let lookup = create_lookup();
         let result = lookup.lookup("glm-4.6").unwrap();
@@ -1939,6 +1942,12 @@ mod tests {
     fn test_free_variant_does_not_normalize_to_paid_claude_model() {
         let lookup = create_lookup();
         assert!(lookup.lookup("claude-sonnet-4-5-free").is_none());
+    }
+
+    #[test]
+    fn test_free_variant_with_extra_suffix_does_not_normalize_to_paid_claude_model() {
+        let lookup = create_lookup();
+        assert!(lookup.lookup("claude-sonnet-4-5-free-high").is_none());
     }
 
     #[test]
