@@ -871,6 +871,55 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_messages_merges_opencode_agent_case_variants() {
+        let loader = DataLoader::new(None);
+        let messages = vec![
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "claude-opus-4-6",
+                "anthropic",
+                "session-1",
+                1_735_689_600_000,
+                tokscale_core::TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                1.5,
+                Some("Hephaestus".to_string()),
+            ),
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "claude-opus-4-6",
+                "anthropic",
+                "session-2",
+                1_735_689_700_000,
+                tokscale_core::TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                2.5,
+                Some("hephaestus".to_string()),
+            ),
+        ];
+
+        let usage = loader
+            .aggregate_messages(messages, &GroupBy::Model)
+            .unwrap();
+
+        assert_eq!(usage.agents.len(), 1);
+        assert_eq!(usage.agents[0].agent, "Hephaestus");
+        assert_eq!(usage.agents[0].clients, "opencode");
+        assert_eq!(usage.agents[0].message_count, 2);
+        assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn test_aggregate_messages_does_not_merge_omo_variants_for_non_opencode_clients() {
         let loader = DataLoader::new(None);
         let messages = vec![

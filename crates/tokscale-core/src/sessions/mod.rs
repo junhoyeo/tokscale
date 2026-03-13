@@ -66,12 +66,14 @@ pub fn normalize_opencode_agent_name(agent: &str) -> String {
 
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     let normalized = match agent_lower {
-        "sisyphus (ultraworker)" => "Sisyphus",
-        "hephaestus (deep agent)" => "Hephaestus",
-        "prometheus (plan builder)" | "prometheus (planner)" => "Prometheus",
-        "atlas (plan executor)" => "Atlas",
-        "metis (plan consultant)" => "Metis",
-        "momus (plan critic)" | "momus (plan reviewer)" => "Momus",
+        "sisyphus (ultraworker)" | "sisyphus" => "Sisyphus",
+        "hephaestus (deep agent)" | "hephaestus" => "Hephaestus",
+        "prometheus (plan builder)" | "prometheus (planner)" | "prometheus" => "Prometheus",
+        "atlas (plan executor)" | "atlas" => "Atlas",
+        "metis (plan consultant)" | "metis" => "Metis",
+        "momus (plan critic)" | "momus (plan reviewer)" | "momus" => "Momus",
+        "sisyphus-junior" => "Sisyphus-Junior",
+        "planner-sisyphus" => "Planner-Sisyphus",
         _ => return None,
     };
 
@@ -263,6 +265,19 @@ mod tests {
         assert_eq!(
             normalize_opencode_agent_name("Sisyphus (Ultraworker)"),
             "Sisyphus"
+        );
+        assert_eq!(normalize_opencode_agent_name("hephaestus"), "Hephaestus");
+        assert_eq!(normalize_opencode_agent_name("prometheus"), "Prometheus");
+        assert_eq!(normalize_opencode_agent_name("atlas"), "Atlas");
+        assert_eq!(normalize_opencode_agent_name("metis"), "Metis");
+        assert_eq!(normalize_opencode_agent_name("momus"), "Momus");
+        assert_eq!(
+            normalize_opencode_agent_name("sisyphus-junior"),
+            "Sisyphus-Junior"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("planner-sisyphus"),
+            "Planner-Sisyphus"
         );
 
         assert_eq!(
