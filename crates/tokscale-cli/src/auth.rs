@@ -125,23 +125,49 @@ fn get_device_name() -> String {
     format!("CLI on {}", hostname)
 }
 
-fn open_browser(url: &str) {
+#[cfg(target_os = "linux")]
+fn has_non_empty_env_var(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn should_auto_open_browser() -> bool {
+    has_non_empty_env_var("DISPLAY") || has_non_empty_env_var("WAYLAND_DISPLAY")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn should_auto_open_browser() -> bool {
+    true
+}
+
+fn open_browser(url: &str) -> bool {
+    if !should_auto_open_browser() {
+        return false;
+    }
+
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        return std::process::Command::new("open").arg(url).spawn().is_ok();
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
+        return std::process::Command::new("cmd")
             .args(["/C", "start", "", url])
-            .spawn();
+            .spawn()
+            .is_ok();
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        return std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .is_ok();
     }
+
+    #[allow(unreachable_code)]
+    false
 }
 
 pub async fn login() -> Result<()> {
@@ -199,7 +225,13 @@ pub async fn login() -> Result<()> {
         format!("  {}", device_data.user_code).green().bold()
     );
 
-    open_browser(&device_data.verification_url);
+    if !open_browser(&device_data.verification_url) {
+        println!(
+            "{}",
+            "  Browser auto-open unavailable in this environment. Continue with the URL above.\n"
+                .bright_black()
+        );
+    }
 
     println!("{}", "  Waiting for authorization...".bright_black());
 
@@ -330,6 +362,45 @@ mod tests {
     use std::env;
     use tempfile::TempDir;
 
+    #[cfg(target_os = "linux")]
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let original = env::var_os(name);
+            unsafe {
+                env::set_var(name, value);
+            }
+            Self { name, original }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let original = env::var_os(name);
+            unsafe {
+                env::remove_var(name);
+            }
+            Self { name, original }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    env::set_var(self.name, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.name);
+                },
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn test_get_api_base_url_default() {
@@ -387,6 +458,36 @@ mod tests {
         assert_eq!(deserialized.created_at, creds.created_at);
 
         assert!(!json.contains("avatarUrl"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(target_os = "linux")]
+    fn test_should_not_auto_open_browser_without_desktop_session() {
+        let _display = EnvVarGuard::remove("DISPLAY");
+        let _wayland = EnvVarGuard::remove("WAYLAND_DISPLAY");
+
+        assert!(!should_auto_open_browser());
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(target_os = "linux")]
+    fn test_should_auto_open_browser_with_display() {
+        let _display = EnvVarGuard::set("DISPLAY", ":0");
+        let _wayland = EnvVarGuard::remove("WAYLAND_DISPLAY");
+
+        assert!(should_auto_open_browser());
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(target_os = "linux")]
+    fn test_should_auto_open_browser_with_wayland_display() {
+        let _display = EnvVarGuard::remove("DISPLAY");
+        let _wayland = EnvVarGuard::set("WAYLAND_DISPLAY", "wayland-0");
+
+        assert!(should_auto_open_browser());
     }
 
     #[test]
