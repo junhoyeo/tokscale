@@ -142,29 +142,23 @@ describe("renderProfileEmbedSvg", () => {
   });
 
   it("computes display name collision width from raw text, not XML-escaped", () => {
-    // Display name with special chars: "A & B" should be treated as 5 chars, not 9
-    const svg = renderProfileEmbedSvg({
-      ...mockStats,
-      user: {
-        ...mockStats.user,
-        username: "short",
-        displayName: "A & B",
+    // In compact mode this name fits when measured as raw text (29 chars),
+    // but would be hidden if measured after XML escaping (33 chars).
+    const displayName = `${"A".repeat(14)} & ${"B".repeat(12)}`;
+    const expectedDisplayName = `${"A".repeat(14)} &amp; ${"B".repeat(12)}`;
+    const svg = renderProfileEmbedSvg(
+      {
+        ...mockStats,
+        user: {
+          ...mockStats.user,
+          username: "short",
+          displayName,
+        },
       },
-    });
+      { compact: true }
+    );
 
-    // The display name should be visible (not hidden due to overestimated width)
-    expect(svg).toContain("A &amp; B");
-    
-    // Verify that a similar-length name without special chars also shows
-    const svgNoSpecial = renderProfileEmbedSvg({
-      ...mockStats,
-      user: {
-        ...mockStats.user,
-        username: "short",
-        displayName: "ABCDE",
-      },
-    });
-    expect(svgNoSpecial).toContain("ABCDE");
+    expect(svg).toContain(expectedDisplayName);
   });
 });
 
