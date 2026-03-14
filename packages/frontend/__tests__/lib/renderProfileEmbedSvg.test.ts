@@ -146,7 +146,8 @@ describe("renderProfileEmbedSvg", () => {
     // but would be hidden if measured after XML escaping (33 chars).
     const displayName = `${"A".repeat(14)} & ${"B".repeat(12)}`;
     const expectedDisplayName = `${"A".repeat(14)} &amp; ${"B".repeat(12)}`;
-    const svg = renderProfileEmbedSvg(
+
+    const compactSvg = renderProfileEmbedSvg(
       {
         ...mockStats,
         user: {
@@ -157,8 +158,17 @@ describe("renderProfileEmbedSvg", () => {
       },
       { compact: true }
     );
+    const defaultSvg = renderProfileEmbedSvg({
+      ...mockStats,
+      user: {
+        ...mockStats.user,
+        username: "short",
+        displayName,
+      },
+    });
 
-    expect(svg).toContain(expectedDisplayName);
+    expect(compactSvg).toContain(expectedDisplayName);
+    expect(defaultSvg).toContain(expectedDisplayName);
   });
 });
 
