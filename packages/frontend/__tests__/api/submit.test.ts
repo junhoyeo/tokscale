@@ -543,6 +543,24 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(claude.tokens).toBe(1800);
     });
 
+    it('migrates legacy sourceBreakdown into devices[__legacy__] and replaces it on old CLI resubmit', () => {
+      const legacy = {
+        claude: makeClientData(800, 8),
+      };
+
+      const merged = mergeClientBreakdowns(
+        legacy,
+        { claude: makeClientData(1000, 10) },
+        new Set(['claude']),
+        '__legacy__'
+      );
+
+      const claude = getClient(merged.claude);
+      expect(merged.devices?.['__legacy__']?.claude.tokens).toBe(1000);
+      expect(Object.keys(merged.devices ?? {})).toEqual(['__legacy__']);
+      expect(claude.tokens).toBe(1000);
+    });
+
     it('recalculateClientAggregate rebuilds top-level totals and model attribution', () => {
       const devices: Record<string, DeviceClientData> = {
         'uuid-A': {
@@ -582,6 +600,27 @@ describe('POST /api/submit - Client-Level Merge', () => {
       const claude = getClient(mixed.claude);
       expect(mixed.devices?.['__legacy__']?.claude.tokens).toBe(400);
       expect(mixed.devices?.['uuid-A']?.claude.tokens).toBe(600);
+      expect(claude.tokens).toBe(1000);
+    });
+
+    it('stores old CLI submits under __legacy__ while preserving existing new CLI devices', () => {
+      const newCli = mergeClientBreakdowns(
+        {},
+        { claude: makeClientData(600, 6) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+
+      const mixed = mergeClientBreakdowns(
+        newCli,
+        { claude: makeClientData(400, 4) },
+        new Set(['claude']),
+        '__legacy__'
+      );
+
+      const claude = getClient(mixed.claude);
+      expect(mixed.devices?.['uuid-A']?.claude.tokens).toBe(600);
+      expect(mixed.devices?.['__legacy__']?.claude.tokens).toBe(400);
       expect(claude.tokens).toBe(1000);
     });
   });
