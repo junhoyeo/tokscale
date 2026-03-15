@@ -3015,11 +3015,14 @@ fn run_submit_command(
 
     let submit_payload = to_ts_token_contribution_data(&graph_result);
 
+    let device_id = device::get_or_create_device_id().unwrap_or_default();
+
     let response = rt.block_on(async {
         reqwest::Client::new()
             .post(format!("{}/api/submit", api_url))
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", credentials.token))
+            .header("X-Device-Id", &device_id)
             .json(&submit_payload)
             .send()
             .await
