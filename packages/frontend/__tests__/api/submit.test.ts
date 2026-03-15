@@ -1,4 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  mergeClientBreakdowns,
+  recalculateClientAggregate,
+  type ClientBreakdownData,
+  type DeviceClientData,
+} from '../../src/lib/db/helpers';
 
 /**
  * Test suite for POST /api/submit - Client-Level Merge
@@ -405,6 +411,178 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(modelBreakdown['claude-sonnet-4']).toBe(950);
       expect(modelBreakdown['claude-opus-4']).toBe(1600);
       expect(modelBreakdown['gpt-4o']).toBe(375);
+    });
+  });
+
+  describe('Device-Level Deduplication', () => {
+    const makeClientData = (tokens: number, cost: number, modelId = 'claude-sonnet-4'): ClientBreakdownData => ({
+      tokens,
+      cost,
+      input: Math.floor(tokens * 0.6),
+      output: Math.floor(tokens * 0.3),
+      cacheRead: Math.floor(tokens * 0.05),
+      cacheWrite: Math.floor(tokens * 0.03),
+      reasoning: Math.floor(tokens * 0.02),
+      messages: Math.max(1, Math.floor(tokens / 100)),
+      models: {
+        [modelId]: {
+          tokens,
+          cost,
+          input: Math.floor(tokens * 0.6),
+          output: Math.floor(tokens * 0.3),
+          cacheRead: Math.floor(tokens * 0.05),
+          cacheWrite: Math.floor(tokens * 0.03),
+          reasoning: Math.floor(tokens * 0.02),
+          messages: Math.max(1, Math.floor(tokens / 100)),
+        },
+      },
+      modelId,
+    });
+
+    const getClient = (value: unknown): ClientBreakdownData => value as ClientBreakdownData;
+    const resolveDeviceId = (headerValue: string | null): string => headerValue ?? '__legacy__';
+
+    it('stores submission under devices[deviceId] when X-Device-Id is present', () => {
+      const merged = mergeClientBreakdowns(
+        {},
+        { claude: makeClientData(1000, 10) },
+        new Set(['claude']),
+        resolveDeviceId('uuid-A')
+      );
+
+      const claude = getClient(merged.claude);
+      expect(merged.devices?.['uuid-A']?.claude.tokens).toBe(1000);
+      expect(claude.tokens).toBe(1000);
+    });
+
+    it('stores submission under devices[__legacy__] when X-Device-Id is missing', () => {
+      const merged = mergeClientBreakdowns(
+        {},
+        { claude: makeClientData(900, 9) },
+        new Set(['claude']),
+        resolveDeviceId(null)
+      );
+
+      expect(merged.devices?.['__legacy__']?.claude.tokens).toBe(900);
+    });
+
+    it('resubmitting same device replaces that device data without double-counting', () => {
+      const first = mergeClientBreakdowns(
+        {},
+        { claude: makeClientData(1000, 10) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+      const second = mergeClientBreakdowns(
+        first,
+        { claude: makeClientData(1500, 15) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+
+      const claude = getClient(second.claude);
+      expect(second.devices?.['uuid-A']?.claude.tokens).toBe(1500);
+      expect(claude.tokens).toBe(1500);
+    });
+
+    it('preserves device-A and device-B and aggregates totals as A + B', () => {
+      const afterA = mergeClientBreakdowns(
+        {},
+        { claude: makeClientData(1000, 10) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+      const afterB = mergeClientBreakdowns(
+        afterA,
+        { claude: makeClientData(500, 5) },
+        new Set(['claude']),
+        'uuid-B'
+      );
+
+      const claude = getClient(afterB.claude);
+      expect(afterB.devices?.['uuid-A']?.claude.tokens).toBe(1000);
+      expect(afterB.devices?.['uuid-B']?.claude.tokens).toBe(500);
+      expect(claude.tokens).toBe(1500);
+    });
+
+    it('deduplicates correctly across token renewal when device-id stays the same', () => {
+      const beforeRenewal = mergeClientBreakdowns(
+        {},
+        { claude: makeClientData(700, 7) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+
+      const afterRenewal = mergeClientBreakdowns(
+        beforeRenewal,
+        { claude: makeClientData(1200, 12) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+
+      const claude = getClient(afterRenewal.claude);
+      expect(afterRenewal.devices?.['uuid-A']?.claude.tokens).toBe(1200);
+      expect(claude.tokens).toBe(1200);
+    });
+
+    it('migrates legacy sourceBreakdown to devices[__legacy__] before device merge', () => {
+      const legacy = {
+        claude: makeClientData(800, 8),
+      };
+
+      const merged = mergeClientBreakdowns(
+        legacy,
+        { claude: makeClientData(1000, 10) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+
+      const claude = getClient(merged.claude);
+      expect(merged.devices?.['__legacy__']?.claude.tokens).toBe(800);
+      expect(merged.devices?.['uuid-A']?.claude.tokens).toBe(1000);
+      expect(claude.tokens).toBe(1800);
+    });
+
+    it('recalculateClientAggregate rebuilds top-level totals and model attribution', () => {
+      const devices: Record<string, DeviceClientData> = {
+        'uuid-A': {
+          claude: makeClientData(1000, 10, 'claude-sonnet-4'),
+        },
+        'uuid-B': {
+          claude: makeClientData(500, 5, 'claude-opus-4'),
+          cursor: makeClientData(300, 3, 'gpt-4o'),
+        },
+      };
+
+      const recalculated = recalculateClientAggregate(devices);
+      const claude = getClient(recalculated.claude);
+      const cursor = getClient(recalculated.cursor);
+
+      expect(claude.tokens).toBe(1500);
+      expect(claude.models['claude-sonnet-4'].tokens).toBe(1000);
+      expect(claude.models['claude-opus-4'].tokens).toBe(500);
+      expect(cursor.tokens).toBe(300);
+    });
+
+    it('handles mixed new CLI and old CLI submits in one aggregate', () => {
+      const oldCli = mergeClientBreakdowns(
+        {},
+        { claude: makeClientData(400, 4) },
+        new Set(['claude']),
+        '__legacy__'
+      );
+
+      const mixed = mergeClientBreakdowns(
+        oldCli,
+        { claude: makeClientData(600, 6) },
+        new Set(['claude']),
+        'uuid-A'
+      );
+
+      const claude = getClient(mixed.claude);
+      expect(mixed.devices?.['__legacy__']?.claude.tokens).toBe(400);
+      expect(mixed.devices?.['uuid-A']?.claude.tokens).toBe(600);
+      expect(claude.tokens).toBe(1000);
     });
   });
 

@@ -15,6 +15,39 @@ import {
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
+export interface ModelBreakdownData {
+  tokens: number;
+  cost: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  messages: number;
+}
+
+export interface ClientBreakdownData {
+  tokens: number;
+  cost: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  messages: number;
+  models: Record<string, ModelBreakdownData>;
+  modelId?: string;
+}
+
+export interface DeviceClientData {
+  [clientName: string]: ClientBreakdownData;
+}
+
+export interface SourceBreakdown {
+  [clientName: string]: ClientBreakdownData | Record<string, DeviceClientData> | undefined;
+  devices?: Record<string, DeviceClientData>;
+}
+
 // ============================================================================
 // USERS
 // ============================================================================
@@ -222,32 +255,7 @@ export const dailyBreakdown = pgTable(
     providerBreakdown: jsonb("provider_breakdown").$type<
       Record<string, number>
     >(),
-    sourceBreakdown: jsonb("source_breakdown").$type<
-      Record<
-        string,
-        {
-          tokens: number;
-          cost: number;
-          input: number;
-          output: number;
-          cacheRead: number;
-          cacheWrite: number;
-          reasoning: number;
-          messages: number;
-          models: Record<string, {
-            tokens: number;
-            cost: number;
-            input: number;
-            output: number;
-            cacheRead: number;
-            cacheWrite: number;
-            reasoning: number;
-            messages: number;
-          }>;
-          modelId?: string;
-        }
-      >
-    >(),
+    sourceBreakdown: jsonb("source_breakdown").$type<SourceBreakdown>(),
     modelBreakdown: jsonb("model_breakdown").$type<Record<string, number>>(),
   },
   (table) => [

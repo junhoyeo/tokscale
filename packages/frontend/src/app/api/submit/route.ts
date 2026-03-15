@@ -10,12 +10,15 @@ import {
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import {
   mergeClientBreakdowns,
+  recalculateClientAggregate,
   recalculateDayTotals,
   buildModelBreakdown,
   clientContributionToBreakdownData,
   mergeTimestampMs,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
+
+type DailySourceBreakdown = NonNullable<typeof dailyBreakdown.$inferInsert.sourceBreakdown>;
 
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -61,6 +64,8 @@ function normalizeSubmissionData(data: unknown): void {
  */
 export async function POST(request: Request) {
   try {
+    const deviceId = request.headers.get("X-Device-Id") ?? "__legacy__";
+
     // ========================================
     // STEP 1: Authentication
     // ========================================
@@ -209,7 +214,7 @@ export async function POST(request: Request) {
         inputTokens: number;
         outputTokens: number;
         timestampMs: number | null;
-        sourceBreakdown: Record<string, ClientBreakdownData>;
+        sourceBreakdown: DailySourceBreakdown;
         modelBreakdown: Record<string, number>;
       }> = [];
 
@@ -220,7 +225,7 @@ export async function POST(request: Request) {
         inputTokens: number;
         outputTokens: number;
         timestampMs: number | null;
-        sourceBreakdown: Record<string, ClientBreakdownData>;
+        sourceBreakdown: DailySourceBreakdown;
         modelBreakdown: Record<string, number>;
       }> = [];
 
@@ -263,11 +268,12 @@ export async function POST(request: Request) {
 
         if (existingDay) {
            const existingClientBreakdown = (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>;
-           const mergedClientBreakdown = mergeClientBreakdowns(
-             existingClientBreakdown,
-             incomingClientBreakdown,
-             submittedClients
-           );
+          const mergedClientBreakdown: DailySourceBreakdown = mergeClientBreakdowns(
+            existingClientBreakdown,
+            incomingClientBreakdown,
+            submittedClients,
+            deviceId
+          ) as unknown as DailySourceBreakdown;
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
           const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);
 
@@ -282,8 +288,11 @@ export async function POST(request: Request) {
             modelBreakdown,
           });
         } else {
-          const dayTotals = recalculateDayTotals(incomingClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingClientBreakdown);
+          const sourceBreakdown = recalculateClientAggregate({
+            [deviceId]: incomingClientBreakdown,
+          }) as DailySourceBreakdown;
+          const dayTotals = recalculateDayTotals(sourceBreakdown);
+          const modelBreakdown = buildModelBreakdown(sourceBreakdown);
 
           toInsert.push({
             submissionId,
@@ -293,7 +302,7 @@ export async function POST(request: Request) {
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: incomingDay.timestampMs ?? null,
-            sourceBreakdown: incomingClientBreakdown,
+            sourceBreakdown,
             modelBreakdown,
           });
         }
@@ -301,7 +310,7 @@ export async function POST(request: Request) {
 
       // Batch INSERT new days
       if (toInsert.length > 0) {
-        await tx.insert(dailyBreakdown).values(toInsert);
+        await tx.insert(dailyBreakdown).values(toInsert as Array<typeof dailyBreakdown.$inferInsert>);
       }
 
       // Batch UPDATE existing days via raw SQL VALUES list
@@ -361,6 +370,8 @@ export async function POST(request: Request) {
       for (const day of allDays) {
         if (day.sourceBreakdown) {
           for (const [clientName, clientData] of Object.entries(day.sourceBreakdown)) {
+            if (clientName === "devices") continue;
+            if (!clientData || typeof clientData !== "object") continue;
             allClients.add(clientName);
             const cd = clientData as ClientBreakdownData;
             if (cd.models) {
