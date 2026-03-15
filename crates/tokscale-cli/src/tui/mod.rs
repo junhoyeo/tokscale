@@ -154,7 +154,9 @@ pub fn run(
         CacheResult::Stale(data) => (Some(data), true),
         CacheResult::Miss => (None, true),
     };
-    let remote_cached = remote::load_cached_remote_stats();
+    // Load credentials first so we can scope the remote cache by account.
+    let creds = auth::load_credentials();
+    let remote_cached = remote::load_cached_remote_stats(creds.as_ref().map(|c| c.username.as_str()));
     let (effective_data, data_source) = if let Some(ref remote_stats) = remote_cached {
         (Some(remote_stats_to_usage_data(remote_stats)), DataSource::Remote)
     } else {
@@ -196,6 +198,7 @@ pub fn run(
     app.data_source = data_source;
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
+    let (remote_tx, remote_rx) = mpsc::channel::<UsageData>();
     let needs_background_load = !has_cached_data || (cache_is_stale && data_source == DataSource::Local);
 
     if needs_background_load {
@@ -223,14 +226,19 @@ pub fn run(
     }
 
     if remote_cached.is_none() {
-        if let Some(creds) = auth::load_credentials() {
-            let token = creds.token;
+        if let Some(c) = creds {
+            let token = c.token;
+            let username = c.username;
             let api_url = auth::get_api_base_url();
+            let tx = remote_tx;
             thread::spawn(move || {
                 let Ok(runtime) = tokio::runtime::Runtime::new() else {
                     return;
                 };
-                let _ = runtime.block_on(remote::fetch_remote_stats(&token, &api_url));
+                if let Ok(stats) = runtime.block_on(remote::fetch_remote_stats(&token, &username, &api_url)) {
+                    let usage_data = remote_stats_to_usage_data(&stats);
+                    let _ = tx.send(usage_data);
+                }
             });
         }
     }
@@ -250,6 +258,7 @@ pub fn run(
         &mut events,
         bg_tx,
         bg_rx,
+        remote_rx,
         #[cfg(unix)]
         &sigcont_flag,
     );
@@ -280,6 +289,7 @@ fn run_loop_with_background(
     events: &mut EventHandler,
     bg_tx: mpsc::Sender<Result<UsageData>>,
     bg_rx: mpsc::Receiver<Result<UsageData>>,
+    remote_rx: mpsc::Receiver<UsageData>,
     #[cfg(unix)] sigcont_flag: &Arc<AtomicBool>,
 ) -> Result<()> {
     loop {
@@ -321,6 +331,13 @@ fn run_loop_with_background(
                 }
             }
             Err(TryRecvError::Empty) => {}
+        }
+
+        // Check if background remote fetch has delivered new aggregated data.
+        if let Ok(remote_data) = remote_rx.try_recv() {
+            app.update_data(remote_data);
+            app.data_source = DataSource::Remote;
+            app.set_status("Synced");
         }
 
         if app.needs_reload && !app.background_loading {

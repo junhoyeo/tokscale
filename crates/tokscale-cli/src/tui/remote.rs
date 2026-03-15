@@ -54,9 +54,12 @@ pub struct RemoteStats {
     pub devices: Vec<RemoteDeviceStat>,
     #[serde(default)]
     pub fetched_at_secs: u64,
+    /// Username the cache was fetched for; used to invalidate on account switch.
+    #[serde(default)]
+    pub cached_for_user: String,
 }
 
-pub async fn fetch_remote_stats(token: &str, api_base_url: &str) -> Result<RemoteStats> {
+pub async fn fetch_remote_stats(token: &str, username: &str, api_base_url: &str) -> Result<RemoteStats> {
     let url = format!("{}/api/me/stats", api_base_url.trim_end_matches('/'));
 
     let response = reqwest::Client::new()
@@ -85,12 +88,13 @@ pub async fn fetch_remote_stats(token: &str, api_base_url: &str) -> Result<Remot
         .await
         .context("Failed to parse remote stats response")?;
     stats.fetched_at_secs = now_secs();
+    stats.cached_for_user = username.to_string();
 
     let _ = save_remote_stats_cache(&stats);
     Ok(stats)
 }
 
-pub fn load_cached_remote_stats() -> Option<RemoteStats> {
+pub fn load_cached_remote_stats(expected_user: Option<&str>) -> Option<RemoteStats> {
     let cache_path = get_cache_path().ok()?;
     if !cache_path.exists() {
         return None;
@@ -103,6 +107,13 @@ pub fn load_cached_remote_stats() -> Option<RemoteStats> {
     let now = now_secs();
     if stats.fetched_at_secs.saturating_add(CACHE_TTL_SECS) <= now {
         return None;
+    }
+
+    // Reject cache if it belongs to a different account.
+    if let Some(user) = expected_user {
+        if !stats.cached_for_user.is_empty() && stats.cached_for_user != user {
+            return None;
+        }
     }
 
     Some(stats)
