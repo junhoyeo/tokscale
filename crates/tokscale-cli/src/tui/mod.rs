@@ -3,6 +3,7 @@ mod cache;
 pub mod client_ui;
 pub mod config;
 pub mod data;
+pub mod remote;
 mod event;
 pub mod settings;
 mod themes;
