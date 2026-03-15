@@ -196,7 +196,7 @@ pub fn run(
     app.data_source = data_source;
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
-    let needs_background_load = !has_cached_data || cache_is_stale;
+    let needs_background_load = !has_cached_data || (cache_is_stale && data_source == DataSource::Local);
 
     if needs_background_load {
         app.set_background_loading(true);
@@ -302,7 +302,9 @@ fn run_loop_with_background(
                 match result {
                     Ok(data) => {
                         app.update_data(data);
-                        app.data_source = DataSource::Local;
+                        if app.data_source != DataSource::Remote {
+                            app.data_source = DataSource::Local;
+                        }
                         app.set_status("Data loaded");
                     }
                     Err(e) => {

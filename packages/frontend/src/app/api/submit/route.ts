@@ -64,7 +64,7 @@ function normalizeSubmissionData(data: unknown): void {
  */
 export async function POST(request: Request) {
   try {
-    const deviceId = request.headers.get("X-Device-Id") ?? "__legacy__";
+    const deviceId = request.headers.get("X-Device-Id") || "__legacy__";
 
     // ========================================
     // STEP 1: Authentication

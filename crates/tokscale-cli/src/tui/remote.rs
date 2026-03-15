@@ -52,6 +52,7 @@ pub struct RemoteStats {
     pub by_day: Vec<RemoteDayStat>,
     #[serde(default)]
     pub devices: Vec<RemoteDeviceStat>,
+    #[serde(default)]
     pub fetched_at_secs: u64,
 }
 
@@ -85,7 +86,7 @@ pub async fn fetch_remote_stats(token: &str, api_base_url: &str) -> Result<Remot
         .context("Failed to parse remote stats response")?;
     stats.fetched_at_secs = now_secs();
 
-    save_remote_stats_cache(&stats)?;
+    let _ = save_remote_stats_cache(&stats);
     Ok(stats)
 }
 
