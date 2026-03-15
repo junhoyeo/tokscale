@@ -3,7 +3,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::spinner::{get_phase_message, get_scanner_spans};
 use super::widgets::{format_cost, format_tokens};
-use crate::tui::app::{App, ClickAction, SortField, Tab};
+use crate::tui::app::{App, ClickAction, DataSource, SortField, Tab};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -239,6 +239,18 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
+
+    let data_source_label = match app.data_source {
+        DataSource::Remote => "🌐 synced",
+        DataSource::Local => "💻 local only",
+    };
+    spans.push(Span::styled(
+        data_source_label,
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
 
     if app.data.loading {
         let scanner_spans = get_scanner_spans(app.spinner_frame);

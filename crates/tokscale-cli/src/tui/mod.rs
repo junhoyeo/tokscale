@@ -9,7 +9,7 @@ pub mod settings;
 mod themes;
 mod ui;
 
-pub use app::{App, Tab, TuiConfig};
+pub use app::{App, DataSource, Tab, TuiConfig};
 pub use cache::{load_cache, save_cached_data, CacheResult};
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::panic;
 
 use anyhow::Result;
+use chrono::NaiveDate;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -36,6 +37,72 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use tokscale_core::ClientId;
+
+use crate::auth;
+
+use self::data::{DailyUsage, ModelUsage, TokenBreakdown};
+
+fn remote_stats_to_usage_data(remote: &remote::RemoteStats) -> UsageData {
+    let fallback_client = remote
+        .by_client
+        .iter()
+        .max_by_key(|stat| stat.tokens)
+        .map(|stat| stat.client.clone())
+        .unwrap_or_else(|| "remote".to_string());
+
+    let models = remote
+        .by_model
+        .iter()
+        .map(|stat| ModelUsage {
+            model: stat.model.clone(),
+            provider: "remote".to_string(),
+            client: fallback_client.clone(),
+            tokens: TokenBreakdown {
+                input: stat.tokens,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost: stat.cost,
+            session_count: 0,
+        })
+        .collect();
+
+    let daily = remote
+        .by_day
+        .iter()
+        .filter_map(|stat| {
+            NaiveDate::parse_from_str(&stat.date, "%Y-%m-%d")
+                .ok()
+                .map(|date| DailyUsage {
+                    date,
+                    tokens: TokenBreakdown {
+                        input: stat.tokens,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    cost: stat.cost,
+                    models: std::collections::BTreeMap::new(),
+                })
+        })
+        .collect();
+
+    UsageData {
+        models,
+        agents: Vec::new(),
+        daily,
+        graph: None,
+        total_tokens: remote.total_tokens,
+        total_cost: remote.total_cost,
+        loading: false,
+        error: None,
+        current_streak: 0,
+        longest_streak: 0,
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -87,7 +154,13 @@ pub fn run(
         CacheResult::Stale(data) => (Some(data), true),
         CacheResult::Miss => (None, true),
     };
-    let has_cached_data = cached_data.is_some();
+    let remote_cached = remote::load_cached_remote_stats();
+    let (effective_data, data_source) = if let Some(ref remote_stats) = remote_cached {
+        (Some(remote_stats_to_usage_data(remote_stats)), DataSource::Remote)
+    } else {
+        (cached_data, DataSource::Local)
+    };
+    let has_cached_data = effective_data.is_some();
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -113,13 +186,14 @@ pub fn run(
         }
     };
 
-    let mut app = match App::new_with_cached_data(config, cached_data) {
+    let mut app = match App::new_with_cached_data(config, effective_data) {
         Ok(a) => a,
         Err(e) => {
             restore_terminal(&mut terminal);
             return Err(e);
         }
     };
+    app.data_source = data_source;
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
     let needs_background_load = !has_cached_data || cache_is_stale;
@@ -146,6 +220,19 @@ pub fn run(
 
             let _ = tx.send(result);
         });
+    }
+
+    if remote_cached.is_none() {
+        if let Some(creds) = auth::load_credentials() {
+            let token = creds.token;
+            let api_url = auth::get_api_base_url();
+            thread::spawn(move || {
+                let Ok(runtime) = tokio::runtime::Runtime::new() else {
+                    return;
+                };
+                let _ = runtime.block_on(remote::fetch_remote_stats(&token, &api_url));
+            });
+        }
     }
 
     #[cfg(unix)]
@@ -215,6 +302,7 @@ fn run_loop_with_background(
                 match result {
                     Ok(data) => {
                         app.update_data(data);
+                        app.data_source = DataSource::Local;
                         app.set_status("Data loaded");
                     }
                     Err(e) => {

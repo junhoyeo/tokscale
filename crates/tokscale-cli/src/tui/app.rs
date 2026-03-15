@@ -99,6 +99,12 @@ pub enum SortDirection {
     Descending,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataSource {
+    Local,
+    Remote,
+}
+
 pub struct ClickArea {
     pub rect: Rect,
     pub action: ClickAction,
@@ -117,6 +123,7 @@ pub struct App {
     pub theme: Theme,
     pub settings: Settings,
     pub data: UsageData,
+    pub data_source: DataSource,
     pub data_loader: DataLoader,
 
     pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
@@ -209,6 +216,7 @@ impl App {
             theme,
             settings,
             data,
+            data_source: DataSource::Local,
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
             include_synthetic: Rc::new(RefCell::new(include_synthetic)),
