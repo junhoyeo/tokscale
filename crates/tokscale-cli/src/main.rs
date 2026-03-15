@@ -1,4 +1,5 @@
 mod auth;
+mod device;
 mod commands;
 mod cursor;
 mod tui;
