@@ -5,10 +5,6 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         .to_lowercase()
         .replace('-', "_");
 
-    if normalized.chars().any(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-
     let canonical = match normalized.as_str() {
         "" | "unknown" => return None,
         "x_ai" | "xai" => "xai",
@@ -21,6 +17,12 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "fireworks" | "fireworks_ai" => "fireworks_ai",
         "google" | "gemini" => "google",
         "openai" | "openai_codex" => "openai",
+        "mistral" | "mistralai" => "mistralai",
+        "ai21" => "ai21",
+        // For unknown segments, reject if they contain digits — those are
+        // almost certainly model-name fragments (e.g., "gpt-4", "claude-3")
+        // rather than provider identifiers.
+        other if other.chars().any(|ch| ch.is_ascii_digit()) => return None,
         other => other,
     };
 
@@ -83,21 +85,36 @@ pub fn matches_provider_hint(dataset_key: &str, provider_id: Option<&str>) -> bo
         return false;
     };
 
+    let hint_tags = provider_tags(provider_id);
+    matches_provider_hint_with_tags(dataset_key, &hint_tags)
+}
+
+pub fn matches_provider_hint_with_tags(dataset_key: &str, hint_tags: &[String]) -> bool {
+    if hint_tags.is_empty() {
+        return false;
+    }
+
     let key_tags = key_provider_tags(dataset_key);
     if key_tags.is_empty() {
         return false;
     }
 
-    let provider_tags = provider_tags(provider_id);
-    if provider_tags.is_empty() {
-        return false;
-    }
+    key_tags
+        .iter()
+        .any(|key_tag| hint_tags.iter().any(|hint_tag| hint_tag == key_tag))
+}
 
-    key_tags.iter().any(|key_tag| {
-        provider_tags
-            .iter()
-            .any(|provider_tag| provider_tag == key_tag)
-    })
+fn contains_delimited(haystack: &str, needle: &str) -> bool {
+    for (pos, _) in haystack.match_indices(needle) {
+        let before_ok = pos == 0 || !haystack.as_bytes()[pos - 1].is_ascii_alphanumeric();
+        let after_pos = pos + needle.len();
+        let after_ok =
+            after_pos == haystack.len() || !haystack.as_bytes()[after_pos].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
@@ -105,18 +122,18 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
 
     if lower.contains("claude")
         || lower.contains("anthropic")
-        || lower.contains("opus")
-        || lower.contains("sonnet")
-        || lower.contains("haiku")
+        || contains_delimited(&lower, "opus")
+        || contains_delimited(&lower, "sonnet")
+        || contains_delimited(&lower, "haiku")
     {
         return Some("anthropic");
     }
 
     if lower.contains("gpt")
         || lower.contains("openai")
-        || lower.contains("o1")
-        || lower.contains("o3")
-        || lower.contains("o4")
+        || contains_delimited(&lower, "o1")
+        || contains_delimited(&lower, "o3")
+        || contains_delimited(&lower, "o4")
     {
         return Some("openai");
     }
@@ -137,7 +154,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("mistral");
     }
 
-    if lower.contains("llama") || lower.contains("meta") {
+    if lower.contains("llama") || contains_delimited(&lower, "meta") {
         return Some("meta");
     }
 
@@ -239,5 +256,52 @@ mod tests {
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));
         assert_eq!(inferred_provider_from_model("qwen3-coder"), Some("qwen"));
         assert_eq!(inferred_provider_from_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn test_inferred_provider_no_false_positives() {
+        assert_eq!(inferred_provider_from_model("protocol1-fast"), None);
+        assert_eq!(inferred_provider_from_model("proto3-server"), None);
+        assert_eq!(inferred_provider_from_model("co4pilot-v2"), None);
+        assert_eq!(inferred_provider_from_model("metadata-model"), None);
+        assert_eq!(inferred_provider_from_model("metamorphic-v1"), None);
+    }
+
+    #[test]
+    fn test_inferred_provider_boundary_matches() {
+        assert_eq!(inferred_provider_from_model("o1-preview"), Some("openai"));
+        assert_eq!(inferred_provider_from_model("o3-mini"), Some("openai"));
+        assert_eq!(inferred_provider_from_model("o4-mini"), Some("openai"));
+        assert_eq!(inferred_provider_from_model("meta-llama-3"), Some("meta"));
+    }
+
+    #[test]
+    fn test_provider_tags_mistral_alias() {
+        assert_eq!(provider_tags("mistral"), vec!["mistralai"]);
+        assert_eq!(provider_tags("mistralai"), vec!["mistralai"]);
+    }
+
+    #[test]
+    fn test_matches_provider_hint_mistral_keys() {
+        assert!(matches_provider_hint(
+            "mistralai/mistral-large",
+            Some("mistral")
+        ));
+        assert!(matches_provider_hint(
+            "mistralai/mixtral-8x7b",
+            Some("mistralai")
+        ));
+    }
+
+    #[test]
+    fn test_provider_tags_ai21_with_digits() {
+        assert_eq!(provider_tags("ai21"), vec!["ai21"]);
+    }
+
+    #[test]
+    fn test_matches_provider_hint_none_and_empty() {
+        assert!(!matches_provider_hint("openai/gpt-4", None));
+        assert!(!matches_provider_hint("openai/gpt-4", Some("")));
+        assert!(!matches_provider_hint("openai/gpt-4", Some("unknown")));
     }
 }

@@ -70,12 +70,19 @@ struct CachedResult {
     matched_key: String,
 }
 
+struct KeyModelPart {
+    key: String,
+    lower_model_part: String,
+}
+
 pub struct PricingLookup {
     litellm: HashMap<String, ModelPricing>,
     openrouter: HashMap<String, ModelPricing>,
     cursor: HashMap<String, ModelPricing>,
     litellm_keys: Vec<String>,
     openrouter_keys: Vec<String>,
+    litellm_key_parts: Vec<KeyModelPart>,
+    openrouter_key_parts: Vec<KeyModelPart>,
     litellm_lower: HashMap<String, String>,
     openrouter_lower: HashMap<String, String>,
     openrouter_model_part: HashMap<String, String>,
@@ -123,12 +130,30 @@ impl PricingLookup {
             cursor_lower.insert(key.to_lowercase(), key.clone());
         }
 
+        let build_key_parts = |keys: &[String]| -> Vec<KeyModelPart> {
+            keys.iter()
+                .map(|key| {
+                    let lower = key.to_lowercase();
+                    let model_part = lower.split('/').next_back().unwrap_or(&lower).to_string();
+                    KeyModelPart {
+                        key: key.clone(),
+                        lower_model_part: model_part,
+                    }
+                })
+                .collect()
+        };
+
+        let litellm_key_parts = build_key_parts(&litellm_keys);
+        let openrouter_key_parts = build_key_parts(&openrouter_keys);
+
         Self {
             litellm,
             openrouter,
             cursor,
             litellm_keys,
             openrouter_keys,
+            litellm_key_parts,
+            openrouter_key_parts,
             litellm_lower,
             openrouter_lower,
             openrouter_model_part,
@@ -146,6 +171,7 @@ impl PricingLookup {
         model_id: &str,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
+        let provider_id = normalize_provider_hint(provider_id);
         let cache_key = build_lookup_cache_key(model_id, provider_id);
         if let Some(cached) = self
             .lookup_cache
@@ -200,6 +226,7 @@ impl PricingLookup {
         force_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
+        let provider_id = normalize_provider_hint(provider_id);
         let canonical = aliases::resolve_alias(model_id).unwrap_or(model_id);
         let lower = canonical.to_lowercase();
 
@@ -231,26 +258,42 @@ impl PricingLookup {
 
     fn lookup_auto(&self, model_id: &str, provider_id: Option<&str>) -> Option<LookupResult> {
         if let Some(stripped) = strip_known_provider_prefix(model_id) {
-            if let Some(exact_litellm) = self.exact_match_litellm(model_id) {
-                return Some(exact_litellm);
-            }
+            let prefix_matches_hint =
+                provider_id.is_none() || model_prefix_matches_provider(model_id, provider_id);
 
-            let exact_openrouter = self.exact_match_openrouter(model_id);
-            let stripped_litellm = self.exact_or_normalized_litellm(stripped, provider_id);
-
-            if let (Some(litellm), Some(openrouter)) = (&stripped_litellm, &exact_openrouter) {
-                if has_meaningful_tier_support(&litellm.pricing)
-                    && !has_any_valid_above_tier_value(&openrouter.pricing)
-                {
-                    return stripped_litellm;
+            if prefix_matches_hint {
+                if let Some(exact_litellm) = self.exact_match_litellm(model_id) {
+                    return Some(exact_litellm);
                 }
-            }
 
-            if let Some(result) = exact_openrouter {
-                return Some(result);
-            }
-            if let Some(result) = stripped_litellm {
-                return Some(result);
+                let exact_openrouter = self.exact_match_openrouter(model_id);
+                let stripped_litellm = self.exact_or_normalized_litellm(stripped, provider_id);
+
+                if let (Some(litellm), Some(openrouter)) = (&stripped_litellm, &exact_openrouter) {
+                    if has_meaningful_tier_support(&litellm.pricing)
+                        && !has_any_valid_above_tier_value(&openrouter.pricing)
+                    {
+                        return stripped_litellm;
+                    }
+                }
+
+                if let Some(result) = exact_openrouter {
+                    return Some(result);
+                }
+                if let Some(result) = stripped_litellm {
+                    return Some(result);
+                }
+            } else {
+                if let Some(result) = choose_best_source_result(
+                    self.exact_match_litellm_for_provider(stripped, provider_id),
+                    self.exact_match_openrouter_for_provider(stripped, provider_id),
+                    provider_id,
+                ) {
+                    return Some(result);
+                }
+                if let Some(result) = self.exact_or_normalized_litellm(stripped, provider_id) {
+                    return Some(result);
+                }
             }
         }
 
@@ -443,7 +486,7 @@ impl PricingLookup {
         exact_match_with_provider_prefixes(
             model_id,
             provider_id,
-            &self.litellm_keys,
+            &self.litellm_key_parts,
             &self.litellm,
             "LiteLLM",
         )
@@ -457,7 +500,7 @@ impl PricingLookup {
         exact_match_with_provider_prefixes(
             model_id,
             provider_id,
-            &self.openrouter_keys,
+            &self.openrouter_key_parts,
             &self.openrouter,
             "OpenRouter",
         )
@@ -1061,10 +1104,14 @@ fn select_best_match(
         return None;
     }
 
+    let hint_tags: Vec<String> = provider_id
+        .map(provider_identity::provider_tags)
+        .unwrap_or_default();
+
     let provider_matches: Vec<&String> = matches
         .iter()
         .copied()
-        .filter(|key| provider_identity::matches_provider_hint(key, provider_id))
+        .filter(|key| provider_identity::matches_provider_hint_with_tags(key, &hint_tags))
         .collect();
 
     let preferred_matches = if provider_matches.is_empty() {
@@ -1073,32 +1120,51 @@ fn select_best_match(
         provider_matches.as_slice()
     };
 
-    if let Some(key) = preferred_matches.iter().find(|k| is_original_provider(k)) {
-        if let Some(pricing) = dataset.get(*key) {
-            return Some(LookupResult {
+    let hint_is_reseller = provider_id.is_some_and(is_reseller_provider);
+    let pick = |candidates: &[&String], prefer_reseller: bool| -> Option<LookupResult> {
+        let key = if prefer_reseller {
+            candidates
+                .iter()
+                .find(|k| is_reseller_provider(k))
+                .or_else(|| candidates.first())
+        } else {
+            candidates
+                .iter()
+                .find(|k| is_original_provider(k))
+                .or_else(|| candidates.iter().find(|k| !is_reseller_provider(k)))
+                .or_else(|| candidates.first())
+        };
+        key.and_then(|k| {
+            dataset.get(k.as_str()).map(|pricing| LookupResult {
                 pricing: pricing.clone(),
                 source: source.into(),
-                matched_key: (*key).clone(),
-            });
-        }
-    }
+                matched_key: (*k).clone(),
+            })
+        })
+    };
 
-    if let Some(key) = preferred_matches.iter().find(|k| !is_reseller_provider(k)) {
-        if let Some(pricing) = dataset.get(*key) {
-            return Some(LookupResult {
-                pricing: pricing.clone(),
-                source: source.into(),
-                matched_key: (*key).clone(),
-            });
-        }
-    }
+    pick(preferred_matches, hint_is_reseller)
+}
 
-    let key = preferred_matches[0];
-    dataset.get(key).map(|pricing| LookupResult {
-        pricing: pricing.clone(),
-        source: source.into(),
-        matched_key: key.clone(),
-    })
+fn model_prefix_matches_provider(model_id: &str, provider_id: Option<&str>) -> bool {
+    let Some(hint) = provider_id else {
+        return true;
+    };
+    let Some(prefix) = model_id.split('/').next() else {
+        return false;
+    };
+    let prefix_tag = provider_identity::canonical_provider(prefix);
+    let hint_primary = provider_identity::canonical_provider(hint);
+    match (prefix_tag, hint_primary) {
+        (Some(p), Some(h)) => p == h,
+        _ => false,
+    }
+}
+
+fn normalize_provider_hint(provider_id: Option<&str>) -> Option<&str> {
+    provider_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
 }
 
 fn build_lookup_cache_key(model_id: &str, provider_id: Option<&str>) -> String {
@@ -1174,20 +1240,20 @@ fn choose_best_source_result(
 fn exact_match_with_provider_prefixes(
     model_id: &str,
     provider_id: Option<&str>,
-    keys: &[String],
+    key_parts: &[KeyModelPart],
     dataset: &HashMap<String, ModelPricing>,
     source: &str,
 ) -> Option<LookupResult> {
     let provider_id = provider_id?;
+    let hint_tags = provider_identity::provider_tags(provider_id);
 
-    let matches: Vec<&String> = keys
+    let matches: Vec<&String> = key_parts
         .iter()
-        .filter(|key| {
-            let lower_key = key.to_lowercase();
-            let model_part = lower_key.split('/').next_back().unwrap_or(&lower_key);
-            model_part_matches_exact(model_part, model_id)
-                && provider_identity::matches_provider_hint(key, Some(provider_id))
+        .filter(|kp| {
+            model_part_matches_exact(&kp.lower_model_part, model_id)
+                && provider_identity::matches_provider_hint_with_tags(&kp.key, &hint_tags)
         })
+        .map(|kp| &kp.key)
         .collect();
 
     if matches.is_empty() {
@@ -3070,5 +3136,178 @@ mod tests {
         let lookup = create_lookup();
         let result = lookup.lookup("gpt-5.2-codex").unwrap();
         assert_eq!(result.matched_key, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_provider_hint_empty_and_unknown_treated_as_none() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.001),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "azure_ai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let r_none = lookup.lookup_with_provider("gpt-4", None).unwrap();
+        let r_empty = lookup.lookup_with_provider("gpt-4", Some("")).unwrap();
+        let r_unknown = lookup
+            .lookup_with_provider("gpt-4", Some("unknown"))
+            .unwrap();
+
+        assert_eq!(r_none.matched_key, r_empty.matched_key);
+        assert_eq!(r_none.matched_key, r_unknown.matched_key);
+    }
+
+    #[test]
+    fn test_provider_hint_mistralai_matches_mistral_keys() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "mistralai/mistral-large".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup
+            .lookup_with_provider("mistral-large", Some("mistral"))
+            .unwrap();
+        assert_eq!(result.matched_key, "mistralai/mistral-large");
+    }
+
+    #[test]
+    fn test_prefixed_model_with_conflicting_provider_uses_provider_aware_path() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "azure/openai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let r_azure = lookup
+            .lookup_with_provider("openai/gpt-4", Some("azure"))
+            .unwrap();
+        assert_eq!(
+            r_azure.matched_key, "azure/openai/gpt-4",
+            "should prefer azure key when provider_id=azure"
+        );
+
+        let r_openai = lookup
+            .lookup_with_provider("openai/gpt-4", Some("openai"))
+            .unwrap();
+        assert_eq!(
+            r_openai.matched_key, "openai/gpt-4",
+            "should use exact prefixed key when provider_id matches prefix"
+        );
+
+        let r_none = lookup.lookup_with_provider("openai/gpt-4", None).unwrap();
+        assert_eq!(
+            r_none.matched_key, "openai/gpt-4",
+            "should use exact prefixed key when no provider hint"
+        );
+    }
+
+    #[test]
+    fn test_prefixed_model_conflicting_provider_falls_back_to_stripped() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.001),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let r = lookup
+            .lookup_with_provider("openai/gpt-4", Some("azure"))
+            .unwrap();
+        assert_eq!(
+            r.matched_key, "gpt-4",
+            "with no azure-specific key, should fall back to stripped generic"
+        );
+    }
+
+    #[test]
+    fn test_compound_provider_hint_prefers_reseller_over_prefix() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "azure/openai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let r = lookup
+            .lookup_with_provider("openai/gpt-4", Some("azure/openai"))
+            .unwrap();
+        assert_eq!(
+            r.matched_key, "azure/openai/gpt-4",
+            "compound hint azure/openai should prefer azure-specific key over openai/ prefix"
+        );
+    }
+
+    #[test]
+    fn test_source_and_provider_normalizes_unknown_hint() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let r_unknown = lookup
+            .lookup_with_source_and_provider("openai/gpt-4", None, Some("unknown"))
+            .unwrap();
+        let r_none = lookup
+            .lookup_with_source_and_provider("openai/gpt-4", None, None)
+            .unwrap();
+        assert_eq!(
+            r_unknown.matched_key, r_none.matched_key,
+            "unknown hint via source_and_provider should behave like None"
+        );
     }
 }
