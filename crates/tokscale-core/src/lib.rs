@@ -892,11 +892,14 @@ fn apply_pricing_if_available(
     }
 }
 
-fn select_local_parse_pricing(
+fn select_local_parse_pricing<F>(
     fresh: Result<Arc<pricing::PricingService>, String>,
-    stale: Option<pricing::PricingService>,
-) -> Option<Arc<pricing::PricingService>> {
-    fresh.ok().or_else(|| stale.map(Arc::new))
+    stale: F,
+) -> Option<Arc<pricing::PricingService>>
+where
+    F: FnOnce() -> Option<pricing::PricingService>,
+{
+    fresh.ok().or_else(|| stale().map(Arc::new))
 }
 
 async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
@@ -905,7 +908,7 @@ async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> 
     // to any cached dataset when the network path fails.
     select_local_parse_pricing(
         pricing::PricingService::get_or_init().await,
-        pricing::PricingService::load_cached_any_age(),
+        pricing::PricingService::load_cached_any_age,
     )
 }
 
@@ -1783,7 +1786,7 @@ mod tests {
         );
         let fresh = Arc::new(pricing::PricingService::new(fresh_litellm, HashMap::new()));
         let stale = pricing::PricingService::new(HashMap::new(), HashMap::new());
-        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), Some(stale)).unwrap();
+        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || Some(stale)).unwrap();
 
         let mut msg = UnifiedMessage::new(
             "opencode",
@@ -1820,9 +1823,24 @@ mod tests {
         let stale = pricing::PricingService::new(stale_litellm, HashMap::new());
 
         let selected =
-            select_local_parse_pricing(Err("network failed".to_string()), Some(stale)).unwrap();
+            select_local_parse_pricing(Err("network failed".to_string()), || Some(stale)).unwrap();
 
         assert!(selected.lookup_with_source("gpt-5.2", None).is_some());
+    }
+
+    #[test]
+    fn test_select_local_parse_pricing_does_not_evaluate_stale_fallback_on_fresh_success() {
+        let fresh = Arc::new(pricing::PricingService::new(HashMap::new(), HashMap::new()));
+        let mut stale_called = false;
+
+        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || {
+            stale_called = true;
+            None
+        })
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&selected, &fresh));
+        assert!(!stale_called);
     }
 
     #[test]
