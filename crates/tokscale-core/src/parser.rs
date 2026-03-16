@@ -178,7 +178,7 @@ mod tests {
 
         let mut file = File::create(&file_path).unwrap();
         writeln!(file, r#"{{"name": "a", "value": 1}}"#).unwrap();
-        writeln!(file, "").unwrap(); // Empty line
+        writeln!(file).unwrap(); // Empty line
         writeln!(file, "   ").unwrap(); // Whitespace only
         writeln!(file, r#"{{"name": "b", "value": 2}}"#).unwrap();
 

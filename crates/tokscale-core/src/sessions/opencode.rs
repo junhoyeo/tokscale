@@ -676,7 +676,7 @@ mod tests {
             .filter(|msg| {
                 msg.dedup_key
                     .as_ref()
-                    .map_or(true, |key| seen.insert(key.clone()))
+                    .is_none_or(|key| seen.insert(key.clone()))
             })
             .collect();
 
@@ -750,7 +750,7 @@ mod tests {
         // Simulate the validity check from lib.rs
         let is_valid = cache.migration_complete
             && current_file_count == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(is_valid, "Cache should be valid when count and mtime match");
     }
@@ -776,7 +776,7 @@ mod tests {
         let current_file_count = 2u64; // changed
         let is_valid = cache.migration_complete
             && current_file_count == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(!is_valid, "Cache should be invalid when file count changes");
     }
@@ -802,7 +802,7 @@ mod tests {
 
         let is_valid = cache.migration_complete
             && 1u64 == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(
             !is_valid,
@@ -842,7 +842,7 @@ mod tests {
 
         let is_valid = cache.migration_complete
             && 1u64 == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(
             !is_valid,
