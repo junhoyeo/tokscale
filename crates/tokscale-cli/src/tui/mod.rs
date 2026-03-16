@@ -157,7 +157,9 @@ pub fn run(
     // Load credentials first so we can scope the remote cache by account and API server.
     let creds = auth::load_credentials();
     let api_url = auth::get_api_base_url();
-    let remote_cached = remote::load_cached_remote_stats(creds.as_ref().map(|c| c.username.as_str()), Some(&api_url));
+    let remote_cached = creds.as_ref().and_then(|c| {
+        remote::load_cached_remote_stats(Some(c.username.as_str()), Some(&api_url))
+    });
     let (effective_data, data_source) = if let Some(ref remote_stats) = remote_cached {
         (Some(remote_stats_to_usage_data(remote_stats)), DataSource::Remote)
     } else {
