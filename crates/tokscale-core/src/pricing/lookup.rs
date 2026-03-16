@@ -1,5 +1,5 @@
 use super::{aliases, litellm::ModelPricing};
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -1060,7 +1060,7 @@ fn select_best_match(
     let provider_matches: Vec<&String> = matches
         .iter()
         .copied()
-        .filter(|key| matches_provider_hint(key, provider_id))
+        .filter(|key| provider_identity::matches_provider_hint(key, provider_id))
         .collect();
 
     let preferred_matches = if provider_matches.is_empty() {
@@ -1106,88 +1106,6 @@ fn build_lookup_cache_key(model_id: &str, provider_id: Option<&str>) -> String {
     }
 }
 
-fn canonicalize_provider_segment(segment: &str) -> Option<String> {
-    let normalized = segment
-        .trim()
-        .trim_end_matches('/')
-        .to_lowercase()
-        .replace('-', "_");
-    let canonical = match normalized.as_str() {
-        "" | "unknown" => return None,
-        "x_ai" | "xai" => "xai",
-        "z_ai" | "zai" => "zai",
-        "moonshot" | "moonshotai" => "moonshotai",
-        "meta" | "meta_llama" => "meta_llama",
-        "azure" | "azure_ai" => "azure_ai",
-        "vertex" | "vertex_ai" => "vertex_ai",
-        "together" | "together_ai" => "together_ai",
-        "fireworks" | "fireworks_ai" => "fireworks_ai",
-        "google" | "gemini" => "google",
-        "openai" | "openai_codex" => "openai",
-        other => other,
-    };
-
-    Some(canonical.into())
-}
-
-fn collect_canonical_provider_tags(value: &str) -> Vec<String> {
-    let mut tags = Vec::new();
-    let mut push = |segment: &str| {
-        if let Some(tag) = canonicalize_provider_segment(segment) {
-            if !tags.iter().any(|existing| existing == &tag) {
-                tags.push(tag);
-            }
-        }
-    };
-
-    for segment in value.trim().trim_end_matches('/').split('/') {
-        push(segment);
-        if segment.contains('.') {
-            for dotted in segment.split('.') {
-                push(dotted);
-            }
-        }
-    }
-
-    tags
-}
-
-fn matches_provider_hint(key: &str, provider_id: Option<&str>) -> bool {
-    let Some(provider_id) = provider_id else {
-        return false;
-    };
-
-    let key_parts: Vec<&str> = key.split('/').collect();
-    if key_parts.len() < 2 {
-        return false;
-    }
-
-    let mut key_tags = Vec::new();
-    for segment in &key_parts[..key_parts.len() - 1] {
-        key_tags.extend(collect_canonical_provider_tags(segment));
-    }
-    key_tags.extend(
-        key_parts[key_parts.len() - 1]
-            .split('.')
-            .flat_map(collect_canonical_provider_tags),
-    );
-
-    if key_tags.is_empty() {
-        return false;
-    }
-
-    let provider_tags = collect_canonical_provider_tags(provider_id);
-    if provider_tags.is_empty() {
-        return false;
-    }
-
-    key_tags.iter().any(|key_tag| {
-        provider_tags
-            .iter()
-            .any(|provider_tag| provider_tag == key_tag)
-    })
-}
-
 fn model_part_matches_exact(model_part: &str, model_id: &str) -> bool {
     if model_part == model_id {
         return true;
@@ -1211,8 +1129,10 @@ fn choose_best_source_result(
 ) -> Option<LookupResult> {
     match (&litellm_result, &openrouter_result) {
         (Some(l), Some(o)) => {
-            let l_matches_provider = matches_provider_hint(&l.matched_key, provider_id);
-            let o_matches_provider = matches_provider_hint(&o.matched_key, provider_id);
+            let l_matches_provider =
+                provider_identity::matches_provider_hint(&l.matched_key, provider_id);
+            let o_matches_provider =
+                provider_identity::matches_provider_hint(&o.matched_key, provider_id);
 
             if l_matches_provider && !o_matches_provider {
                 return litellm_result;
@@ -1262,7 +1182,7 @@ fn exact_match_with_provider_prefixes(
             let lower_key = key.to_lowercase();
             let model_part = lower_key.split('/').next_back().unwrap_or(&lower_key);
             model_part_matches_exact(model_part, model_id)
-                && matches_provider_hint(key, Some(provider_id))
+                && provider_identity::matches_provider_hint(key, Some(provider_id))
         })
         .collect();
 

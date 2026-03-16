@@ -6,7 +6,7 @@
 
 use super::utils::{extract_i64, parse_timestamp_str};
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -221,7 +221,10 @@ fn extract_f64(value: Option<&Value>) -> Option<f64> {
 }
 
 fn provider_from_api_protocol(api_protocol: Option<&str>) -> &'static str {
-    match api_protocol {
+    match api_protocol
+        .and_then(provider_identity::canonical_provider)
+        .as_deref()
+    {
         Some("anthropic") => "anthropic",
         Some("openai") => "openai",
         _ => "unknown",

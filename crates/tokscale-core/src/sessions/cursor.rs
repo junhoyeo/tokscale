@@ -8,7 +8,7 @@
 //! Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use std::path::Path;
 
 fn account_id_from_cursor_cache_path(path: &Path) -> String {
@@ -47,25 +47,7 @@ fn account_id_from_cursor_cache_path(path: &Path) -> String {
 
 /// Provider inference from model name
 fn infer_provider(model: &str) -> &'static str {
-    let lower = model.to_lowercase();
-
-    if lower.contains("claude")
-        || lower.contains("sonnet")
-        || lower.contains("opus")
-        || lower.contains("haiku")
-    {
-        "anthropic"
-    } else if lower.contains("gpt") || lower.contains("o1") || lower.contains("o3") {
-        "openai"
-    } else if lower.contains("gemini") {
-        "google"
-    } else if lower.contains("deepseek") {
-        "deepseek"
-    } else if lower.contains("llama") || lower.contains("mixtral") {
-        "meta"
-    } else {
-        "cursor"
-    }
+    provider_identity::inferred_provider_from_model(model).unwrap_or("cursor")
 }
 
 /// Parse a cost string like "$0.50" or "0.50" to f64
