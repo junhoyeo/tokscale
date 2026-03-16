@@ -154,9 +154,10 @@ pub fn run(
         CacheResult::Stale(data) => (Some(data), true),
         CacheResult::Miss => (None, true),
     };
-    // Load credentials first so we can scope the remote cache by account.
+    // Load credentials first so we can scope the remote cache by account and API server.
     let creds = auth::load_credentials();
-    let remote_cached = remote::load_cached_remote_stats(creds.as_ref().map(|c| c.username.as_str()));
+    let api_url = auth::get_api_base_url();
+    let remote_cached = remote::load_cached_remote_stats(creds.as_ref().map(|c| c.username.as_str()), Some(&api_url));
     let (effective_data, data_source) = if let Some(ref remote_stats) = remote_cached {
         (Some(remote_stats_to_usage_data(remote_stats)), DataSource::Remote)
     } else {
@@ -311,11 +312,15 @@ fn run_loop_with_background(
                 app.set_background_loading(false);
                 match result {
                     Ok(data) => {
-                        app.update_data(data);
-                        if app.data_source != DataSource::Remote {
+                        // Don't overwrite remote data with local reload results
+                        if app.data_source == DataSource::Remote {
+                            // Remote data is authoritative; skip local update
+                            app.set_status("Remote data unchanged");
+                        } else {
+                            app.update_data(data);
                             app.data_source = DataSource::Local;
+                            app.set_status("Data loaded");
                         }
-                        app.set_status("Data loaded");
                     }
                     Err(e) => {
                         app.set_error(Some(e.to_string()));
