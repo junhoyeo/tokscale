@@ -6,7 +6,7 @@
 
 use super::utils::{extract_i64, parse_timestamp_str};
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -220,15 +220,12 @@ fn extract_f64(value: Option<&Value>) -> Option<f64> {
     })
 }
 
-fn provider_from_api_protocol(api_protocol: Option<&str>) -> &'static str {
-    match api_protocol
-        .and_then(provider_identity::canonical_provider)
-        .as_deref()
-    {
-        Some("anthropic") => "anthropic",
-        Some("openai") => "openai",
-        _ => "unknown",
-    }
+fn provider_from_api_protocol(api_protocol: Option<&str>) -> String {
+    api_protocol
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -316,6 +313,29 @@ after"#;
         assert_eq!(messages[0].provider_id, "openai");
         assert_eq!(messages[0].model_id, "unknown");
         assert_eq!(messages[0].agent, None);
+    }
+
+    #[test]
+    fn test_parse_roocode_preserves_nested_reseller_api_protocol() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:00Z",
+    "text": "{\"cost\":0.12,\"tokensIn\":100,\"tokensOut\":50,\"cacheReads\":20,\"cacheWrites\":5,\"apiProtocol\":\"bedrock/anthropic\"}"
+  }
+]"#;
+        let history = r#"before
+<environment_details>
+<model>claude-sonnet-4</model>
+</environment_details>
+after"#;
+        let path = setup_task(&dir, "task-nested-provider", ui_messages, Some(history));
+
+        let messages = parse_roocode_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "bedrock/anthropic");
     }
 
     #[test]
