@@ -133,7 +133,11 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("deepseek");
     }
 
-    if lower.contains("llama") || lower.contains("mixtral") || lower.contains("meta") {
+    if lower.contains("mistral") || lower.contains("mixtral") {
+        return Some("mistral");
+    }
+
+    if lower.contains("llama") || lower.contains("meta") {
         return Some("meta");
     }
 
@@ -223,6 +227,14 @@ mod tests {
         assert_eq!(
             inferred_provider_from_model("deepseek-v3"),
             Some("deepseek")
+        );
+        assert_eq!(
+            inferred_provider_from_model("mixtral-8x7b"),
+            Some("mistral")
+        );
+        assert_eq!(
+            inferred_provider_from_model("mistral-large"),
+            Some("mistral")
         );
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));
         assert_eq!(inferred_provider_from_model("qwen3-coder"), Some("qwen"));

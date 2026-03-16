@@ -231,6 +231,10 @@ impl PricingLookup {
 
     fn lookup_auto(&self, model_id: &str, provider_id: Option<&str>) -> Option<LookupResult> {
         if let Some(stripped) = strip_known_provider_prefix(model_id) {
+            if let Some(exact_litellm) = self.exact_match_litellm(model_id) {
+                return Some(exact_litellm);
+            }
+
             let exact_openrouter = self.exact_match_openrouter(model_id);
             let stripped_litellm = self.exact_or_normalized_litellm(stripped, provider_id);
 
@@ -2707,6 +2711,30 @@ mod tests {
         let resolved = lookup.lookup("anthropic/claude-sonnet-4").unwrap();
         assert_eq!(resolved.source, "OpenRouter");
         assert_eq!(resolved.matched_key, "anthropic/claude-sonnet-4");
+    }
+
+    #[test]
+    fn test_provider_prefixed_exact_litellm_beats_stripped_generic_match() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.001),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "openai/gpt-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let resolved = lookup.lookup("openai/gpt-4").unwrap();
+        assert_eq!(resolved.source, "LiteLLM");
+        assert_eq!(resolved.matched_key, "openai/gpt-4");
     }
 
     #[test]
