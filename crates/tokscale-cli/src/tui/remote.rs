@@ -57,6 +57,9 @@ pub struct RemoteStats {
     /// Username the cache was fetched for; used to invalidate on account switch.
     #[serde(default)]
     pub cached_for_user: String,
+    /// API base URL the cache was fetched from; used to invalidate on server switch.
+    #[serde(default)]
+    pub cached_for_api_url: String,
 }
 
 pub async fn fetch_remote_stats(token: &str, username: &str, api_base_url: &str) -> Result<RemoteStats> {
@@ -89,12 +92,12 @@ pub async fn fetch_remote_stats(token: &str, username: &str, api_base_url: &str)
         .context("Failed to parse remote stats response")?;
     stats.fetched_at_secs = now_secs();
     stats.cached_for_user = username.to_string();
-
+    stats.cached_for_api_url = api_base_url.to_string();
     let _ = save_remote_stats_cache(&stats);
     Ok(stats)
 }
 
-pub fn load_cached_remote_stats(expected_user: Option<&str>) -> Option<RemoteStats> {
+pub fn load_cached_remote_stats(expected_user: Option<&str>, expected_api_url: Option<&str>) -> Option<RemoteStats> {
     let cache_path = get_cache_path().ok()?;
     if !cache_path.exists() {
         return None;
@@ -111,7 +114,14 @@ pub fn load_cached_remote_stats(expected_user: Option<&str>) -> Option<RemoteSta
 
     // Reject cache if it belongs to a different account.
     if let Some(user) = expected_user {
-        if !stats.cached_for_user.is_empty() && stats.cached_for_user != user {
+        if stats.cached_for_user.is_empty() || stats.cached_for_user != user {
+            return None;
+        }
+    }
+
+    // Reject cache if it was fetched from a different API server.
+    if let Some(api_url) = expected_api_url {
+        if stats.cached_for_api_url.is_empty() || stats.cached_for_api_url != api_url {
             return None;
         }
     }
