@@ -17,6 +17,7 @@ pub use sessions::UnifiedMessage;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
@@ -891,6 +892,23 @@ fn apply_pricing_if_available(
     }
 }
 
+fn select_local_parse_pricing(
+    fresh: Result<Arc<pricing::PricingService>, String>,
+    stale: Option<pricing::PricingService>,
+) -> Option<Arc<pricing::PricingService>> {
+    fresh.ok().or_else(|| stale.map(Arc::new))
+}
+
+async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+    // Interactive/local views should pick up newly released model pricing as soon
+    // as a fresh fetch succeeds, but still remain usable offline by falling back
+    // to any cached dataset when the network path fails.
+    select_local_parse_pricing(
+        pricing::PricingService::get_or_init().await,
+        pricing::PricingService::load_cached_any_age(),
+    )
+}
+
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
     let start = Instant::now();
 
@@ -1193,8 +1211,8 @@ pub async fn parse_local_unified_messages(
         clients
     });
 
-    let pricing = pricing::PricingService::load_cached_any_age();
-    let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_ref());
+    let pricing = load_pricing_for_local_parse().await;
+    let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
 
     Ok(filter_unified_messages(messages, &options))
 }
@@ -1263,11 +1281,12 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         apply_pricing_if_available, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, pricing, retain_for_requested_clients, ClientId, GroupBy,
-        LocalParseOptions, TokenBreakdown, UnifiedMessage,
+        parse_local_clients, pricing, retain_for_requested_clients, select_local_parse_pricing,
+        ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
     };
     use std::collections::{HashMap, HashSet};
     use std::str::FromStr;
+    use std::sync::Arc;
 
     #[test]
     fn test_normalize_model_for_grouping() {
@@ -1749,6 +1768,61 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
+    }
+
+    #[test]
+    fn test_select_local_parse_pricing_prefers_fresh_service_for_new_models() {
+        let mut fresh_litellm = HashMap::new();
+        fresh_litellm.insert(
+            "gpt-5.4".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                output_cost_per_token: Some(0.00001),
+                ..Default::default()
+            },
+        );
+        let fresh = Arc::new(pricing::PricingService::new(fresh_litellm, HashMap::new()));
+        let stale = pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), Some(stale)).unwrap();
+
+        let mut msg = UnifiedMessage::new(
+            "opencode",
+            "gpt-5.4",
+            "openai",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(selected.as_ref()));
+
+        assert!(msg.cost > 0.0);
+    }
+
+    #[test]
+    fn test_select_local_parse_pricing_falls_back_to_stale_cache_on_fetch_error() {
+        let mut stale_litellm = HashMap::new();
+        stale_litellm.insert(
+            "gpt-5.2".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.00000175),
+                output_cost_per_token: Some(0.000014),
+                ..Default::default()
+            },
+        );
+        let stale = pricing::PricingService::new(stale_litellm, HashMap::new());
+
+        let selected =
+            select_local_parse_pricing(Err("network failed".to_string()), Some(stale)).unwrap();
+
+        assert!(selected.lookup_with_source("gpt-5.2", None).is_some());
     }
 
     #[test]
