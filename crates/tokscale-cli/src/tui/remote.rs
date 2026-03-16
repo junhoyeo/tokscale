@@ -121,7 +121,9 @@ pub fn load_cached_remote_stats(expected_user: Option<&str>, expected_api_url: O
 
     // Reject cache if it was fetched from a different API server.
     if let Some(api_url) = expected_api_url {
-        if stats.cached_for_api_url.is_empty() || stats.cached_for_api_url != api_url {
+        let cached_url = stats.cached_for_api_url.trim_end_matches('/');
+        let expected = api_url.trim_end_matches('/');
+        if cached_url.is_empty() || cached_url != expected {
             return None;
         }
     }
