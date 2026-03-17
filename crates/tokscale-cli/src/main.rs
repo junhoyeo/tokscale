@@ -2959,6 +2959,31 @@ fn run_submit_command(
         })
         .map_err(|e| anyhow::anyhow!(e))?;
 
+    // Cap contributions to UTC today to prevent timezone-related future-date
+    // rejections. The CLI generates dates using chrono::Local, but the server
+    // validates against UTC. In UTC+ timezones the local date can be ahead of
+    // UTC around midnight, causing valid same-day data to be flagged as
+    // "future dates". Capped contributions will be included in the next
+    // submission once the UTC date catches up.
+    // See: https://github.com/junhoyeo/tokscale/issues/318
+    let utc_today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut graph_result = graph_result;
+    let pre_cap_len = graph_result.contributions.len();
+    graph_result
+        .contributions
+        .retain(|c| c.date.as_str() <= utc_today.as_str());
+    if graph_result.contributions.len() < pre_cap_len {
+        // Recalculate date_range_end and summary after capping
+        if let Some(last) = graph_result.contributions.last() {
+            graph_result.meta.date_range_end = last.date.clone();
+        }
+        graph_result.summary.active_days = graph_result
+            .contributions
+            .iter()
+            .filter(|c| c.totals.tokens > 0)
+            .count() as i32;
+    }
+
     println!("{}", "  Data to submit:".white());
     println!(
         "{}",
