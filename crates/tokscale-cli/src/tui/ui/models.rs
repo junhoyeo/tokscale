@@ -114,8 +114,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .enumerate()
             .map(|(i, h)| {
                 let indicator = match i {
-                    8 if !is_narrow => sort_indicator(SortField::Tokens),
-                    9 if !is_narrow => sort_indicator(SortField::Cost),
+                    9 if !is_narrow && group_by == GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Tokens)
+                    }
+                    10 if !is_narrow && group_by == GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Cost)
+                    }
+                    8 if !is_narrow && group_by != GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Tokens)
+                    }
+                    9 if !is_narrow && group_by != GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Cost)
+                    }
                     1 if is_very_narrow => sort_indicator(SortField::Cost),
                     2 if is_narrow && !is_very_narrow => sort_indicator(SortField::Cost),
                     1 if is_narrow && !is_very_narrow => sort_indicator(SortField::Tokens),

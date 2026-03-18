@@ -101,6 +101,7 @@ pub struct DataLoader {
 }
 
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
+const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
 
 fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     match (&msg.workspace_key, &msg.workspace_label) {
@@ -112,11 +113,15 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
                 .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
         ),
         _ => (
-            "unknown-workspace".to_string(),
+            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
             None,
             UNKNOWN_WORKSPACE_LABEL.to_string(),
         ),
     }
+}
+
+fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
+    format!("{workspace_label} / {model}")
 }
 
 impl DataLoader {
@@ -358,9 +363,15 @@ impl DataLoader {
                 };
                 daily_entry.cost += msg_cost;
 
+                let daily_model_key = if *group_by == GroupBy::WorkspaceModel {
+                    workspace_model_display_label(&workspace_label, &normalized_model)
+                } else {
+                    normalized_model.clone()
+                };
+
                 let model_info = daily_entry
                     .models
-                    .entry(normalized_model.clone())
+                    .entry(daily_model_key)
                     .or_insert_with(|| DailyModelInfo {
                         client: msg.client.clone(),
                         tokens: TokenBreakdown::default(),
@@ -960,6 +971,88 @@ mod tests {
         );
         assert_eq!(usage.models[0].session_count, 2);
         assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_keeps_real_unknown_workspace_separate() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("unknown-workspace"),
+                        Some("unknown-workspace"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("unknown-workspace")
+                && model.workspace_label.as_deref() == Some("unknown-workspace")
+                && (model.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.is_none()
+                && model.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
+                && (model.cost - 2.0).abs() < f64::EPSILON
+        }));
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_splits_daily_models_by_workspace() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("/repo-b"),
+                        Some("repo-b"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let daily_keys: Vec<_> = usage.daily[0].models.keys().cloned().collect();
+        assert_eq!(
+            daily_keys,
+            vec![
+                "repo-a / claude-sonnet-4-5".to_string(),
+                "repo-b / claude-sonnet-4-5".to_string()
+            ]
+        );
     }
 
     #[test]

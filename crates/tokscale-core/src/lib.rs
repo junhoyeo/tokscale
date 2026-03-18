@@ -291,6 +291,7 @@ pub struct ModelReport {
 }
 
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
+const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyReport {
@@ -627,7 +628,7 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
                 .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
         ),
         _ => (
-            "unknown-workspace".to_string(),
+            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
             None,
             UNKNOWN_WORKSPACE_LABEL.to_string(),
         ),
@@ -1620,6 +1621,45 @@ mod tests {
         );
         assert_eq!(entries[0].message_count, 2);
         assert_eq!(entries[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_keeps_real_unknown_workspace_separate() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("unknown-workspace"),
+                    Some("unknown-workspace"),
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.workspace_key.as_deref() == Some("unknown-workspace")
+                && entry.workspace_label.as_deref() == Some("unknown-workspace")
+                && (entry.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.workspace_key.is_none()
+                && entry.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
+                && (entry.cost - 2.0).abs() < f64::EPSILON
+        }));
     }
 
     #[test]

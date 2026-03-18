@@ -30,6 +30,17 @@ fn overview_model_label(group_by: &GroupBy, model: &str, workspace_label: Option
     }
 }
 
+fn overview_color_key<'a>(group_by: &GroupBy, model: &'a str) -> &'a str {
+    if *group_by == GroupBy::WorkspaceModel {
+        model
+            .rsplit_once(" / ")
+            .map(|(_, base_model)| base_model)
+            .unwrap_or(model)
+    } else {
+        model
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let safe_height = area.height.max(12) as usize;
     let chart_height = (safe_height as f64 * 0.35).floor().max(5.0) as u16;
@@ -55,6 +66,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
     let daily = &app.data.daily;
+    let group_by = app.group_by.borrow().clone();
     let mut sorted_daily: Vec<_> = daily.iter().collect();
     sorted_daily.sort_by(|a, b| a.date.cmp(&b.date));
 
@@ -73,7 +85,7 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|(model_name, info)| ModelSegment {
                     model_id: model_name.clone(),
                     tokens: info.tokens.total(),
-                    color: get_model_color(model_name),
+                    color: get_model_color(overview_color_key(&group_by, model_name)),
                 })
                 .collect();
 

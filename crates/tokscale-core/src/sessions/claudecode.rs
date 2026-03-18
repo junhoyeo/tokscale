@@ -53,7 +53,13 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     if path.extension().and_then(|s| s.to_str()) == Some("json") {
-        let json_messages = parse_claude_headless_json(path, &session_id, fallback_timestamp);
+        let json_messages = parse_claude_headless_json(
+            path,
+            &session_id,
+            fallback_timestamp,
+            workspace_key.clone(),
+            workspace_label.clone(),
+        );
         if !json_messages.is_empty() {
             return json_messages;
         }
@@ -200,6 +206,8 @@ fn parse_claude_headless_json(
     path: &Path,
     session_id: &str,
     fallback_timestamp: i64,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
 ) -> Vec<UnifiedMessage> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -214,6 +222,8 @@ fn parse_claude_headless_json(
 
     let mut messages = Vec::with_capacity(1);
     if let Some(message) = extract_claude_headless_message(&value, session_id, fallback_timestamp) {
+        let mut message = message;
+        message.set_workspace(workspace_key, workspace_label);
         messages.push(message);
     }
 
@@ -482,6 +492,18 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 60);
         assert_eq!(messages[0].tokens.cache_read, 10);
+    }
+
+    #[test]
+    fn test_headless_json_output_keeps_workspace_metadata() {
+        let content = r#"{"type":"message","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let (_dir, path) = create_project_file(content, "myproject", "session.json");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("myproject"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("myproject"));
     }
 
     #[test]

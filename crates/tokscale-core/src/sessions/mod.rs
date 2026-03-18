@@ -198,12 +198,24 @@ pub fn normalize_workspace_key(raw: &str) -> Option<String> {
         return None;
     }
 
+    let preserve_unc_prefix = trimmed.starts_with("\\\\") || trimmed.starts_with("//");
     let mut normalized = trimmed.replace('\\', "/");
-    while normalized.contains("//") {
-        normalized = normalized.replace("//", "/");
+
+    if preserve_unc_prefix {
+        let body = normalized.trim_start_matches('/');
+        let mut collapsed = body.to_string();
+        while collapsed.contains("//") {
+            collapsed = collapsed.replace("//", "/");
+        }
+        normalized = format!("//{}", collapsed);
+    } else {
+        while normalized.contains("//") {
+            normalized = normalized.replace("//", "/");
+        }
     }
 
-    if normalized.len() > 1 {
+    let minimum_len = if preserve_unc_prefix { 2 } else { 1 };
+    if normalized.len() > minimum_len {
         normalized = normalized.trim_end_matches('/').to_string();
     }
 
@@ -303,6 +315,18 @@ mod tests {
         assert_eq!(
             normalize_workspace_key("/Users/alice//repo/"),
             Some("/Users/alice/repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_workspace_key_preserves_unc_prefix() {
+        assert_eq!(
+            normalize_workspace_key(r"\\server\share\repo\"),
+            Some("//server/share/repo".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_key("//server//share///repo/"),
+            Some("//server/share/repo".to_string())
         );
     }
 

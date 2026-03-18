@@ -406,15 +406,11 @@ pub fn load_cache(
         .group_by
         .as_deref()
         .and_then(|value| value.parse::<GroupBy>().ok());
-    let effective_group_by = cached_group_by.or({
-        if schema_outdated {
-            Some(GroupBy::Model)
-        } else {
-            None
-        }
-    });
+    if schema_outdated && cached_group_by.is_none() {
+        return CacheResult::Miss;
+    }
 
-    if effective_group_by.as_ref() != Some(group_by) {
+    if cached_group_by.as_ref() != Some(group_by) {
         return CacheResult::Miss;
     }
 
@@ -655,7 +651,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_load_cache_returns_stale_for_legacy_schema_without_version() {
+    fn test_load_cache_misses_for_legacy_schema_without_group_by() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {
@@ -686,7 +682,7 @@ mod tests {
         let clients = make_clients(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(&clients, false, &GroupBy::Model),
-            CacheResult::Stale(_)
+            CacheResult::Miss
         ));
 
         match previous_home {
