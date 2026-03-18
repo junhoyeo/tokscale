@@ -70,6 +70,7 @@ pub enum GroupBy {
     #[default]
     ClientModel,
     ClientProviderModel,
+    WorkspaceModel,
 }
 
 impl std::fmt::Display for GroupBy {
@@ -78,6 +79,7 @@ impl std::fmt::Display for GroupBy {
             GroupBy::Model => write!(f, "model"),
             GroupBy::ClientModel => write!(f, "client,model"),
             GroupBy::ClientProviderModel => write!(f, "client,provider,model"),
+            GroupBy::WorkspaceModel => write!(f, "workspace,model"),
         }
     }
 }
@@ -91,8 +93,9 @@ impl std::str::FromStr for GroupBy {
             "model" => Ok(GroupBy::Model),
             "client,model" | "client-model" => Ok(GroupBy::ClientModel),
             "client,provider,model" | "client-provider-model" => Ok(GroupBy::ClientProviderModel),
+            "workspace,model" | "workspace-model" => Ok(GroupBy::WorkspaceModel),
             _ => Err(format!(
-                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model",
+                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model",
                 s
             )),
         }
@@ -250,6 +253,8 @@ pub struct ReportOptions {
 pub struct ModelUsage {
     pub client: String,
     pub merged_clients: Option<String>,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub model: String,
     pub provider: String,
     pub input: i64,
@@ -284,6 +289,8 @@ pub struct ModelReport {
     pub total_cost: f64,
     pub processing_time_ms: u32,
 }
+
+const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyReport {
@@ -610,41 +617,55 @@ fn filter_unified_messages(
     filtered
 }
 
-pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
-    let start = Instant::now();
+fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
+    match (&msg.workspace_key, &msg.workspace_label) {
+        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), None) => (
+            key.clone(),
+            Some(key.clone()),
+            sessions::workspace_label_from_key(key)
+                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
+        ),
+        _ => (
+            "unknown-workspace".to_string(),
+            None,
+            UNKNOWN_WORKSPACE_LABEL.to_string(),
+        ),
+    }
+}
 
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        let mut clients: Vec<String> = ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect();
-        clients.push("synthetic".to_string());
-        clients
-    });
-
-    let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
-
-    let filtered = filter_messages_for_report(all_messages, &options);
-
+fn aggregate_model_usage_entries(
+    messages: Vec<UnifiedMessage>,
+    group_by: &GroupBy,
+) -> Vec<ModelUsage> {
     let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
-    let group_by = &options.group_by;
 
-    for msg in filtered {
+    for msg in messages {
         let normalized = normalize_model_for_grouping(&msg.model_id);
+        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
         let key = match group_by {
             GroupBy::Model => normalized.clone(),
             GroupBy::ClientModel => format!("{}:{}", msg.client, normalized),
             GroupBy::ClientProviderModel => {
                 format!("{}:{}:{}", msg.client, msg.provider_id, normalized)
             }
+            GroupBy::WorkspaceModel => format!("{}:{}", workspace_group_key, normalized),
         };
+        let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             client: msg.client.clone(),
-            merged_clients: if *group_by == GroupBy::Model {
+            merged_clients: if merge_clients {
                 Some(msg.client.clone())
+            } else {
+                None
+            },
+            workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
+                workspace_key.clone()
+            } else {
+                None
+            },
+            workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
+                Some(workspace_label.clone())
             } else {
                 None
             },
@@ -659,7 +680,7 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
             cost: 0.0,
         });
 
-        if *group_by == GroupBy::Model {
+        if merge_clients {
             if !entry.client.split(", ").any(|s| s == msg.client) {
                 entry.client = format!("{}, {}", entry.client, msg.client);
             }
@@ -689,7 +710,6 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     let mut entries: Vec<ModelUsage> = model_map
         .into_values()
         .map(|mut entry| {
-            // Normalize provider order for deterministic output
             let mut providers: Vec<&str> = entry.provider.split(", ").collect();
             providers.sort_unstable();
             providers.dedup();
@@ -706,6 +726,29 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
             .partial_cmp(&a.cost)
             .unwrap_or(std::cmp::Ordering::Equal),
     });
+
+    entries
+}
+
+pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
+    let start = Instant::now();
+
+    let home_dir = get_home_dir_string(&options.home_dir)?;
+
+    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
+        let mut clients: Vec<String> = ClientId::ALL
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+        clients
+    });
+
+    let pricing = pricing::PricingService::get_or_init().await?;
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+
+    let filtered = filter_messages_for_report(all_messages, &options);
+    let entries = aggregate_model_usage_entries(filtered, &options.group_by);
 
     let total_input: i64 = entries.iter().map(|e| e.input).sum();
     let total_output: i64 = entries.iter().map(|e| e.output).sum();
@@ -910,6 +953,22 @@ async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> 
         pricing::PricingService::get_or_init().await,
         pricing::PricingService::load_cached_any_age,
     )
+}
+
+fn resolve_local_parse_inputs(
+    options: &LocalParseOptions,
+) -> Result<(String, Vec<String>), String> {
+    let home_dir = get_home_dir_string(&options.home_dir)?;
+    let clients = options.clients.clone().unwrap_or_else(|| {
+        let mut clients: Vec<String> = ClientId::iter()
+            .filter(|c| c.parse_local())
+            .map(|c| c.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+        clients
+    });
+
+    Ok((home_dir, clients))
 }
 
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
@@ -1203,18 +1262,18 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let home_dir = get_home_dir_string(&options.home_dir)?;
+    parse_local_unified_messages_with_pricing(options, None).await
+}
 
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        let mut clients: Vec<String> = ClientId::iter()
-            .filter(|c| c.parse_local())
-            .map(|c| c.as_str().to_string())
-            .collect();
-        clients.push("synthetic".to_string());
-        clients
-    });
-
-    let pricing = load_pricing_for_local_parse().await;
+pub async fn parse_local_unified_messages_with_pricing(
+    options: LocalParseOptions,
+    pricing: Option<Arc<pricing::PricingService>>,
+) -> Result<Vec<UnifiedMessage>, String> {
+    let (home_dir, clients) = resolve_local_parse_inputs(&options)?;
+    let pricing = match pricing {
+        Some(pricing) => Some(pricing),
+        None => load_pricing_for_local_parse().await,
+    };
     let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
 
     Ok(filter_unified_messages(messages, &options))
@@ -1265,6 +1324,8 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
         session_id: msg.session_id.clone(),
+        workspace_key: None,
+        workspace_label: None,
         timestamp: msg.timestamp,
         date: msg.date.clone(),
         tokens: TokenBreakdown {
@@ -1283,13 +1344,45 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pricing_if_available, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, pricing, retain_for_requested_clients, select_local_parse_pricing,
-        ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
+        aggregate_model_usage_entries, apply_pricing_if_available, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_local_clients, pricing,
+        retain_for_requested_clients, select_local_parse_pricing, ClientId, GroupBy,
+        LocalParseOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::str::FromStr;
     use std::sync::Arc;
+
+    fn make_workspace_message(
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
+        cost: f64,
+        workspace_key: Option<&str>,
+        workspace_label: Option<&str>,
+    ) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new(
+            client,
+            model_id,
+            provider_id,
+            session_id,
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+        );
+        msg.set_workspace(
+            workspace_key.map(str::to_string),
+            workspace_label.map(str::to_string),
+        );
+        msg
+    }
 
     #[test]
     fn test_normalize_model_for_grouping() {
@@ -1375,6 +1468,14 @@ mod tests {
             GroupBy::from_str("client-provider-model").unwrap(),
             GroupBy::ClientProviderModel
         );
+        assert_eq!(
+            GroupBy::from_str("workspace,model").unwrap(),
+            GroupBy::WorkspaceModel
+        );
+        assert_eq!(
+            GroupBy::from_str("workspace-model").unwrap(),
+            GroupBy::WorkspaceModel
+        );
         assert!(GroupBy::from_str("unknown").is_err());
     }
 
@@ -1389,6 +1490,7 @@ mod tests {
             GroupBy::Model,
             GroupBy::ClientModel,
             GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
         ];
 
         for variant in variants {
@@ -1409,6 +1511,115 @@ mod tests {
             GroupBy::from_str("client , provider , model").unwrap(),
             GroupBy::ClientProviderModel
         );
+        assert_eq!(
+            GroupBy::from_str("workspace, model").unwrap(),
+            GroupBy::WorkspaceModel
+        );
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_merges_same_workspace_and_model() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.25,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+                make_workspace_message(
+                    "qwen",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.75,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "claude-sonnet-4-5");
+        assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
+        assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
+        assert_eq!(entries[0].cost, 4.0);
+        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries[0].merged_clients.as_deref(), Some("claude, qwen"));
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_separates_different_workspaces() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some("/repo-b"),
+                    Some("repo-b"),
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 2);
+        let labels: HashSet<_> = entries
+            .iter()
+            .map(|entry| entry.workspace_label.as_deref().unwrap())
+            .collect();
+        assert_eq!(labels, HashSet::from(["repo-a", "repo-b"]));
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_uses_unknown_bucket_without_workspace_metadata() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    "2.0".parse().unwrap(),
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].workspace_key, None);
+        assert_eq!(
+            entries[0].workspace_label.as_deref(),
+            Some(UNKNOWN_WORKSPACE_LABEL)
+        );
+        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries[0].cost, 3.0);
     }
 
     #[test]

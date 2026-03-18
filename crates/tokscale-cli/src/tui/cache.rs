@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::ClientId;
+use tokscale_core::{ClientId, GroupBy};
 
 use super::data::{
     AgentUsage, ContributionDay, DailyModelInfo, DailyUsage, GraphData, ModelUsage, TokenBreakdown,
@@ -19,7 +19,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 2;
+const CACHE_SCHEMA_VERSION: u32 = 3;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -42,6 +42,8 @@ struct CachedTUIData {
     enabled_clients: Vec<String>,
     #[serde(default)]
     include_synthetic: bool,
+    #[serde(default)]
+    group_by: Option<String>,
     data: CachedUsageData,
 }
 
@@ -76,6 +78,10 @@ struct CachedModelUsage {
     model: String,
     provider: String,
     client: String,
+    #[serde(default)]
+    workspace_key: Option<String>,
+    #[serde(default)]
+    workspace_label: Option<String>,
     tokens: CachedTokenBreakdown,
     cost: f64,
     session_count: u32,
@@ -155,6 +161,8 @@ impl From<&ModelUsage> for CachedModelUsage {
             model: m.model.clone(),
             provider: m.provider.clone(),
             client: m.client.clone(),
+            workspace_key: m.workspace_key.clone(),
+            workspace_label: m.workspace_label.clone(),
             tokens: (&m.tokens).into(),
             cost: m.cost,
             session_count: m.session_count,
@@ -168,6 +176,8 @@ impl From<CachedModelUsage> for ModelUsage {
             model: m.model,
             provider: m.provider,
             client: m.client,
+            workspace_key: m.workspace_key,
+            workspace_label: m.workspace_label,
             tokens: m.tokens.into(),
             cost: m.cost,
             session_count: m.session_count,
@@ -368,7 +378,11 @@ enum ClientMatch {
 /// Load cached TUI data from disk with a single read/parse.
 /// Returns Fresh/Stale/Miss so the caller can decide whether to
 /// display cached data immediately and/or trigger a background refresh.
-pub fn load_cache(enabled_clients: &HashSet<ClientId>, include_synthetic: bool) -> CacheResult {
+pub fn load_cache(
+    enabled_clients: &HashSet<ClientId>,
+    include_synthetic: bool,
+    group_by: &GroupBy,
+) -> CacheResult {
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
     };
@@ -388,6 +402,21 @@ pub fn load_cache(enabled_clients: &HashSet<ClientId>, include_synthetic: bool) 
         return CacheResult::Miss;
     }
     let schema_outdated = cached.schema_version < CACHE_SCHEMA_VERSION;
+    let cached_group_by = cached
+        .group_by
+        .as_deref()
+        .and_then(|value| value.parse::<GroupBy>().ok());
+    let effective_group_by = cached_group_by.or({
+        if schema_outdated {
+            Some(GroupBy::Model)
+        } else {
+            None
+        }
+    });
+
+    if effective_group_by.as_ref() != Some(group_by) {
+        return CacheResult::Miss;
+    }
 
     // Check how cached clients relate to enabled clients
     let client_match = check_client_match(
@@ -466,6 +495,7 @@ pub fn save_cached_data(
     data: &UsageData,
     enabled_clients: &HashSet<ClientId>,
     include_synthetic: bool,
+    group_by: &GroupBy,
 ) {
     let Some(cache_path) = cache_file() else {
         return;
@@ -491,6 +521,7 @@ pub fn save_cached_data(
             .map(|s| s.as_str().to_string())
             .collect(),
         include_synthetic,
+        group_by: Some(group_by.to_string()),
         data: data.into(),
     };
 
@@ -653,7 +684,54 @@ mod tests {
         .unwrap();
 
         let clients = make_clients(&[ClientId::Claude]);
-        assert!(matches!(load_cache(&clients, false), CacheResult::Stale(_)));
+        assert!(matches!(
+            load_cache(&clients, false, &GroupBy::Model),
+            CacheResult::Stale(_)
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_when_group_by_differs() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 3,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "daily": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_clients(&[ClientId::Claude]);
+        assert!(matches!(
+            load_cache(&clients, false, &GroupBy::WorkspaceModel),
+            CacheResult::Miss
+        ));
 
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },

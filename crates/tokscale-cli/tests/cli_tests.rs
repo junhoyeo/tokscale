@@ -158,6 +158,20 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
     tmp
 }
 
+fn create_qwen_workspace_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let session = base.join(".qwen/projects/demo-workspace/chats");
+    fs::create_dir_all(&session).unwrap();
+
+    let msg = r#"{"type":"assistant","model":"qwen3.5-plus","timestamp":"2026-02-23T14:24:56.857Z","sessionId":"demo-session","usageMetadata":{"promptTokenCount":12414,"candidatesTokenCount":76,"thoughtsTokenCount":39,"cachedContentTokenCount":0}}"#;
+    fs::write(session.join("session-1.jsonl"), msg).unwrap();
+
+    tmp
+}
+
 /// Build a Command pointing HOME at the given temp dir, with --no-spinner and --opencode flags.
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
@@ -820,7 +834,63 @@ fn test_models_json_with_group_by_model() {
             entry.get("mergedClients").is_some(),
             "group-by model entries should have mergedClients field"
         );
+        assert!(
+            entry.get("workspaceKey").is_none(),
+            "group-by model entries should not expose workspaceKey"
+        );
+        assert!(
+            entry.get("workspaceLabel").is_none(),
+            "group-by model entries should not expose workspaceLabel"
+        );
     }
+}
+
+#[test]
+fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clients() {
+    let tmp = create_temp_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["--group-by", "workspace,model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+
+    let entries = json["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    for entry in entries {
+        assert_eq!(entry["workspaceKey"], serde_json::Value::Null);
+        assert_eq!(
+            entry["workspaceLabel"].as_str().unwrap(),
+            "Unknown workspace"
+        );
+    }
+}
+
+#[test]
+fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
+    let tmp = create_qwen_workspace_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--qwen", "--no-spinner"])
+        .args(["--group-by", "workspace-model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]["workspaceKey"].as_str().unwrap(),
+        "demo-workspace"
+    );
+    assert_eq!(
+        entries[0]["workspaceLabel"].as_str().unwrap(),
+        "demo-workspace"
+    );
+    assert_eq!(entries[0]["model"].as_str().unwrap(), "qwen3.5-plus");
 }
 
 // ── Pricing command tests ──────────────────────────────────────────────────

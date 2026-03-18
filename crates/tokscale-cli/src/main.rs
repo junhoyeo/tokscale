@@ -109,7 +109,7 @@ struct Cli {
         long,
         value_name = "STRATEGY",
         default_value = "client,model",
-        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model"
+        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model"
     )]
     group_by: String,
 
@@ -173,7 +173,7 @@ enum Commands {
             long,
             value_name = "STRATEGY",
             default_value = "client,model",
-            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model"
+            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model"
         )]
         group_by: String,
         #[arg(long, help = "Disable spinner")]
@@ -1285,6 +1285,10 @@ fn run_models_report(
         struct ModelUsageJson {
             client: String,
             merged_clients: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            workspace_key: Option<serde_json::Value>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            workspace_label: Option<String>,
             model: String,
             provider: String,
             input: i64,
@@ -1316,6 +1320,20 @@ fn run_models_report(
                 .entries
                 .into_iter()
                 .map(|e| ModelUsageJson {
+                    workspace_key: if group_by == GroupBy::WorkspaceModel {
+                        Some(
+                            e.workspace_key
+                                .map(serde_json::Value::String)
+                                .unwrap_or(serde_json::Value::Null),
+                        )
+                    } else {
+                        None
+                    },
+                    workspace_label: if group_by == GroupBy::WorkspaceModel {
+                        e.workspace_label
+                    } else {
+                        None
+                    },
                     client: e.client,
                     merged_clients: e.merged_clients,
                     model: e.model,
@@ -1355,6 +1373,8 @@ fn run_models_report(
         };
         table.set_content_arrangement(arrangement);
         table.enforce_styling();
+
+        let workspace_name = |label: Option<&str>| label.unwrap_or("Unknown workspace").to_string();
 
         if compact {
             match group_by {
@@ -1441,6 +1461,32 @@ fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
+                        Cell::new(format_currency(report.total_cost))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    ]);
+                }
+                GroupBy::WorkspaceModel => {
+                    table.set_header(vec![
+                        Cell::new("Workspace").fg(Color::Cyan),
+                        Cell::new("Model").fg(Color::Cyan),
+                        Cell::new("Cost").fg(Color::Cyan),
+                    ]);
+
+                    for entry in &report.entries {
+                        table.add_row(vec![
+                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
+                            Cell::new(&entry.model),
+                            Cell::new(format_currency(entry.cost))
+                                .set_alignment(CellAlignment::Right),
+                        ]);
+                    }
+
+                    table.add_row(vec![
+                        Cell::new("Total")
+                            .fg(Color::Yellow)
+                            .add_attribute(Attribute::Bold),
+                        Cell::new(""),
                         Cell::new(format_currency(report.total_cost))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
@@ -1544,6 +1590,81 @@ fn run_models_report(
                             Cell::new(&entry.provider).add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_model_name(&entry.model)),
+                            Cell::new(format_tokens_with_commas(entry.input))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(entry.output))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(entry.cache_write))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(entry.cache_read))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(total))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_currency(entry.cost))
+                                .set_alignment(CellAlignment::Right),
+                        ]);
+                    }
+
+                    let total_all = report.total_input
+                        + report.total_output
+                        + report.total_cache_write
+                        + report.total_cache_read;
+                    table.add_row(vec![
+                        Cell::new("Total")
+                            .fg(Color::Yellow)
+                            .add_attribute(Attribute::Bold),
+                        Cell::new(""),
+                        Cell::new(""),
+                        Cell::new(""),
+                        Cell::new(format_tokens_with_commas(report.total_input))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(report.total_output))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(report.total_cache_write))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(report.total_cache_read))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(total_all))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_currency(report.total_cost))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    ]);
+                }
+                GroupBy::WorkspaceModel => {
+                    table.set_header(vec![
+                        Cell::new("Workspace").fg(Color::Cyan),
+                        Cell::new("Providers").fg(Color::Cyan),
+                        Cell::new("Sources").fg(Color::Cyan),
+                        Cell::new("Model").fg(Color::Cyan),
+                        Cell::new("Input").fg(Color::Cyan),
+                        Cell::new("Output").fg(Color::Cyan),
+                        Cell::new("Cache Write").fg(Color::Cyan),
+                        Cell::new("Cache Read").fg(Color::Cyan),
+                        Cell::new("Total").fg(Color::Cyan),
+                        Cell::new("Cost").fg(Color::Cyan),
+                    ]);
+
+                    for entry in &report.entries {
+                        let total =
+                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
+                        let capitalized_clients = clients_str
+                            .split(", ")
+                            .map(capitalize_client)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        table.add_row(vec![
+                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
+                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(capitalized_clients),
+                            Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
@@ -3126,7 +3247,7 @@ fn run_submit_command(
         let enabled_set: HashSet<ClientId> = all_clients.iter().copied().collect();
         let loader = DataLoader::with_filters(None, None, None, None);
         if let Ok(data) = loader.load(&all_clients, &GroupBy::default(), false) {
-            save_cached_data(&data, &enabled_set, false);
+            save_cached_data(&data, &enabled_set, false, &GroupBy::default());
         }
     }
 

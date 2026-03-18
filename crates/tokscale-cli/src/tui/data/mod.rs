@@ -35,6 +35,8 @@ pub struct ModelUsage {
     pub model: String,
     pub provider: String,
     pub client: String,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub session_count: u32,
@@ -96,6 +98,25 @@ pub struct DataLoader {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+}
+
+const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
+
+fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
+    match (&msg.workspace_key, &msg.workspace_label) {
+        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), None) => (
+            key.clone(),
+            Some(key.clone()),
+            tokscale_core::sessions::workspace_label_from_key(key)
+                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
+        ),
+        _ => (
+            "unknown-workspace".to_string(),
+            None,
+            UNKNOWN_WORKSPACE_LABEL.to_string(),
+        ),
+    }
 }
 
 impl DataLoader {
@@ -179,26 +200,39 @@ impl DataLoader {
 
         for msg in &messages {
             let normalized_model = normalize_model_for_grouping(&msg.model_id);
+            let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
             let key = match group_by {
                 GroupBy::Model => normalized_model.clone(),
                 GroupBy::ClientModel => format!("{}:{}", msg.client, normalized_model),
                 GroupBy::ClientProviderModel => {
                     format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model)
                 }
+                GroupBy::WorkspaceModel => {
+                    format!("{}:{}", workspace_group_key, normalized_model)
+                }
             };
+            let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
                 provider: msg.provider_id.clone(),
                 client: msg.client.clone(),
+                workspace_key: if *group_by == GroupBy::WorkspaceModel {
+                    workspace_key.clone()
+                } else {
+                    None
+                },
+                workspace_label: if *group_by == GroupBy::WorkspaceModel {
+                    Some(workspace_label.clone())
+                } else {
+                    None
+                },
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 session_count: 0,
             });
 
-            if *group_by == GroupBy::Model
-                && !model_entry.client.split(", ").any(|s| s == msg.client)
-            {
+            if merge_clients && !model_entry.client.split(", ").any(|s| s == msg.client) {
                 model_entry.client = format!("{}, {}", model_entry.client, msg.client);
             }
 
@@ -538,6 +572,37 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn make_workspace_message(
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
+        cost: f64,
+        workspace_key: Option<&str>,
+        workspace_label: Option<&str>,
+    ) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new(
+            client,
+            model_id,
+            provider_id,
+            session_id,
+            1_735_689_600_000,
+            tokscale_core::TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+        );
+        msg.set_workspace(
+            workspace_key.map(str::to_string),
+            workspace_label.map(str::to_string),
+        );
+        msg
+    }
+
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
@@ -821,6 +886,83 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_messages_groups_by_workspace_and_model() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.25,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "qwen",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.75,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].workspace_key.as_deref(), Some("/repo-a"));
+        assert_eq!(usage.models[0].workspace_label.as_deref(), Some("repo-a"));
+        assert_eq!(usage.models[0].model, "claude-sonnet-4-5");
+        assert_eq!(usage.models[0].client, "claude, qwen");
+        assert_eq!(usage.models[0].session_count, 2);
+        assert_eq!(usage.models[0].cost, 4.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_keeps_unknown_bucket_visible() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].workspace_key, None);
+        assert_eq!(
+            usage.models[0].workspace_label.as_deref(),
+            Some(UNKNOWN_WORKSPACE_LABEL)
+        );
+        assert_eq!(usage.models[0].session_count, 2);
+        assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
     fn test_aggregate_messages_merges_oh_my_opencode_agent_variants() {
         let loader = DataLoader::new(None);
         let messages = vec![
@@ -1047,8 +1189,25 @@ after"#,
         }
 
         let loader = DataLoader::new(None);
+        let pricing = std::sync::Arc::new(tokscale_core::pricing::PricingService::new(
+            HashMap::new(),
+            HashMap::new(),
+        ));
+        let messages = Runtime::new()
+            .unwrap()
+            .block_on(tokscale_core::parse_local_unified_messages_with_pricing(
+                LocalParseOptions {
+                    home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    clients: Some(vec!["roocode".to_string()]),
+                    since: None,
+                    until: None,
+                    year: None,
+                },
+                Some(pricing),
+            ))
+            .unwrap();
         let usage = loader
-            .load(&[ClientId::RooCode], &GroupBy::Model, false)
+            .aggregate_messages(messages, &GroupBy::Model)
             .unwrap();
 
         assert_eq!(usage.agents.len(), 2);
@@ -1089,8 +1248,25 @@ after"#,
         }
 
         let loader = DataLoader::new(None);
+        let pricing = std::sync::Arc::new(tokscale_core::pricing::PricingService::new(
+            HashMap::new(),
+            HashMap::new(),
+        ));
+        let messages = Runtime::new()
+            .unwrap()
+            .block_on(tokscale_core::parse_local_unified_messages_with_pricing(
+                LocalParseOptions {
+                    home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    clients: Some(vec!["opencode".to_string(), "synthetic".to_string()]),
+                    since: None,
+                    until: None,
+                    year: None,
+                },
+                Some(pricing),
+            ))
+            .unwrap();
         let usage = loader
-            .load(&[ClientId::OpenCode], &GroupBy::ClientProviderModel, true)
+            .aggregate_messages(messages, &GroupBy::ClientProviderModel)
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);
