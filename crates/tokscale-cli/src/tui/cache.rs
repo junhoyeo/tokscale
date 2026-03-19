@@ -101,7 +101,9 @@ struct CachedAgentUsage {
 #[serde(rename_all = "camelCase")]
 struct CachedDailyModelInfo {
     client: String,
+    #[serde(default)]
     display_name: String,
+    #[serde(default)]
     color_key: String,
     tokens: CachedTokenBreakdown,
     cost: f64,
@@ -259,7 +261,35 @@ impl TryFrom<CachedDailyUsage> for DailyUsage {
             date: NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")?,
             tokens: d.tokens.into(),
             cost: d.cost,
-            models: d.models.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            models: d
+                .models
+                .into_iter()
+                .map(|(key, value)| {
+                    let display_name = if value.display_name.is_empty() {
+                        key.clone()
+                    } else {
+                        value.display_name.clone()
+                    };
+                    let color_key = if value.color_key.is_empty() {
+                        display_name
+                            .rsplit_once(" / ")
+                            .map(|(_, base_model)| base_model.to_string())
+                            .unwrap_or_else(|| display_name.clone())
+                    } else {
+                        value.color_key.clone()
+                    };
+                    (
+                        key,
+                        DailyModelInfo {
+                            client: value.client,
+                            display_name,
+                            color_key,
+                            tokens: value.tokens.into(),
+                            cost: value.cost,
+                        },
+                    )
+                })
+                .collect(),
         })
     }
 }
@@ -738,6 +768,90 @@ mod tests {
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_stale_legacy_daily_models_without_display_fields() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 3,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [{
+      "date": "2026-03-18",
+      "tokens": {
+        "input": 10,
+        "output": 5,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0
+      },
+      "cost": 1.25,
+      "models": [[
+        "claude-sonnet-4-5",
+        {
+          "client": "claude",
+          "tokens": {
+            "input": 10,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 1.25
+        }
+      ]]
+    }],
+    "graph": null,
+    "totalTokens": 15,
+    "totalCost": 1.25,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_clients(&[ClientId::Claude]);
+        match load_cache(&clients, false, &GroupBy::Model) {
+            CacheResult::Stale(data) => {
+                let daily_model = data.daily[0].models.get("claude-sonnet-4-5").unwrap();
+                assert_eq!(daily_model.display_name, "claude-sonnet-4-5");
+                assert_eq!(daily_model.color_key, "claude-sonnet-4-5");
+            }
+            other => panic!(
+                "expected stale legacy cache, got {:?}",
+                other_variant_name(&other)
+            ),
+        }
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    fn other_variant_name(result: &CacheResult) -> &'static str {
+        match result {
+            CacheResult::Fresh(_) => "Fresh",
+            CacheResult::Stale(_) => "Stale",
+            CacheResult::Miss => "Miss",
         }
     }
 }
