@@ -165,8 +165,8 @@ fn qwen_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
         .map(|component| component.as_os_str().to_string_lossy().to_string())
         .collect();
 
-    for window in components.windows(3) {
-        if window[0] == "projects" && !window[1].is_empty() {
+    for window in components.windows(4).rev() {
+        if window[0] == "projects" && !window[1].is_empty() && window[2] == "chats" {
             let key = normalize_workspace_key(&window[1]);
             let label = key.as_deref().and_then(workspace_label_from_key);
             return (key, label);
@@ -272,6 +272,24 @@ mod tests {
             messages[0].workspace_label,
             Some("test_project".to_string())
         );
+    }
+
+    #[test]
+    fn test_workspace_metadata_ignores_unanchored_projects_segments() {
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "d96bf338", "usageMetadata": {"promptTokenCount": 12414, "candidatesTokenCount": 76, "thoughtsTokenCount": 39, "cachedContentTokenCount": 0}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("projects/noise/not-chats/demo/.qwen/projects/real_project/chats/abc123.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+
+        let messages = parse_qwen_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("real_project"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("real_project"));
     }
 
     #[test]

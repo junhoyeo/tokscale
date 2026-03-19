@@ -123,6 +123,8 @@ pub struct ParsedMessage {
     pub model_id: String,
     pub provider_id: String,
     pub session_id: String,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub timestamp: i64,
     pub date: String,
     pub input: i64,
@@ -1286,6 +1288,8 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
         session_id: msg.session_id.clone(),
+        workspace_key: msg.workspace_key.clone(),
+        workspace_label: msg.workspace_label.clone(),
         timestamp: msg.timestamp,
         date: msg.date.clone(),
         input: msg.tokens.input,
@@ -1325,8 +1329,8 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
         session_id: msg.session_id.clone(),
-        workspace_key: None,
-        workspace_label: None,
+        workspace_key: msg.workspace_key.clone(),
+        workspace_label: msg.workspace_label.clone(),
         timestamp: msg.timestamp,
         date: msg.date.clone(),
         tokens: TokenBreakdown {
@@ -1346,9 +1350,9 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, normalize_model_for_grouping,
-        parse_all_messages_with_pricing, parse_local_clients, pricing,
-        retain_for_requested_clients, select_local_parse_pricing, ClientId, GroupBy,
-        LocalParseOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
+        retain_for_requested_clients, select_local_parse_pricing, unified_to_parsed, ClientId,
+        GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::str::FromStr;
@@ -1621,6 +1625,42 @@ mod tests {
         );
         assert_eq!(entries[0].message_count, 2);
         assert_eq!(entries[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_parsed_round_trip_preserves_workspace_metadata() {
+        let mut unified = UnifiedMessage::new(
+            "qwen",
+            "qwen3.5-plus",
+            "qwen",
+            "session-1",
+            1_742_390_400_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 2,
+                cache_write: 0,
+                reasoning: 1,
+            },
+            1.25,
+        );
+        unified.set_workspace(
+            Some("//server/share/demo-workspace".to_string()),
+            Some("demo-workspace".to_string()),
+        );
+
+        let parsed = unified_to_parsed(&unified);
+        let round_tripped = parsed_to_unified(&parsed, 2.5);
+
+        assert_eq!(
+            round_tripped.workspace_key.as_deref(),
+            Some("//server/share/demo-workspace")
+        );
+        assert_eq!(
+            round_tripped.workspace_label.as_deref(),
+            Some("demo-workspace")
+        );
+        assert_eq!(round_tripped.cost, 2.5);
     }
 
     #[test]

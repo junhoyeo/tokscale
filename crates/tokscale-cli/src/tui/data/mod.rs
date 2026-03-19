@@ -54,6 +54,8 @@ pub struct AgentUsage {
 #[derive(Debug, Clone)]
 pub struct DailyModelInfo {
     pub client: String,
+    pub display_name: String,
+    pub color_key: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
 }
@@ -122,6 +124,13 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
 
 fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
     format!("{workspace_label} / {model}")
+}
+
+fn workspace_model_daily_key(workspace_group_key: &str, model: &str) -> String {
+    format!(
+        "{}:{workspace_group_key}:{model}",
+        workspace_group_key.len()
+    )
 }
 
 impl DataLoader {
@@ -364,7 +373,7 @@ impl DataLoader {
                 daily_entry.cost += msg_cost;
 
                 let daily_model_key = if *group_by == GroupBy::WorkspaceModel {
-                    workspace_model_display_label(&workspace_label, &normalized_model)
+                    workspace_model_daily_key(&workspace_group_key, &normalized_model)
                 } else {
                     normalized_model.clone()
                 };
@@ -374,6 +383,12 @@ impl DataLoader {
                     .entry(daily_model_key)
                     .or_insert_with(|| DailyModelInfo {
                         client: msg.client.clone(),
+                        display_name: if *group_by == GroupBy::WorkspaceModel {
+                            workspace_model_display_label(&workspace_label, &normalized_model)
+                        } else {
+                            normalized_model.clone()
+                        },
+                        color_key: normalized_model.clone(),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                     });
@@ -1046,11 +1061,63 @@ mod tests {
 
         assert_eq!(usage.daily.len(), 1);
         let daily_keys: Vec<_> = usage.daily[0].models.keys().cloned().collect();
+        assert_eq!(daily_keys.len(), 2);
+        assert_ne!(daily_keys[0], daily_keys[1]);
+        let daily_display_names: Vec<_> = usage.daily[0]
+            .models
+            .values()
+            .map(|info| info.display_name.clone())
+            .collect();
         assert_eq!(
-            daily_keys,
+            daily_display_names,
             vec![
                 "repo-a / claude-sonnet-4-5".to_string(),
                 "repo-b / claude-sonnet-4-5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_disambiguates_identical_labels() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("/srv/team-a/demo"),
+                        Some("demo"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("/srv/team-b/demo"),
+                        Some("demo"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        assert_eq!(usage.daily[0].models.len(), 2);
+        let display_names: Vec<_> = usage.daily[0]
+            .models
+            .values()
+            .map(|info| info.display_name.clone())
+            .collect();
+        assert_eq!(
+            display_names,
+            vec![
+                "demo / claude-sonnet-4-5".to_string(),
+                "demo / claude-sonnet-4-5".to_string()
             ]
         );
     }

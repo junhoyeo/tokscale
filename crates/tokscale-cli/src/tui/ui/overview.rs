@@ -81,11 +81,11 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
 
             let models: Vec<ModelSegment> = d
                 .models
-                .iter()
-                .map(|(model_name, info)| ModelSegment {
-                    model_id: model_name.clone(),
+                .values()
+                .map(|info| ModelSegment {
+                    model_id: info.display_name.clone(),
                     tokens: info.tokens.total(),
-                    color: get_model_color(overview_color_key(&group_by, model_name)),
+                    color: get_model_color(overview_color_key(&group_by, &info.color_key)),
                 })
                 .collect();
 

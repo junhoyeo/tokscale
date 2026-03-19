@@ -19,7 +19,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 3;
+const CACHE_SCHEMA_VERSION: u32 = 4;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -101,6 +101,8 @@ struct CachedAgentUsage {
 #[serde(rename_all = "camelCase")]
 struct CachedDailyModelInfo {
     client: String,
+    display_name: String,
+    color_key: String,
     tokens: CachedTokenBreakdown,
     cost: f64,
 }
@@ -213,6 +215,8 @@ impl From<&DailyModelInfo> for CachedDailyModelInfo {
     fn from(d: &DailyModelInfo) -> Self {
         Self {
             client: d.client.clone(),
+            display_name: d.display_name.clone(),
+            color_key: d.color_key.clone(),
             tokens: (&d.tokens).into(),
             cost: d.cost,
         }
@@ -223,6 +227,8 @@ impl From<CachedDailyModelInfo> for DailyModelInfo {
     fn from(d: CachedDailyModelInfo) -> Self {
         Self {
             client: d.client,
+            display_name: d.display_name,
+            color_key: d.color_key,
             tokens: d.tokens.into(),
             cost: d.cost,
         }
@@ -705,7 +711,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,

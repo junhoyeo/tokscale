@@ -860,7 +860,15 @@ fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clie
     let entries = json["entries"].as_array().unwrap();
     assert!(!entries.is_empty());
     for entry in entries {
-        assert_eq!(entry["workspaceKey"], serde_json::Value::Null);
+        assert!(
+            entry.get("workspaceKey").is_some(),
+            "workspace grouping entries should always expose workspaceKey"
+        );
+        assert!(entry["workspaceKey"].is_null());
+        assert!(
+            entry.get("workspaceLabel").is_some(),
+            "workspace grouping entries should always expose workspaceLabel"
+        );
         assert_eq!(
             entry["workspaceLabel"].as_str().unwrap(),
             "Unknown workspace"
