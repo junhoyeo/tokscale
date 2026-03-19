@@ -88,9 +88,13 @@ pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
 
 pub fn parse_openclaw_transcript(transcript_path: &Path) -> Vec<UnifiedMessage> {
     let session_id = match transcript_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .filter(|stem| !stem.is_empty())
+        .file_name()
+        .and_then(|n| {
+            n.to_string_lossy()
+                .split_once(".jsonl")
+                .map(|(id, _)| id.to_string())
+        })
+        .filter(|id| !id.is_empty())
     {
         Some(id) => id,
         None => return Vec::new(),

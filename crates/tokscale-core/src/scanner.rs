@@ -105,6 +105,10 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                // OpenClaw: also match deleted transcripts (<uuid>.jsonl.deleted.<ts>)
+                "*.jsonl*" => {
+                    file_name.ends_with(".jsonl") || file_name.contains(".jsonl.deleted.")
+                }
                 "*.csv" => file_name.ends_with(".csv"),
                 "usage*.csv" => {
                     if is_in_archive_dir {

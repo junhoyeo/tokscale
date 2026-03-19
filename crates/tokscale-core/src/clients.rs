@@ -168,7 +168,7 @@ define_clients!(
         id: "openclaw",
         root: PathRoot::Home,
         relative: ".openclaw/agents",
-        pattern: "*.jsonl",
+        pattern: "*.jsonl*",
         headless: false,
         parse_local: true
     },
