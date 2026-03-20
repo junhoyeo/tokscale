@@ -60,6 +60,9 @@ pub fn parse_crush_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         if message_count <= 0 && cost <= 0.0 {
             continue;
         }
+        if created_at_secs <= 0 {
+            continue;
+        }
 
         let timestamp_ms = created_at_secs.saturating_mul(1000);
         let session_id = format!("{}:{}", db_namespace, id);
@@ -146,6 +149,23 @@ mod tests {
     #[test]
     fn test_parse_crush_sqlite_returns_empty_for_missing_db() {
         let messages = parse_crush_sqlite(Path::new("/nonexistent/crush.db"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_crush_sqlite_skips_sessions_without_valid_created_at() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_test_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO sessions (id, parent_session_id, title, message_count, cost, updated_at, created_at)
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params!["root-1", "Root", 3_i64, 4.5_f64, 1_742_342_000_i64, 0_i64],
+        )
+        .unwrap();
+
+        let messages = parse_crush_sqlite(&db_path);
         assert!(messages.is_empty());
     }
 }

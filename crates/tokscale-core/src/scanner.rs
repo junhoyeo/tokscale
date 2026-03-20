@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 
 use crate::clients::ClientId;
 use serde::Deserialize;
+use serde_json::Value;
 
 /// Result of scanning all session directories
 #[derive(Debug)]
@@ -84,7 +85,7 @@ pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
 #[derive(Debug, Deserialize, Default)]
 struct CrushProjectList {
     #[serde(default)]
-    projects: Vec<CrushProject>,
+    projects: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +121,7 @@ fn scan_crush_registry(registry_path: &Path) -> Vec<PathBuf> {
 
     list.projects
         .into_iter()
+        .filter_map(|project| serde_json::from_value::<CrushProject>(project).ok())
         .filter_map(|project| crush_db_path(&resolve_crush_data_dir(&project)))
         .collect()
 }
@@ -850,6 +852,31 @@ mod tests {
                 project_b_data.join("crush.db"),
             ]
         );
+    }
+
+    #[test]
+    fn test_scan_crush_registry_skips_malformed_project_entries() {
+        let dir = TempDir::new().unwrap();
+        let valid_project = dir.path().join("valid-project");
+        fs::create_dir_all(valid_project.join(".crush")).unwrap();
+        File::create(valid_project.join(".crush").join("crush.db")).unwrap();
+
+        let registry_path = dir.path().join("projects.json");
+        let projects_json = format!(
+            r#"{{
+  "projects": [
+    {{ "path": "{}", "data_dir": ".crush" }},
+    {{ "path": 123, "data_dir": ".crush" }},
+    {{ "data_dir": ".crush" }},
+    "not-an-object"
+  ]
+}}"#,
+            valid_project.display()
+        );
+        setup_mock_crush_registry(&registry_path, &projects_json);
+
+        let result = scan_crush_registry(&registry_path);
+        assert_eq!(result, vec![valid_project.join(".crush").join("crush.db")]);
     }
 
     #[test]
