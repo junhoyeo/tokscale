@@ -166,6 +166,58 @@ impl DataLoader {
         self.aggregate_messages(messages, group_by)
     }
 
+    #[cfg(test)]
+    fn load_with_pricing(
+        &self,
+        enabled_clients: &[ClientId],
+        group_by: &GroupBy,
+        include_synthetic: bool,
+        pricing: &tokscale_core::pricing::PricingService,
+    ) -> Result<UsageData> {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+            .to_string_lossy()
+            .to_string();
+
+        let mut sources: Vec<String> = enabled_clients
+            .iter()
+            .map(|client| client.as_str().to_string())
+            .collect();
+        if include_synthetic {
+            sources.push("synthetic".to_string());
+        }
+
+        let opts = LocalParseOptions {
+            home_dir: Some(home),
+            clients: Some(sources),
+            since: self.since.clone(),
+            until: self.until.clone(),
+            year: self.year.clone(),
+        };
+
+        let messages = if Handle::try_current().is_ok() {
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let rt = Runtime::new().map_err(|e| e.to_string())?;
+                    rt.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
+                        opts,
+                        Some(pricing),
+                    ))
+                })
+                .join()
+                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
+            })
+        } else {
+            Runtime::new()?.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
+                opts,
+                Some(pricing),
+            ))
+        }
+        .map_err(anyhow::Error::msg)?;
+
+        self.aggregate_messages(messages, group_by)
+    }
+
     fn aggregate_messages(
         &self,
         messages: Vec<UnifiedMessage>,
@@ -534,6 +586,7 @@ fn calculate_streaks_for_today(daily: &[DailyUsage], today: NaiveDate) -> (u32, 
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::collections::HashMap;
     use std::env;
     use std::fs;
     use tempfile::TempDir;
@@ -541,7 +594,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 14);
+        assert_eq!(clients.len(), 15);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -556,6 +609,7 @@ mod tests {
         assert_eq!(clients[11], ClientId::RooCode);
         assert_eq!(clients[12], ClientId::KiloCode);
         assert_eq!(clients[13], ClientId::Mux);
+        assert_eq!(clients[14], ClientId::Crush);
     }
 
     #[test]
@@ -601,6 +655,10 @@ mod tests {
             "Kilo"
         );
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Mux), "Mux");
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Crush),
+            "Crush"
+        );
     }
 
     #[test]
@@ -619,6 +677,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), 'r');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::KiloCode), 'k');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), 'x');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), 'h');
     }
 
     #[test]
@@ -670,6 +729,10 @@ mod tests {
             Some(ClientId::KiloCode)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('x'), Some(ClientId::Mux));
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('h'),
+            Some(ClientId::Crush)
+        );
         assert_eq!(crate::tui::client_ui::from_hotkey('a'), None);
     }
 
@@ -1046,9 +1109,10 @@ after"#,
             env::set_var("HOME", temp_dir.path());
         }
 
+        let pricing = tokscale_core::pricing::PricingService::new(HashMap::new(), HashMap::new());
         let loader = DataLoader::new(None);
         let usage = loader
-            .load(&[ClientId::RooCode], &GroupBy::Model, false)
+            .load_with_pricing(&[ClientId::RooCode], &GroupBy::Model, false, &pricing)
             .unwrap();
 
         assert_eq!(usage.agents.len(), 2);
@@ -1088,9 +1152,15 @@ after"#,
             env::set_var("HOME", temp_dir.path());
         }
 
+        let pricing = tokscale_core::pricing::PricingService::new(HashMap::new(), HashMap::new());
         let loader = DataLoader::new(None);
         let usage = loader
-            .load(&[ClientId::OpenCode], &GroupBy::ClientProviderModel, true)
+            .load_with_pricing(
+                &[ClientId::OpenCode],
+                &GroupBy::ClientProviderModel,
+                true,
+                &pricing,
+            )
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);

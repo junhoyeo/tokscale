@@ -552,6 +552,21 @@ fn parse_all_messages_with_pricing(
         .collect();
     all_messages.extend(mux_messages);
 
+    let crush_messages: Vec<UnifiedMessage> = scan_result
+        .crush_dbs
+        .par_iter()
+        .flat_map(|db_path| {
+            sessions::crush::parse_crush_sqlite(db_path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(crush_messages);
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let synthetic_messages: Vec<UnifiedMessage> =
@@ -1163,6 +1178,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Mux, mux_count);
     messages.extend(mux_msgs);
 
+    let crush_msgs: Vec<ParsedMessage> = scan_result
+        .crush_dbs
+        .par_iter()
+        .flat_map(|db_path| {
+            sessions::crush::parse_crush_sqlite(db_path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let crush_count = crush_msgs.len() as i32;
+    counts.set(ClientId::Crush, crush_count);
+    messages.extend(crush_msgs);
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let synthetic_msgs: Vec<ParsedMessage> =
@@ -1200,8 +1229,9 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     })
 }
 
-pub async fn parse_local_unified_messages(
+pub async fn parse_local_unified_messages_with_pricing(
     options: LocalParseOptions,
+    pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
     let home_dir = get_home_dir_string(&options.home_dir)?;
 
@@ -1214,10 +1244,16 @@ pub async fn parse_local_unified_messages(
         clients
     });
 
-    let pricing = load_pricing_for_local_parse().await;
-    let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
+    let messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing);
 
     Ok(filter_unified_messages(messages, &options))
+}
+
+pub async fn parse_local_unified_messages(
+    options: LocalParseOptions,
+) -> Result<Vec<UnifiedMessage>, String> {
+    let pricing = load_pricing_for_local_parse().await;
+    parse_local_unified_messages_with_pricing(options, pricing.as_deref()).await
 }
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
@@ -1287,6 +1323,7 @@ mod tests {
         parse_local_clients, pricing, retain_for_requested_clients, select_local_parse_pricing,
         ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
     };
+    use serial_test::serial;
     use std::collections::{HashMap, HashSet};
     use std::str::FromStr;
     use std::sync::Arc;
@@ -1844,8 +1881,10 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_synthetic_filter() {
         let temp_dir = tempfile::TempDir::new().unwrap();
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
         let message_dir = temp_dir
             .path()
             .join(".local/share/opencode/storage/message/project-1");
@@ -1855,6 +1894,7 @@ mod tests {
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"hf:deepseek-ai/DeepSeek-V3-0324","providerID":"unknown","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
         )
         .unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", temp_dir.path().join(".local/share")) };
 
         let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
         let messages = parse_all_messages_with_pricing(
@@ -1867,11 +1907,18 @@ mod tests {
         assert_eq!(messages[0].client, "opencode");
         assert_eq!(messages[0].model_id, "deepseek-v3-0324");
         assert_eq!(messages[0].provider_id, "synthetic");
+
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
     }
 
     #[test]
+    #[serial]
     fn test_parse_local_clients_preserves_gateway_message_client_counts() {
         let temp_dir = tempfile::TempDir::new().unwrap();
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
         let message_dir = temp_dir
             .path()
             .join(".local/share/opencode/storage/message/project-1");
@@ -1881,6 +1928,7 @@ mod tests {
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
         )
         .unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", temp_dir.path().join(".local/share")) };
 
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -1896,11 +1944,18 @@ mod tests {
         assert_eq!(parsed.messages[0].client, "opencode");
         assert_eq!(parsed.messages[0].model_id, "deepseek-v3-0324");
         assert_eq!(parsed.messages[0].provider_id, "fireworks");
+
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
     }
 
     #[test]
+    #[serial]
     fn test_parse_all_messages_fireworks_provider_kept_under_synthetic_only_filter() {
         let temp_dir = tempfile::TempDir::new().unwrap();
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
         let message_dir = temp_dir
             .path()
             .join(".local/share/opencode/storage/message/project-1");
@@ -1910,6 +1965,7 @@ mod tests {
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0.1,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
         )
         .unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", temp_dir.path().join(".local/share")) };
 
         let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
         let messages = parse_all_messages_with_pricing(
@@ -1926,11 +1982,18 @@ mod tests {
         assert_eq!(messages[0].client, "opencode");
         assert_eq!(messages[0].model_id, "deepseek-v3-0324");
         assert_eq!(messages[0].provider_id, "fireworks");
+
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
     }
 
     #[test]
+    #[serial]
     fn test_parse_local_clients_fireworks_provider_kept_under_synthetic_only_filter() {
         let temp_dir = tempfile::TempDir::new().unwrap();
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
         let message_dir = temp_dir
             .path()
             .join(".local/share/opencode/storage/message/project-1");
@@ -1940,6 +2003,7 @@ mod tests {
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0.1,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
         )
         .unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", temp_dir.path().join(".local/share")) };
 
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -1958,5 +2022,82 @@ mod tests {
         assert_eq!(parsed.messages[0].client, "opencode");
         assert_eq!(parsed.messages[0].model_id, "deepseek-v3-0324");
         assert_eq!(parsed.messages[0].provider_id, "fireworks");
+
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_local_clients_includes_crush_session_costs() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let xdg_dir = temp_dir.path().join("xdg");
+        let project_dir = temp_dir.path().join("project");
+        let data_dir = project_dir.join(".crush");
+        std::fs::create_dir_all(xdg_dir.join("crush")).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let registry = format!(
+            r#"{{
+  "projects": [
+    {{ "path": "{}", "data_dir": ".crush" }}
+  ]
+}}"#,
+            project_dir.display()
+        );
+        std::fs::write(xdg_dir.join("crush").join("projects.json"), registry).unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg_dir) };
+
+        let db_path = data_dir.join("crush.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                title TEXT,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                cost REAL NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT 0
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, parent_session_id, title, message_count, cost, updated_at, created_at)
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params!["root-1", "Root", 4_i64, 9.75_f64, 1_742_400_100_i64, 1_742_400_000_i64],
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home_dir.to_string_lossy().to_string()),
+            clients: Some(vec!["crush".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Crush), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "crush");
+        assert_eq!(parsed.messages[0].model_id, "session-total");
+        assert_eq!(parsed.messages[0].provider_id, "crush");
+        assert_eq!(parsed.messages[0].input, 0);
+        assert_eq!(parsed.messages[0].output, 0);
+
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
     }
 }

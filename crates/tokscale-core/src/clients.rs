@@ -32,6 +32,7 @@ pub struct ClientDef {
     pub pattern: &'static str,
     pub headless: bool,
     pub parse_local: bool,
+    pub submit_default: bool,
 }
 
 impl ClientDef {
@@ -41,7 +42,7 @@ impl ClientDef {
 }
 
 macro_rules! define_clients {
-    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr } ),+ $(,)? ) => {
+    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr, submit_default: $sd:expr } ),+ $(,)? ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[repr(usize)]
         pub enum ClientId {
@@ -72,6 +73,10 @@ macro_rules! define_clients {
                 self.data().parse_local
             }
 
+            pub fn submit_default(&self) -> bool {
+                self.data().submit_default
+            }
+
             pub fn iter() -> impl Iterator<Item = ClientId> {
                 Self::ALL.iter().copied()
             }
@@ -90,6 +95,7 @@ macro_rules! define_clients {
                 pattern: $pat,
                 headless: $hl,
                 parse_local: $pl,
+                submit_default: $sd,
             } ),+
         ];
 
@@ -111,7 +117,8 @@ define_clients!(
         relative: "opencode/storage/message",
         pattern: "*.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Claude = 1 => {
         id: "claude",
@@ -119,7 +126,8 @@ define_clients!(
         relative: ".claude/projects",
         pattern: "*.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Codex = 2 => {
         id: "codex",
@@ -130,7 +138,8 @@ define_clients!(
         relative: "sessions",
         pattern: "*.jsonl",
         headless: true,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Cursor = 3 => {
         id: "cursor",
@@ -138,7 +147,8 @@ define_clients!(
         relative: ".config/tokscale/cursor-cache",
         pattern: "usage*.csv",
         headless: false,
-        parse_local: false
+        parse_local: false,
+        submit_default: true
     },
     Gemini = 4 => {
         id: "gemini",
@@ -146,7 +156,8 @@ define_clients!(
         relative: ".gemini/tmp",
         pattern: "*.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Amp = 5 => {
         id: "amp",
@@ -154,7 +165,8 @@ define_clients!(
         relative: "amp/threads",
         pattern: "T-*.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Droid = 6 => {
         id: "droid",
@@ -162,7 +174,8 @@ define_clients!(
         relative: ".factory/sessions",
         pattern: "*.settings.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     OpenClaw = 7 => {
         id: "openclaw",
@@ -170,7 +183,8 @@ define_clients!(
         relative: ".openclaw/agents",
         pattern: "*.jsonl*",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Pi = 8 => {
         id: "pi",
@@ -178,7 +192,8 @@ define_clients!(
         relative: ".pi/agent/sessions",
         pattern: "*.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Kimi = 9 => {
         id: "kimi",
@@ -186,7 +201,8 @@ define_clients!(
         relative: ".kimi/sessions",
         pattern: "wire.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Qwen = 10 => {
         id: "qwen",
@@ -194,7 +210,8 @@ define_clients!(
         relative: ".qwen/projects",
         pattern: "*.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     RooCode = 11 => {
         id: "roocode",
@@ -202,7 +219,8 @@ define_clients!(
         relative: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
         pattern: "ui_messages.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     KiloCode = 12 => {
         id: "kilocode",
@@ -210,7 +228,8 @@ define_clients!(
         relative: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
         pattern: "ui_messages.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Mux = 13 => {
         id: "mux",
@@ -218,7 +237,17 @@ define_clients!(
         relative: ".mux/sessions",
         pattern: "session-usage.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
+    },
+    Crush = 14 => {
+        id: "crush",
+        root: PathRoot::XdgData,
+        relative: "crush/projects.json",
+        pattern: "projects.json",
+        headless: false,
+        parse_local: true,
+        submit_default: false
     }
 );
 
@@ -271,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 14);
+        assert_eq!(ClientId::COUNT, 15);
     }
 
     #[test]
@@ -360,6 +389,7 @@ mod tests {
             pattern: "*.jsonl",
             headless: false,
             parse_local: true,
+            submit_default: true,
         };
 
         assert_eq!(client.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
@@ -396,5 +426,10 @@ mod tests {
     #[test]
     fn test_cursor_parse_local_is_false() {
         assert!(!ClientId::Cursor.data().parse_local);
+    }
+
+    #[test]
+    fn test_crush_submit_default_is_false() {
+        assert!(!ClientId::Crush.data().submit_default);
     }
 }
