@@ -1361,6 +1361,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "roocode" => Some("Roo Code"),
         "kilocode" => Some("Kilo"),
         "mux" => Some("Mux"),
+        "crush" => Some("Crush"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -2181,6 +2182,11 @@ mod tests {
     #[test]
     fn test_client_display_name_pi() {
         assert_eq!(client_display_name("pi"), Some("Pi"));
+    }
+
+    #[test]
+    fn test_client_display_name_crush() {
+        assert_eq!(client_display_name("crush"), Some("Crush"));
     }
 
     #[test]

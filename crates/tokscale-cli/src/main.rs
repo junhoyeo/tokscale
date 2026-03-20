@@ -84,6 +84,9 @@ struct Cli {
     #[arg(long, help = "Show only Mux usage")]
     mux: bool,
 
+    #[arg(long, help = "Show only Crush usage")]
+    crush: bool,
+
     #[arg(long, help = "Show only Synthetic usage")]
     synthetic: bool,
 
@@ -158,6 +161,8 @@ enum Commands {
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -220,6 +225,8 @@ enum Commands {
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -294,6 +301,8 @@ enum Commands {
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -345,6 +354,8 @@ enum Commands {
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -392,6 +403,8 @@ enum Commands {
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Submit only today's usage")]
@@ -461,6 +474,8 @@ enum Commands {
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(
@@ -546,6 +561,7 @@ fn main() -> Result<()> {
             kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -579,6 +595,7 @@ fn main() -> Result<()> {
                 kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -628,6 +645,7 @@ fn main() -> Result<()> {
             kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -654,6 +672,7 @@ fn main() -> Result<()> {
                 kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -711,6 +730,7 @@ fn main() -> Result<()> {
             kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -737,6 +757,7 @@ fn main() -> Result<()> {
                 kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -759,6 +780,7 @@ fn main() -> Result<()> {
             kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -783,6 +805,7 @@ fn main() -> Result<()> {
                 kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -814,6 +837,7 @@ fn main() -> Result<()> {
             kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -839,6 +863,7 @@ fn main() -> Result<()> {
                 kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -870,6 +895,7 @@ fn main() -> Result<()> {
             kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             short,
             agents,
@@ -893,6 +919,7 @@ fn main() -> Result<()> {
                 kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             run_wrapped_command(
@@ -923,6 +950,7 @@ fn main() -> Result<()> {
                 kilocode: cli.kilocode,
                 kilo: cli.kilo,
                 mux: cli.mux,
+                crush: cli.crush,
                 synthetic: cli.synthetic,
             });
             let (since, until) =
@@ -993,6 +1021,7 @@ struct ClientFlags {
     kilocode: bool,
     kilo: bool,
     mux: bool,
+    crush: bool,
     synthetic: bool,
 }
 
@@ -1015,6 +1044,7 @@ fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
         (ClientId::KiloCode, flags.kilocode),
         (ClientId::Kilo, flags.kilo),
         (ClientId::Mux, flags.mux),
+        (ClientId::Crush, flags.crush),
     ]
     .into_iter()
     .filter(|(_, enabled)| *enabled)
@@ -1030,6 +1060,15 @@ fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
     } else {
         Some(clients)
     }
+}
+
+fn default_submit_clients() -> Vec<String> {
+    let mut clients: Vec<String> = tokscale_core::ClientId::iter()
+        .filter(|client| client.submit_default())
+        .map(|client| client.as_str().to_string())
+        .collect();
+    clients.push("synthetic".to_string());
+    clients
 }
 
 fn build_date_filter(
@@ -2193,6 +2232,7 @@ fn capitalize_client(client: &str) -> String {
         "gemini" => "Gemini".to_string(),
         "amp" => "Amp".to_string(),
         "droid" => "Droid".to_string(),
+        "crush" => "Crush".to_string(),
         "openclaw" => "openclaw".to_string(),
         "pi" => "Pi".to_string(),
         other => other.to_string(),
@@ -3014,6 +3054,8 @@ fn run_submit_command(
 
     println!("\n  {}\n", "Tokscale - Submit Usage Data".cyan());
 
+    let clients = clients.or_else(|| Some(default_submit_clients()));
+
     let include_cursor = clients
         .as_ref()
         .is_none_or(|s| s.iter().any(|src| src == "cursor"));
@@ -3536,6 +3578,7 @@ mod tests {
             kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: false,
         };
         assert_eq!(build_client_filter(flags), None);
@@ -3559,6 +3602,7 @@ mod tests {
             kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: false,
         };
         assert_eq!(
@@ -3585,6 +3629,7 @@ mod tests {
             kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: false,
         };
         assert_eq!(
@@ -3615,6 +3660,7 @@ mod tests {
             kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: true,
         };
         assert_eq!(
@@ -3641,6 +3687,7 @@ mod tests {
             kilocode: true,
             kilo: true,
             mux: true,
+            crush: true,
             synthetic: true,
         };
         let result = build_client_filter(flags);
@@ -3662,7 +3709,15 @@ mod tests {
         assert!(sources.contains(&"kilocode".to_string()));
         assert!(sources.contains(&"kilo".to_string()));
         assert!(sources.contains(&"mux".to_string()));
+        assert!(sources.contains(&"crush".to_string()));
         assert!(sources.contains(&"synthetic".to_string()));
+    }
+
+    #[test]
+    fn test_default_submit_clients_excludes_crush() {
+        let clients = default_submit_clients();
+        assert!(clients.contains(&"synthetic".to_string()));
+        assert!(!clients.contains(&"crush".to_string()));
     }
 
     #[test]
@@ -3823,6 +3878,11 @@ mod tests {
     #[test]
     fn test_capitalize_client_droid() {
         assert_eq!(capitalize_client("droid"), "Droid");
+    }
+
+    #[test]
+    fn test_capitalize_client_crush() {
+        assert_eq!(capitalize_client("crush"), "Crush");
     }
 
     #[test]
