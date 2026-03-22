@@ -599,8 +599,9 @@ mod tests {
         );
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::KiloCode),
-            "Kilo"
+            "KiloCode"
         );
+        assert_eq!(crate::tui::client_ui::display_name(ClientId::Mux), "Mux");
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Kilo),
             "Kilo CLI"
@@ -622,6 +623,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Qwen), 'w');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), 'r');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::KiloCode), 'k');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), 'x');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), 'l');
     }
 
@@ -677,6 +679,7 @@ mod tests {
             crate::tui::client_ui::from_hotkey('l'),
             Some(ClientId::Kilo)
         );
+        assert_eq!(crate::tui::client_ui::from_hotkey('x'), Some(ClientId::Mux));
         assert_eq!(crate::tui::client_ui::from_hotkey('a'), None);
     }
 

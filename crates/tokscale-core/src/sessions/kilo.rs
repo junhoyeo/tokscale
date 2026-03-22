@@ -6,10 +6,11 @@
 //! Kilo CLI uses a SQLite database similar to OpenCode.
 
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::path::Path;
+use std::time::SystemTime;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -110,12 +111,25 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 
         let agent = msg.agent.or(msg.mode);
         let session_id = msg.session_id.unwrap_or_else(|| "unknown".to_string());
-        let timestamp = msg.time.map(|t| t.created as i64).unwrap_or(0);
+        let timestamp = msg.time.map(|t| t.created as i64).unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        });
+
+        let provider = msg
+            .provider_id
+            .as_ref()
+            .map(|s| s.as_str())
+            .or_else(|| provider_identity::inferred_provider_from_model(&model_id))
+            .unwrap_or("kilo")
+            .to_string();
 
         let unified = UnifiedMessage::new_with_agent(
             "kilo",
             model_id,
-            msg.provider_id.unwrap_or_else(|| "kilo".to_string()),
+            provider,
             session_id,
             timestamp,
             TokenBreakdown {
