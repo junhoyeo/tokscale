@@ -5,6 +5,7 @@
 //!
 //! Kilo CLI uses a SQLite database similar to OpenCode.
 
+use super::utils::file_modified_timestamp_ms;
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
@@ -51,6 +52,14 @@ pub struct KiloTime {
 }
 
 pub fn parse_kilo_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
+    let fallback_timestamp = file_modified_timestamp_ms(db_path);
+    parse_kilo_sqlite_with_fallback(db_path, fallback_timestamp)
+}
+
+pub fn parse_kilo_sqlite_with_fallback(
+    db_path: &Path,
+    fallback_timestamp: i64,
+) -> Vec<UnifiedMessage> {
     let conn = match Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -110,10 +119,10 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 
         let agent = msg.agent.or(msg.mode);
         let session_id = msg.session_id.unwrap_or_else(|| "unknown".to_string());
-        let timestamp = match msg.time {
-            Some(t) => t.created as i64,
-            None => continue,
-        };
+        let timestamp = msg
+            .time
+            .map(|t| t.created as i64)
+            .unwrap_or(fallback_timestamp);
 
         let provider = msg
             .provider_id
