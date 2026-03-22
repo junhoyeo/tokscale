@@ -15,6 +15,7 @@ pub struct ScanResult {
     pub files: [Vec<PathBuf>; ClientId::COUNT],
     pub opencode_db: Option<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
+    pub kilo_db: Option<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -25,6 +26,7 @@ impl Default for ScanResult {
             files: std::array::from_fn(|_| Vec::new()),
             opencode_db: None,
             synthetic_db: None,
+            kilo_db: None,
             opencode_json_dir: None,
         }
     }
@@ -176,6 +178,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
                 | ClientId::OpenClaw
                 | ClientId::RooCode
                 | ClientId::KiloCode
+                | ClientId::Kilo
         ) {
             continue;
         }
@@ -305,6 +308,14 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
             server_path,
             ClientId::KiloCode.data().pattern,
         ));
+    }
+
+    // Kilo CLI: SQLite database at ~/.local/share/kilo/kilo.db
+    if enabled.contains(&ClientId::Kilo) {
+        let kilo_db_path = ClientId::Kilo.data().resolve_path(home_dir);
+        if std::path::Path::new(&kilo_db_path).exists() {
+            result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        }
     }
 
     // Execute scans in parallel

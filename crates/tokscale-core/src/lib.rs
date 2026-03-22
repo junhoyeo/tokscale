@@ -552,6 +552,18 @@ fn parse_all_messages_with_pricing(
         .collect();
     all_messages.extend(mux_messages);
 
+    // Kilo CLI: SQLite database
+    if let Some(db_path) = &scan_result.kilo_db {
+        let kilo_messages: Vec<UnifiedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
+            .into_iter()
+            .map(|mut msg| {
+                apply_pricing_if_available(&mut msg, pricing);
+                msg
+            })
+            .collect();
+        all_messages.extend(kilo_messages);
+    }
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let synthetic_messages: Vec<UnifiedMessage> =
@@ -1162,6 +1174,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mux_count = mux_msgs.len() as i32;
     counts.set(ClientId::Mux, mux_count);
     messages.extend(mux_msgs);
+
+    // Kilo CLI: SQLite database
+    let _kilo_count: i32 = if let Some(db_path) = &scan_result.kilo_db {
+        let kilo_msgs: Vec<ParsedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
+            .into_iter()
+            .map(|msg| unified_to_parsed(&msg))
+            .collect();
+        let count = kilo_msgs.len() as i32;
+        counts.set(ClientId::Kilo, count);
+        messages.extend(kilo_msgs);
+        count
+    } else {
+        0
+    };
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {

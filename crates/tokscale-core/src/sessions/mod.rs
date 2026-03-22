@@ -8,6 +8,7 @@ pub mod codex;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
 pub mod mux;

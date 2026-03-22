@@ -219,6 +219,14 @@ define_clients!(
         pattern: "session-usage.json",
         headless: false,
         parse_local: true
+    },
+    Kilo = 14 => {
+        id: "kilo",
+        root: PathRoot::XdgData,
+        relative: "kilo/kilo.db",
+        pattern: "kilo.db",
+        headless: false,
+        parse_local: true
     }
 );
 
@@ -271,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 14);
+        assert_eq!(ClientId::COUNT, 15);
     }
 
     #[test]
