@@ -1018,19 +1018,21 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 5);
+        assert_eq!(tabs.len(), 6);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Models);
         assert_eq!(tabs[2], Tab::Daily);
-        assert_eq!(tabs[3], Tab::Stats);
-        assert_eq!(tabs[4], Tab::Agents);
+        assert_eq!(tabs[3], Tab::Monthly);
+        assert_eq!(tabs[4], Tab::Stats);
+        assert_eq!(tabs[5], Tab::Agents);
     }
 
     #[test]
     fn test_tab_next() {
         assert_eq!(Tab::Overview.next(), Tab::Models);
         assert_eq!(Tab::Models.next(), Tab::Daily);
-        assert_eq!(Tab::Daily.next(), Tab::Stats);
+        assert_eq!(Tab::Daily.next(), Tab::Monthly);
+        assert_eq!(Tab::Monthly.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
         assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
@@ -1040,7 +1042,8 @@ mod tests {
         assert_eq!(Tab::Overview.prev(), Tab::Agents);
         assert_eq!(Tab::Models.prev(), Tab::Overview);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
-        assert_eq!(Tab::Stats.prev(), Tab::Daily);
+        assert_eq!(Tab::Monthly.prev(), Tab::Daily);
+        assert_eq!(Tab::Stats.prev(), Tab::Monthly);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
@@ -1048,18 +1051,20 @@ mod tests {
     fn test_tab_as_str() {
         assert_eq!(Tab::Overview.as_str(), "Overview");
         assert_eq!(Tab::Models.as_str(), "Models");
-        assert_eq!(Tab::Agents.as_str(), "Agents");
         assert_eq!(Tab::Daily.as_str(), "Daily");
+        assert_eq!(Tab::Monthly.as_str(), "Monthly");
         assert_eq!(Tab::Stats.as_str(), "Stats");
+        assert_eq!(Tab::Agents.as_str(), "Agents");
     }
 
     #[test]
     fn test_tab_short_name() {
         assert_eq!(Tab::Overview.short_name(), "Ovw");
         assert_eq!(Tab::Models.short_name(), "Mod");
-        assert_eq!(Tab::Agents.short_name(), "Agt");
         assert_eq!(Tab::Daily.short_name(), "Day");
+        assert_eq!(Tab::Monthly.short_name(), "Mth");
         assert_eq!(Tab::Stats.short_name(), "Sta");
+        assert_eq!(Tab::Agents.short_name(), "Agt");
     }
 
     #[test]
@@ -1332,6 +1337,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Daily);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Monthly);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -1353,10 +1361,16 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Monthly);
+
+        app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Daily);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
