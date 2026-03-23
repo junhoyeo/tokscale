@@ -661,7 +661,7 @@ fn main() -> Result<()> {
                     since,
                     until,
                     year,
-                    Some(Tab::Daily),
+                    Some(Tab::Monthly),
                 )
             }
         }

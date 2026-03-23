@@ -138,6 +138,7 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
     if !is_very_narrow {
         let count_label = match app.current_tab {
             Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
+            Tab::Monthly => format!(" ({} entries)", app.data.monthly_models.len()),
             _ => format!(" ({} models)", app.data.models.len()),
         };
         right_spans.push(Span::styled(
