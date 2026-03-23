@@ -65,6 +65,17 @@ pub struct DailyUsage {
 }
 
 #[derive(Debug, Clone)]
+pub struct MonthlyModelUsage {
+    pub month: String,
+    pub model: String,
+    pub provider: String,
+    pub client: String,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub message_count: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct ContributionDay {
     pub date: NaiveDate,
     pub tokens: u64,
@@ -82,6 +93,10 @@ pub struct UsageData {
     pub models: Vec<ModelUsage>,
     pub agents: Vec<AgentUsage>,
     pub daily: Vec<DailyUsage>,
+    #[allow(dead_code)]
+    pub monthly_models: Vec<MonthlyModelUsage>,
+    #[allow(dead_code)]
+    pub total_months: u32,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -175,6 +190,8 @@ impl DataLoader {
         let mut agent_map: HashMap<String, AgentUsage> = HashMap::new();
         let mut agent_clients: HashMap<String, BTreeSet<String>> = HashMap::new();
         let mut daily_map: HashMap<NaiveDate, DailyUsage> = HashMap::new();
+        let mut monthly_map: HashMap<(String, String), MonthlyModelUsage> = HashMap::new();
+        let mut month_set: BTreeSet<String> = BTreeSet::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
 
         for msg in &messages {
@@ -239,7 +256,7 @@ impl DataLoader {
             model_entry.cost += msg_cost;
 
             let session_key = format!("{}:{}", msg.client, msg.session_id);
-            let model_sessions = model_session_ids.entry(key).or_default();
+            let model_sessions = model_session_ids.entry(key.clone()).or_default();
             if model_sessions.insert(session_key) {
                 model_entry.session_count += 1;
             }
@@ -290,6 +307,62 @@ impl DataLoader {
             }
 
             if let Some(date) = parse_date(&msg.date) {
+                let month = date.format("%Y-%m").to_string();
+                month_set.insert(month.clone());
+                let monthly_key = (month.clone(), key.clone());
+
+                let monthly_entry =
+                    monthly_map
+                        .entry(monthly_key)
+                        .or_insert_with(|| MonthlyModelUsage {
+                            month: month.clone(),
+                            model: normalized_model.clone(),
+                            provider: msg.provider_id.clone(),
+                            client: msg.client.clone(),
+                            tokens: TokenBreakdown::default(),
+                            cost: 0.0,
+                            message_count: 0,
+                        });
+
+                if *group_by == GroupBy::Model
+                    && !monthly_entry.client.split(", ").any(|s| s == msg.client)
+                {
+                    monthly_entry.client = format!("{}, {}", monthly_entry.client, msg.client);
+                }
+
+                if *group_by != GroupBy::ClientProviderModel
+                    && !monthly_entry
+                        .provider
+                        .split(", ")
+                        .any(|p| p == msg.provider_id)
+                {
+                    monthly_entry.provider =
+                        format!("{}, {}", monthly_entry.provider, msg.provider_id);
+                }
+
+                monthly_entry.tokens.input = monthly_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                monthly_entry.tokens.output = monthly_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                monthly_entry.tokens.cache_read = monthly_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                monthly_entry.tokens.cache_write = monthly_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                monthly_entry.tokens.reasoning = monthly_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                monthly_entry.cost += msg_cost;
+                monthly_entry.message_count = monthly_entry.message_count.saturating_add(1);
+
                 let daily_entry = daily_map.entry(date).or_insert_with(|| DailyUsage {
                     date,
                     tokens: TokenBreakdown::default(),
@@ -388,6 +461,15 @@ impl DataLoader {
         let mut daily: Vec<DailyUsage> = daily_map.into_values().collect();
         daily.sort_by(|a, b| b.date.cmp(&a.date));
 
+        let mut monthly_models: Vec<MonthlyModelUsage> = monthly_map.into_values().collect();
+        monthly_models.sort_by(|a, b| {
+            b.month
+                .cmp(&a.month)
+                .then_with(|| b.cost.total_cmp(&a.cost))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        let total_months = month_set.len() as u32;
+
         let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
         let total_cost: f64 = models
             .iter()
@@ -401,6 +483,8 @@ impl DataLoader {
             models,
             agents,
             daily,
+            monthly_models,
+            total_months,
             graph: Some(graph),
             total_tokens,
             total_cost,
