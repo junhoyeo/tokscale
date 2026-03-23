@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
-use super::data::{AgentUsage, DailyUsage, DataLoader, ModelUsage, UsageData};
+use super::data::{AgentUsage, DailyUsage, DataLoader, ModelUsage, MonthlyModelUsage, UsageData};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
@@ -30,6 +30,7 @@ pub enum Tab {
     Overview,
     Models,
     Daily,
+    Monthly,
     Stats,
     Agents,
 }
@@ -40,6 +41,7 @@ impl Tab {
             Tab::Overview,
             Tab::Models,
             Tab::Daily,
+            Tab::Monthly,
             Tab::Stats,
             Tab::Agents,
         ]
@@ -50,6 +52,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Models => "Models",
             Tab::Daily => "Daily",
+            Tab::Monthly => "Monthly",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
         }
@@ -60,6 +63,7 @@ impl Tab {
             Tab::Overview => "Ovw",
             Tab::Models => "Mod",
             Tab::Daily => "Day",
+            Tab::Monthly => "Mth",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
         }
@@ -69,7 +73,8 @@ impl Tab {
         match self {
             Tab::Overview => Tab::Models,
             Tab::Models => Tab::Daily,
-            Tab::Daily => Tab::Stats,
+            Tab::Daily => Tab::Monthly,
+            Tab::Monthly => Tab::Stats,
             Tab::Stats => Tab::Agents,
             Tab::Agents => Tab::Overview,
         }
@@ -80,7 +85,8 @@ impl Tab {
             Tab::Overview => Tab::Agents,
             Tab::Models => Tab::Overview,
             Tab::Daily => Tab::Models,
-            Tab::Stats => Tab::Daily,
+            Tab::Monthly => Tab::Daily,
+            Tab::Stats => Tab::Monthly,
             Tab::Agents => Tab::Stats,
         }
     }
@@ -597,6 +603,7 @@ impl App {
             Tab::Overview | Tab::Models => self.data.models.len(),
             Tab::Agents => self.data.agents.len(),
             Tab::Daily => self.data.daily.len(),
+            Tab::Monthly => self.data.monthly_models.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
                     self.stats_breakdown_total_lines
@@ -750,6 +757,15 @@ impl App {
                 .get_sorted_daily()
                 .get(self.selected_index)
                 .map(|d| format!("{}: {} tokens, ${:.4}", d.date, d.tokens.total(), d.cost)),
+            Tab::Monthly => self.get_sorted_monthly().get(self.selected_index).map(|m| {
+                format!(
+                    "{} {}: {} tokens, ${:.4}",
+                    m.month,
+                    m.model,
+                    m.tokens.total(),
+                    m.cost
+                )
+            }),
             Tab::Stats => None,
         };
 
@@ -936,6 +952,53 @@ impl App {
         }
 
         daily
+    }
+
+    pub fn get_sorted_monthly(&self) -> Vec<&MonthlyModelUsage> {
+        let mut monthly: Vec<&MonthlyModelUsage> = self.data.monthly_models.iter().collect();
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => monthly.sort_by(|a, b| {
+                b.cost
+                    .total_cmp(&a.cost)
+                    .then_with(|| b.month.cmp(&a.month))
+                    .then_with(|| a.model.cmp(&b.model))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => monthly.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| a.month.cmp(&b.month))
+                    .then_with(|| a.model.cmp(&b.model))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => monthly.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| b.month.cmp(&a.month))
+                    .then_with(|| a.model.cmp(&b.model))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => monthly.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| a.month.cmp(&b.month))
+                    .then_with(|| a.model.cmp(&b.model))
+            }),
+            (SortField::Date, SortDirection::Descending) => monthly.sort_by(|a, b| {
+                b.month
+                    .cmp(&a.month)
+                    .then_with(|| b.cost.total_cmp(&a.cost))
+                    .then_with(|| a.model.cmp(&b.model))
+            }),
+            (SortField::Date, SortDirection::Ascending) => monthly.sort_by(|a, b| {
+                a.month
+                    .cmp(&b.month)
+                    .then_with(|| b.cost.total_cmp(&a.cost))
+                    .then_with(|| a.model.cmp(&b.model))
+            }),
+        }
+
+        monthly
     }
 
     pub fn is_narrow(&self) -> bool {
