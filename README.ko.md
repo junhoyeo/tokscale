@@ -66,6 +66,8 @@
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ 지원 |
+| <img width="48px" src=".github/assets/client-kilo-cli.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ 지원 |
+| <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (프로젝트 레지스트리) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ 지원 |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
@@ -130,7 +132,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 9가지 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Synthetic 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Synthetic 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -319,6 +321,12 @@ tokscale --kilocode
 
 # Mux 사용량만 표시
 tokscale --mux
+
+# Kilo CLI 사용량만 표시
+tokscale --kilo
+
+# Crush 사용량만 표시
+tokscale --crush
 
 # Synthetic (synthetic.new) 사용량만 표시
 tokscale --synthetic
@@ -572,7 +580,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Cursor, Gemini, Amp, Droid, OpenClaw, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Synthetic)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Cursor, Gemini, Amp, Droid, OpenClaw, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Synthetic)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -855,6 +863,8 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage 작업 로그 |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 작업 로그 |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | 모든 플랫폼에서 동일한 경로 |
+| Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | OpenCode와 같이 `xdg-basedir` 사용 |
+| Crush | `$XDG_DATA_HOME/crush/` | `$XDG_DATA_HOME/crush/` | XDG 데이터 디렉토리 사용 |
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 이러한 도구들은 `%APPDATA%`와 같은 Windows 기본 경로 대신 크로스 플랫폼 일관성을 위해 의도적으로 Unix 스타일 경로(`.local/share` 등)를 사용합니다.
@@ -1092,6 +1102,18 @@ Mux는 세션별 누적 토큰 사용량을 `session-usage.json` 파일에 저�
  `input`, `cached` (캐시 읽기), `cacheCreate` (캐시 쓰기), `output`, `reasoning`
  모델명은 `provider:model` 형식을 사용합니다 (예: `anthropic:claude-opus-4-6`) — tokscale은 모델 식별을 위해 provider 접두사를 제거합니다
  하위 에이전트 사용량은 Mux에 의해 자동으로 상위 세션에 합산되므로 중복 집계가 없습니다
+
+### Kilo CLI
+
+위치: `~/.local/share/kilo/kilo.db`
+
+Kilo CLI는 OpenCode와 유사한 SQLite 데이터베이스에 세션 데이터를 저장합니다. 각 메시지 행에는 모델 및 공급자 속성과 함께 메시지별 토큰 분류(입력, 출력, 캐시 읽기/쓰기, 추론)가 포함됩니다.
+
+### Crush
+
+위치: `$XDG_DATA_HOME/crush/projects.json`를 통해 발견되는 프로젝트별 SQLite 데이터베이스
+
+Crush는 프로젝트별 SQLite 데이터베이스(`crush.db`)에 사용량을 저장합니다. Crush는 신뢰할 수 있는 메시지별 또는 모델별 토큰 집계를 제공하지 않으므로, Tokscale은 루트 세션의 세션 수준 비용 합계만 가져옵니다. 레코드는 `model=session-total`로 표시되며 토큰 분류는 0입니다.
 
 ### Synthetic (synthetic.new)
 
