@@ -1012,6 +1012,21 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(crush_messages);
     }
 
+    let antigravity_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Antigravity)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::antigravity::parse_antigravity_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(antigravity_messages);
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
@@ -1911,6 +1926,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let crush_count = summed_parsed_message_count(&crush_msgs);
     counts.set(ClientId::Crush, crush_count);
     messages.extend(crush_msgs);
+
+    let antigravity_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Antigravity)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::antigravity::parse_antigravity_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let antigravity_count = antigravity_msgs.len() as i32;
+    counts.set(ClientId::Antigravity, antigravity_count);
+    messages.extend(antigravity_msgs);
+
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {

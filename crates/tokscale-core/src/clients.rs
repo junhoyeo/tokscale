@@ -322,6 +322,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Antigravity = 20 => {
+        id: "antigravity",
+        root: PathRoot::Home,
+        relative: ".config/tokscale/antigravity-cache/sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: false
     }
 );
 
@@ -374,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 20);
+        assert_eq!(ClientId::COUNT, 21);
     }
 
     #[test]
