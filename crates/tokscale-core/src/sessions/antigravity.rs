@@ -1,5 +1,5 @@
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::{pricing, provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
@@ -59,6 +59,9 @@ fn parse_usage_row(value: &Value, fallback_model: Option<&str>) -> Option<Unifie
         .map(|text| text.to_string())
         .or_else(|| fallback_model.map(|text| text.to_string()))
         .unwrap_or_else(|| "unknown".to_string());
+    let model_id = pricing::aliases::resolve_alias(&model_id)
+        .unwrap_or(model_id.as_str())
+        .to_string();
 
     let provider_id = value
         .get("providerId")
@@ -132,9 +135,23 @@ mod tests {
         let messages = parse_antigravity_file(path.path());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "antigravity");
-        assert_eq!(messages[0].model_id, "claude-sonnet-4.6");
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
         assert_eq!(messages[0].tokens.input, 12);
         assert_eq!(messages[0].tokens.reasoning, 1);
         assert_eq!(messages[0].dedup_key.as_deref(), Some("resp-1"));
+    }
+
+    #[test]
+    fn parse_usage_row_resolves_placeholder_model_alias() {
+        let input = r#"{"type":"usage","sessionId":"abc","modelId":"MODEL_PLACEHOLDER_M26","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let messages = parse_antigravity_file(path.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
     }
 }
