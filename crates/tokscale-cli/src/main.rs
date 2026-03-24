@@ -1,3 +1,4 @@
+mod antigravity;
 mod auth;
 mod commands;
 mod cursor;
@@ -215,6 +216,11 @@ enum Commands {
         #[command(subcommand)]
         subcommand: CursorSubcommand,
     },
+    #[command(about = "Antigravity integration commands")]
+    Antigravity {
+        #[command(subcommand)]
+        subcommand: AntigravitySubcommand,
+    },
     #[command(about = "Delete all submitted usage data from the server")]
     DeleteSubmittedData,
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
@@ -252,6 +258,19 @@ enum CursorSubcommand {
         #[arg(help = "Account label or id")]
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AntigravitySubcommand {
+    #[command(about = "Sync usage from running Antigravity language servers")]
+    Sync,
+    #[command(about = "Show Antigravity sync status")]
+    Status {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Delete cached Antigravity usage artifacts")]
+    PurgeCache,
 }
 
 fn main() -> Result<()> {
@@ -522,6 +541,10 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "cursor")?;
             run_cursor_command(subcommand)
         }
+        Some(Commands::Antigravity { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "antigravity")?;
+            run_antigravity_command(subcommand)
+        }
         Some(Commands::DeleteSubmittedData) => {
             reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
             run_delete_data_command()
@@ -623,6 +646,7 @@ pub enum ClientFilter {
     Copilot,
     Goose,
     Codebuff,
+    Antigravity,
     Synthetic,
 }
 
@@ -652,6 +676,7 @@ impl ClientFilter {
             Self::Copilot => "copilot",
             Self::Goose => "goose",
             Self::Codebuff => "codebuff",
+            Self::Antigravity => "antigravity",
             Self::Synthetic => "synthetic",
         }
     }
@@ -684,6 +709,7 @@ impl ClientFilter {
             Self::Copilot => Some(ClientId::Copilot),
             Self::Goose => Some(ClientId::Goose),
             Self::Codebuff => Some(ClientId::Codebuff),
+            Self::Antigravity => Some(ClientId::Antigravity),
             Self::Synthetic => None,
         }
     }
@@ -713,6 +739,7 @@ impl ClientFilter {
             ClientId::Copilot => Self::Copilot,
             ClientId::Goose => Self::Goose,
             ClientId::Codebuff => Self::Codebuff,
+            ClientId::Antigravity => Self::Antigravity,
         }
     }
 
@@ -805,6 +832,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub goose: bool,
     #[arg(long, hide = true)]
+    pub antigravity: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -858,7 +887,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 21] = [
+    let legacy: [(bool, ClientFilter); 22] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -879,6 +908,7 @@ fn build_client_filter_with_defaults(
         (flags.hermes, ClientFilter::Hermes),
         (flags.copilot, ClientFilter::Copilot),
         (flags.goose, ClientFilter::Goose),
+        (flags.antigravity, ClientFilter::Antigravity),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -3914,6 +3944,14 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
         CursorSubcommand::Status { name } => cursor::run_cursor_status(name),
         CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
         CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
+    }
+}
+
+fn run_antigravity_command(subcommand: AntigravitySubcommand) -> Result<()> {
+    match subcommand {
+        AntigravitySubcommand::Sync => antigravity::run_antigravity_sync(),
+        AntigravitySubcommand::Status { json } => antigravity::run_antigravity_status(json),
+        AntigravitySubcommand::PurgeCache => antigravity::run_antigravity_purge_cache(),
     }
 }
 

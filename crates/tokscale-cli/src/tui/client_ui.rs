@@ -86,6 +86,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         display_name: "Codebuff",
         hotkey: 'b',
     },
+    ClientUi {
+        display_name: "Antigravity",
+        hotkey: 'a',
+    },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {
