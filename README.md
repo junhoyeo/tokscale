@@ -447,6 +447,25 @@ When you log out, tokscale keeps your cached usage history by moving it to `curs
 
 > ⚠️ **Security Warning**: Treat your session token like a password. Never share it publicly or commit it to version control. The token grants full access to your Cursor account.
 
+### Antigravity Commands
+
+Antigravity sync only works while the Antigravity-enabled editor is running and its local language server is available. tokscale reads usage from that local language server and caches normalized artifacts locally.
+
+```bash
+# Check whether tokscale can see running Antigravity language servers
+tokscale antigravity status
+
+# Sync usage from local Antigravity language servers into tokscale's cache
+tokscale antigravity sync
+
+# Delete the cached Antigravity artifacts
+tokscale antigravity purge-cache
+```
+
+**Cache location**: `~/.config/tokscale/antigravity-cache/`
+
+**How it works**: `tokscale antigravity sync` discovers local Antigravity session candidates, fetches confirmed usage data from the local language server RPC, and stores normalized JSONL artifacts for tokscale-core to parse later. Run sync before reports if you want the freshest Antigravity data.
+
 ### Example Output (`--light` version)
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -1096,6 +1115,12 @@ Session files containing message arrays:
 Location: `~/.config/tokscale/cursor-cache/` (synced via Cursor API)
 
 Cursor data is fetched from the Cursor API using your session token and cached locally. Run `tokscale cursor login` to authenticate. See [Cursor IDE Commands](#cursor-ide-commands) for setup instructions.
+
+### Antigravity
+
+Location: `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` (synced via local Antigravity language server RPC)
+
+Antigravity data is not fetched automatically by the root command. Run `tokscale antigravity sync` while the Antigravity-enabled editor is open to refresh the local cache, then use normal tokscale reports and filters against the cached JSONL artifacts.
 
 ### OpenClaw
 
