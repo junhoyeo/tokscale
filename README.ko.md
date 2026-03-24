@@ -67,7 +67,7 @@
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-kilo-cli.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ 지원 |
-| <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (프로젝트 레지스트리) | ✅ 지원 |
+| <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (프로젝트 레지스트리, 기본값: `~/.local/share/crush/projects.json`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ 지원 |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
@@ -864,7 +864,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 작업 로그 |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | 모든 플랫폼에서 동일한 경로 |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | OpenCode와 같이 `xdg-basedir` 사용 |
-| Crush | `$XDG_DATA_HOME/crush/` | `$XDG_DATA_HOME/crush/` | XDG 데이터 디렉토리 사용 |
+| Crush | `$XDG_DATA_HOME/crush/` (기본값: `~/.local/share/crush/`) | `%USERPROFILE%\.local\share\crush\` (설정된 경우 `%XDG_DATA_HOME%\crush\`) | 기본 경로를 포함한 XDG 데이터 디렉토리 사용 |
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 이러한 도구들은 `%APPDATA%`와 같은 Windows 기본 경로 대신 크로스 플랫폼 일관성을 위해 의도적으로 Unix 스타일 경로(`.local/share` 등)를 사용합니다.
@@ -1111,7 +1111,7 @@ Kilo CLI는 OpenCode와 유사한 SQLite 데이터베이스에 세션 데이터�
 
 ### Crush
 
-위치: `$XDG_DATA_HOME/crush/projects.json`를 통해 발견되는 프로젝트별 SQLite 데이터베이스
+위치: `$XDG_DATA_HOME/crush/projects.json`를 통해 발견되는 프로젝트별 SQLite 데이터베이스 (기본값: `~/.local/share/crush/projects.json`)
 
 Crush는 프로젝트별 SQLite 데이터베이스(`crush.db`)에 사용량을 저장합니다. Crush는 신뢰할 수 있는 메시지별 또는 모델별 토큰 집계를 제공하지 않으므로, Tokscale은 루트 세션의 세션 수준 비용 합계만 가져옵니다. 레코드는 `model=session-total`로 표시되며 토큰 분류는 0입니다.
 
