@@ -3693,7 +3693,7 @@ mod tests {
         let result = build_client_filter(flags);
         assert!(result.is_some());
         let sources = result.unwrap();
-        assert_eq!(sources.len(), 16);
+        assert_eq!(sources.len(), 17);
         assert!(sources.contains(&"opencode".to_string()));
         assert!(sources.contains(&"claude".to_string()));
         assert!(sources.contains(&"codex".to_string()));

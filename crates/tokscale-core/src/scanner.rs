@@ -995,12 +995,17 @@ mod tests {
     #[serial]
     fn test_scan_all_clients_crush_populates_crush_db_paths() {
         let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+        let previous_dir = std::env::current_dir().unwrap();
 
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("home");
         let xdg = dir.path().join("xdg");
         let project = dir.path().join("project");
         let data_dir = project.join(".crush");
+        // Isolate CWD so find_current_workspace_crush_db() does not
+        // discover a real .crush directory from the host machine.
+        let isolated_cwd = dir.path().join("cwd");
+        fs::create_dir_all(&isolated_cwd).unwrap();
 
         fs::create_dir_all(xdg.join("crush")).unwrap();
         fs::create_dir_all(&data_dir).unwrap();
@@ -1018,11 +1023,13 @@ mod tests {
         setup_mock_crush_registry(&registry_path, &projects_json);
 
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
+        std::env::set_current_dir(&isolated_cwd).unwrap();
 
         let result = scan_all_clients(home.to_str().unwrap(), &["crush".to_string()]);
         assert_eq!(result.crush_dbs, vec![data_dir.join("crush.db")]);
         assert!(result.get(ClientId::Crush).is_empty());
 
+        restore_current_dir(&previous_dir);
         restore_env("XDG_DATA_HOME", previous_xdg);
     }
 
