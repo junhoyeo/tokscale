@@ -9,6 +9,7 @@ pub mod crush;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
 pub mod mux;
@@ -22,7 +23,7 @@ pub(crate) mod utils;
 
 use crate::TokenBreakdown;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
     pub client: String,
     pub model_id: String,
@@ -32,8 +33,14 @@ pub struct UnifiedMessage {
     pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    #[serde(default = "default_message_count")]
+    pub message_count: i32,
     pub agent: Option<String>,
     pub dedup_key: Option<String>,
+}
+
+const fn default_message_count() -> i32 {
+    1
 }
 
 pub fn normalize_agent_name(agent: &str) -> String {
@@ -174,9 +181,19 @@ impl UnifiedMessage {
             date,
             tokens,
             cost,
+            message_count: default_message_count(),
             agent,
             dedup_key,
         }
+    }
+
+    pub(crate) fn refresh_derived_fields(&mut self) {
+        self.date = timestamp_to_date(self.timestamp);
+    }
+
+    pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
+        self.timestamp = timestamp;
+        self.refresh_derived_fields();
     }
 }
 

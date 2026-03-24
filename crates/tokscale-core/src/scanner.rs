@@ -17,6 +17,7 @@ pub struct ScanResult {
     pub files: [Vec<PathBuf>; ClientId::COUNT],
     pub opencode_db: Option<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
+    pub kilo_db: Option<PathBuf>,
     pub crush_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
@@ -28,6 +29,7 @@ impl Default for ScanResult {
             files: std::array::from_fn(|_| Vec::new()),
             opencode_db: None,
             synthetic_db: None,
+            kilo_db: None,
             crush_dbs: Vec::new(),
             opencode_json_dir: None,
         }
@@ -80,81 +82,6 @@ pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
     roots.push(mac_root);
 
     roots
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct CrushProjectList {
-    #[serde(default)]
-    projects: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CrushProject {
-    path: String,
-    data_dir: String,
-}
-
-fn crush_db_path(data_dir: &Path) -> Option<PathBuf> {
-    let candidate = data_dir.join("crush.db");
-    candidate.is_file().then_some(candidate)
-}
-
-fn resolve_crush_data_dir(project: &CrushProject) -> PathBuf {
-    let data_dir = PathBuf::from(&project.data_dir);
-    if data_dir.is_absolute() {
-        data_dir
-    } else {
-        PathBuf::from(&project.path).join(data_dir)
-    }
-}
-
-fn scan_crush_registry(registry_path: &Path) -> Vec<PathBuf> {
-    let registry = match std::fs::read_to_string(registry_path) {
-        Ok(content) => content,
-        Err(_) => return Vec::new(),
-    };
-
-    let list: CrushProjectList = match serde_json::from_str(&registry) {
-        Ok(list) => list,
-        Err(_) => return Vec::new(),
-    };
-
-    list.projects
-        .into_iter()
-        .filter_map(|project| serde_json::from_value::<CrushProject>(project).ok())
-        .filter_map(|project| crush_db_path(&resolve_crush_data_dir(&project)))
-        .collect()
-}
-
-fn find_current_workspace_crush_db() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    for ancestor in cwd.ancestors() {
-        if let Some(candidate) = crush_db_path(&ancestor.join(".crush")) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn discover_crush_dbs(home_dir: &str) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-
-    let registry_path = PathBuf::from(ClientId::Crush.data().resolve_path(home_dir));
-    for db_path in scan_crush_registry(&registry_path) {
-        if seen.insert(db_path.clone()) {
-            result.push(db_path);
-        }
-    }
-
-    if let Some(db_path) = find_current_workspace_crush_db() {
-        if seen.insert(db_path.clone()) {
-            result.push(db_path);
-        }
-    }
-
-    result.sort();
-    result
 }
 
 /// Scan a single directory for session files
@@ -226,6 +153,96 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Parse a `TOKSCALE_EXTRA_DIRS`-formatted string into (ClientId, path) pairs.
+///
+/// Format: comma-separated `client:path` pairs.
+/// Example: `"claude:/path/to/mac/sessions,openclaw:/other/path"`
+///
+/// Only returns entries whose client is present in `enabled`.
+/// This is a pure function — the caller is responsible for reading the
+/// environment variable and passing its value here.
+pub fn parse_extra_dirs(value: &str, enabled: &HashSet<ClientId>) -> Vec<(ClientId, String)> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+
+    value
+        .split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let (client_str, path) = entry.split_once(':')?;
+            let client_id = ClientId::from_str(client_str.trim())?;
+            if !enabled.contains(&client_id) || !supports_extra_dir_scanning(client_id) {
+                return None;
+            }
+            let path = path.trim().to_string();
+            if path.is_empty() {
+                return None;
+            }
+            Some((client_id, path))
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CrushProjectList {
+    #[serde(default)]
+    projects: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrushProject {
+    path: String,
+    data_dir: String,
+}
+
+fn crush_db_path(data_dir: &Path) -> Option<PathBuf> {
+    let candidate = data_dir.join("crush.db");
+    candidate.is_file().then_some(candidate)
+}
+
+fn resolve_crush_data_dir(project: &CrushProject) -> PathBuf {
+    let data_dir = PathBuf::from(&project.data_dir);
+    if data_dir.is_absolute() {
+        data_dir
+    } else {
+        PathBuf::from(&project.path).join(data_dir)
+    }
+}
+
+fn scan_crush_registry(registry_path: &Path) -> Vec<PathBuf> {
+    let registry = match std::fs::read_to_string(registry_path) {
+        Ok(contents) => contents,
+        Err(_) => return Vec::new(),
+    };
+
+    let list: CrushProjectList = match serde_json::from_str(&registry) {
+        Ok(list) => list,
+        Err(_) => return Vec::new(),
+    };
+
+    list.projects
+        .into_iter()
+        .filter_map(|project| serde_json::from_value::<CrushProject>(project).ok())
+        .filter_map(|project| crush_db_path(&resolve_crush_data_dir(&project)))
+        .collect()
+}
+
+fn discover_crush_dbs(home_dir: &str) -> Vec<PathBuf> {
+    let registry_path = PathBuf::from(ClientId::Crush.data().resolve_path(home_dir));
+    let mut dbs = scan_crush_registry(&registry_path);
+    dbs.sort();
+    dbs.dedup();
+    dbs
+}
+
+fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
+    // Kilo currently loads a single SQLite DB via `scan_result.kilo_db` rather than
+    // consuming scanned file lists, and Crush discovers SQLite DBs via the
+    // project registry rather than scanned file paths.
+    !matches!(client_id, ClientId::Kilo | ClientId::Crush)
+}
+
 /// Scan all session client directories in parallel
 pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
     let mut result = ScanResult::default();
@@ -255,6 +272,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
                 | ClientId::OpenClaw
                 | ClientId::RooCode
                 | ClientId::KiloCode
+                | ClientId::Kilo
                 | ClientId::Crush
         ) {
             continue;
@@ -263,6 +281,13 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         let def = client_id.data();
         let path = def.resolve_path(home_dir);
         tasks.push((*client_id, path, def.pattern));
+    }
+
+    // Extra scan directories from TOKSCALE_EXTRA_DIRS env var
+    let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
+    for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+        let pattern = client_id.data().pattern;
+        tasks.push((client_id, path, pattern));
     }
 
     if enabled.contains(&ClientId::OpenCode) {
@@ -349,10 +374,6 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         }
     }
 
-    if enabled.contains(&ClientId::Crush) {
-        result.crush_dbs = discover_crush_dbs(home_dir);
-    }
-
     if enabled.contains(&ClientId::RooCode) {
         let local_path = ClientId::RooCode.data().resolve_path(home_dir);
         tasks.push((
@@ -391,6 +412,18 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         ));
     }
 
+    // Kilo CLI: SQLite database at ~/.local/share/kilo/kilo.db
+    if enabled.contains(&ClientId::Kilo) {
+        let kilo_db_path = ClientId::Kilo.data().resolve_path(home_dir);
+        if std::path::Path::new(&kilo_db_path).exists() {
+            result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        }
+    }
+
+    if enabled.contains(&ClientId::Crush) {
+        result.crush_dbs = discover_crush_dbs(home_dir);
+    }
+
     // Execute scans in parallel
     let scan_results: Vec<(ClientId, Vec<PathBuf>)> = tasks
         .into_par_iter()
@@ -400,9 +433,14 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         })
         .collect();
 
-    // Aggregate results
+    // Aggregate results, deduplicating file paths across overlapping directories
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for (client_id, files) in scan_results {
-        result.get_mut(client_id).extend(files);
+        for file in files {
+            if seen.insert(file.clone()) {
+                result.get_mut(client_id).push(file);
+            }
+        }
     }
 
     result
@@ -800,6 +838,22 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_all_clients_openclaw_deleted_transcript() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let openclaw_sessions = home.join(".openclaw/agents/main/sessions");
+        fs::create_dir_all(&openclaw_sessions).unwrap();
+        File::create(openclaw_sessions.join("session-archived.jsonl.deleted.1700000000000"))
+            .unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["openclaw".to_string()]);
+        assert_eq!(result.get(ClientId::OpenClaw).len(), 1);
+        assert!(result.get(ClientId::OpenClaw)[0]
+            .ends_with("session-archived.jsonl.deleted.1700000000000"));
+    }
+
+    #[test]
     fn test_scan_all_clients_multiple() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -881,7 +935,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_discover_crush_dbs_includes_current_workspace_fallback() {
+    fn test_discover_crush_dbs_ignores_cwd_without_override() {
         let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
         let previous_dir = std::env::current_dir().unwrap();
 
@@ -895,20 +949,17 @@ mod tests {
         fs::create_dir_all(xdg.join("crush")).unwrap();
         fs::create_dir_all(project.join(".crush")).unwrap();
         File::create(project.join(".crush").join("crush.db")).unwrap();
+        fs::write(
+            xdg.join("crush").join("projects.json"),
+            r#"{"projects":[]}"#,
+        )
+        .unwrap();
 
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
         std::env::set_current_dir(&nested).unwrap();
 
         let result = discover_crush_dbs(home.to_str().unwrap());
-        assert_eq!(result.len(), 1);
-        assert_eq!(
-            result[0].canonicalize().unwrap(),
-            project
-                .join(".crush")
-                .join("crush.db")
-                .canonicalize()
-                .unwrap()
-        );
+        assert!(result.is_empty());
 
         restore_current_dir(&previous_dir);
         restore_env("XDG_DATA_HOME", previous_xdg);
@@ -1076,5 +1127,85 @@ mod tests {
             .get(ClientId::KiloCode)
             .iter()
             .all(|p| p.ends_with("ui_messages.json")));
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_basic() {
+        let enabled: HashSet<ClientId> = [ClientId::Claude, ClientId::OpenClaw]
+            .iter()
+            .copied()
+            .collect();
+        let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,openclaw:/tmp/oc-extra", &enabled);
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0].0, ClientId::Claude);
+        assert_eq!(dirs[0].1, "/tmp/mac-sessions");
+        assert_eq!(dirs[1].0, ClientId::OpenClaw);
+        assert_eq!(dirs[1].1, "/tmp/oc-extra");
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_filters_disabled_clients() {
+        let enabled: HashSet<ClientId> = [ClientId::Claude].iter().copied().collect();
+        let dirs = parse_extra_dirs(
+            "claude:/tmp/mac-sessions,gemini:/tmp/gemini-extra",
+            &enabled,
+        );
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].0, ClientId::Claude);
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_skips_unsupported_clients() {
+        let enabled: HashSet<ClientId> =
+            [ClientId::Claude, ClientId::Kilo].iter().copied().collect();
+        let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,kilo:/tmp/kilo", &enabled);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].0, ClientId::Claude);
+        assert_eq!(dirs[0].1, "/tmp/mac-sessions");
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_empty_string() {
+        let enabled: HashSet<ClientId> = ClientId::iter().collect();
+        let dirs = parse_extra_dirs("", &enabled);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_invalid_client() {
+        let enabled: HashSet<ClientId> = ClientId::iter().collect();
+        let dirs = parse_extra_dirs("nonexistent:/tmp/foo", &enabled);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_extra_dirs() {
+        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        // Setup default Claude dir
+        setup_mock_claude_dir(home);
+
+        // Setup extra dir with additional session files
+        let extra_dir = TempDir::new().unwrap();
+        let extra_project = extra_dir.path().join("mac-project");
+        fs::create_dir_all(&extra_project).unwrap();
+        File::create(extra_project.join("extra-session.jsonl")).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("claude:{}", extra_dir.path().to_string_lossy()),
+            )
+        };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        // 1 from default path + 1 from extra dir
+        assert_eq!(result.get(ClientId::Claude).len(), 2);
+
+        restore_env("TOKSCALE_EXTRA_DIRS", previous);
     }
 }

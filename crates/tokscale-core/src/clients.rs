@@ -240,7 +240,16 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Crush = 14 => {
+    Kilo = 14 => {
+        id: "kilo",
+        root: PathRoot::XdgData,
+        relative: "kilo/kilo.db",
+        pattern: "kilo.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Crush = 15 => {
         id: "crush",
         root: PathRoot::XdgData,
         relative: "crush/projects.json",
@@ -300,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 15);
+        assert_eq!(ClientId::COUNT, 16);
     }
 
     #[test]
@@ -430,6 +439,6 @@ mod tests {
 
     #[test]
     fn test_crush_submit_default_is_false() {
-        assert!(!ClientId::Crush.data().submit_default);
+        assert!(!ClientId::Crush.submit_default());
     }
 }

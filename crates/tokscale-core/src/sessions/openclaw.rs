@@ -289,6 +289,24 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 5);
     }
 
+    #[test]
+    fn test_parse_openclaw_transcript_derives_session_id_from_archived_filename() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai-codex","modelId":"gpt-5.2"}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
+
+        let session_path =
+            create_test_session(&dir, "my-session-123.jsonl.deleted.1700000000000", content);
+        let messages = parse_openclaw_transcript(Path::new(&session_path));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "my-session-123");
+        assert_eq!(messages[0].model_id, "gpt-5.2");
+        assert_eq!(messages[0].provider_id, "openai-codex");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 5);
+    }
+
     fn create_test_index(dir: &TempDir, content: &str) -> PathBuf {
         let index_path = dir.path().join("sessions.json");
         let mut file = File::create(&index_path).unwrap();

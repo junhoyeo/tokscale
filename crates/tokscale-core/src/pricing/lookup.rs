@@ -958,6 +958,25 @@ fn is_valid_price_value(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 
+/// Returns true if the pricing entry has at least one usable cost field
+/// (base or above-200k tier). Entries with all-None pricing (e.g.
+/// subscription-based providers like Perplexity) are useless for
+/// pay-per-token cost estimation and should be deprioritized.
+fn has_any_usable_pricing(pricing: &ModelPricing) -> bool {
+    [
+        pricing.input_cost_per_token,
+        pricing.output_cost_per_token,
+        pricing.cache_read_input_token_cost,
+        pricing.cache_creation_input_token_cost,
+        pricing.input_cost_per_token_above_200k_tokens,
+        pricing.output_cost_per_token_above_200k_tokens,
+        pricing.cache_read_input_token_cost_above_200k_tokens,
+        pricing.cache_creation_input_token_cost_above_200k_tokens,
+    ]
+    .into_iter()
+    .any(|opt| opt.is_some_and(is_valid_price_value))
+}
+
 fn has_any_valid_above_tier_value(pricing: &ModelPricing) -> bool {
     [
         pricing.input_cost_per_token_above_200k_tokens,
@@ -1120,6 +1139,31 @@ fn select_best_match(
         provider_matches.as_slice()
     };
 
+    // Deprioritize entries with all-None pricing (e.g. perplexity/anthropic/...
+    // which matches provider hint "anthropic" but has subscription-based pricing
+    // with no per-token cost data). If provider-specific candidates are all
+    // unusable, fall back to any priced candidate in the broader match set so
+    // fuzzy/provider-aware lookups can still resolve a valid non-provider key.
+    let preferred_with_pricing: Vec<&String> = preferred_matches
+        .iter()
+        .copied()
+        .filter(|k| dataset.get(k.as_str()).is_some_and(has_any_usable_pricing))
+        .collect();
+    let effective_matches: Vec<&String> =
+        if preferred_with_pricing.is_empty() && !provider_matches.is_empty() {
+            matches
+                .iter()
+                .copied()
+                .filter(|k| dataset.get(k.as_str()).is_some_and(has_any_usable_pricing))
+                .collect()
+        } else {
+            preferred_with_pricing
+        };
+    if effective_matches.is_empty() {
+        return None;
+    }
+    let effective_matches = effective_matches.as_slice();
+
     let hint_is_reseller = provider_id.is_some_and(is_reseller_provider);
     let pick = |candidates: &[&String], prefer_reseller: bool| -> Option<LookupResult> {
         let key = if prefer_reseller {
@@ -1143,7 +1187,7 @@ fn select_best_match(
         })
     };
 
-    pick(preferred_matches, hint_is_reseller)
+    pick(effective_matches, hint_is_reseller)
 }
 
 fn model_prefix_matches_provider(model_id: &str, provider_id: Option<&str>) -> bool {
@@ -2955,6 +2999,70 @@ mod tests {
         let cost = lookup.calculate_cost("anthropic/claude-opus-4-6", 200_001, 0, 0, 0, 0);
         let expected = 200_000.0 * 0.00001 + 0.00002;
         assert!((cost - expected).abs() < 1e-12);
+    }
+
+    /// Regression test for #336: subscription-based resellers (e.g. Perplexity) with
+    /// all-None pricing should not shadow valid entries during provider-aware lookup.
+    /// `perplexity/anthropic/claude-opus-4-6` matches provider hint "anthropic" via
+    /// its path segments, but has no per-token pricing. The lookup must fall through
+    /// to the exact `claude-opus-4-6` entry that has real pricing data.
+    #[test]
+    fn test_none_pricing_reseller_does_not_shadow_real_entry() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4-6".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                cache_read_input_token_cost: Some(0.0000005),
+                cache_creation_input_token_cost: Some(0.00000625),
+                ..Default::default()
+            },
+        );
+        // Perplexity entry: matches "anthropic" hint but has no pricing
+        litellm.insert(
+            "perplexity/anthropic/claude-opus-4-6".into(),
+            ModelPricing::default(),
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        // With provider hint "anthropic", should find the real entry, not perplexity
+        let result = lookup.lookup_with_provider("claude-opus-4-6", Some("anthropic"));
+        assert!(result.is_some(), "lookup should succeed");
+        let result = result.unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-6");
+        assert!(result.pricing.input_cost_per_token.is_some());
+
+        // Cost should be non-zero
+        let cost = lookup.calculate_cost("claude-opus-4-6", 100_000, 50_000, 0, 0, 0);
+        assert!(cost > 0.0, "cost should be positive, got {}", cost);
+    }
+
+    #[test]
+    fn test_none_pricing_provider_match_falls_back_to_priced_fuzzy_candidate() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4-6-20250301".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "perplexity/anthropic/claude-opus-4-6-20250301".into(),
+            ModelPricing::default(),
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let result = lookup.lookup_with_provider("claude-opus-4-6-latest", Some("anthropic"));
+        assert!(result.is_some(), "lookup should succeed via fuzzy fallback");
+        let result = result.unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-6-20250301");
+        assert_eq!(result.source, "LiteLLM");
+        assert!(result.pricing.input_cost_per_token.is_some());
     }
 
     #[test]

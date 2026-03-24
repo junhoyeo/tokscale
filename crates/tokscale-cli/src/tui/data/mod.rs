@@ -166,58 +166,6 @@ impl DataLoader {
         self.aggregate_messages(messages, group_by)
     }
 
-    #[cfg(test)]
-    fn load_with_pricing(
-        &self,
-        enabled_clients: &[ClientId],
-        group_by: &GroupBy,
-        include_synthetic: bool,
-        pricing: &tokscale_core::pricing::PricingService,
-    ) -> Result<UsageData> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-            .to_string_lossy()
-            .to_string();
-
-        let mut sources: Vec<String> = enabled_clients
-            .iter()
-            .map(|client| client.as_str().to_string())
-            .collect();
-        if include_synthetic {
-            sources.push("synthetic".to_string());
-        }
-
-        let opts = LocalParseOptions {
-            home_dir: Some(home),
-            clients: Some(sources),
-            since: self.since.clone(),
-            until: self.until.clone(),
-            year: self.year.clone(),
-        };
-
-        let messages = if Handle::try_current().is_ok() {
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    let rt = Runtime::new().map_err(|e| e.to_string())?;
-                    rt.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
-                        opts,
-                        Some(pricing),
-                    ))
-                })
-                .join()
-                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
-            })
-        } else {
-            Runtime::new()?.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
-                opts,
-                Some(pricing),
-            ))
-        }
-        .map_err(anyhow::Error::msg)?;
-
-        self.aggregate_messages(messages, group_by)
-    }
-
     fn aggregate_messages(
         &self,
         messages: Vec<UnifiedMessage>,
@@ -333,7 +281,9 @@ impl DataLoader {
                     .reasoning
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
                 agent_entry.cost += msg_cost;
-                agent_entry.message_count = agent_entry.message_count.saturating_add(1);
+                agent_entry.message_count = agent_entry
+                    .message_count
+                    .saturating_add(msg.message_count.max(0) as u32);
 
                 agent_clients
                     .entry(normalized_agent)
@@ -586,15 +536,111 @@ fn calculate_streaks_for_today(daily: &[DailyUsage], today: NaiveDate) -> (u32, 
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::collections::HashMap;
     use std::env;
     use std::fs;
     use tempfile::TempDir;
+    use tokio::runtime::{Handle, Runtime};
+    use tokscale_core::parse_local_unified_messages_with_pricing;
+    use tokscale_core::pricing::{ModelPricing, PricingService};
+    use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
+
+    fn test_pricing_service() -> PricingService {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-sonnet-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.00001),
+                output_cost_per_token: Some(0.00002),
+                cache_read_input_token_cost: Some(0.000003),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "claude-haiku-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                cache_read_input_token_cost: Some(0.000001),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "accounts/fireworks/models/deepseek-v3-0324".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                output_cost_per_token: Some(0.03),
+                ..Default::default()
+            },
+        );
+
+        PricingService::new(litellm, HashMap::new())
+    }
+
+    fn load_with_pricing(
+        loader: &DataLoader,
+        enabled_clients: &[ClientId],
+        group_by: &GroupBy,
+        include_synthetic: bool,
+        pricing: Option<&PricingService>,
+    ) -> Result<UsageData> {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+            .to_string_lossy()
+            .to_string();
+
+        let mut sources: Vec<String> = enabled_clients
+            .iter()
+            .map(|client| client.as_str().to_string())
+            .collect();
+        if include_synthetic {
+            sources.push("synthetic".to_string());
+        }
+
+        let opts = LocalParseOptions {
+            home_dir: Some(home),
+            clients: Some(sources),
+            since: loader.since.clone(),
+            until: loader.until.clone(),
+            year: loader.year.clone(),
+        };
+
+        let messages = if Handle::try_current().is_ok() {
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let rt = Runtime::new().map_err(|e| e.to_string())?;
+                    rt.block_on(parse_local_unified_messages_with_pricing(opts, pricing))
+                })
+                .join()
+                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
+            })
+        } else {
+            Runtime::new()?.block_on(parse_local_unified_messages_with_pricing(opts, pricing))
+        }
+        .map_err(anyhow::Error::msg)?;
+
+        loader.aggregate_messages(messages, group_by)
+    }
+
+    fn expected_message_cost(
+        pricing: &PricingService,
+        model_id: &str,
+        provider_id: &str,
+        tokens: CoreTokenBreakdown,
+    ) -> f64 {
+        pricing.calculate_cost_with_provider(model_id, Some(provider_id), &tokens)
+    }
+
+    fn assert_cost_matches(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected cost {expected}, got {actual}"
+        );
+    }
 
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 15);
+        assert_eq!(clients.len(), 16);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -609,7 +655,8 @@ mod tests {
         assert_eq!(clients[11], ClientId::RooCode);
         assert_eq!(clients[12], ClientId::KiloCode);
         assert_eq!(clients[13], ClientId::Mux);
-        assert_eq!(clients[14], ClientId::Crush);
+        assert_eq!(clients[14], ClientId::Kilo);
+        assert_eq!(clients[15], ClientId::Crush);
     }
 
     #[test]
@@ -652,9 +699,13 @@ mod tests {
         );
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::KiloCode),
-            "Kilo"
+            "KiloCode"
         );
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Mux), "Mux");
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Kilo),
+            "Kilo CLI"
+        );
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Crush),
             "Crush"
@@ -677,6 +728,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), 'r');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::KiloCode), 'k');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), 'x');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), 'l');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), 'h');
     }
 
@@ -727,6 +779,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('k'),
             Some(ClientId::KiloCode)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('l'),
+            Some(ClientId::Kilo)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('x'), Some(ClientId::Mux));
         assert_eq!(
@@ -1109,22 +1165,74 @@ after"#,
             env::set_var("HOME", temp_dir.path());
         }
 
-        let pricing = tokscale_core::pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let pricing = test_pricing_service();
         let loader = DataLoader::new(None);
-        let usage = loader
-            .load_with_pricing(&[ClientId::RooCode], &GroupBy::Model, false, &pricing)
-            .unwrap();
+        let usage = load_with_pricing(
+            &loader,
+            &[ClientId::RooCode],
+            &GroupBy::Model,
+            false,
+            Some(&pricing),
+        )
+        .unwrap();
+
+        let architect_expected = expected_message_cost(
+            &pricing,
+            "claude-sonnet-4",
+            "anthropic",
+            CoreTokenBreakdown {
+                input: 420_000,
+                output: 120_000,
+                cache_read: 32_000,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        ) + expected_message_cost(
+            &pricing,
+            "claude-sonnet-4",
+            "anthropic",
+            CoreTokenBreakdown {
+                input: 90_000,
+                output: 60_000,
+                cache_read: 12_000,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        );
+        let reviewer_expected = expected_message_cost(
+            &pricing,
+            "claude-haiku-4",
+            "anthropic",
+            CoreTokenBreakdown {
+                input: 70_000,
+                output: 26_000,
+                cache_read: 8_000,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        ) + expected_message_cost(
+            &pricing,
+            "claude-haiku-4",
+            "anthropic",
+            CoreTokenBreakdown {
+                input: 22_000,
+                output: 18_000,
+                cache_read: 3_000,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        );
 
         assert_eq!(usage.agents.len(), 2);
         assert_eq!(usage.agents[0].agent, "architect");
         assert_eq!(usage.agents[0].clients, "roocode");
         assert_eq!(usage.agents[0].message_count, 2);
-        assert!((usage.agents[0].cost - 11.5).abs() < f64::EPSILON);
+        assert_cost_matches(usage.agents[0].cost, architect_expected);
         assert_eq!(usage.agents[0].tokens.total(), 734_000);
 
         assert_eq!(usage.agents[1].agent, "reviewer");
         assert_eq!(usage.agents[1].message_count, 2);
-        assert!((usage.agents[1].cost - 2.7).abs() < f64::EPSILON);
+        assert_cost_matches(usage.agents[1].cost, reviewer_expected);
         assert_eq!(usage.agents[1].tokens.total(), 147_000);
 
         match previous_home {
@@ -1152,23 +1260,36 @@ after"#,
             env::set_var("HOME", temp_dir.path());
         }
 
-        let pricing = tokscale_core::pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let pricing = test_pricing_service();
         let loader = DataLoader::new(None);
-        let usage = loader
-            .load_with_pricing(
-                &[ClientId::OpenCode],
-                &GroupBy::ClientProviderModel,
-                true,
-                &pricing,
-            )
-            .unwrap();
+        let usage = load_with_pricing(
+            &loader,
+            &[ClientId::OpenCode],
+            &GroupBy::ClientProviderModel,
+            true,
+            Some(&pricing),
+        )
+        .unwrap();
+
+        let expected_cost = expected_message_cost(
+            &pricing,
+            "accounts/fireworks/models/deepseek-v3-0324",
+            "fireworks",
+            CoreTokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        );
 
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].client, "opencode");
         assert_eq!(usage.models[0].provider, "fireworks");
         assert_eq!(usage.models[0].model, "deepseek-v3-0324");
         assert_eq!(usage.models[0].tokens.total(), 15);
-        assert!((usage.models[0].cost - 0.25).abs() < f64::EPSILON);
+        assert_cost_matches(usage.models[0].cost, expected_cost);
 
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
