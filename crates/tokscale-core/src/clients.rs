@@ -568,4 +568,14 @@ mod tests {
         );
         assert_eq!(ClientId::Codebuff.data().pattern, "chat-messages.json");
     }
+
+    #[test]
+    fn test_antigravity_parse_local_is_true() {
+        assert!(ClientId::Antigravity.data().parse_local);
+    }
+
+    #[test]
+    fn test_antigravity_submit_default_is_false() {
+        assert!(!ClientId::Antigravity.submit_default());
+    }
 }
