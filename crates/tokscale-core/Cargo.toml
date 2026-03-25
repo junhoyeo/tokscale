@@ -15,6 +15,7 @@ rayon = { workspace = true }
 simd-json = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bincode = { workspace = true }
 walkdir = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
@@ -23,6 +24,9 @@ tokio = { workspace = true }
 dirs = { workspace = true }
 once_cell = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
+libc = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

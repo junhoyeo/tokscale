@@ -88,9 +88,13 @@ pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
 
 pub fn parse_openclaw_transcript(transcript_path: &Path) -> Vec<UnifiedMessage> {
     let session_id = match transcript_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .filter(|stem| !stem.is_empty())
+        .file_name()
+        .and_then(|n| {
+            n.to_string_lossy()
+                .split_once(".jsonl")
+                .map(|(id, _)| id.to_string())
+        })
+        .filter(|id| !id.is_empty())
     {
         Some(id) => id,
         None => return Vec::new(),
@@ -275,6 +279,24 @@ mod tests {
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "my-session-123.jsonl", content);
+        let messages = parse_openclaw_transcript(Path::new(&session_path));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "my-session-123");
+        assert_eq!(messages[0].model_id, "gpt-5.2");
+        assert_eq!(messages[0].provider_id, "openai-codex");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 5);
+    }
+
+    #[test]
+    fn test_parse_openclaw_transcript_derives_session_id_from_archived_filename() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai-codex","modelId":"gpt-5.2"}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
+
+        let session_path =
+            create_test_session(&dir, "my-session-123.jsonl.deleted.1700000000000", content);
         let messages = parse_openclaw_transcript(Path::new(&session_path));
 
         assert_eq!(messages.len(), 1);

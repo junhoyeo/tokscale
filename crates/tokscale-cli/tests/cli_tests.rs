@@ -177,7 +177,8 @@ fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
-        .env("XDG_CACHE_HOME", tmp.join(".cache"));
+        .env("XDG_CACHE_HOME", tmp.join(".cache"))
+        .env("TOKSCALE_PRICING_CACHE_ONLY", "1");
     cmd
 }
 
@@ -346,9 +347,12 @@ fn test_headless_command_invalid_client() {
 
 #[test]
 fn test_models_with_invalid_date_format() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("models")
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .arg("models")
         .arg("--light")
+        .arg("--opencode")
+        .arg("--no-spinner")
         .arg("--since")
         .arg("invalid-date")
         .assert()
@@ -357,9 +361,12 @@ fn test_models_with_invalid_date_format() {
 
 #[test]
 fn test_models_with_invalid_year() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("models")
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .arg("models")
         .arg("--light")
+        .arg("--opencode")
+        .arg("--no-spinner")
         .arg("--year")
         .arg("not-a-year")
         .assert()
@@ -969,8 +976,9 @@ fn test_pricing_command_invalid_provider() {
 
 #[test]
 fn test_clients_command() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("clients")
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .arg("clients")
         .assert()
         .success()
         .stdout(predicate::str::contains("OpenCode").or(predicate::str::contains("opencode")))
@@ -979,7 +987,8 @@ fn test_clients_command() {
 
 #[test]
 fn test_clients_json() {
-    let output = cargo_bin_cmd!("tokscale")
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
         .args(["clients", "--json"])
         .output()
         .unwrap();

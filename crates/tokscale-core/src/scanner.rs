@@ -15,6 +15,7 @@ pub struct ScanResult {
     pub files: [Vec<PathBuf>; ClientId::COUNT],
     pub opencode_db: Option<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
+    pub kilo_db: Option<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -25,6 +26,7 @@ impl Default for ScanResult {
             files: std::array::from_fn(|_| Vec::new()),
             opencode_db: None,
             synthetic_db: None,
+            kilo_db: None,
             opencode_json_dir: None,
         }
     }
@@ -105,6 +107,10 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                // OpenClaw: also match deleted transcripts (<uuid>.jsonl.deleted.<ts>)
+                "*.jsonl*" => {
+                    file_name.ends_with(".jsonl") || file_name.contains(".jsonl.deleted.")
+                }
                 "*.csv" => file_name.ends_with(".csv"),
                 "usage*.csv" => {
                     if is_in_archive_dir {
@@ -143,6 +149,44 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Parse a `TOKSCALE_EXTRA_DIRS`-formatted string into (ClientId, path) pairs.
+///
+/// Format: comma-separated `client:path` pairs.
+/// Example: `"claude:/path/to/mac/sessions,openclaw:/other/path"`
+///
+/// Only returns entries whose client is present in `enabled`.
+/// This is a pure function — the caller is responsible for reading the
+/// environment variable and passing its value here.
+pub fn parse_extra_dirs(value: &str, enabled: &HashSet<ClientId>) -> Vec<(ClientId, String)> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+
+    value
+        .split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let (client_str, path) = entry.split_once(':')?;
+            let client_id = ClientId::from_str(client_str.trim())?;
+            if !enabled.contains(&client_id) || !supports_extra_dir_scanning(client_id) {
+                return None;
+            }
+            let path = path.trim().to_string();
+            if path.is_empty() {
+                return None;
+            }
+            Some((client_id, path))
+        })
+        .collect()
+}
+
+fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
+    // Kilo currently loads a single SQLite DB via `scan_result.kilo_db` rather than
+    // consuming scanned file lists, so accepting `kilo:` extra dirs would silently
+    // advertise unsupported behavior.
+    !matches!(client_id, ClientId::Kilo)
+}
+
 /// Scan all session client directories in parallel
 pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
     let mut result = ScanResult::default();
@@ -172,6 +216,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
                 | ClientId::OpenClaw
                 | ClientId::RooCode
                 | ClientId::KiloCode
+                | ClientId::Kilo
         ) {
             continue;
         }
@@ -179,6 +224,13 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         let def = client_id.data();
         let path = def.resolve_path(home_dir);
         tasks.push((*client_id, path, def.pattern));
+    }
+
+    // Extra scan directories from TOKSCALE_EXTRA_DIRS env var
+    let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
+    for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+        let pattern = client_id.data().pattern;
+        tasks.push((client_id, path, pattern));
     }
 
     if enabled.contains(&ClientId::OpenCode) {
@@ -303,6 +355,14 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         ));
     }
 
+    // Kilo CLI: SQLite database at ~/.local/share/kilo/kilo.db
+    if enabled.contains(&ClientId::Kilo) {
+        let kilo_db_path = ClientId::Kilo.data().resolve_path(home_dir);
+        if std::path::Path::new(&kilo_db_path).exists() {
+            result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        }
+    }
+
     // Execute scans in parallel
     let scan_results: Vec<(ClientId, Vec<PathBuf>)> = tasks
         .into_par_iter()
@@ -312,9 +372,14 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         })
         .collect();
 
-    // Aggregate results
+    // Aggregate results, deduplicating file paths across overlapping directories
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for (client_id, files) in scan_results {
-        result.get_mut(client_id).extend(files);
+        for file in files {
+            if seen.insert(file.clone()) {
+                result.get_mut(client_id).push(file);
+            }
+        }
     }
 
     result
@@ -703,6 +768,22 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_all_clients_openclaw_deleted_transcript() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let openclaw_sessions = home.join(".openclaw/agents/main/sessions");
+        fs::create_dir_all(&openclaw_sessions).unwrap();
+        File::create(openclaw_sessions.join("session-archived.jsonl.deleted.1700000000000"))
+            .unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["openclaw".to_string()]);
+        assert_eq!(result.get(ClientId::OpenClaw).len(), 1);
+        assert!(result.get(ClientId::OpenClaw)[0]
+            .ends_with("session-archived.jsonl.deleted.1700000000000"));
+    }
+
+    #[test]
     fn test_scan_all_clients_multiple() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -848,5 +929,85 @@ mod tests {
             .get(ClientId::KiloCode)
             .iter()
             .all(|p| p.ends_with("ui_messages.json")));
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_basic() {
+        let enabled: HashSet<ClientId> = [ClientId::Claude, ClientId::OpenClaw]
+            .iter()
+            .copied()
+            .collect();
+        let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,openclaw:/tmp/oc-extra", &enabled);
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0].0, ClientId::Claude);
+        assert_eq!(dirs[0].1, "/tmp/mac-sessions");
+        assert_eq!(dirs[1].0, ClientId::OpenClaw);
+        assert_eq!(dirs[1].1, "/tmp/oc-extra");
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_filters_disabled_clients() {
+        let enabled: HashSet<ClientId> = [ClientId::Claude].iter().copied().collect();
+        let dirs = parse_extra_dirs(
+            "claude:/tmp/mac-sessions,gemini:/tmp/gemini-extra",
+            &enabled,
+        );
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].0, ClientId::Claude);
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_skips_unsupported_clients() {
+        let enabled: HashSet<ClientId> =
+            [ClientId::Claude, ClientId::Kilo].iter().copied().collect();
+        let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,kilo:/tmp/kilo", &enabled);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].0, ClientId::Claude);
+        assert_eq!(dirs[0].1, "/tmp/mac-sessions");
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_empty_string() {
+        let enabled: HashSet<ClientId> = ClientId::iter().collect();
+        let dirs = parse_extra_dirs("", &enabled);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_invalid_client() {
+        let enabled: HashSet<ClientId> = ClientId::iter().collect();
+        let dirs = parse_extra_dirs("nonexistent:/tmp/foo", &enabled);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_extra_dirs() {
+        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        // Setup default Claude dir
+        setup_mock_claude_dir(home);
+
+        // Setup extra dir with additional session files
+        let extra_dir = TempDir::new().unwrap();
+        let extra_project = extra_dir.path().join("mac-project");
+        fs::create_dir_all(&extra_project).unwrap();
+        File::create(extra_project.join("extra-session.jsonl")).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("claude:{}", extra_dir.path().to_string_lossy()),
+            )
+        };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        // 1 from default path + 1 from extra dir
+        assert_eq!(result.get(ClientId::Claude).len(), 2);
+
+        restore_env("TOKSCALE_EXTRA_DIRS", previous);
     }
 }

@@ -88,8 +88,16 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
             0.0
         },
         max_cost_in_single_day: max_cost,
-        clients: clients_set.into_iter().collect(),
-        models: models_set.into_iter().collect(),
+        clients: {
+            let mut v: Vec<_> = clients_set.into_iter().collect();
+            v.sort();
+            v
+        },
+        models: {
+            let mut v: Vec<_> = models_set.into_iter().collect();
+            v.sort();
+            v
+        },
     }
 }
 

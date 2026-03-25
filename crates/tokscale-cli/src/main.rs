@@ -75,8 +75,11 @@ struct Cli {
     #[arg(long, help = "Show only Roo Code usage")]
     roocode: bool,
 
-    #[arg(long, help = "Show only Kilo usage")]
+    #[arg(long, help = "Show only KiloCode usage")]
     kilocode: bool,
+
+    #[arg(long, help = "Show only Kilo CLI usage")]
+    kilo: bool,
 
     #[arg(long, help = "Show only Mux usage")]
     mux: bool,
@@ -149,8 +152,10 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
         kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
+        kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
         #[arg(long, help = "Show only Synthetic usage")]
@@ -209,8 +214,10 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
         kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
+        kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
         #[arg(long, help = "Show only Synthetic usage")]
@@ -281,8 +288,10 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
         kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
+        kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
         #[arg(long, help = "Show only Synthetic usage")]
@@ -330,8 +339,10 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
         kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
+        kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
         #[arg(long, help = "Show only Synthetic usage")]
@@ -375,8 +386,10 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
         kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
+        kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
         #[arg(long, help = "Show only Synthetic usage")]
@@ -442,8 +455,10 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
         kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
+        kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
         #[arg(long, help = "Show only Synthetic usage")]
@@ -529,6 +544,7 @@ fn main() -> Result<()> {
             qwen,
             roocode,
             kilocode,
+            kilo,
             mux,
             synthetic,
             today,
@@ -561,6 +577,7 @@ fn main() -> Result<()> {
                 qwen,
                 roocode,
                 kilocode,
+                kilo,
                 mux,
                 synthetic,
             });
@@ -609,6 +626,7 @@ fn main() -> Result<()> {
             qwen,
             roocode,
             kilocode,
+            kilo,
             mux,
             synthetic,
             today,
@@ -634,6 +652,7 @@ fn main() -> Result<()> {
                 qwen,
                 roocode,
                 kilocode,
+                kilo,
                 mux,
                 synthetic,
             });
@@ -690,6 +709,7 @@ fn main() -> Result<()> {
             qwen,
             roocode,
             kilocode,
+            kilo,
             mux,
             synthetic,
             today,
@@ -715,6 +735,7 @@ fn main() -> Result<()> {
                 qwen,
                 roocode,
                 kilocode,
+                kilo,
                 mux,
                 synthetic,
             });
@@ -736,6 +757,7 @@ fn main() -> Result<()> {
             qwen,
             roocode,
             kilocode,
+            kilo,
             mux,
             synthetic,
             today,
@@ -759,6 +781,7 @@ fn main() -> Result<()> {
                 qwen,
                 roocode,
                 kilocode,
+                kilo,
                 mux,
                 synthetic,
             });
@@ -789,6 +812,7 @@ fn main() -> Result<()> {
             qwen,
             roocode,
             kilocode,
+            kilo,
             mux,
             synthetic,
             today,
@@ -813,6 +837,7 @@ fn main() -> Result<()> {
                 qwen,
                 roocode,
                 kilocode,
+                kilo,
                 mux,
                 synthetic,
             });
@@ -843,6 +868,7 @@ fn main() -> Result<()> {
             qwen,
             roocode,
             kilocode,
+            kilo,
             mux,
             synthetic,
             short,
@@ -865,6 +891,7 @@ fn main() -> Result<()> {
                 qwen,
                 roocode,
                 kilocode,
+                kilo,
                 mux,
                 synthetic,
             });
@@ -894,6 +921,7 @@ fn main() -> Result<()> {
                 qwen: cli.qwen,
                 roocode: cli.roocode,
                 kilocode: cli.kilocode,
+                kilo: cli.kilo,
                 mux: cli.mux,
                 synthetic: cli.synthetic,
             });
@@ -963,6 +991,7 @@ struct ClientFlags {
     qwen: bool,
     roocode: bool,
     kilocode: bool,
+    kilo: bool,
     mux: bool,
     synthetic: bool,
 }
@@ -984,6 +1013,7 @@ fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
         (ClientId::Qwen, flags.qwen),
         (ClientId::RooCode, flags.roocode),
         (ClientId::KiloCode, flags.kilocode),
+        (ClientId::Kilo, flags.kilo),
         (ClientId::Mux, flags.mux),
     ]
     .into_iter()
@@ -2331,6 +2361,8 @@ fn run_clients_command(json: bool) -> Result<()> {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         headless_paths: Vec<HeadlessPath>,
         headless_message_count: i32,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        extra_paths: Vec<ExtraPath>,
     }
 
     #[derive(serde::Serialize)]
@@ -2346,6 +2378,19 @@ fn run_clients_command(json: bool) -> Result<()> {
         path: String,
         exists: bool,
     }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExtraPath {
+        path: String,
+        exists: bool,
+    }
+
+    // Collect extra dirs from TOKSCALE_EXTRA_DIRS for display (reuse core parser)
+    let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
+    let all_clients: std::collections::HashSet<ClientId> = ClientId::iter().collect();
+    let extra_dirs: Vec<(ClientId, String)> =
+        tokscale_core::parse_extra_dirs(&extra_dirs_val, &all_clients);
 
     let clients: Vec<ClientRow> = ClientId::iter()
         .map(|client| {
@@ -2408,6 +2453,15 @@ fn run_clients_command(json: bool) -> Result<()> {
             }
             .to_string();
 
+            let extra_paths: Vec<ExtraPath> = extra_dirs
+                .iter()
+                .filter(|(c, _)| *c == client)
+                .map(|(_, path)| ExtraPath {
+                    path: path.clone(),
+                    exists: Path::new(path).exists(),
+                })
+                .collect();
+
             ClientRow {
                 client: client.as_str().to_string(),
                 label,
@@ -2418,6 +2472,7 @@ fn run_clients_command(json: bool) -> Result<()> {
                 headless_supported,
                 headless_paths,
                 headless_message_count,
+                extra_paths,
             }
         })
         .collect();
@@ -2479,6 +2534,18 @@ fn run_clients_command(json: bool) -> Result<()> {
                 println!(
                     "  {}",
                     format!("legacy: {}", legacy_desc.join(", ")).bright_black()
+                );
+            }
+
+            if !row.extra_paths.is_empty() {
+                let extra_desc: Vec<String> = row
+                    .extra_paths
+                    .iter()
+                    .map(|ep| describe_path(&ep.path, ep.exists))
+                    .collect();
+                println!(
+                    "  {}",
+                    format!("extra: {}", extra_desc.join(", ")).bright_black()
                 );
             }
 
@@ -3010,6 +3077,34 @@ struct SubmitMetrics {
     sources: Option<Vec<String>>,
 }
 
+fn cap_graph_result_to_utc_today(
+    graph_result: &mut tokscale_core::GraphResult,
+    utc_today: &str,
+) -> bool {
+    let pre_cap_len = graph_result.contributions.len();
+    graph_result
+        .contributions
+        .retain(|c| c.date.as_str() <= utc_today);
+    if graph_result.contributions.len() == pre_cap_len {
+        return false;
+    }
+
+    graph_result.meta.date_range_start = graph_result
+        .contributions
+        .first()
+        .map(|c| c.date.clone())
+        .unwrap_or_default();
+    graph_result.meta.date_range_end = graph_result
+        .contributions
+        .last()
+        .map(|c| c.date.clone())
+        .unwrap_or_default();
+    graph_result.summary = tokscale_core::calculate_summary(&graph_result.contributions);
+    graph_result.years = tokscale_core::calculate_years(&graph_result.contributions);
+
+    true
+}
+
 fn run_submit_command(
     clients: Option<Vec<String>>,
     since: Option<String>,
@@ -3079,6 +3174,17 @@ fn run_submit_command(
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
+
+    // Cap contributions to UTC today to prevent timezone-related future-date
+    // rejections. The CLI generates dates using chrono::Local, but the server
+    // validates against UTC. In UTC+ timezones the local date can be ahead of
+    // UTC around midnight, causing valid same-day data to be flagged as
+    // "future dates". Capped contributions will be included in the next
+    // submission once the UTC date catches up.
+    // See: https://github.com/junhoyeo/tokscale/issues/318
+    let utc_today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut graph_result = graph_result;
+    cap_graph_result_to_utc_today(&mut graph_result, &utc_today);
 
     println!("{}", "  Data to submit:".white());
     println!(
@@ -3461,6 +3567,77 @@ fn run_headless_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokscale_core::{
+        calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
+        GraphMeta, GraphResult, TokenBreakdown, YearSummary,
+    };
+
+    fn token_breakdown(total_tokens: i64) -> TokenBreakdown {
+        TokenBreakdown {
+            input: total_tokens,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        }
+    }
+
+    fn daily_contribution(
+        date: &str,
+        total_tokens: i64,
+        total_cost: f64,
+        client: &str,
+        model_id: &str,
+    ) -> DailyContribution {
+        DailyContribution {
+            date: date.to_string(),
+            totals: DailyTotals {
+                tokens: total_tokens,
+                cost: total_cost,
+                messages: 1,
+            },
+            intensity: 0,
+            token_breakdown: token_breakdown(total_tokens),
+            clients: vec![ClientContribution {
+                client: client.to_string(),
+                model_id: model_id.to_string(),
+                provider_id: "openai".to_string(),
+                tokens: token_breakdown(total_tokens),
+                cost: total_cost,
+                messages: 1,
+            }],
+        }
+    }
+
+    fn graph_result_with_contributions(contributions: Vec<DailyContribution>) -> GraphResult {
+        GraphResult {
+            meta: GraphMeta {
+                generated_at: "2026-03-24T00:00:00Z".to_string(),
+                version: "test".to_string(),
+                date_range_start: contributions
+                    .first()
+                    .map(|c| c.date.clone())
+                    .unwrap_or_default(),
+                date_range_end: contributions
+                    .last()
+                    .map(|c| c.date.clone())
+                    .unwrap_or_default(),
+                processing_time_ms: 0,
+            },
+            summary: calculate_summary(&contributions),
+            years: calculate_years(&contributions),
+            contributions,
+        }
+    }
+
+    fn year_summary(graph: &GraphResult, year: &str) -> YearSummary {
+        graph
+            .years
+            .iter()
+            .find(|entry| entry.year == year)
+            .cloned()
+            .unwrap()
+    }
 
     #[test]
     fn test_build_client_filter_all_false() {
@@ -3478,6 +3655,7 @@ mod tests {
             qwen: false,
             roocode: false,
             kilocode: false,
+            kilo: false,
             mux: false,
             synthetic: false,
         };
@@ -3500,6 +3678,7 @@ mod tests {
             qwen: false,
             roocode: false,
             kilocode: false,
+            kilo: false,
             mux: false,
             synthetic: false,
         };
@@ -3525,6 +3704,7 @@ mod tests {
             qwen: false,
             roocode: false,
             kilocode: false,
+            kilo: false,
             mux: false,
             synthetic: false,
         };
@@ -3554,6 +3734,7 @@ mod tests {
             qwen: false,
             roocode: false,
             kilocode: false,
+            kilo: false,
             mux: false,
             synthetic: true,
         };
@@ -3579,13 +3760,14 @@ mod tests {
             qwen: true,
             roocode: true,
             kilocode: true,
+            kilo: true,
             mux: true,
             synthetic: true,
         };
         let result = build_client_filter(flags);
         assert!(result.is_some());
         let sources = result.unwrap();
-        assert_eq!(sources.len(), 15);
+        assert_eq!(sources.len(), 16);
         assert!(sources.contains(&"opencode".to_string()));
         assert!(sources.contains(&"claude".to_string()));
         assert!(sources.contains(&"codex".to_string()));
@@ -3599,6 +3781,7 @@ mod tests {
         assert!(sources.contains(&"qwen".to_string()));
         assert!(sources.contains(&"roocode".to_string()));
         assert!(sources.contains(&"kilocode".to_string()));
+        assert!(sources.contains(&"kilo".to_string()));
         assert!(sources.contains(&"mux".to_string()));
         assert!(sources.contains(&"synthetic".to_string()));
     }
@@ -3926,5 +4109,78 @@ mod tests {
         let (position2, forward2) = LightSpinner::scanner_state(54);
         assert_eq!(position1, position2);
         assert_eq!(forward1, forward2);
+    }
+
+    #[test]
+    fn test_cap_graph_result_to_utc_today_recalculates_all_derived_fields() {
+        let mut graph = graph_result_with_contributions(vec![
+            daily_contribution("2026-12-30", 10, 1.25, "codex", "model-a"),
+            daily_contribution("2026-12-31", 20, 2.50, "codex", "model-b"),
+            daily_contribution("2027-01-01", 30, 3.75, "cursor", "model-c"),
+        ]);
+
+        let changed = cap_graph_result_to_utc_today(&mut graph, "2026-12-31");
+
+        assert!(changed);
+        assert_eq!(graph.meta.date_range_start, "2026-12-30");
+        assert_eq!(graph.meta.date_range_end, "2026-12-31");
+        assert_eq!(graph.contributions.len(), 2);
+        assert_eq!(graph.summary.total_tokens, 30);
+        assert_eq!(graph.summary.total_cost, 3.75);
+        assert_eq!(graph.summary.total_days, 2);
+        assert_eq!(graph.summary.active_days, 2);
+        assert_eq!(graph.summary.clients, vec!["codex".to_string()]);
+        assert_eq!(
+            graph.summary.models,
+            vec!["model-a".to_string(), "model-b".to_string()]
+        );
+        assert_eq!(graph.years.len(), 1);
+        assert_eq!(year_summary(&graph, "2026").total_tokens, 30);
+    }
+
+    #[test]
+    fn test_cap_graph_result_to_utc_today_clears_empty_post_cap_state() {
+        let mut graph = graph_result_with_contributions(vec![daily_contribution(
+            "2027-01-01",
+            30,
+            3.75,
+            "cursor",
+            "model-c",
+        )]);
+
+        let changed = cap_graph_result_to_utc_today(&mut graph, "2026-12-31");
+
+        assert!(changed);
+        assert!(graph.contributions.is_empty());
+        assert_eq!(graph.meta.date_range_start, "");
+        assert_eq!(graph.meta.date_range_end, "");
+        assert_eq!(graph.summary.total_tokens, 0);
+        assert_eq!(graph.summary.total_cost, 0.0);
+        assert_eq!(graph.summary.total_days, 0);
+        assert_eq!(graph.summary.active_days, 0);
+        assert!(graph.summary.clients.is_empty());
+        assert!(graph.summary.models.is_empty());
+        assert!(graph.years.is_empty());
+    }
+
+    #[test]
+    fn test_cap_graph_result_to_utc_today_is_noop_when_all_dates_are_in_range() {
+        let mut graph = graph_result_with_contributions(vec![
+            daily_contribution("2026-12-30", 10, 1.25, "codex", "model-a"),
+            daily_contribution("2026-12-31", 20, 2.50, "codex", "model-b"),
+        ]);
+        let original_summary = graph.summary.clone();
+        let original_years = graph.years.clone();
+
+        let changed = cap_graph_result_to_utc_today(&mut graph, "2026-12-31");
+
+        assert!(!changed);
+        assert_eq!(graph.meta.date_range_start, "2026-12-30");
+        assert_eq!(graph.meta.date_range_end, "2026-12-31");
+        assert_eq!(graph.summary.total_tokens, original_summary.total_tokens);
+        assert_eq!(graph.summary.total_cost, original_summary.total_cost);
+        assert_eq!(graph.summary.clients, original_summary.clients);
+        assert_eq!(graph.summary.models, original_summary.models);
+        assert_eq!(graph.years.len(), original_years.len());
     }
 }

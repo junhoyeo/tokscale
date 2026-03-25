@@ -8,6 +8,7 @@ pub mod codex;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
 pub mod mux;
@@ -21,7 +22,7 @@ pub(crate) mod utils;
 
 use crate::TokenBreakdown;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
     pub client: String,
     pub model_id: String,
@@ -189,6 +190,15 @@ impl UnifiedMessage {
     ) {
         self.workspace_key = workspace_key;
         self.workspace_label = workspace_label;
+    }
+
+    pub(crate) fn refresh_derived_fields(&mut self) {
+        self.date = timestamp_to_date(self.timestamp);
+    }
+
+    pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
+        self.timestamp = timestamp;
+        self.refresh_derived_fields();
     }
 }
 
