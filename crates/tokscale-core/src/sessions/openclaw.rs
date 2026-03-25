@@ -209,13 +209,13 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                     let model = msg
                         .model
                         .clone()
-                        .or_else(|| current_model.clone())
-                        .filter(|m| !m.is_empty());
+                        .filter(|m| !m.is_empty())
+                        .or_else(|| current_model.clone().filter(|m| !m.is_empty()));
                     let provider = msg
                         .provider
                         .clone()
-                        .or_else(|| current_provider.clone())
                         .filter(|p| !p.is_empty())
+                        .or_else(|| current_provider.clone().filter(|p| !p.is_empty()))
                         .unwrap_or_else(|| "unknown".to_string());
 
                     let model = match model {
@@ -410,6 +410,20 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
         assert_eq!(messages[0].provider_id, "unknown");
+    }
+
+    #[test]
+    fn test_parse_openclaw_session_empty_embedded_values_fall_back_to_current_model_state() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4-6"}
+{"type":"message","id":"msg1","message":{"role":"assistant","provider":"","model":"","content":[],"usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
+
+        let session_path = create_test_session(&dir, "session.jsonl", content);
+        let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
     }
 
     fn create_test_index(dir: &TempDir, content: &str) -> PathBuf {
