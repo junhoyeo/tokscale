@@ -107,9 +107,12 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
-                // OpenClaw: also match deleted transcripts (<uuid>.jsonl.deleted.<ts>)
+                // OpenClaw: also match archived transcripts
+                // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
                 "*.jsonl*" => {
-                    file_name.ends_with(".jsonl") || file_name.contains(".jsonl.deleted.")
+                    file_name.ends_with(".jsonl")
+                        || file_name.contains(".jsonl.deleted.")
+                        || file_name.contains(".jsonl.reset.")
                 }
                 "*.csv" => file_name.ends_with(".csv"),
                 "usage*.csv" => {
@@ -640,6 +643,14 @@ mod tests {
         let mut transcript = File::create(openclaw_sessions.join("session-abc.jsonl")).unwrap();
         transcript.write_all(b"{}").unwrap();
 
+        let mut archived_deleted =
+            File::create(openclaw_sessions.join("session-deleted.jsonl.deleted.123")).unwrap();
+        archived_deleted.write_all(b"{}").unwrap();
+
+        let mut archived_reset =
+            File::create(openclaw_sessions.join("session-reset.jsonl.reset.456")).unwrap();
+        archived_reset.write_all(b"{}").unwrap();
+
         // Even if an index exists, we should count JSONL transcripts (not sessions.json only)
         let mut index = File::create(openclaw_sessions.join("sessions.json")).unwrap();
         index.write_all(b"{}").unwrap();
@@ -763,8 +774,19 @@ mod tests {
         setup_mock_openclaw_dir(home);
 
         let result = scan_all_clients(home.to_str().unwrap(), &["openclaw".to_string()]);
-        assert_eq!(result.get(ClientId::OpenClaw).len(), 1);
-        assert!(result.get(ClientId::OpenClaw)[0].ends_with("session-abc.jsonl"));
+        assert_eq!(result.get(ClientId::OpenClaw).len(), 3);
+        assert!(result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .any(|path| path.ends_with("session-abc.jsonl")));
+        assert!(result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .any(|path| path.ends_with("session-deleted.jsonl.deleted.123")));
+        assert!(result
+            .get(ClientId::OpenClaw)
+            .iter()
+            .any(|path| path.ends_with("session-reset.jsonl.reset.456")));
     }
 
     #[test]
