@@ -1360,6 +1360,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "qwen" => Some("Qwen CLI"),
         "roocode" => Some("Roo Code"),
         "kilocode" => Some("Kilo"),
+        "kilo" => Some("Kilo CLI"),
         "mux" => Some("Mux"),
         "crush" => Some("Crush"),
         "synthetic" => Some("Synthetic"),
@@ -1382,6 +1383,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
         "Roo Code" => Some("https://tokscale.ai/assets/logos/roocode.png"),
         "Kilo" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
+        "Kilo CLI" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
         "Mux" => Some("https://tokscale.ai/assets/logos/mux.png"),
         "Crush" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png",
@@ -2188,6 +2190,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_kilo() {
+        assert_eq!(client_display_name("kilo"), Some("Kilo CLI"));
+    }
+
+    #[test]
     fn test_client_display_name_crush() {
         assert_eq!(client_display_name("crush"), Some("Crush"));
     }
@@ -2270,6 +2277,14 @@ mod tests {
         assert_eq!(
             client_logo_url("Pi"),
             Some("https://tokscale.ai/assets/logos/pi.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_kilo_cli() {
+        assert_eq!(
+            client_logo_url("Kilo CLI"),
+            Some("https://tokscale.ai/assets/logos/kilocode.png")
         );
     }
 
