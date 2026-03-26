@@ -172,13 +172,16 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   // Step 2: No future dates
   // The CLI generates dates using the user's local timezone, but the server
-  // runs in UTC. For users in UTC+ timezones (e.g. UTC+8), their local date
-  // can be ahead of UTC — causing valid submissions to be rejected as
-  // "future dates". Adding a 1-day buffer accommodates all timezones (UTC-12
-  // to UTC+14).
+  // runs in UTC. For users in UTC+ timezones (e.g. UTC+14), their local date
+  // can be ahead of UTC. Additionally, some CLI versions aggregate session
+  // data across date boundaries or include entries with slightly skewed
+  // timestamps, so a 1-day buffer is not enough in practice.
+  // Using a 2-day buffer to handle all timezone offsets plus date boundary
+  // edge cases reliably.
   // See: https://github.com/junhoyeo/tokscale/issues/318
+  // See: https://github.com/junhoyeo/tokscale/issues/334
   const now = new Date();
-  const maxDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const maxDate = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
   const maxDateStr = maxDate.toISOString().split("T")[0];
 
   if (submission.meta.dateRange.end > maxDateStr) {
