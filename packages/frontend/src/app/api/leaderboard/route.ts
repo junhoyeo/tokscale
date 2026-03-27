@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getLeaderboardData, type Period, type SortBy } from "@/lib/leaderboard/getLeaderboard";
+import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
+import type { Period, SortBy } from "@/lib/leaderboard/types";
 
 export const revalidate = 60;
 

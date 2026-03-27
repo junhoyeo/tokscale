@@ -117,7 +117,7 @@ export function WorldwideSection({
           <GlobeTwoCol>
             <GlobeLeftCol>
               <GlobeLeftTitle>
-                Tracking 800B+
+                Tracking Trillions of
                 <br />
                 Tokens Worldwide
               </GlobeLeftTitle>

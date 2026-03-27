@@ -27,6 +27,7 @@ describe("renderProfileEmbedSvg", () => {
 
     expect(svg).toContain("<svg");
     expect(svg).toContain("Tokscale Stats");
+    expect(svg).toContain("README EMBED");
     expect(svg).toContain("@octocat");
     expect(svg).toContain("1,234,567");
     expect(svg).toContain("$42.42");
@@ -38,15 +39,17 @@ describe("renderProfileEmbedSvg", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
     expect(svg).toContain("family=Figtree");
-    expect(svg).toContain("font-family=\"Figtree");
+    expect(svg).toContain('font-family="Figtree');
   });
 
   it("renders compact variant", () => {
     const svg = renderProfileEmbedSvg(mockStats, { compact: true, theme: "light" });
 
-    expect(svg).toContain("width=\"460\"");
-    expect(svg).toContain("height=\"162\"");
+    expect(svg).toContain('width="460"');
+    expect(svg).toContain('height="162"');
+    expect(svg).toContain("README EMBED");
     expect(svg).toContain("@octocat");
+    expect(svg).toContain('stop-color="#F6FAFF"');
     expect(svg).not.toContain("Submissions");
   });
 
@@ -62,17 +65,16 @@ describe("renderProfileEmbedSvg", () => {
 
     expect(tokensSvg).toContain("Rank (Tokens)");
     expect(costSvg).toContain("Rank (Cost)");
+    expect(tokensSvg).toContain("RANK · TOKENS");
+    expect(costSvg).toContain("RANK · COST");
   });
 
-
-  it("applies accent color to tokens, green to cost, and medal color to rank", () => {
+  it("uses gradient tokens, green cost, and medal rank colors", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    // Tokens value should use dark accent
-    expect(svg).toContain('fill="#58a6ff"');
-    // Cost value should use dark green
-    expect(svg).toContain('fill="#3FB950"');
-    // Rank #3 should use bronze
+    expect(svg).toContain('id="tokens-gradient"');
+    expect(svg).toContain('fill="url(#tokens-gradient)"');
+    expect(svg).toContain('fill="#53D18C"');
     expect(svg).toContain('fill="#D97706"');
   });
 
@@ -83,6 +85,17 @@ describe("renderProfileEmbedSvg", () => {
     });
     expect(svg).toContain('fill="#EAB308"');
   });
+
+  it("renders branded gradient surfaces for the refreshed card", () => {
+    const svg = renderProfileEmbedSvg(mockStats);
+
+    expect(svg).toContain('id="card-bg"');
+    expect(svg).toContain('id="shell-bg"');
+    expect(svg).toContain('id="header-bg"');
+    expect(svg).toContain('id="metric-sheen"');
+    expect(svg).toContain('filter="url(#soft-glow)"');
+  });
+
   it("escapes XML in user-provided text", () => {
     const svg = renderProfileEmbedSvg({
       ...mockStats,
@@ -99,7 +112,6 @@ describe("renderProfileEmbedSvg", () => {
   it("does not contain raw & outside XML entities (well-formed XML)", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    // Strip all valid XML entities, then check no raw & remains
     const stripped = svg.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, "");
     expect(stripped).not.toContain("&");
   });
@@ -107,24 +119,56 @@ describe("renderProfileEmbedSvg", () => {
   it("positions display name dynamically after username", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    // Username '@octocat' is 8 chars; at ~9px/char = 72px; x should be >= 24 + 72 + 8 = 104
-    const displayNameTag = svg.match(/<text x="(\d+)"[^>]*>The Octocat<\/text>/);
+    const displayNameTag = svg.match(/<text x="(\d+(?:\.\d+)?)"[^>]*>The Octocat<\/text>/);
     expect(displayNameTag).toBeTruthy();
     const x = Number(displayNameTag![1]);
-    expect(x).toBeGreaterThanOrEqual(24 + 8 * 9 + 8);
+    expect(x).toBeGreaterThanOrEqual(20 + 18 + 8 * 9 + 8);
   });
 
   it("hides display name when username is too long to leave room", () => {
-    const longUsername = "a".repeat(50); // long enough to exhaust available width
-    const svg = renderProfileEmbedSvg({
+    const longUsername = "a".repeat(50);
+    const svg = renderProfileEmbedSvg(
+      {
+        ...mockStats,
+        user: {
+          ...mockStats.user,
+          username: longUsername,
+          displayName: "Should Be Hidden",
+        },
+      },
+      { compact: true }
+    );
+    expect(svg).not.toContain("Should Be Hidden");
+  });
+
+  it("computes display name collision width from raw text, not XML-escaped", () => {
+    // In compact mode this name fits when measured as raw text (29 chars),
+    // but would be hidden if measured after XML escaping (33 chars).
+    const displayName = `${"A".repeat(14)} & ${"B".repeat(12)}`;
+    const expectedDisplayName = `${"A".repeat(14)} &amp; ${"B".repeat(12)}`;
+
+    const compactSvg = renderProfileEmbedSvg(
+      {
+        ...mockStats,
+        user: {
+          ...mockStats.user,
+          username: "short",
+          displayName,
+        },
+      },
+      { compact: true }
+    );
+    const defaultSvg = renderProfileEmbedSvg({
       ...mockStats,
       user: {
         ...mockStats.user,
-        username: longUsername,
-        displayName: "Should Be Hidden",
+        username: "short",
+        displayName,
       },
-    }, { compact: true });
-    expect(svg).not.toContain("Should Be Hidden");
+    });
+
+    expect(compactSvg).toContain(expectedDisplayName);
+    expect(defaultSvg).toContain(expectedDisplayName);
   });
 });
 
@@ -133,8 +177,10 @@ describe("renderProfileEmbedErrorSvg", () => {
     const svg = renderProfileEmbedErrorSvg("User <unknown>", { theme: "light" });
 
     expect(svg).toContain("Tokscale Stats");
+    expect(svg).toContain("README EMBED");
     expect(svg).toContain("User &lt;unknown&gt;");
     expect(svg).not.toContain("User <unknown>");
     expect(svg).toContain("family=Figtree");
+    expect(svg).toContain('id="error-bg"');
   });
 });

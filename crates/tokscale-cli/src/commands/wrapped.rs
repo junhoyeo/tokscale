@@ -351,7 +351,7 @@ fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentE
             continue;
         };
 
-        let normalized = tokscale_core::sessions::normalize_agent_name(agent);
+        let normalized = tokscale_core::sessions::normalize_opencode_agent_name(agent);
         let tokens = message.input
             + message.output
             + message.cache_read

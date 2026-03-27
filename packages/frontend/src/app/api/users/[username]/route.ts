@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
 import { eq, desc, sql, and, gte } from "drizzle-orm";
+import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 
 export const revalidate = 60; // ISR: revalidate every 60 seconds
 
@@ -54,10 +55,12 @@ export async function GET(_request: Request, { params }: RouteParams) {
           sourcesUsed: submissions.sourcesUsed,
           modelsUsed: submissions.modelsUsed,
           updatedAt: submissions.updatedAt,
+          cliVersion: submissions.cliVersion,
+          schemaVersion: submissions.schemaVersion,
         })
         .from(submissions)
         .where(eq(submissions.userId, user.id))
-        .orderBy(desc(submissions.createdAt))
+        .orderBy(desc(submissions.updatedAt))
         .limit(1),
 
       db.execute<{ rank: number }>(sql`
@@ -384,6 +387,11 @@ export async function GET(_request: Request, { params }: RouteParams) {
         end: stats?.latestDate || null,
       },
       updatedAt: latestSubmission?.updatedAt?.toISOString() || null,
+      submissionFreshness: buildSubmissionFreshness({
+        updatedAt: latestSubmission?.updatedAt,
+        cliVersion: latestSubmission?.cliVersion,
+        schemaVersion: latestSubmission?.schemaVersion,
+      }),
       clients: latestSubmission?.sourcesUsed || [],
       models: latestSubmission?.modelsUsed || [],
       modelUsage,

@@ -4,7 +4,7 @@
 //! - SQLite database (OpenCode 1.2+): ~/.local/share/opencode/opencode.db
 //! - Legacy JSON files: ~/.local/share/opencode/storage/message/
 
-use super::{normalize_agent_name, UnifiedMessage};
+use super::{normalize_opencode_agent_name, UnifiedMessage};
 use crate::TokenBreakdown;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let tokens = msg.tokens?;
     let model_id = msg.model_id?;
     let agent_or_mode = msg.mode.or(msg.agent);
-    let agent = agent_or_mode.map(|a| normalize_agent_name(&a));
+    let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
 
     let session_id = msg.session_id.unwrap_or_else(|| "unknown".to_string());
 
@@ -155,7 +155,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         };
 
         let agent_or_mode = msg.mode.or(msg.agent);
-        let agent = agent_or_mode.map(|a| normalize_agent_name(&a));
+        let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
 
         let mut unified = UnifiedMessage::new_with_agent(
             "opencode",
@@ -676,7 +676,7 @@ mod tests {
             .filter(|msg| {
                 msg.dedup_key
                     .as_ref()
-                    .map_or(true, |key| seen.insert(key.clone()))
+                    .is_none_or(|key| seen.insert(key.clone()))
             })
             .collect();
 
@@ -750,7 +750,7 @@ mod tests {
         // Simulate the validity check from lib.rs
         let is_valid = cache.migration_complete
             && current_file_count == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(is_valid, "Cache should be valid when count and mtime match");
     }
@@ -776,7 +776,7 @@ mod tests {
         let current_file_count = 2u64; // changed
         let is_valid = cache.migration_complete
             && current_file_count == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(!is_valid, "Cache should be invalid when file count changes");
     }
@@ -802,7 +802,7 @@ mod tests {
 
         let is_valid = cache.migration_complete
             && 1u64 == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(
             !is_valid,
@@ -842,7 +842,7 @@ mod tests {
 
         let is_valid = cache.migration_complete
             && 1u64 == cache.json_file_count
-            && get_json_dir_mtime(&json_dir).map_or(false, |m| m <= cache.json_dir_mtime_secs);
+            && get_json_dir_mtime(&json_dir).is_some_and(|m| m <= cache.json_dir_mtime_secs);
 
         assert!(
             !is_valid,

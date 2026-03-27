@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getUserRank, type Period, type SortBy } from "@/lib/leaderboard/getLeaderboard";
+import { getUserRank } from "@/lib/leaderboard/getLeaderboard";
+import type { Period, SortBy } from "@/lib/leaderboard/types";
 import { isValidGitHubUsername } from "@/lib/validation/username";
 
 export const revalidate = 60;

@@ -8,6 +8,7 @@ pub mod codex;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
 pub mod mux;
@@ -21,7 +22,7 @@ pub(crate) mod utils;
 
 use crate::TokenBreakdown;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
     pub client: String,
     pub model_id: String,
@@ -36,20 +37,48 @@ pub struct UnifiedMessage {
 }
 
 pub fn normalize_agent_name(agent: &str) -> String {
-    let agent_lower = agent.to_lowercase();
+    let trimmed = agent.trim();
+    let agent_lower = trimmed.to_lowercase();
 
     if agent_lower.contains("plan") {
         if agent_lower.contains("omo") || agent_lower.contains("sisyphus") {
             return "Planner-Sisyphus".to_string();
         }
-        return agent.to_string();
+        return trimmed.to_string();
     }
 
     if agent_lower == "omo" || agent_lower == "sisyphus" {
         return "Sisyphus".to_string();
     }
 
-    agent.to_string()
+    trimmed.to_string()
+}
+
+pub fn normalize_opencode_agent_name(agent: &str) -> String {
+    let trimmed = agent.trim();
+    let agent_lower = trimmed.to_lowercase();
+
+    if let Some(normalized) = normalize_oh_my_opencode_agent_name(&agent_lower) {
+        return normalized;
+    }
+
+    normalize_agent_name(trimmed)
+}
+
+fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
+    let normalized = match agent_lower {
+        "sisyphus (ultraworker)" | "sisyphus" => "Sisyphus",
+        "hephaestus (deep agent)" | "hephaestus" => "Hephaestus",
+        "prometheus (plan builder)" | "prometheus (planner)" | "prometheus" => "Prometheus",
+        "atlas (plan executor)" | "atlas" => "Atlas",
+        "metis (plan consultant)" | "metis" => "Metis",
+        "momus (plan critic)" | "momus (plan reviewer)" | "momus" => "Momus",
+        "sisyphus-junior" => "Sisyphus-Junior",
+        "planner-sisyphus" => "Planner-Sisyphus",
+        _ => return None,
+    };
+
+    Some(normalized.to_string())
 }
 
 impl UnifiedMessage {
@@ -149,6 +178,15 @@ impl UnifiedMessage {
             dedup_key,
         }
     }
+
+    pub(crate) fn refresh_derived_fields(&mut self) {
+        self.date = timestamp_to_date(self.timestamp);
+    }
+
+    pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
+        self.timestamp = timestamp;
+        self.refresh_derived_fields();
+    }
 }
 
 /// Convert Unix milliseconds to a local YYYY-MM-DD date string.
@@ -229,6 +267,57 @@ mod tests {
         assert_eq!(normalize_agent_name("Sisyphus"), "Sisyphus");
         assert_eq!(normalize_agent_name("omo"), "Sisyphus");
         assert_eq!(normalize_agent_name("sisyphus"), "Sisyphus");
+        assert_eq!(
+            normalize_agent_name("Sisyphus (Ultraworker)"),
+            "Sisyphus (Ultraworker)"
+        );
+
+        assert_eq!(
+            normalize_opencode_agent_name("Sisyphus (Ultraworker)"),
+            "Sisyphus"
+        );
+        assert_eq!(normalize_opencode_agent_name("hephaestus"), "Hephaestus");
+        assert_eq!(normalize_opencode_agent_name("prometheus"), "Prometheus");
+        assert_eq!(normalize_opencode_agent_name("atlas"), "Atlas");
+        assert_eq!(normalize_opencode_agent_name("metis"), "Metis");
+        assert_eq!(normalize_opencode_agent_name("momus"), "Momus");
+        assert_eq!(
+            normalize_opencode_agent_name("sisyphus-junior"),
+            "Sisyphus-Junior"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("planner-sisyphus"),
+            "Planner-Sisyphus"
+        );
+
+        assert_eq!(
+            normalize_opencode_agent_name("Hephaestus (Deep Agent)"),
+            "Hephaestus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Prometheus (Plan Builder)"),
+            "Prometheus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Prometheus (Planner)"),
+            "Prometheus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Atlas (Plan Executor)"),
+            "Atlas"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Metis (Plan Consultant)"),
+            "Metis"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Momus (Plan Critic)"),
+            "Momus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Momus (Plan Reviewer)"),
+            "Momus"
+        );
 
         assert_eq!(normalize_agent_name("OmO-Plan"), "Planner-Sisyphus");
         assert_eq!(normalize_agent_name("Planner-Sisyphus"), "Planner-Sisyphus");

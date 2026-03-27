@@ -471,5 +471,6 @@ jobs:
         if: success()
         continue-on-error: true
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
         run: bash scripts/post-discord-release.sh "${{ needs.bump-versions.outputs.version }}"

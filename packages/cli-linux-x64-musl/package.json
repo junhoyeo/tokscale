@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/cli-linux-x64-musl",
-  "version": "2.0.9",
+  "version": "2.0.14",
   "description": "tokscale CLI binary for linux x64 musl",
   "license": "MIT",
   "type": "module",
@@ -23,7 +23,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/junhoyeo/tokscale.git",
+    "url": "git+https://github.com/junhoyeo/tokscale.git",
     "directory": "packages/cli-linux-x64-musl"
   }
 }

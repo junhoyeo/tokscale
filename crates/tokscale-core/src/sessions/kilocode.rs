@@ -79,4 +79,36 @@ mod tests {
         let messages = parse_kilocode_file(&task_dir.join("ui_messages.json"));
         assert!(messages.is_empty());
     }
+
+    #[test]
+    fn test_parse_kilocode_preserves_nested_reseller_api_protocol() {
+        let dir = TempDir::new().unwrap();
+        let task_dir = dir.path().join("tasks").join("kilo-task-3");
+        fs::create_dir_all(&task_dir).unwrap();
+        fs::write(
+            task_dir.join("ui_messages.json"),
+            r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:00Z",
+    "text": "{\"cost\":0.05,\"tokensIn\":40,\"tokensOut\":15,\"cacheReads\":7,\"cacheWrites\":3,\"apiProtocol\":\"azure/openai\"}"
+  }
+]"#,
+        )
+        .unwrap();
+        fs::write(
+            task_dir.join("api_conversation_history.json"),
+            r#"
+<environment_details>
+<model>gpt-5</model>
+</environment_details>
+"#,
+        )
+        .unwrap();
+
+        let messages = parse_kilocode_file(&task_dir.join("ui_messages.json"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "azure/openai");
+    }
 }

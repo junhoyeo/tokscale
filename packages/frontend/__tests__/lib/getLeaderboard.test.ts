@@ -18,6 +18,8 @@ const mockState = vi.hoisted(() => {
       updatedAt: "submissions.updatedAt",
       totalTokens: "submissions.totalTokens",
       totalCost: "submissions.totalCost",
+      cliVersion: "submissions.cliVersion",
+      schemaVersion: "submissions.schemaVersion",
     },
     dailyBreakdown: {
       submissionId: "dailyBreakdown.submissionId",
@@ -99,6 +101,10 @@ vi.mock("@/lib/db", () => ({
   dailyBreakdown: mockState.tables.dailyBreakdown,
 }));
 
+vi.mock("@/lib/submissionFreshness", async () =>
+  import("../../src/lib/submissionFreshness")
+);
+
 vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
@@ -137,6 +143,8 @@ describe("period leaderboard data", () => {
       tokens: 100,
       cost: 1.25,
       updatedAt: "2026-03-07T11:00:00.000Z",
+      cliVersion: "1.5.0",
+      schemaVersion: 1,
     },
     {
       userId: "user-alice",
@@ -146,6 +154,8 @@ describe("period leaderboard data", () => {
       tokens: 150,
       cost: 1.75,
       updatedAt: "2026-03-07T11:00:00.000Z",
+      cliVersion: "1.5.0",
+      schemaVersion: 1,
     },
     {
       userId: "user-bob",
@@ -154,7 +164,9 @@ describe("period leaderboard data", () => {
       avatarUrl: null,
       tokens: 1000,
       cost: 9.5,
-      updatedAt: "2026-03-07T09:00:00.000Z",
+      updatedAt: "2026-01-15T09:00:00.000Z",
+      cliVersion: "1.3.0",
+      schemaVersion: 0,
     },
   ];
 
@@ -180,6 +192,12 @@ describe("period leaderboard data", () => {
       username: "bob",
       totalTokens: 1000,
       totalCost: 9.5,
+      submissionFreshness: {
+        lastUpdated: "2026-01-15T09:00:00.000Z",
+        cliVersion: "1.3.0",
+        schemaVersion: 0,
+        isStale: true,
+      },
     });
     expect(leaderboard.users[1]).toMatchObject({
       rank: 2,
@@ -187,6 +205,12 @@ describe("period leaderboard data", () => {
       totalTokens: 250,
       totalCost: 3,
       submissionCount: null,
+      submissionFreshness: {
+        lastUpdated: "2026-03-07T11:00:00.000Z",
+        cliVersion: "1.5.0",
+        schemaVersion: 1,
+        isStale: false,
+      },
     });
     expect(leaderboard.stats).toMatchObject({
       totalTokens: 1250,
@@ -234,6 +258,12 @@ describe("period leaderboard data", () => {
       totalCost: 3,
       submissionCount: null,
       lastSubmission: "2026-03-07T11:00:00.000Z",
+      submissionFreshness: {
+        lastUpdated: "2026-03-07T11:00:00.000Z",
+        cliVersion: "1.5.0",
+        schemaVersion: 1,
+        isStale: false,
+      },
     });
   });
 });

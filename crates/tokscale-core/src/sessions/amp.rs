@@ -3,7 +3,7 @@
 //! Parses JSON files from ~/.local/share/amp/threads/
 
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -67,24 +67,7 @@ pub struct AmpThread {
 
 /// Get provider from model name
 fn get_provider_from_model(model: &str) -> &'static str {
-    let model_lower = model.to_lowercase();
-    if model_lower.contains("claude")
-        || model_lower.contains("opus")
-        || model_lower.contains("sonnet")
-        || model_lower.contains("haiku")
-    {
-        return "anthropic";
-    }
-    if model_lower.contains("gpt") || model_lower.contains("o1") || model_lower.contains("o3") {
-        return "openai";
-    }
-    if model_lower.contains("gemini") {
-        return "google";
-    }
-    if model_lower.contains("grok") {
-        return "xai";
-    }
-    "anthropic" // Default for Amp
+    provider_identity::inferred_provider_from_model(model).unwrap_or("anthropic")
 }
 
 /// Parse an Amp thread JSON file

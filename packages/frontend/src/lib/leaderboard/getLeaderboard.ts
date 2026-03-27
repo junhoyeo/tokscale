@@ -1,41 +1,10 @@
 import { unstable_cache } from "next/cache";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
 import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
+import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+import type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
 
-export type Period = "all" | "month" | "week";
-export type SortBy = "tokens" | "cost";
-
-export interface LeaderboardUser {
-  rank: number;
-  userId: string;
-  username: string;
-  displayName: string | null;
-  avatarUrl: string | null;
-  totalTokens: number;
-  totalCost: number;
-  submissionCount: number | null;
-  lastSubmission: string;
-}
-
-export interface LeaderboardData {
-  users: LeaderboardUser[];
-  pagination: {
-    page: number;
-    limit: number;
-    totalUsers: number;
-    totalPages: number;
-    hasNext: boolean;
-    hasPrev: boolean;
-  };
-  stats: {
-    totalTokens: number;
-    totalCost: number;
-    totalSubmissions: number | null;
-    uniqueUsers: number;
-  };
-  period: Period;
-  sortBy: SortBy;
-}
+export type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
 
 interface LeaderboardPeriodRow {
   userId: string;
@@ -45,6 +14,8 @@ interface LeaderboardPeriodRow {
   tokens: number;
   cost: number;
   updatedAt: string;
+  cliVersion: string | null;
+  schemaVersion: number;
 }
 
 interface PeriodDateRange {
@@ -60,6 +31,8 @@ interface PeriodLeaderboardDbRow {
   tokens: number | string | null;
   cost: number | string | null;
   updatedAt: Date | string;
+  cliVersion: string | null;
+  schemaVersion: number | null;
 }
 
 interface AllTimeLeaderboardDbRow {
@@ -71,6 +44,8 @@ interface AllTimeLeaderboardDbRow {
   totalCost: number | string | null;
   submissionCount: number | string | null;
   lastSubmission: string;
+  cliVersion: string | null;
+  schemaVersion: number | null;
 }
 
 function toUtcDateString(date: Date): string {
@@ -143,6 +118,11 @@ function aggregatePeriodRows(
       existing.totalCost += row.cost;
       if (row.updatedAt > existing.lastSubmission) {
         existing.lastSubmission = row.updatedAt;
+        existing.submissionFreshness = buildSubmissionFreshness({
+          updatedAt: row.updatedAt,
+          cliVersion: row.cliVersion,
+          schemaVersion: row.schemaVersion,
+        });
       }
       continue;
     }
@@ -156,6 +136,11 @@ function aggregatePeriodRows(
       totalCost: row.cost,
       submissionCount: null,
       lastSubmission: row.updatedAt,
+      submissionFreshness: buildSubmissionFreshness({
+        updatedAt: row.updatedAt,
+        cliVersion: row.cliVersion,
+        schemaVersion: row.schemaVersion,
+      }),
     });
   }
 
@@ -236,6 +221,8 @@ async function fetchPeriodLeaderboardRows(
       tokens: dailyBreakdown.tokens,
       cost: dailyBreakdown.cost,
       updatedAt: submissions.updatedAt,
+      cliVersion: submissions.cliVersion,
+      schemaVersion: submissions.schemaVersion,
     })
     .from(dailyBreakdown)
     .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
@@ -257,6 +244,8 @@ async function fetchPeriodLeaderboardRows(
     updatedAt: row.updatedAt instanceof Date
       ? row.updatedAt.toISOString()
       : new Date(row.updatedAt).toISOString(),
+    cliVersion: row.cliVersion,
+    schemaVersion: Number(row.schemaVersion) || 0,
   }));
 }
 
@@ -288,6 +277,16 @@ async function fetchLeaderboardData(
       totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
       submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
       lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
+      cliVersion: sql<string | null>`(
+        SELECT s2.cli_version FROM submissions s2
+        WHERE s2.user_id = ${users.id}
+        ORDER BY s2.updated_at DESC LIMIT 1
+      )`.as("cli_version"),
+      schemaVersion: sql<number>`COALESCE((
+        SELECT s2.schema_version FROM submissions s2
+        WHERE s2.user_id = ${users.id}
+        ORDER BY s2.updated_at DESC LIMIT 1
+      ), 0)`.as("schema_version"),
     })
     .from(submissions)
     .innerJoin(users, eq(submissions.userId, users.id))
@@ -322,6 +321,11 @@ async function fetchLeaderboardData(
       totalCost: Number(row.totalCost) || 0,
       submissionCount: Number(row.submissionCount) || 0,
       lastSubmission: row.lastSubmission,
+      submissionFreshness: buildSubmissionFreshness({
+        updatedAt: row.lastSubmission,
+        cliVersion: row.cliVersion,
+        schemaVersion: row.schemaVersion,
+      }),
     })),
     pagination: {
       page,
@@ -390,6 +394,16 @@ async function fetchUserRank(
       totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
       submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
       lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
+      cliVersion: sql<string | null>`(
+        SELECT s2.cli_version FROM submissions s2
+        WHERE s2.user_id = ${user.id}
+        ORDER BY s2.updated_at DESC LIMIT 1
+      )`.as("cli_version"),
+      schemaVersion: sql<number>`COALESCE((
+        SELECT s2.schema_version FROM submissions s2
+        WHERE s2.user_id = ${user.id}
+        ORDER BY s2.updated_at DESC LIMIT 1
+      ), 0)`.as("schema_version"),
     })
     .from(submissions)
     .where(eq(submissions.userId, user.id));
@@ -435,6 +449,11 @@ async function fetchUserRank(
     totalCost: userTotalCost,
     submissionCount: Number(userStats.submissionCount) || 0,
     lastSubmission: userStats.lastSubmission,
+    submissionFreshness: buildSubmissionFreshness({
+      updatedAt: userStats.lastSubmission,
+      cliVersion: userStats.cliVersion,
+      schemaVersion: userStats.schemaVersion,
+    }),
   };
 }
 

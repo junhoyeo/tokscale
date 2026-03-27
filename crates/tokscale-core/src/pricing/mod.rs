@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+use crate::TokenBreakdown;
+
 pub use litellm::ModelPricing;
 
 static PRICING_SERVICE: OnceCell<Arc<PricingService>> = OnceCell::const_new();
@@ -132,6 +134,16 @@ impl PricingService {
         self.lookup.lookup_with_source(model_id, force_source)
     }
 
+    pub fn lookup_with_source_and_provider(
+        &self,
+        model_id: &str,
+        force_source: Option<&str>,
+        provider_id: Option<&str>,
+    ) -> Option<LookupResult> {
+        self.lookup
+            .lookup_with_source_and_provider(model_id, force_source, provider_id)
+    }
+
     pub fn calculate_cost(
         &self,
         model_id: &str,
@@ -141,8 +153,24 @@ impl PricingService {
         cache_write: i64,
         reasoning: i64,
     ) -> f64 {
+        let usage = TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+        };
+        self.calculate_cost_with_provider(model_id, None, &usage)
+    }
+
+    pub fn calculate_cost_with_provider(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> f64 {
         self.lookup
-            .calculate_cost(model_id, input, output, cache_read, cache_write, reasoning)
+            .calculate_cost_with_provider(model_id, provider_id, usage)
     }
 }
 
