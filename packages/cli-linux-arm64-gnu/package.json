@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/cli-linux-arm64-gnu",
-  "version": "2.0.13",
+  "version": "2.0.14",
   "description": "tokscale CLI binary for linux arm64 gnu",
   "license": "MIT",
   "type": "module",
@@ -23,7 +23,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/junhoyeo/tokscale.git",
+    "url": "git+https://github.com/junhoyeo/tokscale.git",
     "directory": "packages/cli-linux-arm64-gnu"
   }
 }

@@ -29,6 +29,9 @@ struct OpenClawEntry {
     #[serde(rename = "type")]
     entry_type: String,
     message: Option<OpenClawMessage>,
+    #[serde(rename = "customType")]
+    custom_type: Option<String>,
+    data: Option<OpenClawModelData>,
     #[serde(rename = "modelId")]
     model_id: Option<String>,
     provider: Option<String>,
@@ -39,6 +42,15 @@ struct OpenClawMessage {
     role: Option<String>,
     usage: Option<OpenClawUsage>,
     timestamp: Option<i64>,
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenClawModelData {
+    provider: Option<String>,
+    #[serde(rename = "modelId")]
+    model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +181,20 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                     current_provider = Some(provider);
                 }
             }
+            "custom" => {
+                if entry.custom_type.as_deref() != Some("model-snapshot") {
+                    continue;
+                }
+
+                if let Some(data) = entry.data {
+                    if let Some(model) = data.model_id {
+                        current_model = Some(model);
+                    }
+                    if let Some(provider) = data.provider {
+                        current_provider = Some(provider);
+                    }
+                }
+            }
             "message" => {
                 if let Some(msg) = entry.message {
                     if msg.role.as_deref() != Some("assistant") {
@@ -180,14 +206,25 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                         None => continue,
                     };
 
-                    let model = match &current_model {
-                        Some(m) => m.clone(),
+                    let model = msg
+                        .model
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .or_else(|| current_model.clone().filter(|m| !m.is_empty()));
+                    let provider = msg
+                        .provider
+                        .clone()
+                        .filter(|p| !p.is_empty())
+                        .or_else(|| current_provider.clone().filter(|p| !p.is_empty()))
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    let model = match model {
+                        Some(model) => model,
                         None => continue,
                     };
 
-                    let provider = current_provider
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string());
+                    current_model = Some(model.clone());
+                    current_provider = Some(provider.clone());
                     let timestamp = msg.timestamp.unwrap_or(file_mtime_ms);
                     let cost = usage.cost.and_then(|c| c.total).unwrap_or(0.0);
 
@@ -305,6 +342,88 @@ mod tests {
         assert_eq!(messages[0].provider_id, "openai-codex");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 5);
+    }
+
+    #[test]
+    fn test_parse_openclaw_transcript_derives_session_id_from_reset_filename() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4-6"}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2},"timestamp":1700000000000}}"#;
+
+        let session_path = create_test_session(
+            &dir,
+            "my-session-123.jsonl.reset.2026-03-20T06-34-44.520Z",
+            content,
+        );
+        let messages = parse_openclaw_transcript(Path::new(&session_path));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "my-session-123");
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+    }
+
+    #[test]
+    fn test_parse_openclaw_session_model_snapshot_updates_current_model() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"custom","customType":"model-snapshot","data":{"provider":"anthropic","modelId":"claude-opus-4-6"}}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":25,"cacheWrite":10},"timestamp":1700000000000}}"#;
+
+        let session_path = create_test_session(&dir, "session.jsonl", content);
+        let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 25);
+        assert_eq!(messages[0].tokens.cache_write, 10);
+    }
+
+    #[test]
+    fn test_parse_openclaw_session_embedded_model_provider_without_model_change() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"message","id":"msg1","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-6","content":[],"usage":{"input":100,"output":50,"cacheRead":20,"cacheWrite":5},"timestamp":1700000000000}}"#;
+
+        let session_path = create_test_session(&dir, "session.jsonl", content);
+        let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 20);
+        assert_eq!(messages[0].tokens.cache_write, 5);
+    }
+
+    #[test]
+    fn test_parse_openclaw_session_preserves_unknown_provider_fallback() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","modelId":"claude-sonnet-4-6"}
+{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
+
+        let session_path = create_test_session(&dir, "session.jsonl", content);
+        let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id, "unknown");
+    }
+
+    #[test]
+    fn test_parse_openclaw_session_empty_embedded_values_fall_back_to_current_model_state() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4-6"}
+{"type":"message","id":"msg1","message":{"role":"assistant","provider":"","model":"","content":[],"usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
+
+        let session_path = create_test_session(&dir, "session.jsonl", content);
+        let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
     }
 
     fn create_test_index(dir: &TempDir, content: &str) -> PathBuf {
