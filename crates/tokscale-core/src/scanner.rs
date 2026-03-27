@@ -60,9 +60,11 @@ impl ScanResult {
     }
 }
 
-pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
-    if let Ok(path) = std::env::var("TOKSCALE_HEADLESS_DIR") {
-        return vec![PathBuf::from(path)];
+pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    if use_env_roots {
+        if let Ok(path) = std::env::var("TOKSCALE_HEADLESS_DIR") {
+            return vec![PathBuf::from(path)];
+        }
     }
 
     let mut roots = Vec::new();
@@ -78,6 +80,10 @@ pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
     roots.push(mac_root);
 
     roots
+}
+
+pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
+    headless_roots_with_env_strategy(home_dir, true)
 }
 
 /// Scan a single directory for session files
@@ -196,7 +202,11 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
 }
 
 /// Scan all session client directories in parallel
-pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
+pub fn scan_all_clients_with_env_strategy(
+    home_dir: &str,
+    clients: &[String],
+    use_env_roots: bool,
+) -> ScanResult {
     let mut result = ScanResult::default();
 
     let include_all = clients.is_empty();
@@ -211,7 +221,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
             .collect()
     };
 
-    let headless_roots = headless_roots(home_dir);
+    let headless_roots = headless_roots_with_env_strategy(home_dir, use_env_roots);
 
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
@@ -229,20 +239,26 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         }
 
         let def = client_id.data();
-        let path = def.resolve_path(home_dir);
+        let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
         tasks.push((*client_id, path, def.pattern()));
     }
 
-    // Extra scan directories from TOKSCALE_EXTRA_DIRS env var
-    let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
-    for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
-        let pattern = client_id.data().pattern();
-        tasks.push((client_id, path, pattern));
+    // Extra scan directories are part of the caller's environment, so they are
+    // intentionally ignored when an explicit --home override disables env roots.
+    if use_env_roots {
+        let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
+        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+            let pattern = client_id.data().pattern();
+            tasks.push((client_id, path, pattern));
+        }
     }
 
     if enabled.contains(&ClientId::OpenCode) {
-        let xdg_data =
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir));
+        let xdg_data = if use_env_roots {
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+        } else {
+            format!("{}/.local/share", home_dir)
+        };
 
         // OpenCode 1.2+: SQLite database at ~/.local/share/opencode/opencode.db
         let opencode_db_path = PathBuf::from(format!("{}/opencode/opencode.db", xdg_data));
@@ -251,7 +267,9 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         }
 
         // OpenCode legacy: JSON files at ~/.local/share/opencode/storage/message/*/*.json
-        let opencode_path = ClientId::OpenCode.data().resolve_path(home_dir);
+        let opencode_path = ClientId::OpenCode
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
         result.opencode_json_dir = Some(PathBuf::from(&opencode_path));
         tasks.push((
             ClientId::OpenCode,
@@ -262,9 +280,14 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
 
     if enabled.contains(&ClientId::Codex) {
         // Codex: ~/.codex/sessions/**/*.jsonl
-        let codex_home =
-            std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir));
-        let codex_path = ClientId::Codex.data().resolve_path(home_dir);
+        let codex_home = if use_env_roots {
+            std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir))
+        } else {
+            format!("{}/.codex", home_dir)
+        };
+        let codex_path = ClientId::Codex
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
         tasks.push((
             ClientId::Codex,
             codex_path,
@@ -289,7 +312,9 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
 
     if enabled.contains(&ClientId::OpenClaw) {
         // OpenClaw transcripts: ~/.openclaw/agents/**/*.jsonl
-        let openclaw_path = ClientId::OpenClaw.data().resolve_path(home_dir);
+        let openclaw_path = ClientId::OpenClaw
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
         tasks.push((
             ClientId::OpenClaw,
             openclaw_path,
@@ -320,8 +345,11 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
     }
 
     if include_synthetic {
-        let xdg_data =
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir));
+        let xdg_data = if use_env_roots {
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+        } else {
+            format!("{}/.local/share", home_dir)
+        };
         let octofriend_db_path = PathBuf::from(format!("{}/octofriend/sqlite.db", xdg_data));
         if octofriend_db_path.exists() {
             result.synthetic_db = Some(octofriend_db_path);
@@ -329,7 +357,9 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
     }
 
     if enabled.contains(&ClientId::RooCode) {
-        let local_path = ClientId::RooCode.data().resolve_path(home_dir);
+        let local_path = ClientId::RooCode
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
         tasks.push((
             ClientId::RooCode,
             local_path,
@@ -348,7 +378,9 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
     }
 
     if enabled.contains(&ClientId::Kilo) {
-        let local_path = ClientId::Kilo.data().resolve_path(home_dir);
+        let local_path = ClientId::Kilo
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
         tasks.push((ClientId::Kilo, local_path, ClientId::Kilo.data().pattern()));
 
         let server_path = format!(
@@ -360,7 +392,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
 
     if enabled.contains(&ClientId::Kilo) {
         if let Some(cli_source) = ClientId::Kilo.data().source_by_tag("cli") {
-            let kilo_db_path = cli_source.resolve_path(home_dir);
+            let kilo_db_path = cli_source.resolve_path_with_env_strategy(home_dir, use_env_roots);
             if std::path::Path::new(&kilo_db_path).exists() {
                 result.kilo_db = Some(PathBuf::from(kilo_db_path));
             }
@@ -387,6 +419,10 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
     }
 
     result
+}
+
+pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
+    scan_all_clients_with_env_strategy(home_dir, clients, true)
 }
 
 #[cfg(test)]
@@ -742,6 +778,24 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_headless_roots_ignore_env_override_when_disabled() {
+        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
+        unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "/custom/headless") };
+
+        let roots = headless_roots_with_env_strategy("/tmp/home", false);
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/tmp/home/.config/tokscale/headless"),
+                PathBuf::from("/tmp/home/Library/Application Support/tokscale/headless")
+            ]
+        );
+
+        restore_env("TOKSCALE_HEADLESS_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
     fn test_scan_all_clients_opencode() {
         let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
 
@@ -757,6 +811,33 @@ mod tests {
         assert!(result.get(ClientId::Claude).is_empty());
         assert!(result.get(ClientId::Codex).is_empty());
         assert!(result.get(ClientId::Gemini).is_empty());
+
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_opencode_home_override_ignores_xdg_env() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("target-home");
+        let conflicting_xdg = dir.path().join("conflicting-xdg");
+        setup_mock_opencode_dir(&home);
+        fs::create_dir_all(&conflicting_xdg).unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", &conflicting_xdg) };
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["opencode".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::OpenCode).len(), 1);
+        assert_eq!(
+            result.opencode_json_dir,
+            Some(home.join(".local/share/opencode/storage/message"))
+        );
 
         restore_env("XDG_DATA_HOME", previous_xdg);
     }
@@ -900,6 +981,31 @@ mod tests {
 
         let result = scan_all_clients(home.to_str().unwrap(), &["codex".to_string()]);
         assert_eq!(result.get(ClientId::Codex).len(), 1);
+
+        restore_env("CODEX_HOME", previous_codex);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_codex_home_override_ignores_codex_home_env() {
+        let previous_codex = std::env::var("CODEX_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("target-home");
+        let conflicting = dir.path().join("conflicting-codex-home");
+        setup_mock_codex_dir(&home);
+        fs::create_dir_all(&conflicting).unwrap();
+
+        unsafe { std::env::set_var("CODEX_HOME", &conflicting) };
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["codex".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Codex).len(), 1);
+        assert!(result.get(ClientId::Codex)[0].ends_with("session.jsonl"));
+        assert!(result.get(ClientId::Codex)[0].starts_with(home.join(".codex")));
 
         restore_env("CODEX_HOME", previous_codex);
     }

@@ -102,6 +102,14 @@ struct Cli {
     #[arg(long, help = "Filter by year (YYYY)")]
     year: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "PATH",
+        global = true,
+        help = "Read local session data from this home directory for local report commands"
+    )]
+    home: Option<String>,
+
     #[arg(long, help = "Show processing time")]
     benchmark: bool,
 
@@ -571,6 +579,7 @@ fn main() -> Result<()> {
             if json || light || !can_use_tui {
                 run_models_report(
                     json,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -583,6 +592,7 @@ fn main() -> Result<()> {
                     group_by,
                 )
             } else {
+                ensure_home_supported_for_tui(&cli.home)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -644,6 +654,7 @@ fn main() -> Result<()> {
             if json || light || !can_use_tui {
                 run_monthly_report(
                     json,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -655,6 +666,7 @@ fn main() -> Result<()> {
                     month,
                 )
             } else {
+                ensure_home_supported_for_tui(&cli.home)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -672,11 +684,26 @@ fn main() -> Result<()> {
             json,
             provider,
             no_spinner,
-        }) => run_pricing_lookup(&model_id, json, provider.as_deref(), no_spinner),
-        Some(Commands::Clients { json }) => run_clients_command(json),
-        Some(Commands::Login) => run_login_command(),
-        Some(Commands::Logout) => run_logout_command(),
-        Some(Commands::Whoami) => run_whoami_command(),
+        }) => {
+            reject_unsupported_home_override(&cli.home, "pricing")?;
+            run_pricing_lookup(&model_id, json, provider.as_deref(), no_spinner)
+        }
+        Some(Commands::Clients { json }) => {
+            reject_unsupported_home_override(&cli.home, "clients")?;
+            run_clients_command(json)
+        }
+        Some(Commands::Login) => {
+            reject_unsupported_home_override(&cli.home, "login")?;
+            run_login_command()
+        }
+        Some(Commands::Logout) => {
+            reject_unsupported_home_override(&cli.home, "logout")?;
+            run_logout_command()
+        }
+        Some(Commands::Whoami) => {
+            reject_unsupported_home_override(&cli.home, "whoami")?;
+            run_whoami_command()
+        }
         Some(Commands::Graph {
             output,
             opencode,
@@ -722,7 +749,16 @@ fn main() -> Result<()> {
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
             let year = normalize_year_filter(today, week, month, year);
-            run_graph_command(output, clients, since, until, year, benchmark, no_spinner)
+            run_graph_command(
+                output,
+                cli.home.clone(),
+                clients,
+                since,
+                until,
+                year,
+                benchmark,
+                no_spinner,
+            )
         }
         Some(Commands::Tui {
             opencode,
@@ -747,6 +783,7 @@ fn main() -> Result<()> {
             until,
             year,
         }) => {
+            ensure_home_supported_for_tui(&cli.home)?;
             let clients = build_client_filter(ClientFlags {
                 opencode,
                 claude,
@@ -801,6 +838,7 @@ fn main() -> Result<()> {
             year,
             dry_run,
         }) => {
+            reject_unsupported_home_override(&cli.home, "submit")?;
             let clients = build_client_filter(ClientFlags {
                 opencode,
                 claude,
@@ -828,7 +866,10 @@ fn main() -> Result<()> {
             format,
             output,
             no_auto_flags,
-        }) => run_headless_command(&source, args, format, output, no_auto_flags),
+        }) => {
+            reject_unsupported_home_override(&cli.home, "headless")?;
+            run_headless_command(&source, args, format, output, no_auto_flags)
+        }
         Some(Commands::Wrapped {
             output,
             year,
@@ -853,6 +894,7 @@ fn main() -> Result<()> {
             disable_pinned,
             no_spinner: _,
         }) => {
+            reject_unsupported_home_override(&cli.home, "wrapped")?;
             let client_filter = build_client_filter(ClientFlags {
                 opencode,
                 claude,
@@ -880,8 +922,14 @@ fn main() -> Result<()> {
                 disable_pinned,
             )
         }
-        Some(Commands::Cursor { subcommand }) => run_cursor_command(subcommand),
-        Some(Commands::DeleteSubmittedData) => run_delete_data_command(),
+        Some(Commands::Cursor { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "cursor")?;
+            run_cursor_command(subcommand)
+        }
+        Some(Commands::DeleteSubmittedData) => {
+            reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
+            run_delete_data_command()
+        }
         None => {
             let clients = build_client_filter(ClientFlags {
                 opencode: cli.opencode,
@@ -911,6 +959,7 @@ fn main() -> Result<()> {
             if cli.json {
                 run_models_report(
                     cli.json,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -925,6 +974,7 @@ fn main() -> Result<()> {
             } else if cli.light || !can_use_tui {
                 run_models_report(
                     false,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -937,6 +987,7 @@ fn main() -> Result<()> {
                     group_by,
                 )
             } else {
+                ensure_home_supported_for_tui(&cli.home)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -1003,6 +1054,31 @@ fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
     } else {
         Some(clients)
     }
+}
+
+fn reject_unsupported_home_override(home_dir: &Option<String>, command: &str) -> Result<()> {
+    if home_dir.is_some() {
+        return Err(anyhow::anyhow!(
+            "--home is currently supported only for local report commands. It is not supported for `{}`.",
+            command
+        ));
+    }
+
+    Ok(())
+}
+
+fn use_env_roots(home_dir: &Option<String>) -> bool {
+    home_dir.is_none()
+}
+
+fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
+    if home_dir.is_some() {
+        return Err(anyhow::anyhow!(
+            "--home is currently supported for local report commands only. Use `--json`, `--light`, `models`, `monthly`, or `graph` instead of TUI mode."
+        ));
+    }
+
+    Ok(())
 }
 
 fn build_date_filter(
@@ -1238,6 +1314,7 @@ impl Drop for LightSpinner {
 #[allow(clippy::too_many_arguments)]
 fn run_models_report(
     json: bool,
+    home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
@@ -1260,12 +1337,14 @@ fn run_models_report(
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
             get_model_report(ReportOptions {
-                home_dir: None,
+                home_dir,
+                use_env_roots,
                 clients,
                 since,
                 until,
@@ -1750,6 +1829,7 @@ fn run_models_report(
 #[allow(clippy::too_many_arguments)]
 fn run_monthly_report(
     json: bool,
+    home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
@@ -1771,12 +1851,14 @@ fn run_monthly_report(
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
             get_monthly_report(ReportOptions {
-                home_dir: None,
+                home_dir,
+                use_env_roots,
                 clients,
                 since,
                 until,
@@ -2301,6 +2383,7 @@ fn run_clients_command(json: bool) -> Result<()> {
 
     let parsed = parse_local_clients(LocalParseOptions {
         home_dir: Some(home_dir.to_string_lossy().to_string()),
+        use_env_roots: true,
         clients: Some(
             ClientId::iter()
                 .filter(|client| client.parse_local())
@@ -3048,8 +3131,10 @@ fn prompt_star_repo(username: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_graph_command(
     output: Option<String>,
+    home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
@@ -3062,10 +3147,11 @@ fn run_graph_command(
     use tokscale_core::{generate_graph, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let include_cursor = clients
-        .as_ref()
-        .is_none_or(|s| s.iter().any(|src| src == "cursor"));
-    let has_cursor_cache = cursor::has_cursor_usage_cache();
+    let include_cursor = home_dir.is_none()
+        && clients
+            .as_ref()
+            .is_none_or(|s| s.iter().any(|src| src == "cursor"));
+    let has_cursor_cache = include_cursor && cursor::has_cursor_usage_cache();
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
     if include_cursor && cursor::is_cursor_logged_in() {
@@ -3081,11 +3167,13 @@ fn run_graph_command(
     if show_progress {
         eprintln!("  Generating graph data...");
     }
+    let use_env_roots = use_env_roots(&home_dir);
     let rt = tokio::runtime::Runtime::new()?;
     let graph_result = rt
         .block_on(async {
             generate_graph(ReportOptions {
-                home_dir: None,
+                home_dir,
+                use_env_roots,
                 clients,
                 since,
                 until,
@@ -3267,6 +3355,7 @@ fn run_submit_command(
         .block_on(async {
             generate_graph(ReportOptions {
                 home_dir: None,
+                use_env_roots: true,
                 clients,
                 since,
                 until,

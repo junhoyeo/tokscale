@@ -178,6 +178,7 @@ impl DataLoader {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
+            use_env_roots: true,
             clients: Some(sources),
             since: self.since.clone(),
             until: self.until.clone(),
@@ -656,6 +657,7 @@ mod tests {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
+            use_env_roots: true,
             clients: Some(sources),
             since: loader.since.clone(),
             until: loader.until.clone(),

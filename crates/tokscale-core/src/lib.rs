@@ -172,6 +172,7 @@ impl std::fmt::Debug for ParsedMessages {
 #[derive(Debug, Clone)]
 pub struct LocalParseOptions {
     pub home_dir: Option<String>,
+    pub use_env_roots: bool,
     pub clients: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -245,6 +246,7 @@ pub struct GraphResult {
 #[derive(Debug, Clone)]
 pub struct ReportOptions {
     pub home_dir: Option<String>,
+    pub use_env_roots: bool,
     pub clients: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -313,10 +315,20 @@ pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, S
         })
 }
 
+#[allow(dead_code)]
 fn parse_all_messages_with_pricing(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
+) -> Vec<UnifiedMessage> {
+    parse_all_messages_with_pricing_with_env_strategy(home_dir, clients, pricing, true)
+}
+
+fn parse_all_messages_with_pricing_with_env_strategy(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
 ) -> Vec<UnifiedMessage> {
     #[derive(Debug)]
     struct CachedParseOutcome {
@@ -596,8 +608,8 @@ fn parse_all_messages_with_pricing(
         parse_full_log_source(path, pricing, is_headless)
     }
 
-    let scan_result = scanner::scan_all_clients(home_dir, clients);
-    let headless_roots = scanner::headless_roots(home_dir);
+    let scan_result = scanner::scan_all_clients_with_env_strategy(home_dir, clients, use_env_roots);
+    let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
     let mut source_cache = message_cache::SourceMessageCache::load();
     source_cache.prune_missing_files();
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
@@ -1065,7 +1077,12 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+        &home_dir,
+        &clients,
+        Some(&pricing),
+        options.use_env_roots,
+    );
 
     let filtered = filter_messages_for_report(all_messages, &options);
     let entries = aggregate_model_usage_entries(filtered, &options.group_by);
@@ -1115,7 +1132,12 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+        &home_dir,
+        &clients,
+        Some(&pricing),
+        options.use_env_roots,
+    );
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1181,7 +1203,12 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+        &home_dir,
+        &clients,
+        Some(&pricing),
+        options.use_env_roots,
+    );
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1303,7 +1330,12 @@ fn parse_local_unified_messages_resolved(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let messages = parse_all_messages_with_pricing(home_dir, clients, pricing);
+    let messages = parse_all_messages_with_pricing_with_env_strategy(
+        home_dir,
+        clients,
+        pricing,
+        options.use_env_roots,
+    );
     Ok(filter_unified_messages(messages, &options))
 }
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
@@ -1322,8 +1354,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
 
-    let scan_result = scanner::scan_all_clients(&home_dir, &clients);
-    let headless_roots = scanner::headless_roots(&home_dir);
+    let scan_result =
+        scanner::scan_all_clients_with_env_strategy(&home_dir, &clients, options.use_env_roots);
+    let headless_roots =
+        scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
     let mut messages: Vec<ParsedMessage> = Vec::new();
 
@@ -3120,6 +3154,7 @@ mod tests {
 
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
             clients: Some(vec!["opencode".to_string(), "synthetic".to_string()]),
             since: None,
             until: None,
@@ -3179,6 +3214,7 @@ mod tests {
 
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
             clients: Some(vec!["synthetic".to_string()]),
             since: None,
             until: None,
