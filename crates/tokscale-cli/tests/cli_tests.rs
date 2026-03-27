@@ -193,6 +193,55 @@ fn create_codex_fixture_dir() -> TempDir {
     tmp
 }
 
+fn create_conflicting_opencode_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let session = base.join(".local/share/opencode/storage/message/conflicting-session");
+    fs::create_dir_all(&session).unwrap();
+
+    let msg = r#"{
+        "id": "conflict_msg",
+        "sessionID": "conflicting-session",
+        "role": "assistant",
+        "modelID": "gemini-2.5-pro",
+        "providerID": "google",
+        "cost": 0.11,
+        "tokens": {
+            "input": 111,
+            "output": 222,
+            "reasoning": 0,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1736510400000.0 }
+    }"#;
+    fs::write(session.join("conflict_msg.json"), msg).unwrap();
+
+    tmp
+}
+
+fn create_conflicting_codex_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let sessions_dir = base.join(".codex/sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(
+        sessions_dir.join("conflicting-session.jsonl"),
+        concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":900,"cached_input_tokens":90,"output_tokens":45}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    tmp
+}
+
 /// Build a Command pointing HOME at the given temp dir, with --no-spinner and --opencode flags.
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
@@ -458,7 +507,7 @@ fn test_monthly_with_date_filters() {
 #[test]
 fn test_models_home_override_ignores_conflicting_xdg_env() {
     let real_home = create_temp_fixture_dir();
-    let conflicting_home = create_empty_fixture_dir();
+    let conflicting_home = create_conflicting_opencode_fixture_dir();
 
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .args([
@@ -482,12 +531,13 @@ fn test_models_home_override_ignores_conflicting_xdg_env() {
     assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
     assert_eq!(json["totalInput"].as_i64().unwrap(), 2400);
     assert_eq!(json["totalOutput"].as_i64().unwrap(), 1000);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
 }
 
 #[test]
 fn test_monthly_home_override_ignores_conflicting_xdg_env() {
     let real_home = create_temp_fixture_dir();
-    let conflicting_home = create_empty_fixture_dir();
+    let conflicting_home = create_conflicting_opencode_fixture_dir();
 
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .args([
@@ -512,12 +562,13 @@ fn test_monthly_home_override_ignores_conflicting_xdg_env() {
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().any(|entry| entry["month"] == "2024-06"));
     assert!(entries.iter().any(|entry| entry["month"] == "2025-01"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
 }
 
 #[test]
 fn test_graph_home_override_ignores_conflicting_xdg_env() {
     let real_home = create_temp_fixture_dir();
-    let conflicting_home = create_empty_fixture_dir();
+    let conflicting_home = create_conflicting_opencode_fixture_dir();
 
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .args([
@@ -539,12 +590,13 @@ fn test_graph_home_override_ignores_conflicting_xdg_env() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let contributions = json["contributions"].as_array().unwrap();
     assert_eq!(contributions.len(), 2);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
 }
 
 #[test]
 fn test_models_home_override_ignores_conflicting_codex_home_env() {
     let real_home = create_codex_fixture_dir();
-    let conflicting_home = create_empty_fixture_dir();
+    let conflicting_home = create_conflicting_codex_fixture_dir();
 
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .env("CODEX_HOME", conflicting_home.path().join(".codex"))
@@ -570,6 +622,7 @@ fn test_models_home_override_ignores_conflicting_codex_home_env() {
     assert_eq!(json["totalInput"].as_i64().unwrap(), 100);
     assert_eq!(json["totalOutput"].as_i64().unwrap(), 30);
     assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 20);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("\"gpt-5\""));
 }
 
 #[test]

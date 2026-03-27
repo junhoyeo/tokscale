@@ -1166,4 +1166,35 @@ mod tests {
 
         restore_env("TOKSCALE_EXTRA_DIRS", previous);
     }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_ignores_extra_dirs_when_env_roots_disabled() {
+        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_claude_dir(home);
+
+        let extra_dir = TempDir::new().unwrap();
+        let extra_project = extra_dir.path().join("mac-project");
+        fs::create_dir_all(&extra_project).unwrap();
+        File::create(extra_project.join("extra-session.jsonl")).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("claude:{}", extra_dir.path().to_string_lossy()),
+            )
+        };
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Claude).len(), 1);
+
+        restore_env("TOKSCALE_EXTRA_DIRS", previous);
+    }
 }
