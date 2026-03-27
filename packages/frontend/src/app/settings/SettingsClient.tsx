@@ -22,6 +22,13 @@ interface ApiToken {
   lastUsedAt: string | null;
 }
 
+type FeedbackTone = "success" | "info" | "error";
+
+interface FeedbackState {
+  tone: FeedbackTone;
+  message: string;
+}
+
 const PageWrapper = styled.div`
   min-height: 100vh;
   display: flex;
@@ -126,7 +133,6 @@ const IconWrapper = styled.div`
   color: #737373;
 `;
 
-
 const DangerButton = styled.button`
   padding: 4px 12px;
   font-size: 12px;
@@ -138,6 +144,10 @@ const DangerButton = styled.button`
   cursor: pointer;
   transition: all 150ms;
   &:hover { background: #F85149; color: #FFFFFF; }
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
 `;
 
 const InfoBanner = styled.div`
@@ -165,6 +175,9 @@ export default function SettingsClient() {
   const [user, setUser] = useState<User | null>(null);
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeletingSubmittedData, setIsDeletingSubmittedData] = useState(false);
+  const [submittedDataStatus, setSubmittedDataStatus] =
+    useState<FeedbackState | null>(null);
 
   useEffect(() => {
     fetch("/api/auth/session")
@@ -207,6 +220,49 @@ export default function SettingsClient() {
     }
   };
 
+  const handleDeleteSubmittedData = async () => {
+    const confirmed = confirm(
+      "Delete all submitted usage data from Tokscale? This removes your leaderboard entries, public profile stats, and stored usage history. Your account and API tokens will stay active."
+    );
+
+    if (!confirmed) return;
+
+    setIsDeletingSubmittedData(true);
+    setSubmittedDataStatus(null);
+
+    try {
+      const response = await fetch("/api/settings/submitted-data", {
+        method: "DELETE",
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { deleted?: boolean; error?: string }
+        | null;
+
+      if (!response.ok) {
+        setSubmittedDataStatus({
+          tone: "error",
+          message: data?.error || "Failed to delete submitted usage data.",
+        });
+        return;
+      }
+
+      setSubmittedDataStatus({
+        tone: data?.deleted ? "success" : "info",
+        message: data?.deleted
+          ? "Submitted usage data deleted. Public profile, leaderboard, and embed views will refresh shortly."
+          : "No submitted usage data was found for this account.",
+      });
+      router.refresh();
+    } catch {
+      setSubmittedDataStatus({
+        tone: "error",
+        message: "Failed to delete submitted usage data.",
+      });
+    } finally {
+      setIsDeletingSubmittedData(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <PageWrapper style={{ backgroundColor: "var(--color-bg-default)" }}>
@@ -233,7 +289,10 @@ export default function SettingsClient() {
         </Title>
 
         <Section
-          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+          style={{
+            backgroundColor: "var(--color-bg-default)",
+            borderColor: "var(--color-border-default)",
+          }}
         >
           <SectionTitle style={{ color: "var(--color-fg-default)" }}>
             Profile
@@ -265,16 +324,17 @@ export default function SettingsClient() {
         </Section>
 
         <Section
-          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+          style={{
+            backgroundColor: "var(--color-bg-default)",
+            borderColor: "var(--color-border-default)",
+          }}
         >
           <SectionTitle style={{ color: "var(--color-fg-default)" }}>
             API Tokens
           </SectionTitle>
           <Description style={{ color: "var(--color-fg-muted)" }}>
             Tokens are created when you run{" "}
-            <CodeText
-              style={{ backgroundColor: "var(--color-bg-subtle)" }}
-            >
+            <CodeText style={{ backgroundColor: "var(--color-bg-subtle)" }}>
               tokscale login
             </CodeText>{" "}
             from the CLI.
@@ -288,9 +348,7 @@ export default function SettingsClient() {
               <p>No API tokens yet.</p>
               <EmptyText>
                 Run{" "}
-                <CodeText
-                  style={{ backgroundColor: "var(--color-bg-subtle)" }}
-                >
+                <CodeText style={{ backgroundColor: "var(--color-bg-subtle)" }}>
                   tokscale login
                 </CodeText>{" "}
                 to create one.
@@ -314,14 +372,16 @@ export default function SettingsClient() {
                       <SmallText style={{ color: "var(--color-fg-muted)" }}>
                         Created {new Date(token.createdAt).toLocaleDateString()}
                         {token.lastUsedAt && (
-                          <> - Last used {new Date(token.lastUsedAt).toLocaleDateString()}</>
+                          <>
+                            {" "}
+                            - Last used{" "}
+                            {new Date(token.lastUsedAt).toLocaleDateString()}
+                          </>
                         )}
                       </SmallText>
                     </div>
                   </TokenInfo>
-                  <DangerButton
-                    onClick={() => handleRevokeToken(token.id)}
-                  >
+                  <DangerButton onClick={() => handleRevokeToken(token.id)}>
                     Revoke
                   </DangerButton>
                 </TokenItem>
@@ -330,7 +390,60 @@ export default function SettingsClient() {
           )}
         </Section>
 
+        <Section
+          style={{
+            backgroundColor: "var(--color-bg-default)",
+            borderColor: "var(--color-border-default)",
+          }}
+        >
+          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+            Submitted Usage Data
+          </SectionTitle>
+          <Description style={{ color: "var(--color-fg-muted)" }}>
+            Remove your submitted usage history from Tokscale without deleting
+            your account or revoking API tokens.
+          </Description>
+          <InfoBanner
+            style={{
+              marginBottom: 16,
+              borderColor: "#F85149",
+              backgroundColor: "rgba(248, 81, 73, 0.08)",
+              color: "var(--color-fg-default)",
+            }}
+          >
+            This deletes your submitted usage data, including leaderboard
+            entries, public profile stats, and embed-backed aggregates. You can
+            submit again later if you want to restore them.
+          </InfoBanner>
 
+          {submittedDataStatus && (
+            <InfoBanner
+              style={{
+                marginBottom: 16,
+                borderColor:
+                  submittedDataStatus.tone === "error"
+                    ? "#F85149"
+                    : "var(--color-border-default)",
+                backgroundColor:
+                  submittedDataStatus.tone === "success"
+                    ? "rgba(46, 160, 67, 0.12)"
+                    : submittedDataStatus.tone === "error"
+                      ? "rgba(248, 81, 73, 0.08)"
+                      : "var(--color-bg-subtle)",
+                color: "var(--color-fg-default)",
+              }}
+            >
+              {submittedDataStatus.message}
+            </InfoBanner>
+          )}
+
+          <DangerButton
+            disabled={isDeletingSubmittedData}
+            onClick={handleDeleteSubmittedData}
+          >
+            {isDeletingSubmittedData ? "Deleting..." : "Delete Submitted Usage"}
+          </DangerButton>
+        </Section>
       </MainContent>
 
       <Footer />
