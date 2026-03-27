@@ -4,19 +4,26 @@ const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
   const revalidateTag = vi.fn();
   const revalidatePath = vi.fn();
+  const eq = vi.fn((left: unknown, right: unknown) => ({
+    kind: "eq",
+    left,
+    right,
+  }));
+  const returning = vi.fn(async () => {
+    if (deleteError) {
+      throw deleteError;
+    }
+    return deletedRows;
+  });
+  const where = vi.fn(() => ({
+    returning,
+  }));
   let deletedRows: Array<{ id: string }> = [];
   let deleteError: Error | null = null;
 
   const db = {
     delete: vi.fn(() => ({
-      where: vi.fn(() => ({
-        returning: vi.fn(async () => {
-          if (deleteError) {
-            throw deleteError;
-          }
-          return deletedRows;
-        }),
-      })),
+      where,
     })),
   };
 
@@ -24,12 +31,17 @@ const mockState = vi.hoisted(() => {
     getSession,
     revalidateTag,
     revalidatePath,
+    eq,
     db,
+    where,
     reset() {
       getSession.mockReset();
       revalidateTag.mockReset();
       revalidatePath.mockReset();
+      eq.mockClear();
       db.delete.mockClear();
+      where.mockClear();
+      returning.mockClear();
       deletedRows = [];
       deleteError = null;
     },
@@ -45,6 +57,10 @@ const mockState = vi.hoisted(() => {
 vi.mock("next/cache", () => ({
   revalidateTag: mockState.revalidateTag,
   revalidatePath: mockState.revalidatePath,
+}));
+
+vi.mock("drizzle-orm", () => ({
+  eq: mockState.eq,
 }));
 
 vi.mock("@/lib/auth/session", () => ({
@@ -102,6 +118,12 @@ describe("DELETE /api/settings/submitted-data", () => {
       deletedSubmissions: 1,
     });
     expect(mockState.db.delete).toHaveBeenCalledTimes(1);
+    expect(mockState.eq).toHaveBeenCalledWith("submissions.userId", "user-1");
+    expect(mockState.where).toHaveBeenCalledWith({
+      kind: "eq",
+      left: "submissions.userId",
+      right: "user-1",
+    });
     expect(mockState.revalidateTag).toHaveBeenCalledTimes(7);
     expect(mockState.revalidatePath).toHaveBeenCalledTimes(5);
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "leaderboard", "max");
