@@ -33,6 +33,7 @@ const SUPPORTED_SOURCES = [
   "qwen",
   "roocode",
   "kilocode",
+  "kilo",
   "mux",
   "synthetic",
 ] as const;

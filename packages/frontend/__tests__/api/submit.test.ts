@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { ClientType } from '@/lib/types';
 
 /**
  * Test suite for POST /api/submit - Client-Level Merge
@@ -13,11 +14,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock data factories
 function createMockSubmissionData(overrides: Partial<{
-  clients: string[];
+  clients: ClientType[];
   contributions: Array<{
     date: string;
     clients: Array<{
-      client: string;
+      client: ClientType;
       modelId: string;
       cost: number;
       tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
@@ -79,7 +80,7 @@ function createMockSubmissionData(overrides: Partial<{
         reasoning: 0,
       },
       clients: d.clients.map(client => ({
-        client: client.client as 'opencode' | 'claude' | 'codex' | 'gemini' | 'cursor' | 'amp' | 'droid' | 'openclaw' | 'pi' | 'kimi' | 'qwen',
+        client: client.client as ClientType,
         modelId: client.modelId,
         tokens: client.tokens,
         cost: client.cost,
@@ -125,6 +126,13 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(data.summary.clients).toContain('kimi');
       expect(data.contributions[0].clients[0].client).toBe('kimi');
+    });
+
+    it('should support kilo client in submission payload', () => {
+      const data = createMockSubmissionData({ clients: ['kilo'] });
+
+      expect(data.summary.clients).toContain('kilo');
+      expect(data.contributions[0].clients[0].client).toBe('kilo');
     });
   });
 
