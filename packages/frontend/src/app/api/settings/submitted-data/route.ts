@@ -2,34 +2,53 @@ import { revalidatePath, revalidateTag } from "next/cache";
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { getSession } from "@/lib/auth/session";
+import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import { db, submissions } from "@/lib/db";
 
-export async function DELETE() {
+async function resolveUser(request: Request): Promise<{ id: string; username: string } | null> {
+  const authHeader = request.headers.get("Authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.slice(7);
+    const result = await authenticatePersonalToken(token, { touchLastUsedAt: false });
+    if (result.status === "valid") {
+      return { id: result.userId, username: result.username };
+    }
+    return null;
+  }
+
+  const session = await getSession();
+  if (session) {
+    return { id: session.id, username: session.username };
+  }
+  return null;
+}
+
+export async function DELETE(request: Request) {
   try {
-    const session = await getSession();
-    if (!session) {
+    const user = await resolveUser(request);
+    if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
     const deletedRows = await db
       .delete(submissions)
-      .where(eq(submissions.userId, session.id))
+      .where(eq(submissions.userId, user.id))
       .returning({ id: submissions.id });
 
     try {
       revalidateTag("leaderboard", "max");
-      revalidateTag(`user:${session.username}`, "max");
+      revalidateTag(`user:${user.username}`, "max");
       revalidateTag("user-rank", "max");
-      revalidateTag(`user-rank:${session.username}`, "max");
-      revalidateTag(`embed-user:${session.username}`, "max");
-      revalidateTag(`embed-user:${session.username}:tokens`, "max");
-      revalidateTag(`embed-user:${session.username}:cost`, "max");
+      revalidateTag(`user-rank:${user.username}`, "max");
+      revalidateTag(`embed-user:${user.username}`, "max");
+      revalidateTag(`embed-user:${user.username}:tokens`, "max");
+      revalidateTag(`embed-user:${user.username}:cost`, "max");
 
       revalidatePath("/leaderboard");
       revalidatePath("/profile");
-      revalidatePath(`/u/${session.username}`);
-      revalidatePath(`/api/users/${session.username}`);
-      revalidatePath(`/api/embed/${session.username}/svg`);
+      revalidatePath(`/u/${user.username}`);
+      revalidatePath(`/api/users/${user.username}`);
+      revalidatePath(`/api/embed/${user.username}/svg`);
     } catch (cacheError) {
       console.error("Cache invalidation failed after deletion:", cacheError);
     }

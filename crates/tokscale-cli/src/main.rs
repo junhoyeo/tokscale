@@ -482,6 +482,8 @@ enum Commands {
         #[command(subcommand)]
         subcommand: CursorSubcommand,
     },
+    #[command(about = "Delete all submitted usage data from the server")]
+    DeleteData,
 }
 
 #[derive(Subcommand)]
@@ -906,6 +908,7 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::Cursor { subcommand }) => run_cursor_command(subcommand),
+        Some(Commands::DeleteData) => run_delete_data_command(),
         None => {
             let clients = build_client_filter(ClientFlags {
                 opencode: cli.opencode,
@@ -2683,6 +2686,101 @@ fn run_logout_command() -> Result<()> {
 
 fn run_whoami_command() -> Result<()> {
     auth::whoami()
+}
+
+fn run_delete_data_command() -> Result<()> {
+    use colored::Colorize;
+    use std::io::{self, Write};
+    use tokio::runtime::Runtime;
+
+    let credentials = auth::load_credentials()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `tokscale login` first."))?;
+
+    println!(
+        "\n{}",
+        "  ⚠ Delete all submitted usage data".red().bold()
+    );
+    println!(
+        "{}",
+        "  This will permanently remove:".bright_black()
+    );
+    println!("{}", "    • Leaderboard entries".bright_black());
+    println!("{}", "    • Public profile stats".bright_black());
+    println!("{}", "    • Daily usage history".bright_black());
+    println!(
+        "{}",
+        "  Your account and API tokens will stay active.\n".bright_black()
+    );
+
+    print!(
+        "{}",
+        "  Are you sure you want to delete all submitted data? (y/N): ".white()
+    );
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().to_lowercase() != "y" {
+        println!("{}", "  Cancelled.".bright_black());
+        return Ok(());
+    }
+
+    print!(
+        "{}",
+        "  Type \"delete my data\" to confirm: ".white()
+    );
+    io::stdout().flush()?;
+    input.clear();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().to_lowercase() != "delete my data" {
+        println!("{}", "  Confirmation failed. Cancelled.".bright_black());
+        return Ok(());
+    }
+
+    println!("\n{}", "  Deleting submitted data...".bright_black());
+
+    let api_url = auth::get_api_base_url();
+    let rt = Runtime::new()?;
+
+    let response = rt.block_on(async {
+        reqwest::Client::new()
+            .delete(format!("{}/api/settings/submitted-data", api_url))
+            .header("Authorization", format!("Bearer {}", credentials.token))
+            .send()
+            .await
+    });
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            let body: serde_json::Value = rt
+                .block_on(async { resp.json().await })
+                .unwrap_or_default();
+
+            if status.is_success() {
+                let deleted = body.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
+                let count = body.get("deletedSubmissions").and_then(|v| v.as_i64()).unwrap_or(0);
+                if deleted {
+                    println!(
+                        "{}",
+                        format!("  ✓ Deleted {} submission(s). Leaderboard and profile will refresh shortly.", count).green()
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        "  No submitted data found for this account.".yellow()
+                    );
+                }
+            } else {
+                let err = body.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                eprintln!("{}", format!("  ✗ Failed ({}): {}", status, err).red());
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", format!("  ✗ Request failed: {}", e).red());
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
