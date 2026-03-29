@@ -84,6 +84,8 @@ const DataSummarySchema = z.object({
 const ExportMetaSchema = z.object({
   generatedAt: z.string(),
   version: z.string(),
+  sourceId: z.string().trim().min(1).max(255).optional(),
+  sourceName: z.string().trim().min(1).max(255).optional(),
   dateRange: z.object({
     start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),

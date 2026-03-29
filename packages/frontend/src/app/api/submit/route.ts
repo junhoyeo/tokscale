@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { db, apiTokens, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
@@ -43,6 +43,12 @@ function normalizeSubmissionData(data: unknown): void {
       }
     }
   }
+}
+
+function normalizeOptionalString(value: string | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 /**
@@ -130,6 +136,8 @@ export async function POST(request: Request) {
         clients: Array.from(submittedClients).sort(),
       },
     };
+    const sourceId = normalizeOptionalString(data.meta.sourceId);
+    const sourceName = normalizeOptionalString(data.meta.sourceName);
 
     // ========================================
     // STEP 3: DATABASE OPERATIONS IN TRANSACTION
@@ -144,9 +152,19 @@ export async function POST(request: Request) {
       // STEP 3a: Get or create user's submission
       // ------------------------------------------
       const [existingSubmission] = await tx
-        .select({ id: submissions.id })
+        .select({ id: submissions.id, sourceName: submissions.sourceName })
         .from(submissions)
-        .where(eq(submissions.userId, tokenRecord.userId))
+        .where(
+          sourceId
+            ? and(
+                eq(submissions.userId, tokenRecord.userId),
+                eq(submissions.sourceId, sourceId)
+              )
+            : and(
+                eq(submissions.userId, tokenRecord.userId),
+                isNull(submissions.sourceId)
+              )
+        )
         .for('update')
         .limit(1);
 
@@ -161,6 +179,8 @@ export async function POST(request: Request) {
           .insert(submissions)
           .values({
             userId: tokenRecord.userId,
+            sourceId,
+            sourceName,
             totalTokens: 0,
             totalCost: "0",
             inputTokens: 0,
@@ -392,8 +412,9 @@ export async function POST(request: Request) {
           reasoningTokens: totalReasoning,
           dateStart: aggregates.dateStart,
           dateEnd: aggregates.dateEnd,
-           sourcesUsed: Array.from(allClients),
-           modelsUsed: Array.from(allModels),
+          sourceName: sourceName ?? existingSubmission?.sourceName ?? null,
+          sourcesUsed: Array.from(allClients),
+          modelsUsed: Array.from(allModels),
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
@@ -402,18 +423,50 @@ export async function POST(request: Request) {
         })
         .where(eq(submissions.id, submissionId));
 
+      const [userAggregates] = await tx
+        .select({
+          totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)::bigint`,
+          totalCost: sql<string>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4))), 0)::text`,
+          dateStart: sql<string>`MIN(${submissions.dateStart})`,
+          dateEnd: sql<string>`MAX(${submissions.dateEnd})`,
+        })
+        .from(submissions)
+        .where(eq(submissions.userId, tokenRecord.userId));
+
+      const [userDayAggregates] = await tx
+        .select({
+          activeDays: sql<number>`COUNT(DISTINCT ${dailyBreakdown.date})::int`,
+        })
+        .from(dailyBreakdown)
+        .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
+        .where(eq(submissions.userId, tokenRecord.userId));
+
+      const userSubmissions = await tx
+        .select({
+          sourcesUsed: submissions.sourcesUsed,
+        })
+        .from(submissions)
+        .where(eq(submissions.userId, tokenRecord.userId));
+
+      const userClients = new Set<string>();
+      for (const submission of userSubmissions) {
+        for (const client of submission.sourcesUsed || []) {
+          userClients.add(client);
+        }
+      }
+
       return {
         submissionId,
         isNewSubmission,
         metrics: {
-          totalTokens: aggregates.totalTokens,
-          totalCost: parseFloat(aggregates.totalCost),
+          totalTokens: userAggregates.totalTokens,
+          totalCost: parseFloat(userAggregates.totalCost),
           dateRange: {
-            start: aggregates.dateStart,
-            end: aggregates.dateEnd,
+            start: userAggregates.dateStart,
+            end: userAggregates.dateEnd,
           },
-          activeDays: aggregates.activeDays,
-          clients: Array.from(allClients),
+          activeDays: userDayAggregates.activeDays,
+          clients: Array.from(userClients).sort(),
         },
       };
     });

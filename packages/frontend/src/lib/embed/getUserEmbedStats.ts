@@ -27,14 +27,15 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
       username: users.username,
       displayName: users.displayName,
       avatarUrl: users.avatarUrl,
-      totalTokens: sql<number>`COALESCE(${submissions.totalTokens}, 0)`,
-      totalCost: sql<number>`COALESCE(CAST(${submissions.totalCost} AS DECIMAL(12,4)), 0)`,
-      submissionCount: sql<number>`COALESCE(${submissions.submitCount}, 0)`,
-      updatedAt: submissions.updatedAt,
+      totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)`,
+      totalCost: sql<number>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4))), 0)`,
+      submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`,
+      updatedAt: sql<Date | null>`MAX(${submissions.updatedAt})`,
     })
     .from(users)
     .leftJoin(submissions, eq(submissions.userId, users.id))
     .where(eq(users.username, username))
+    .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
     .limit(1);
 
   if (!result) {
@@ -47,16 +48,24 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
 
   if (rankingValue > 0) {
     const rankResult = await db.execute<{ rank: number }>(sql`
-      WITH ranked AS (
+      WITH user_totals AS (
+        SELECT
+          user_id,
+          SUM(total_tokens) AS total_tokens,
+          SUM(CAST(total_cost AS DECIMAL(12,4))) AS total_cost
+        FROM submissions
+        GROUP BY user_id
+      ),
+      ranked AS (
         SELECT
           user_id,
           RANK() OVER (
             ORDER BY
               ${sortBy === "cost"
-                ? sql`CAST(total_cost AS DECIMAL(12,4)) DESC, total_tokens DESC`
-                : sql`total_tokens DESC, CAST(total_cost AS DECIMAL(12,4)) DESC`}
+                ? sql`total_cost DESC, total_tokens DESC`
+                : sql`total_tokens DESC, total_cost DESC`}
           ) AS rank
-        FROM submissions
+        FROM user_totals
       )
       SELECT rank FROM ranked WHERE user_id = ${result.id}
     `);

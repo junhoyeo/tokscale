@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
@@ -51,6 +53,14 @@ struct UserInfo {
 
 fn get_credentials_path() -> Result<PathBuf> {
     Ok(home_dir()?.join(".config/tokscale/credentials.json"))
+}
+
+fn get_source_id_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".config/tokscale/source-id"))
+}
+
+fn get_source_id_lock_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".config/tokscale/source-id.lock"))
 }
 
 fn ensure_config_dir() -> Result<()> {
@@ -123,6 +133,114 @@ fn get_device_name() -> String {
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string());
     format!("CLI on {}", hostname)
+}
+
+fn read_source_id(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+struct SourceIdLock {
+    path: PathBuf,
+}
+
+impl Drop for SourceIdLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_source_id_lock() -> Result<SourceIdLock> {
+    ensure_config_dir()?;
+    let lock_path = get_source_id_lock_path()?;
+
+    for _ in 0..100 {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(_) => return Ok(SourceIdLock { path: lock_path }),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Ok(metadata) = fs::metadata(&lock_path) {
+                    if let Ok(modified_at) = metadata.modified() {
+                        if modified_at.elapsed().unwrap_or_default() > Duration::from_secs(10) {
+                            let _ = fs::remove_file(&lock_path);
+                            continue;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    anyhow::bail!("Timed out waiting for source ID lock");
+}
+
+fn write_source_id(path: &Path, source_id: &str) -> Result<()> {
+    let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp_path)?;
+        file.write_all(source_id.as_bytes())?;
+        file.write_all(b"\n")?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(&temp_path, format!("{source_id}\n"))?;
+    }
+
+    fs::rename(&temp_path, path)?;
+    Ok(())
+}
+
+pub fn get_submit_source_id() -> Result<String> {
+    if let Some(source_id) = std::env::var_os("TOKSCALE_SOURCE_ID") {
+        let trimmed = source_id.to_string_lossy().trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+
+    ensure_config_dir()?;
+    let path = get_source_id_path()?;
+
+    if let Some(existing) = read_source_id(&path) {
+        return Ok(existing);
+    }
+
+    let _lock = acquire_source_id_lock()?;
+
+    if let Some(existing) = read_source_id(&path) {
+        return Ok(existing);
+    }
+
+    let source_id = uuid::Uuid::new_v4().to_string();
+    write_source_id(&path, &source_id)?;
+    Ok(source_id)
+}
+
+pub fn get_submit_source_name() -> Option<String> {
+    std::env::var("TOKSCALE_SOURCE_NAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| Some(get_device_name()))
 }
 
 #[cfg(target_os = "linux")]

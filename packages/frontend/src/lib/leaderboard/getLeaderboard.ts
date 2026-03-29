@@ -301,7 +301,7 @@ async function fetchLeaderboardData(
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
         totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`,
-        totalSubmissions: sql<number>`COUNT(${submissions.id})`,
+        totalSubmissions: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`,
         uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
       .from(submissions),
