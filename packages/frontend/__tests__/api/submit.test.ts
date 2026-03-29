@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ClientType } from '@/lib/types';
+import { validateSubmission } from '@/lib/validation/submission';
 
 /**
  * Test suite for POST /api/submit - Client-Level Merge
@@ -133,6 +134,47 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(data.summary.clients).toContain('kilo');
       expect(data.contributions[0].clients[0].client).toBe('kilo');
+    });
+
+    it('should pass validation for kilo client submissions', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 1500, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['kilo' as const], models: ['claude-sonnet-4'] },
+        years: [{ year: '2024', totalTokens: 1500, totalCost: 1.5, range: { start: '2024-12-01', end: '2024-12-01' } }],
+        contributions: [{
+          date: '2024-12-01',
+          totals: { tokens: 1500, cost: 1.5, messages: 5 },
+          intensity: 2 as const,
+          tokenBreakdown: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'kilo' as const, modelId: 'claude-sonnet-4', tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 5 }],
+        }],
+      };
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should accept mixed kilo and kilocode submissions', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 3000, totalCost: 3.0, totalDays: 1, activeDays: 1, averagePerDay: 3.0, maxCostInSingleDay: 3.0, clients: ['kilo' as const, 'kilocode' as const], models: ['claude-sonnet-4'] },
+        years: [{ year: '2024', totalTokens: 3000, totalCost: 3.0, range: { start: '2024-12-01', end: '2024-12-01' } }],
+        contributions: [{
+          date: '2024-12-01',
+          totals: { tokens: 3000, cost: 3.0, messages: 10 },
+          intensity: 2 as const,
+          tokenBreakdown: { input: 2000, output: 1000, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [
+            { client: 'kilo' as const, modelId: 'claude-sonnet-4', tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 5 },
+            { client: 'kilocode' as const, modelId: 'claude-sonnet-4', tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 5 },
+          ],
+        }],
+      };
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
     });
   });
 
