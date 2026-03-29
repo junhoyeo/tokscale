@@ -48,7 +48,7 @@ pub fn normalize_agent_name(agent: &str) -> String {
         return titlecase_agent(stripped);
     }
 
-    if agent_lower == "omo" || agent_lower == "sisyphus" {
+    if agent_lower == "omo" || agent_lower == "sisyphus" || agent_lower == "orchestrator-sisyphus" {
         return "Sisyphus".to_string();
     }
 
@@ -69,7 +69,7 @@ pub fn normalize_opencode_agent_name(agent: &str) -> String {
 
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     let normalized = match agent_lower {
-        "sisyphus (ultraworker)" | "sisyphus" => "Sisyphus",
+        "sisyphus (ultraworker)" | "sisyphus" | "orchestrator-sisyphus" => "Sisyphus",
         "hephaestus (deep agent)" | "hephaestus" => "Hephaestus",
         "prometheus (plan builder)" | "prometheus (planner)" | "prometheus" => "Prometheus",
         "atlas (plan executor)" | "atlas" => "Atlas",
@@ -362,6 +362,11 @@ mod tests {
         assert_eq!(normalize_agent_name("Planner-Sisyphus"), "Planner-Sisyphus");
         assert_eq!(normalize_agent_name("omo-plan"), "Planner-Sisyphus");
 
+        assert_eq!(normalize_agent_name("orchestrator-sisyphus"), "Sisyphus");
+        assert_eq!(
+            normalize_opencode_agent_name("orchestrator-sisyphus"),
+            "Sisyphus"
+        );
         assert_eq!(normalize_agent_name("explore"), "Explore");
         assert_eq!(normalize_agent_name("CustomAgent"), "CustomAgent");
 
