@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
+  const authenticatePersonalToken = vi.fn();
   const revalidateTag = vi.fn();
   const revalidatePath = vi.fn();
   const eq = vi.fn((left: unknown, right: unknown) => ({
@@ -29,6 +30,7 @@ const mockState = vi.hoisted(() => {
 
   return {
     getSession,
+    authenticatePersonalToken,
     revalidateTag,
     revalidatePath,
     eq,
@@ -36,6 +38,7 @@ const mockState = vi.hoisted(() => {
     where,
     reset() {
       getSession.mockReset();
+      authenticatePersonalToken.mockReset();
       revalidateTag.mockReset();
       revalidatePath.mockReset();
       eq.mockClear();
@@ -67,6 +70,10 @@ vi.mock("@/lib/auth/session", () => ({
   getSession: mockState.getSession,
 }));
 
+vi.mock("@/lib/auth/personalTokens", () => ({
+  authenticatePersonalToken: mockState.authenticatePersonalToken,
+}));
+
 vi.mock("@/lib/db", () => ({
   db: mockState.db,
   submissions: {
@@ -88,11 +95,22 @@ beforeEach(() => {
   mockState.reset();
 });
 
+function createRequest(token?: string) {
+  const headers = new Headers();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return new Request("http://localhost/api/settings/submitted-data", {
+    method: "DELETE",
+    headers,
+  });
+}
+
 describe("DELETE /api/settings/submitted-data", () => {
   it("returns 401 when session is missing", async () => {
     mockState.getSession.mockResolvedValue(null);
 
-    const response = await DELETE();
+    const response = await DELETE(createRequest());
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Not authenticated" });
@@ -109,7 +127,7 @@ describe("DELETE /api/settings/submitted-data", () => {
     });
     mockState.setDeletedRows([{ id: "submission-1" }]);
 
-    const response = await DELETE();
+    const response = await DELETE(createRequest());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -150,7 +168,7 @@ describe("DELETE /api/settings/submitted-data", () => {
     });
     mockState.setDeletedRows([]);
 
-    const response = await DELETE();
+    const response = await DELETE(createRequest());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -172,11 +190,38 @@ describe("DELETE /api/settings/submitted-data", () => {
     });
     mockState.setDeleteError(new Error("db unavailable"));
 
-    const response = await DELETE();
+    const response = await DELETE(createRequest());
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
       error: "Failed to delete submitted usage data",
+    });
+  });
+
+  it("accepts bearer token auth for CLI deletion", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      userId: "user-2",
+      username: "bob",
+    });
+    mockState.setDeletedRows([{ id: "submission-2" }]);
+
+    const response = await DELETE(createRequest("tt_valid"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      deleted: true,
+      deletedSubmissions: 1,
+    });
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+    });
+    expect(mockState.getSession).not.toHaveBeenCalled();
+    expect(mockState.where).toHaveBeenCalledWith({
+      kind: "eq",
+      left: "submissions.userId",
+      right: "user-2",
     });
   });
 });

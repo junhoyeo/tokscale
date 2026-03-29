@@ -482,7 +482,10 @@ enum Commands {
         #[command(subcommand)]
         subcommand: CursorSubcommand,
     },
-    #[command(about = "Delete all submitted usage data from the server")]
+    #[command(
+        about = "Delete all submitted usage data from the server",
+        visible_alias = "delete-data"
+    )]
     DeleteSubmittedData,
 }
 
@@ -2696,14 +2699,8 @@ fn run_delete_data_command() -> Result<()> {
     let credentials = auth::load_credentials()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `tokscale login` first."))?;
 
-    println!(
-        "\n{}",
-        "  ⚠ Delete all submitted usage data".red().bold()
-    );
-    println!(
-        "{}",
-        "  This will permanently remove:".bright_black()
-    );
+    println!("\n{}", "  ⚠ Delete all submitted usage data".red().bold());
+    println!("{}", "  This will permanently remove:".bright_black());
     println!("{}", "    • Leaderboard entries".bright_black());
     println!("{}", "    • Public profile stats".bright_black());
     println!("{}", "    • Daily usage history".bright_black());
@@ -2737,10 +2734,7 @@ fn run_delete_data_command() -> Result<()> {
         return Ok(());
     }
 
-    print!(
-        "{}",
-        "  Type \"delete my data\" to confirm: ".white()
-    );
+    print!("{}", "  Type \"delete my data\" to confirm: ".white());
     io::stdout().flush()?;
     input.clear();
     io::stdin().read_line(&mut input)?;
@@ -2765,35 +2759,65 @@ fn run_delete_data_command() -> Result<()> {
     match response {
         Ok(resp) => {
             let status = resp.status();
-            let body: serde_json::Value = rt
-                .block_on(async { resp.json().await })
-                .unwrap_or_default();
+            let body: serde_json::Value =
+                rt.block_on(async { resp.json().await }).unwrap_or_default();
 
-            if status.is_success() {
-                let deleted = body.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
-                let count = body.get("deletedSubmissions").and_then(|v| v.as_i64()).unwrap_or(0);
-                if deleted {
+            match interpret_delete_submitted_data_response(status, &body)? {
+                DeleteSubmittedDataOutcome::Deleted(count) => {
                     println!(
                         "{}",
-                        format!("  ✓ Deleted {} submission(s). Leaderboard and profile will refresh shortly.", count).green()
-                    );
-                } else {
-                    println!(
-                        "{}",
-                        "  No submitted data found for this account.".yellow()
+                        format!(
+                            "  ✓ Deleted {} submission(s). Leaderboard and profile will refresh shortly.",
+                            count
+                        )
+                        .green()
                     );
                 }
-            } else {
-                let err = body.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
-                eprintln!("{}", format!("  ✗ Failed ({}): {}", status, err).red());
+                DeleteSubmittedDataOutcome::NotFound => {
+                    println!("{}", "  No submitted data found for this account.".yellow());
+                }
             }
         }
         Err(e) => {
-            eprintln!("{}", format!("  ✗ Request failed: {}", e).red());
+            return Err(anyhow::anyhow!("Request failed: {}", e));
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteSubmittedDataOutcome {
+    Deleted(i64),
+    NotFound,
+}
+
+fn interpret_delete_submitted_data_response(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> Result<DeleteSubmittedDataOutcome> {
+    if status.is_success() {
+        let deleted = body
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let count = body
+            .get("deletedSubmissions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        if deleted {
+            Ok(DeleteSubmittedDataOutcome::Deleted(count))
+        } else {
+            Ok(DeleteSubmittedDataOutcome::NotFound)
+        }
+    } else {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        Err(anyhow::anyhow!("Failed ({}): {}", status, err))
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -3557,6 +3581,8 @@ fn run_headless_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use reqwest::StatusCode;
     use tokscale_core::{
         calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
         GraphMeta, GraphResult, TokenBreakdown, YearSummary,
@@ -3774,6 +3800,44 @@ mod tests {
         assert!(sources.contains(&"kilo".to_string()));
         assert!(sources.contains(&"mux".to_string()));
         assert!(sources.contains(&"synthetic".to_string()));
+    }
+
+    #[test]
+    fn test_delete_submitted_data_alias_parses() {
+        let cli = Cli::try_parse_from(["tokscale", "delete-data"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
+    }
+
+    #[test]
+    fn test_delete_submitted_data_primary_command_parses() {
+        let cli = Cli::try_parse_from(["tokscale", "delete-submitted-data"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
+    }
+
+    #[test]
+    fn test_interpret_delete_submitted_data_response_success() {
+        let body = serde_json::json!({
+            "deleted": true,
+            "deletedSubmissions": 2
+        });
+
+        let outcome = interpret_delete_submitted_data_response(StatusCode::OK, &body).unwrap();
+        match outcome {
+            DeleteSubmittedDataOutcome::Deleted(count) => assert_eq!(count, 2),
+            DeleteSubmittedDataOutcome::NotFound => panic!("expected deleted outcome"),
+        }
+    }
+
+    #[test]
+    fn test_interpret_delete_submitted_data_response_failure() {
+        let body = serde_json::json!({
+            "error": "Not authenticated"
+        });
+
+        let err = interpret_delete_submitted_data_response(StatusCode::UNAUTHORIZED, &body)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Failed (401 Unauthorized): Not authenticated"));
     }
 
     #[test]

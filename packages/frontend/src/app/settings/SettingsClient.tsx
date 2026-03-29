@@ -126,6 +126,7 @@ const IconWrapper = styled.div`
   color: #737373;
 `;
 
+
 const DangerButton = styled.button`
   padding: 4px 12px;
   font-size: 12px;
@@ -137,10 +138,6 @@ const DangerButton = styled.button`
   cursor: pointer;
   transition: all 150ms;
   &:hover { background: #F85149; color: #FFFFFF; }
-  &:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
 `;
 
 const InfoBanner = styled.div`
@@ -168,7 +165,6 @@ export default function SettingsClient() {
   const [user, setUser] = useState<User | null>(null);
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-
 
   useEffect(() => {
     fetch("/api/auth/session")
@@ -237,10 +233,7 @@ export default function SettingsClient() {
         </Title>
 
         <Section
-          style={{
-            backgroundColor: "var(--color-bg-default)",
-            borderColor: "var(--color-border-default)",
-          }}
+          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
         >
           <SectionTitle style={{ color: "var(--color-fg-default)" }}>
             Profile
@@ -272,17 +265,16 @@ export default function SettingsClient() {
         </Section>
 
         <Section
-          style={{
-            backgroundColor: "var(--color-bg-default)",
-            borderColor: "var(--color-border-default)",
-          }}
+          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
         >
           <SectionTitle style={{ color: "var(--color-fg-default)" }}>
             API Tokens
           </SectionTitle>
           <Description style={{ color: "var(--color-fg-muted)" }}>
             Tokens are created when you run{" "}
-            <CodeText style={{ backgroundColor: "var(--color-bg-subtle)" }}>
+            <CodeText
+              style={{ backgroundColor: "var(--color-bg-subtle)" }}
+            >
               tokscale login
             </CodeText>{" "}
             from the CLI.
@@ -296,7 +288,9 @@ export default function SettingsClient() {
               <p>No API tokens yet.</p>
               <EmptyText>
                 Run{" "}
-                <CodeText style={{ backgroundColor: "var(--color-bg-subtle)" }}>
+                <CodeText
+                  style={{ backgroundColor: "var(--color-bg-subtle)" }}
+                >
                   tokscale login
                 </CodeText>{" "}
                 to create one.
@@ -320,16 +314,14 @@ export default function SettingsClient() {
                       <SmallText style={{ color: "var(--color-fg-muted)" }}>
                         Created {new Date(token.createdAt).toLocaleDateString()}
                         {token.lastUsedAt && (
-                          <>
-                            {" "}
-                            - Last used{" "}
-                            {new Date(token.lastUsedAt).toLocaleDateString()}
-                          </>
+                          <> - Last used {new Date(token.lastUsedAt).toLocaleDateString()}</>
                         )}
                       </SmallText>
                     </div>
                   </TokenInfo>
-                  <DangerButton onClick={() => handleRevokeToken(token.id)}>
+                  <DangerButton
+                    onClick={() => handleRevokeToken(token.id)}
+                  >
                     Revoke
                   </DangerButton>
                 </TokenItem>
@@ -337,6 +329,7 @@ export default function SettingsClient() {
             </TokenList>
           )}
         </Section>
+
 
       </MainContent>
 
