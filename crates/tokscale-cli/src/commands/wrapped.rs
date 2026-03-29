@@ -1386,7 +1386,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Kilo CLI" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
         "Mux" => Some("https://tokscale.ai/assets/logos/mux.png"),
         "Crush" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png",
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png",
         ),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
@@ -2293,7 +2293,7 @@ mod tests {
         assert_eq!(
             client_logo_url("Crush"),
             Some(
-                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png"
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png"
             )
         );
     }

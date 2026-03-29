@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/cli",
-  "version": "2.0.14",
+  "version": "2.0.15",
   "description": "A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
   "license": "MIT",
   "type": "module",
@@ -28,14 +28,14 @@
   },
   "dependencies": {},
   "optionalDependencies": {
-    "@tokscale/cli-darwin-arm64": "2.0.14",
-    "@tokscale/cli-darwin-x64": "2.0.14",
-    "@tokscale/cli-linux-x64-gnu": "2.0.14",
-    "@tokscale/cli-linux-x64-musl": "2.0.14",
-    "@tokscale/cli-linux-arm64-gnu": "2.0.14",
-    "@tokscale/cli-linux-arm64-musl": "2.0.14",
-    "@tokscale/cli-win32-x64-msvc": "2.0.14",
-    "@tokscale/cli-win32-arm64-msvc": "2.0.14"
+    "@tokscale/cli-darwin-arm64": "2.0.15",
+    "@tokscale/cli-darwin-x64": "2.0.15",
+    "@tokscale/cli-linux-x64-gnu": "2.0.15",
+    "@tokscale/cli-linux-x64-musl": "2.0.15",
+    "@tokscale/cli-linux-arm64-gnu": "2.0.15",
+    "@tokscale/cli-linux-arm64-musl": "2.0.15",
+    "@tokscale/cli-win32-x64-msvc": "2.0.15",
+    "@tokscale/cli-win32-arm64-msvc": "2.0.15"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

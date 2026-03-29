@@ -9,7 +9,7 @@ use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -64,8 +64,13 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
     };
 
     let reader = BufReader::new(file);
-    let mut messages = Vec::with_capacity(64);
-    let mut processed_hashes: HashSet<String> = HashSet::new();
+    let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
+    // Maps dedup_key to the index in `messages` of the first occurrence.
+    // CC's streaming API writes the same messageId:requestId multiple times as the
+    // response streams in; later entries often carry more complete token counts.
+    // We merge duplicates using per-field max to always keep the highest value seen
+    // for each token type, ensuring we capture the most complete record.
+    let mut processed_hashes: HashMap<String, usize> = HashMap::new();
     let mut headless_state = ClaudeHeadlessState::default();
     let mut buffer = Vec::with_capacity(4096);
 
@@ -91,21 +96,33 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     None => continue,
                 };
 
-                // Build dedup key for global deduplication (messageId:requestId composite)
-                let dedup_key = match (&message.id, &entry.request_id) {
+                let usage = match message.usage {
+                    Some(u) => u,
+                    None => continue,
+                };
+
+                // Build dedup key for global deduplication (messageId:requestId composite).
+                // For streaming responses, merge using per-field max to capture the most
+                // complete token counts across all duplicate entries.
+                let pending_hash = match (&message.id, &entry.request_id) {
                     (Some(msg_id), Some(req_id)) => {
                         let hash = format!("{}:{}", msg_id, req_id);
-                        if !processed_hashes.insert(hash.clone()) {
+                        if let Some(&existing_idx) = processed_hashes.get(&hash) {
+                            // Per-field max merge: each token field is updated independently
+                            let t = &mut messages[existing_idx].tokens;
+                            t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
+                            t.output = t.output.max(usage.output_tokens.unwrap_or(0).max(0));
+                            t.cache_read = t
+                                .cache_read
+                                .max(usage.cache_read_input_tokens.unwrap_or(0).max(0));
+                            t.cache_write = t
+                                .cache_write
+                                .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
                             continue;
                         }
                         Some(hash)
                     }
                     _ => None,
-                };
-
-                let usage = match message.usage {
-                    Some(u) => u,
-                    None => continue,
                 };
 
                 let model = match message.model {
@@ -118,6 +135,11 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
                     .map(|dt| dt.timestamp_millis())
                     .unwrap_or(fallback_timestamp);
+
+                // Insert dedup index only after all checks pass, right before push
+                let dedup_key = pending_hash.inspect(|hash| {
+                    processed_hashes.insert(hash.clone(), messages.len());
+                });
 
                 messages.push(UnifiedMessage::new_with_dedup(
                     "claude",
@@ -369,6 +391,90 @@ mod tests {
         );
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[1].tokens.input, 200);
+    }
+
+    #[test]
+    fn test_deduplication_keeps_max_output_for_streaming_duplicates() {
+        // CC streaming writes the same messageId:requestId multiple times.
+        // The first entry has a partial output_tokens count; the last has the
+        // final (largest) count. We must keep the entry with the highest
+        // output_tokens, not the first-seen entry.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":31}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":31}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.200Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":300}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "Streaming duplicates should collapse to one entry"
+        );
+        assert_eq!(
+            messages[0].tokens.output, 300,
+            "Should keep the max output_tokens"
+        );
+        assert_eq!(messages[0].tokens.input, 10);
+    }
+
+    #[test]
+    fn test_deduplication_per_field_max_not_just_output() {
+        // Later entry has same output but higher input - should still update input
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":5}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":50,"output_tokens":100,"cache_read_input_tokens":20}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(
+            messages[0].tokens.input, 50,
+            "Should keep max input even if output unchanged"
+        );
+        assert_eq!(
+            messages[0].tokens.cache_read, 20,
+            "Should keep max cache_read even if output unchanged"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_higher_first_lower_later() {
+        // First entry has higher output than later - should keep first's higher values
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":500}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].tokens.output, 500,
+            "Should keep max output (first entry)"
+        );
+        assert_eq!(
+            messages[0].tokens.input, 100,
+            "Should keep max input (first entry)"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_skips_model_none_without_stale_index() {
+        // First entry has id+requestId+usage but model=null → skipped, no push.
+        // Second entry is a valid duplicate. Must not panic on stale index.
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":10,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "Only the entry with model should be kept"
+        );
+        assert_eq!(messages[0].tokens.output, 100);
     }
 
     #[test]

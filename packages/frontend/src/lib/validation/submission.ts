@@ -32,7 +32,7 @@ const SUPPORTED_SOURCES = [
   "kimi",
   "qwen",
   "roocode",
-  "kilocode",
+  "kilo",
   "mux",
   "synthetic",
 ] as const;
@@ -90,9 +90,22 @@ const ExportMetaSchema = z.object({
   }),
 });
 
+const LEGACY_CLIENT_ALIASES: Record<string, string> = {
+  kilocode: "kilo",
+};
+
+function normalizeLegacyClientId(id: unknown): unknown {
+  if (typeof id === "string" && id in LEGACY_CLIENT_ALIASES) {
+    return LEGACY_CLIENT_ALIASES[id];
+  }
+  return id;
+}
+
 /**
- * Normalize legacy payloads that use "sources"/"source" to the new "clients"/"client" keys.
- * This ensures older CLI versions can still submit data during the rename rollout.
+ * Normalize legacy payloads:
+ * - "sources"/"source" → "clients"/"client" key renames
+ * - "kilocode" → "kilo" client ID alias
+ * This ensures older CLI versions can still submit data.
  */
 function normalizeLegacySources(data: unknown): unknown {
   if (!data || typeof data !== "object") return data;
@@ -103,6 +116,9 @@ function normalizeLegacySources(data: unknown): unknown {
     if ("sources" in summary && !("clients" in summary)) {
       summary.clients = summary.sources;
       delete summary.sources;
+    }
+    if (Array.isArray(summary.clients)) {
+      summary.clients = summary.clients.map(normalizeLegacyClientId);
     }
     d.summary = summary;
   }
@@ -116,11 +132,19 @@ function normalizeLegacySources(data: unknown): unknown {
         contrib.clients = (items as Record<string, unknown>[]).map((s) => {
           if (s && typeof s === "object" && "source" in s && !("client" in s)) {
             const { source, ...rest } = s;
-            return { client: source, ...rest };
+            return { client: normalizeLegacyClientId(source), ...rest };
           }
           return s;
         });
         delete contrib.sources;
+      }
+      if (Array.isArray(contrib.clients)) {
+        contrib.clients = (contrib.clients as Record<string, unknown>[]).map((cl) => {
+          if (cl && typeof cl === "object" && "client" in cl) {
+            return { ...cl, client: normalizeLegacyClientId(cl.client) };
+          }
+          return cl;
+        });
       }
       return contrib;
     });
@@ -171,14 +195,17 @@ export function validateSubmission(data: unknown): ValidationResult {
   const submission = parseResult.data;
 
   // Step 2: No future dates
-  // The CLI generates dates using the user's local timezone, but the server
-  // runs in UTC. For users in UTC+ timezones (e.g. UTC+8), their local date
-  // can be ahead of UTC — causing valid submissions to be rejected as
-  // "future dates". Adding a 1-day buffer accommodates all timezones (UTC-12
-  // to UTC+14).
+  // CLI generates dates using local timezone (chrono::Local), server validates
+  // against UTC. A 2-day buffer handles:
+  //   1. Max timezone offset (UTC+14 = ~14 hours ahead)
+  //   2. Date boundary edge cases from session aggregation
+  //   3. Clock skew between client and server
+  // Security note: allows submitting "tomorrow's" data, but trust model already
+  // relies on self-reported data without cryptographic proof.
   // See: https://github.com/junhoyeo/tokscale/issues/318
+  // See: https://github.com/junhoyeo/tokscale/issues/334
   const now = new Date();
-  const maxDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const maxDate = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
   const maxDateStr = maxDate.toISOString().split("T")[0];
 
   if (submission.meta.dateRange.end > maxDateStr) {

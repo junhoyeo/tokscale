@@ -123,6 +123,9 @@ export async function POST(request: Request) {
         submittedClients.add(client_contrib.client);
       }
     }
+    if (submittedClients.has("kilo")) {
+      submittedClients.add("kilocode" as SubmissionData["summary"]["clients"][number]);
+    }
     const hashData: SubmissionData = {
       ...data,
       summary: {
@@ -360,7 +363,8 @@ export async function POST(request: Request) {
 
       for (const day of allDays) {
         if (day.sourceBreakdown) {
-          for (const [clientName, clientData] of Object.entries(day.sourceBreakdown)) {
+          for (const [rawClientName, clientData] of Object.entries(day.sourceBreakdown)) {
+            const clientName = rawClientName === "kilocode" ? "kilo" : rawClientName;
             allClients.add(clientName);
             const cd = clientData as ClientBreakdownData;
             if (cd.models) {
