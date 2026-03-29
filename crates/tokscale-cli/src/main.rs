@@ -2581,8 +2581,10 @@ struct TsExportMeta {
     generated_at: String,
     version: String,
     date_range: DateRange,
-    source_id: String,
-    source_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_name: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2594,10 +2596,14 @@ struct TsTokenContributionData {
     contributions: Vec<TsDailyContribution>,
 }
 
-fn to_ts_token_contribution_data(
-    graph: &tokscale_core::GraphResult,
+struct SubmitSourceMetadata {
     source_id: String,
     source_name: String,
+}
+
+fn to_ts_token_contribution_data(
+    graph: &tokscale_core::GraphResult,
+    source_metadata: Option<SubmitSourceMetadata>,
 ) -> TsTokenContributionData {
     TsTokenContributionData {
         meta: TsExportMeta {
@@ -2607,8 +2613,8 @@ fn to_ts_token_contribution_data(
                 start: graph.meta.date_range_start.clone(),
                 end: graph.meta.date_range_end.clone(),
             },
-            source_id,
-            source_name,
+            source_id: source_metadata.as_ref().map(|metadata| metadata.source_id.clone()),
+            source_name: source_metadata.map(|metadata| metadata.source_name),
         },
         summary: TsDataSummary {
             total_tokens: graph.summary.total_tokens,
@@ -2882,11 +2888,7 @@ fn run_graph_command(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
-    let output_data = to_ts_token_contribution_data(
-        &graph_result,
-        auth::get_submission_source_id(),
-        auth::get_device_name(),
-    );
+    let output_data = to_ts_token_contribution_data(&graph_result, None);
     let json_output = serde_json::to_string_pretty(&output_data)?;
 
     if let Some(output_path) = output {
@@ -3132,8 +3134,10 @@ fn run_submit_command(
 
     let submit_payload = to_ts_token_contribution_data(
         &graph_result,
-        auth::get_submission_source_id(),
-        auth::get_device_name(),
+        Some(SubmitSourceMetadata {
+            source_id: auth::get_submission_source_id(),
+            source_name: auth::get_device_name(),
+        }),
     );
 
     let response = rt.block_on(async {

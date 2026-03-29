@@ -109,7 +109,7 @@ export async function POST(request: Request) {
     }
 
     const data = validation.data;
-    const submissionSourceId = data.meta.sourceId?.trim() || "__legacy__";
+    const submissionSourceId = data.meta.sourceId.trim();
     const submissionSourceName = data.meta.sourceName?.trim();
 
     if (data.contributions.length === 0) {
@@ -286,8 +286,15 @@ export async function POST(request: Request) {
             modelBreakdown,
           });
         } else {
+          const sourceAwareClientBreakdown = mergeClientBreakdowns(
+            {},
+            incomingClientBreakdown,
+            new Set(Object.keys(incomingClientBreakdown)),
+            submissionSourceId,
+            submissionSourceName,
+          );
           const dayTotals = recalculateDayTotals(incomingClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingClientBreakdown);
+          const modelBreakdown = buildModelBreakdown(sourceAwareClientBreakdown);
 
           toInsert.push({
             submissionId,
@@ -297,7 +304,7 @@ export async function POST(request: Request) {
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: incomingDay.timestampMs ?? null,
-            sourceBreakdown: incomingClientBreakdown,
+            sourceBreakdown: sourceAwareClientBreakdown,
             modelBreakdown,
           });
         }

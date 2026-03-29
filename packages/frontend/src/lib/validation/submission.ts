@@ -6,6 +6,7 @@
  */
 
 import { z } from "zod";
+import { LEGACY_SOURCE_ID_PREFIX } from "@/lib/db/helpers";
 
 // ============================================================================
 // SCHEMAS
@@ -88,7 +89,14 @@ const ExportMetaSchema = z.object({
     start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   }),
-  sourceId: z.string().trim().min(1).max(255).optional(),
+  sourceId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(255)
+    .refine((sourceId) => !sourceId.startsWith(LEGACY_SOURCE_ID_PREFIX), {
+      message: "sourceId uses a reserved prefix",
+    }),
   sourceName: z.string().trim().min(1).max(255).optional(),
 });
 

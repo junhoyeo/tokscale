@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 
 fn home_dir() -> Result<PathBuf> {
@@ -129,6 +131,31 @@ pub fn get_device_name() -> String {
     format!("CLI on {}", hostname)
 }
 
+fn fallback_submission_source_id() -> String {
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|value| value.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    let home = dirs::home_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update("tokscale-source-id-v1");
+    hasher.update(home.as_bytes());
+    hasher.update(hostname.as_bytes());
+    let digest = hasher.finalize();
+    format!("fallback-{:x}", &digest[..16])
+}
+
+fn read_source_id(path: &Path) -> Option<String> {
+    let existing = fs::read_to_string(path).ok()?;
+    let existing = existing.trim();
+    if existing.is_empty() {
+        return None;
+    }
+    Some(existing.to_string())
+}
+
 pub fn get_submission_source_id() -> String {
     if let Some(source_id) = std::env::var_os("TOKSCALE_SOURCE_ID")
         .and_then(|value| value.into_string().ok())
@@ -138,23 +165,52 @@ pub fn get_submission_source_id() -> String {
         return source_id;
     }
 
+    let fallback_source_id = fallback_submission_source_id();
+
     if let Ok(path) = get_machine_id_path() {
-        if let Ok(existing) = fs::read_to_string(&path) {
-            let existing = existing.trim();
-            if !existing.is_empty() {
-                return existing.to_string();
-            }
+        if let Some(existing) = read_source_id(&path) {
+            return existing;
         }
 
-        if ensure_config_dir().is_ok() {
-            let source_id = uuid::Uuid::new_v4().to_string();
-            if fs::write(&path, &source_id).is_ok() {
-                return source_id;
+        if ensure_config_dir().is_err() {
+            return fallback_source_id;
+        }
+
+        let source_id = uuid::Uuid::new_v4().to_string();
+
+        #[cfg(unix)]
+        let create_result = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+        };
+
+        #[cfg(not(unix))]
+        let create_result = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path);
+
+        match create_result {
+            Ok(mut file) => {
+                if file.write_all(source_id.as_bytes()).is_ok() {
+                    return source_id;
+                }
+                let _ = fs::remove_file(&path);
             }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some(existing) = read_source_id(&path) {
+                    return existing;
+                }
+            }
+            Err(_) => return fallback_source_id,
         }
     }
 
-    uuid::Uuid::new_v4().to_string()
+    fallback_source_id
 }
 
 #[cfg(target_os = "linux")]

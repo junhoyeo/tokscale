@@ -2,6 +2,8 @@
  * Client-level merge helpers for submission API
  */
 
+export const LEGACY_SOURCE_ID_PREFIX = "__tokscale_legacy__:";
+
 export interface ModelBreakdownData {
   tokens: number;
   cost: number;
@@ -96,18 +98,22 @@ export function mergeClientBreakdowns(
 
   for (const [clientName, clientData] of Object.entries(existing || {})) {
     if (!incomingClients.has(clientName)) {
-      merged[clientName] = cloneClientBreakdown(clientData, "__legacy__");
+      merged[clientName] = cloneClientBreakdown(clientName, clientData);
     }
   }
 
   for (const clientName of incomingClients) {
     const existingClient = existing?.[clientName];
-    const instances = extractClientInstances(existingClient, sourceId);
+    const instances =
+      existingClient?.instances && Object.keys(existingClient.instances).length > 0
+        ? extractClientInstances(clientName, existingClient)
+        : {};
 
     if (incoming[clientName]) {
+      const existingSourceName = instances[sourceId]?.sourceName;
       instances[sourceId] = {
         ...cloneSourceInstance(incoming[clientName]),
-        sourceName,
+        sourceName: sourceName ?? existingSourceName,
       };
       merged[clientName] = aggregateClientInstances(instances);
     } else {
@@ -188,8 +194,8 @@ function cloneSourceInstance(instance: ClientSourceInstanceData | ClientBreakdow
 }
 
 function extractClientInstances(
+  clientName: string,
   clientData: ClientBreakdownData | undefined,
-  fallbackSourceId: string,
 ): Record<string, ClientSourceInstanceData> {
   if (!clientData) {
     return {};
@@ -205,7 +211,7 @@ function extractClientInstances(
   }
 
   return {
-    [fallbackSourceId]: cloneSourceInstance(clientData),
+    [`${LEGACY_SOURCE_ID_PREFIX}${clientName}`]: cloneSourceInstance(clientData),
   };
 }
 
@@ -273,10 +279,10 @@ function aggregateClientInstances(
 }
 
 function cloneClientBreakdown(
+  clientName: string,
   clientData: ClientBreakdownData,
-  fallbackSourceId: string,
 ): ClientBreakdownData {
-  return aggregateClientInstances(extractClientInstances(clientData, fallbackSourceId));
+  return aggregateClientInstances(extractClientInstances(clientName, clientData));
 }
 
 /**
