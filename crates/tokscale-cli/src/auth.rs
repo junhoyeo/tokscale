@@ -156,6 +156,30 @@ fn read_source_id(path: &Path) -> Option<String> {
     Some(existing.to_string())
 }
 
+fn repair_source_id(path: &Path, source_id: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(source_id.as_bytes())?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(source_id.as_bytes())?;
+        Ok(())
+    }
+}
+
 pub fn get_submission_source_id() -> String {
     if let Some(source_id) = std::env::var_os("TOKSCALE_SOURCE_ID")
         .and_then(|value| value.into_string().ok())
@@ -204,6 +228,11 @@ pub fn get_submission_source_id() -> String {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if let Some(existing) = read_source_id(&path) {
                     return existing;
+                }
+                if repair_source_id(&path, &fallback_source_id).is_ok() {
+                    if let Some(existing) = read_source_id(&path) {
+                        return existing;
+                    }
                 }
             }
             Err(_) => return fallback_source_id,

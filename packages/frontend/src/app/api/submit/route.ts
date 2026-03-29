@@ -45,6 +45,10 @@ function normalizeSubmissionData(data: unknown): void {
   }
 }
 
+function getLegacySubmissionSourceId(data: SubmissionData): string {
+  return `${generateSubmissionHash(data)}-legacy`;
+}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -109,7 +113,6 @@ export async function POST(request: Request) {
     }
 
     const data = validation.data;
-    const submissionSourceId = data.meta.sourceId.trim();
     const submissionSourceName = data.meta.sourceName?.trim();
 
     if (data.contributions.length === 0) {
@@ -132,6 +135,7 @@ export async function POST(request: Request) {
         clients: Array.from(submittedClients).sort(),
       },
     };
+    const submissionSourceId = data.meta.sourceId?.trim() || getLegacySubmissionSourceId(hashData);
 
     // ========================================
     // STEP 3: DATABASE OPERATIONS IN TRANSACTION

@@ -96,7 +96,8 @@ const ExportMetaSchema = z.object({
     .max(255)
     .refine((sourceId) => !sourceId.startsWith(LEGACY_SOURCE_ID_PREFIX), {
       message: "sourceId uses a reserved prefix",
-    }),
+    })
+    .optional(),
   sourceName: z.string().trim().min(1).max(255).optional(),
 });
 
