@@ -88,6 +88,8 @@ const ExportMetaSchema = z.object({
     start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   }),
+  sourceId: z.string().trim().min(1).max(255).optional(),
+  sourceName: z.string().trim().min(1).max(255).optional(),
 });
 
 /**
@@ -315,6 +317,7 @@ export function generateSubmissionHash(data: SubmissionData): string {
   const content = JSON.stringify({
     // What clients are being submitted
     clients: data.summary.clients.slice().sort(),
+    sourceId: data.meta.sourceId ?? null,
     // Date range of this submission
     dateRange: data.meta.dateRange,
     // Number of days with data (for basic fingerprinting)

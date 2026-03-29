@@ -109,6 +109,8 @@ export async function POST(request: Request) {
     }
 
     const data = validation.data;
+    const submissionSourceId = data.meta.sourceId?.trim() || "__legacy__";
+    const submissionSourceName = data.meta.sourceName?.trim();
 
     if (data.contributions.length === 0) {
       return NextResponse.json(
@@ -266,7 +268,9 @@ export async function POST(request: Request) {
            const mergedClientBreakdown = mergeClientBreakdowns(
              existingClientBreakdown,
              incomingClientBreakdown,
-             submittedClients
+             submittedClients,
+             submissionSourceId,
+             submissionSourceName,
            );
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
           const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);

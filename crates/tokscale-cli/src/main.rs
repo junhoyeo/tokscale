@@ -2581,6 +2581,8 @@ struct TsExportMeta {
     generated_at: String,
     version: String,
     date_range: DateRange,
+    source_id: String,
+    source_name: String,
 }
 
 #[derive(serde::Serialize)]
@@ -2592,7 +2594,11 @@ struct TsTokenContributionData {
     contributions: Vec<TsDailyContribution>,
 }
 
-fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenContributionData {
+fn to_ts_token_contribution_data(
+    graph: &tokscale_core::GraphResult,
+    source_id: String,
+    source_name: String,
+) -> TsTokenContributionData {
     TsTokenContributionData {
         meta: TsExportMeta {
             generated_at: graph.meta.generated_at.clone(),
@@ -2601,6 +2607,8 @@ fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenC
                 start: graph.meta.date_range_start.clone(),
                 end: graph.meta.date_range_end.clone(),
             },
+            source_id,
+            source_name,
         },
         summary: TsDataSummary {
             total_tokens: graph.summary.total_tokens,
@@ -2874,7 +2882,11 @@ fn run_graph_command(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
-    let output_data = to_ts_token_contribution_data(&graph_result);
+    let output_data = to_ts_token_contribution_data(
+        &graph_result,
+        auth::get_submission_source_id(),
+        auth::get_device_name(),
+    );
     let json_output = serde_json::to_string_pretty(&output_data)?;
 
     if let Some(output_path) = output {
@@ -3118,7 +3130,11 @@ fn run_submit_command(
 
     let api_url = auth::get_api_base_url();
 
-    let submit_payload = to_ts_token_contribution_data(&graph_result);
+    let submit_payload = to_ts_token_contribution_data(
+        &graph_result,
+        auth::get_submission_source_id(),
+        auth::get_device_name(),
+    );
 
     let response = rt.block_on(async {
         reqwest::Client::new()

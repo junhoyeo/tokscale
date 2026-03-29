@@ -53,6 +53,10 @@ fn get_credentials_path() -> Result<PathBuf> {
     Ok(home_dir()?.join(".config/tokscale/credentials.json"))
 }
 
+fn get_machine_id_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".config/tokscale/machine-id"))
+}
+
 fn ensure_config_dir() -> Result<()> {
     let config_dir = home_dir()?.join(".config/tokscale");
 
@@ -117,12 +121,40 @@ pub fn get_api_base_url() -> String {
     std::env::var("TOKSCALE_API_URL").unwrap_or_else(|_| "https://tokscale.ai".to_string())
 }
 
-fn get_device_name() -> String {
+pub fn get_device_name() -> String {
     let hostname = hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string());
     format!("CLI on {}", hostname)
+}
+
+pub fn get_submission_source_id() -> String {
+    if let Some(source_id) = std::env::var_os("TOKSCALE_SOURCE_ID")
+        .and_then(|value| value.into_string().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return source_id;
+    }
+
+    if let Ok(path) = get_machine_id_path() {
+        if let Ok(existing) = fs::read_to_string(&path) {
+            let existing = existing.trim();
+            if !existing.is_empty() {
+                return existing.to_string();
+            }
+        }
+
+        if ensure_config_dir().is_ok() {
+            let source_id = uuid::Uuid::new_v4().to_string();
+            if fs::write(&path, &source_id).is_ok() {
+                return source_id;
+            }
+        }
+    }
+
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(target_os = "linux")]
