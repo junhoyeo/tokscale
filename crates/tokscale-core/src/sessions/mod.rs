@@ -38,31 +38,33 @@ pub struct UnifiedMessage {
 
 pub fn normalize_agent_name(agent: &str) -> String {
     let trimmed = agent.trim();
-    let agent_lower = trimmed.to_lowercase();
+    let stripped = strip_agent_prefix(trimmed);
+    let agent_lower = stripped.to_lowercase();
 
     if agent_lower.contains("plan") {
         if agent_lower.contains("omo") || agent_lower.contains("sisyphus") {
             return "Planner-Sisyphus".to_string();
         }
-        return trimmed.to_string();
+        return titlecase_agent(stripped);
     }
 
     if agent_lower == "omo" || agent_lower == "sisyphus" {
         return "Sisyphus".to_string();
     }
 
-    trimmed.to_string()
+    titlecase_agent(stripped)
 }
 
 pub fn normalize_opencode_agent_name(agent: &str) -> String {
     let trimmed = agent.trim();
-    let agent_lower = trimmed.to_lowercase();
+    let stripped = strip_agent_prefix(trimmed);
+    let agent_lower = stripped.to_lowercase();
 
     if let Some(normalized) = normalize_oh_my_opencode_agent_name(&agent_lower) {
         return normalized;
     }
 
-    normalize_agent_name(trimmed)
+    normalize_agent_name(stripped)
 }
 
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
@@ -79,6 +81,43 @@ fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     };
 
     Some(normalized.to_string())
+}
+
+fn strip_agent_prefix(name: &str) -> &str {
+    for prefix in &["astrape:", "oh-my-claudecode:", "oh-my-codex:"] {
+        if name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return &name[prefix.len()..];
+        }
+    }
+    name
+}
+
+fn titlecase_word(word: &str) -> String {
+    match word.to_lowercase().as_str() {
+        "ui" => "UI".to_string(),
+        "ux" => "UX".to_string(),
+        "api" => "API".to_string(),
+        _ => {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    upper + &chars.collect::<String>()
+                }
+            }
+        }
+    }
+}
+
+fn titlecase_agent(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    name.split('-')
+        .map(titlecase_word)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl UnifiedMessage {
@@ -323,7 +362,39 @@ mod tests {
         assert_eq!(normalize_agent_name("Planner-Sisyphus"), "Planner-Sisyphus");
         assert_eq!(normalize_agent_name("omo-plan"), "Planner-Sisyphus");
 
-        assert_eq!(normalize_agent_name("explore"), "explore");
+        assert_eq!(normalize_agent_name("explore"), "Explore");
         assert_eq!(normalize_agent_name("CustomAgent"), "CustomAgent");
+
+        assert_eq!(normalize_agent_name("executor"), "Executor");
+        assert_eq!(
+            normalize_agent_name("task-orchestrator"),
+            "Task Orchestrator"
+        );
+        assert_eq!(normalize_agent_name("git-committer"), "Git Committer");
+        assert_eq!(
+            normalize_agent_name("frontend-ui-ux-engineer"),
+            "Frontend UI UX Engineer"
+        );
+        assert_eq!(
+            normalize_agent_name("astrape:executor-high"),
+            "Executor High"
+        );
+        assert_eq!(
+            normalize_agent_name("oh-my-claudecode:code-reviewer"),
+            "Code Reviewer"
+        );
+        assert_eq!(normalize_agent_name("oh-my-codex:librarian"), "Librarian");
+        assert_eq!(normalize_agent_name("astrape:executor"), "Executor");
+        assert_eq!(normalize_agent_name("plan-reviewer"), "Plan Reviewer");
+        assert_eq!(normalize_agent_name("astrape:planner"), "Planner");
+
+        assert_eq!(
+            normalize_opencode_agent_name("astrape:sisyphus"),
+            "Sisyphus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("oh-my-claudecode:executor"),
+            "Executor"
+        );
     }
 }

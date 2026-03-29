@@ -920,7 +920,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.agents.len(), 1);
-        assert_eq!(usage.agents[0].agent, "builder");
+        assert_eq!(usage.agents[0].agent, "Builder");
         assert_eq!(usage.agents[0].clients, "opencode, roocode");
         assert_eq!(usage.agents[0].message_count, 2);
         assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
@@ -1212,13 +1212,13 @@ after"#,
         );
 
         assert_eq!(usage.agents.len(), 2);
-        assert_eq!(usage.agents[0].agent, "architect");
+        assert_eq!(usage.agents[0].agent, "Architect");
         assert_eq!(usage.agents[0].clients, "roocode");
         assert_eq!(usage.agents[0].message_count, 2);
         assert_cost_matches(usage.agents[0].cost, architect_expected);
         assert_eq!(usage.agents[0].tokens.total(), 734_000);
 
-        assert_eq!(usage.agents[1].agent, "reviewer");
+        assert_eq!(usage.agents[1].agent, "Reviewer");
         assert_eq!(usage.agents[1].message_count, 2);
         assert_cost_matches(usage.agents[1].cost, reviewer_expected);
         assert_eq!(usage.agents[1].tokens.total(), 147_000);
