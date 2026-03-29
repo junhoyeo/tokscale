@@ -16,19 +16,23 @@ export async function DELETE() {
       .where(eq(submissions.userId, session.id))
       .returning({ id: submissions.id });
 
-    revalidateTag("leaderboard", "max");
-    revalidateTag(`user:${session.username}`, "max");
-    revalidateTag("user-rank", "max");
-    revalidateTag(`user-rank:${session.username}`, "max");
-    revalidateTag(`embed-user:${session.username}`, "max");
-    revalidateTag(`embed-user:${session.username}:tokens`, "max");
-    revalidateTag(`embed-user:${session.username}:cost`, "max");
+    try {
+      revalidateTag("leaderboard", "max");
+      revalidateTag(`user:${session.username}`, "max");
+      revalidateTag("user-rank", "max");
+      revalidateTag(`user-rank:${session.username}`, "max");
+      revalidateTag(`embed-user:${session.username}`, "max");
+      revalidateTag(`embed-user:${session.username}:tokens`, "max");
+      revalidateTag(`embed-user:${session.username}:cost`, "max");
 
-    revalidatePath("/leaderboard");
-    revalidatePath("/profile");
-    revalidatePath(`/u/${session.username}`);
-    revalidatePath(`/api/users/${session.username}`);
-    revalidatePath(`/api/embed/${session.username}/svg`);
+      revalidatePath("/leaderboard");
+      revalidatePath("/profile");
+      revalidatePath(`/u/${session.username}`);
+      revalidatePath(`/api/users/${session.username}`);
+      revalidatePath(`/api/embed/${session.username}/svg`);
+    } catch (cacheError) {
+      console.error("Cache invalidation failed after deletion:", cacheError);
+    }
 
     return NextResponse.json({
       success: true,
