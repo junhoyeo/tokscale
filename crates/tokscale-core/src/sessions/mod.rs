@@ -90,7 +90,10 @@ fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
 
 fn strip_agent_prefix(name: &str) -> &str {
     for prefix in &["astrape:", "oh-my-claudecode:", "oh-my-codex:"] {
-        if name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        if name
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
             return &name[prefix.len()..];
         }
     }
