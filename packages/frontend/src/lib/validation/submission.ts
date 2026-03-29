@@ -171,13 +171,13 @@ export function validateSubmission(data: unknown): ValidationResult {
   const submission = parseResult.data;
 
   // Step 2: No future dates
-  // The CLI generates dates using the user's local timezone, but the server
-  // runs in UTC. For users in UTC+ timezones (e.g. UTC+14), their local date
-  // can be ahead of UTC. Additionally, some CLI versions aggregate session
-  // data across date boundaries or include entries with slightly skewed
-  // timestamps, so a 1-day buffer is not enough in practice.
-  // Using a 2-day buffer to handle all timezone offsets plus date boundary
-  // edge cases reliably.
+  // CLI generates dates using local timezone (chrono::Local), server validates
+  // against UTC. A 2-day buffer handles:
+  //   1. Max timezone offset (UTC+14 = ~14 hours ahead)
+  //   2. Date boundary edge cases from session aggregation
+  //   3. Clock skew between client and server
+  // Security note: allows submitting "tomorrow's" data, but trust model already
+  // relies on self-reported data without cryptographic proof.
   // See: https://github.com/junhoyeo/tokscale/issues/318
   // See: https://github.com/junhoyeo/tokscale/issues/334
   const now = new Date();
