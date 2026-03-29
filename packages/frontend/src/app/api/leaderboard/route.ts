@@ -30,7 +30,9 @@ export async function GET(request: Request) {
     const page = Math.max(1, parseIntSafe(searchParams.get("page"), 1));
     const limit = Math.min(100, Math.max(1, parseIntSafe(searchParams.get("limit"), 50)));
 
-    const data = await getLeaderboardData(period, page, limit, sortBy);
+    const search = (searchParams.get("search") || "").trim();
+
+    const data = await getLeaderboardData(period, page, limit, sortBy, search);
 
     return NextResponse.json(data);
   } catch (error) {
