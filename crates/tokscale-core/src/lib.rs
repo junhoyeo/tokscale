@@ -1837,6 +1837,31 @@ mod tests {
     }
 
     #[test]
+    fn test_retain_for_requested_clients_preserves_kilo_split() {
+        let kilocode_only: HashSet<&str> = HashSet::from(["kilocode"]);
+        assert!(retain_for_requested_clients(
+            "kilocode",
+            "gpt-5",
+            "openai",
+            &kilocode_only
+        ));
+        assert!(!retain_for_requested_clients(
+            "kilo",
+            "gpt-5",
+            "openai",
+            &kilocode_only
+        ));
+
+        let kilo_only: HashSet<&str> = HashSet::from(["kilo"]);
+        assert!(retain_for_requested_clients(
+            "kilo", "gpt-5", "openai", &kilo_only
+        ));
+        assert!(!retain_for_requested_clients(
+            "kilocode", "gpt-5", "openai", &kilo_only
+        ));
+    }
+
+    #[test]
     fn test_cursor_parse_path_reprices_zero_cost_composer_1_5_rows() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
