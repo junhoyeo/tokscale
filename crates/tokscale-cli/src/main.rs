@@ -483,7 +483,7 @@ enum Commands {
         subcommand: CursorSubcommand,
     },
     #[command(about = "Delete all submitted usage data from the server")]
-    DeleteData,
+    DeleteSubmittedData,
 }
 
 #[derive(Subcommand)]
@@ -908,7 +908,7 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::Cursor { subcommand }) => run_cursor_command(subcommand),
-        Some(Commands::DeleteData) => run_delete_data_command(),
+        Some(Commands::DeleteSubmittedData) => run_delete_data_command(),
         None => {
             let clients = build_client_filter(ClientFlags {
                 opencode: cli.opencode,
@@ -2718,6 +2718,19 @@ fn run_delete_data_command() -> Result<()> {
     );
     io::stdout().flush()?;
     let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().to_lowercase() != "y" {
+        println!("{}", "  Cancelled.".bright_black());
+        return Ok(());
+    }
+
+    print!(
+        "{}",
+        "  This cannot be undone. You will lose all historical token/cost data. Continue? (y/N): "
+            .white()
+    );
+    io::stdout().flush()?;
+    input.clear();
     io::stdin().read_line(&mut input)?;
     if input.trim().to_lowercase() != "y" {
         println!("{}", "  Cancelled.".bright_black());
