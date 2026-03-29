@@ -297,7 +297,8 @@ async function fetchLeaderboardData(
       .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
       .as("ranked");
 
-    const searchPattern = `%${search.toLowerCase()}%`;
+    const escapedSearch = search.toLowerCase().replace(/[%_\\]/g, "\\$&");
+    const searchPattern = `%${escapedSearch}%`;
     const results = await db
       .select()
       .from(rankedSubquery)

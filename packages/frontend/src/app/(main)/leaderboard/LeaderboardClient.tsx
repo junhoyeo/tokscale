@@ -946,8 +946,13 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   const isFirstRankFetch = useRef(true);
 
-  // Debounce search input
+  // Debounce search input — skip setPage(1) on initial mount with empty query
+  const isSearchMounted = useRef(false);
   useEffect(() => {
+    if (!isSearchMounted.current) {
+      isSearchMounted.current = true;
+      if (!searchQuery) return;
+    }
     const timer = setTimeout(() => {
       setDebouncedSearch(searchQuery);
       setPage(1);
