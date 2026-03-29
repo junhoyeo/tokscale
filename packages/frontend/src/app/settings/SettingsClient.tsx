@@ -221,11 +221,24 @@ export default function SettingsClient() {
   };
 
   const handleDeleteSubmittedData = async () => {
-    const confirmed = confirm(
-      "Delete all submitted usage data from Tokscale? This removes your leaderboard entries, public profile stats, and stored usage history. Your account and API tokens will stay active."
-    );
+    if (
+      !confirm(
+        "Delete all submitted usage data? This removes your leaderboard entries, profile stats, and daily usage history."
+      )
+    )
+      return;
 
-    if (!confirmed) return;
+    if (
+      !confirm(
+        "Are you sure? This cannot be undone. You will lose all historical token/cost data on your public profile."
+      )
+    )
+      return;
+
+    const typed = prompt(
+      'Type "delete my data" to confirm permanent deletion:'
+    );
+    if (typed?.trim().toLowerCase() !== "delete my data") return;
 
     setIsDeletingSubmittedData(true);
     setSubmittedDataStatus(null);
