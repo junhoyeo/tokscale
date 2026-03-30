@@ -24,211 +24,313 @@ impl PathRoot {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientDef {
-    pub id: &'static str,
+#[derive(Debug, Clone, Copy)]
+pub struct SourceDef {
+    pub tag: &'static str,
     pub root: PathRoot,
     pub relative_path: &'static str,
     pub pattern: &'static str,
+}
+
+impl SourceDef {
+    pub fn resolve_path(&self, home_dir: &str) -> String {
+        format!("{}/{}", self.root.resolve(home_dir), self.relative_path)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientDef {
+    pub id: &'static str,
+    pub sources: &'static [SourceDef],
     pub headless: bool,
     pub parse_local: bool,
 }
 
 impl ClientDef {
     pub fn resolve_path(&self, home_dir: &str) -> String {
-        format!("{}/{}", self.root.resolve(home_dir), self.relative_path)
+        self.sources
+            .first()
+            .map(|s| s.resolve_path(home_dir))
+            .unwrap_or_default()
+    }
+
+    pub fn primary_source(&self) -> Option<&'static SourceDef> {
+        self.sources.first()
+    }
+
+    pub fn source_by_tag(&self, tag: &str) -> Option<&'static SourceDef> {
+        self.sources.iter().find(|s| s.tag == tag)
+    }
+
+    pub fn pattern(&self) -> &'static str {
+        self.sources.first().map(|s| s.pattern).unwrap_or("")
     }
 }
 
-macro_rules! define_clients {
-    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr } ),+ $(,)? ) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        #[repr(usize)]
-        pub enum ClientId {
-            $( $variant = $index ),+
-        }
-
-        impl ClientId {
-            pub const COUNT: usize = [ $( $index ),+ ].len();
-            pub const ALL: [ClientId; Self::COUNT] = [ $( ClientId::$variant ),+ ];
-
-            pub fn data(&self) -> &'static ClientDef {
-                &CLIENTS[*self as usize]
-            }
-
-            pub fn as_str(&self) -> &'static str {
-                self.data().id
-            }
-
-            pub fn file_pattern(&self) -> &'static str {
-                self.data().pattern
-            }
-
-            pub fn supports_headless(&self) -> bool {
-                self.data().headless
-            }
-
-            pub fn parse_local(&self) -> bool {
-                self.data().parse_local
-            }
-
-            pub fn iter() -> impl Iterator<Item = ClientId> {
-                Self::ALL.iter().copied()
-            }
-
-            #[allow(clippy::should_implement_trait)]
-            pub fn from_str(s: &str) -> Option<ClientId> {
-                Self::ALL.iter().copied().find(|c| c.as_str() == s)
-            }
-        }
-
-        pub const CLIENTS: [ClientDef; ClientId::COUNT] = [
-            $( ClientDef {
-                id: $id,
-                root: $root,
-                relative_path: $rel,
-                pattern: $pat,
-                headless: $hl,
-                parse_local: $pl,
-            } ),+
-        ];
-
-        const _: () = {
-            let mut i = 0;
-            $(
-                assert!($index == i, "ClientId indices must be sequential");
-                i += 1;
-                let _ = i;
-            )+
-        };
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
+pub enum ClientId {
+    OpenCode = 0,
+    Claude = 1,
+    Codex = 2,
+    Cursor = 3,
+    Gemini = 4,
+    Amp = 5,
+    Droid = 6,
+    OpenClaw = 7,
+    Pi = 8,
+    Kimi = 9,
+    Qwen = 10,
+    RooCode = 11,
+    Kilo = 12,
+    Mux = 13,
 }
 
-define_clients!(
-    OpenCode = 0 => {
-        id: "opencode",
-        root: PathRoot::XdgData,
-        relative: "opencode/storage/message",
-        pattern: "*.json",
-        headless: false,
-        parse_local: true
+impl ClientId {
+    pub const COUNT: usize = 14;
+    pub const ALL: [ClientId; Self::COUNT] = [
+        ClientId::OpenCode,
+        ClientId::Claude,
+        ClientId::Codex,
+        ClientId::Cursor,
+        ClientId::Gemini,
+        ClientId::Amp,
+        ClientId::Droid,
+        ClientId::OpenClaw,
+        ClientId::Pi,
+        ClientId::Kimi,
+        ClientId::Qwen,
+        ClientId::RooCode,
+        ClientId::Kilo,
+        ClientId::Mux,
+    ];
+
+    pub fn data(&self) -> &'static ClientDef {
+        &CLIENTS[*self as usize]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.data().id
+    }
+
+    pub fn file_pattern(&self) -> &'static str {
+        self.data().pattern()
+    }
+
+    pub fn supports_headless(&self) -> bool {
+        self.data().headless
+    }
+
+    pub fn parse_local(&self) -> bool {
+        self.data().parse_local
+    }
+
+    pub fn iter() -> impl Iterator<Item = ClientId> {
+        Self::ALL.iter().copied()
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<ClientId> {
+        let normalized = if s == "kilocode" { "kilo" } else { s };
+        Self::ALL.iter().copied().find(|c| c.as_str() == normalized)
+    }
+}
+
+static SOURCES_OPENCODE: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::XdgData,
+    relative_path: "opencode/storage/message",
+    pattern: "*.json",
+}];
+
+static SOURCES_CLAUDE: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".claude/projects",
+    pattern: "*.jsonl",
+}];
+
+static SOURCES_CODEX: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::EnvVar {
+        var: "CODEX_HOME",
+        fallback_relative: ".codex",
     },
-    Claude = 1 => {
-        id: "claude",
+    relative_path: "sessions",
+    pattern: "*.jsonl",
+}];
+
+static SOURCES_CURSOR: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".config/tokscale/cursor-cache",
+    pattern: "usage*.csv",
+}];
+
+static SOURCES_GEMINI: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".gemini/tmp",
+    pattern: "*.json",
+}];
+
+static SOURCES_AMP: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::XdgData,
+    relative_path: "amp/threads",
+    pattern: "T-*.json",
+}];
+
+static SOURCES_DROID: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".factory/sessions",
+    pattern: "*.settings.json",
+}];
+
+static SOURCES_OPENCLAW: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".openclaw/agents",
+    pattern: "*.jsonl*",
+}];
+
+static SOURCES_PI: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".pi/agent/sessions",
+    pattern: "*.jsonl",
+}];
+
+static SOURCES_KIMI: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".kimi/sessions",
+    pattern: "wire.jsonl",
+}];
+
+static SOURCES_QWEN: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".qwen/projects",
+    pattern: "*.jsonl",
+}];
+
+static SOURCES_ROOCODE: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
+    pattern: "ui_messages.json",
+}];
+
+static SOURCES_KILO: [SourceDef; 2] = [
+    SourceDef {
+        tag: "vscode",
         root: PathRoot::Home,
-        relative: ".claude/projects",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true
-    },
-    Codex = 2 => {
-        id: "codex",
-        root: PathRoot::EnvVar {
-            var: "CODEX_HOME",
-            fallback_relative: ".codex",
-        },
-        relative: "sessions",
-        pattern: "*.jsonl",
-        headless: true,
-        parse_local: true
-    },
-    Cursor = 3 => {
-        id: "cursor",
-        root: PathRoot::Home,
-        relative: ".config/tokscale/cursor-cache",
-        pattern: "usage*.csv",
-        headless: false,
-        parse_local: false
-    },
-    Gemini = 4 => {
-        id: "gemini",
-        root: PathRoot::Home,
-        relative: ".gemini/tmp",
-        pattern: "*.json",
-        headless: false,
-        parse_local: true
-    },
-    Amp = 5 => {
-        id: "amp",
-        root: PathRoot::XdgData,
-        relative: "amp/threads",
-        pattern: "T-*.json",
-        headless: false,
-        parse_local: true
-    },
-    Droid = 6 => {
-        id: "droid",
-        root: PathRoot::Home,
-        relative: ".factory/sessions",
-        pattern: "*.settings.json",
-        headless: false,
-        parse_local: true
-    },
-    OpenClaw = 7 => {
-        id: "openclaw",
-        root: PathRoot::Home,
-        relative: ".openclaw/agents",
-        pattern: "*.jsonl*",
-        headless: false,
-        parse_local: true
-    },
-    Pi = 8 => {
-        id: "pi",
-        root: PathRoot::Home,
-        relative: ".pi/agent/sessions",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true
-    },
-    Kimi = 9 => {
-        id: "kimi",
-        root: PathRoot::Home,
-        relative: ".kimi/sessions",
-        pattern: "wire.jsonl",
-        headless: false,
-        parse_local: true
-    },
-    Qwen = 10 => {
-        id: "qwen",
-        root: PathRoot::Home,
-        relative: ".qwen/projects",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true
-    },
-    RooCode = 11 => {
-        id: "roocode",
-        root: PathRoot::Home,
-        relative: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
+        relative_path: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
         pattern: "ui_messages.json",
-        headless: false,
-        parse_local: true
     },
-    KiloCode = 12 => {
-        id: "kilocode",
-        root: PathRoot::Home,
-        relative: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
-        pattern: "ui_messages.json",
-        headless: false,
-        parse_local: true
-    },
-    Mux = 13 => {
-        id: "mux",
-        root: PathRoot::Home,
-        relative: ".mux/sessions",
-        pattern: "session-usage.json",
-        headless: false,
-        parse_local: true
-    },
-    Kilo = 14 => {
-        id: "kilo",
+    SourceDef {
+        tag: "cli",
         root: PathRoot::XdgData,
-        relative: "kilo/kilo.db",
+        relative_path: "kilo/kilo.db",
         pattern: "kilo.db",
+    },
+];
+
+static SOURCES_MUX: [SourceDef; 1] = [SourceDef {
+    tag: "default",
+    root: PathRoot::Home,
+    relative_path: ".mux/sessions",
+    pattern: "session-usage.json",
+}];
+
+pub static CLIENTS: [ClientDef; ClientId::COUNT] = [
+    ClientDef {
+        id: "opencode",
+        sources: &SOURCES_OPENCODE,
         headless: false,
-        parse_local: true
-    }
-);
+        parse_local: true,
+    },
+    ClientDef {
+        id: "claude",
+        sources: &SOURCES_CLAUDE,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "codex",
+        sources: &SOURCES_CODEX,
+        headless: true,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "cursor",
+        sources: &SOURCES_CURSOR,
+        headless: false,
+        parse_local: false,
+    },
+    ClientDef {
+        id: "gemini",
+        sources: &SOURCES_GEMINI,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "amp",
+        sources: &SOURCES_AMP,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "droid",
+        sources: &SOURCES_DROID,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "openclaw",
+        sources: &SOURCES_OPENCLAW,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "pi",
+        sources: &SOURCES_PI,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "kimi",
+        sources: &SOURCES_KIMI,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "qwen",
+        sources: &SOURCES_QWEN,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "roocode",
+        sources: &SOURCES_ROOCODE,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "kilo",
+        sources: &SOURCES_KILO,
+        headless: false,
+        parse_local: true,
+    },
+    ClientDef {
+        id: "mux",
+        sources: &SOURCES_MUX,
+        headless: false,
+        parse_local: true,
+    },
+];
 
 pub struct ClientCounts {
     counts: [i32; ClientId::COUNT],
@@ -279,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 15);
+        assert_eq!(ClientId::COUNT, 14);
     }
 
     #[test]
@@ -360,17 +462,14 @@ mod tests {
     }
 
     #[test]
-    fn test_client_def_resolve_path_combines_root_and_relative() {
-        let client = ClientDef {
-            id: "test",
+    fn test_source_def_resolve_path() {
+        let source = SourceDef {
+            tag: "default",
             root: PathRoot::Home,
             relative_path: ".test/sessions",
             pattern: "*.jsonl",
-            headless: false,
-            parse_local: true,
         };
-
-        assert_eq!(client.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
+        assert_eq!(source.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
     }
 
     #[test]
@@ -392,8 +491,10 @@ mod tests {
 
     #[test]
     fn test_codex_root_uses_codex_home_env_var() {
+        let def = ClientId::Codex.data();
+        let source = def.primary_source().unwrap();
         assert_eq!(
-            ClientId::Codex.data().root,
+            source.root,
             PathRoot::EnvVar {
                 var: "CODEX_HOME",
                 fallback_relative: ".codex",
@@ -404,5 +505,29 @@ mod tests {
     #[test]
     fn test_cursor_parse_local_is_false() {
         assert!(!ClientId::Cursor.data().parse_local);
+    }
+
+    #[test]
+    fn test_kilo_has_two_sources() {
+        let def = ClientId::Kilo.data();
+        assert_eq!(def.sources.len(), 2);
+        assert_eq!(def.sources[0].tag, "vscode");
+        assert_eq!(def.sources[1].tag, "cli");
+    }
+
+    #[test]
+    fn test_kilo_source_by_tag() {
+        let def = ClientId::Kilo.data();
+        let vscode = def.source_by_tag("vscode").unwrap();
+        assert!(vscode.relative_path.contains("kilocode.kilo-code"));
+
+        let cli = def.source_by_tag("cli").unwrap();
+        assert!(cli.relative_path.contains("kilo.db"));
+    }
+
+    #[test]
+    fn test_kilocode_alias_maps_to_kilo() {
+        assert_eq!(ClientId::from_str("kilocode"), Some(ClientId::Kilo));
+        assert_eq!(ClientId::from_str("kilo"), Some(ClientId::Kilo));
     }
 }

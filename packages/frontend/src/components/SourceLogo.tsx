@@ -51,6 +51,7 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
       case "roocode":
         return "/assets/logos/roocode.png";
       case "kilocode":
+      case "kilo":
         return "/assets/logos/kilocode.png";
       case "mux":
         return "/assets/logos/mux.png";

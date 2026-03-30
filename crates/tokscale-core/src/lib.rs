@@ -831,7 +831,7 @@ fn parse_all_messages_with_pricing(
     }
 
     let kilocode_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::KiloCode)
+        .get(ClientId::Kilo)
         .par_iter()
         .map(|path| {
             load_or_parse_source(path, &source_cache, pricing, |path| {
@@ -840,7 +840,12 @@ fn parse_all_messages_with_pricing(
         })
         .collect();
     for outcome in kilocode_outcomes {
-        all_messages.extend(outcome.messages);
+        all_messages.extend(outcome.messages.into_iter().map(|mut msg| {
+            if msg.client == "kilocode" {
+                msg.client = "kilo".to_string();
+            }
+            msg
+        }));
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
@@ -1525,7 +1530,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(roocode_msgs);
 
     let kilocode_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::KiloCode)
+        .get(ClientId::Kilo)
         .par_iter()
         .flat_map(|path| {
             sessions::kilocode::parse_kilocode_file(path)
@@ -1534,8 +1539,8 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .collect::<Vec<_>>()
         })
         .collect();
-    let kilocode_count = kilocode_msgs.len() as i32;
-    counts.set(ClientId::KiloCode, kilocode_count);
+    let kilo_vscode_count = kilocode_msgs.len() as i32;
+    counts.set(ClientId::Kilo, kilo_vscode_count);
     messages.extend(kilocode_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
@@ -1559,7 +1564,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             .map(|msg| unified_to_parsed(&msg))
             .collect();
         let count = kilo_msgs.len() as i32;
-        counts.set(ClientId::Kilo, count);
+        counts.add(ClientId::Kilo, count);
         messages.extend(kilo_msgs);
         count
     } else {
@@ -2083,6 +2088,29 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_parse_path_reprices_zero_cost_composer_1_rows() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+
+        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-03-04T12:00:00.000Z","Included","Composer 1","No","1200","1000","5000","2000","8000","0""#;
+        std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
+
+        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let messages = parse_all_messages_with_pricing(
+            temp_dir.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            Some(&pricing),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "cursor");
+        assert_eq!(messages[0].model_id, "Composer 1");
+        assert!(messages[0].cost > 0.0);
+    }
+
+    #[test]
     fn test_cursor_parse_path_reprices_zero_cost_composer_1_5_rows() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
@@ -2102,6 +2130,29 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "cursor");
         assert_eq!(messages[0].model_id, "Composer 1.5");
+        assert!(messages[0].cost > 0.0);
+    }
+
+    #[test]
+    fn test_cursor_parse_path_reprices_zero_cost_composer_2_rows() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+
+        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-03-04T12:00:00.000Z","Included","composer-2","No","1200","1000","5000","2000","8000","0""#;
+        std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
+
+        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let messages = parse_all_messages_with_pricing(
+            temp_dir.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            Some(&pricing),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "cursor");
+        assert_eq!(messages[0].model_id, "composer-2");
         assert!(messages[0].cost > 0.0);
     }
 

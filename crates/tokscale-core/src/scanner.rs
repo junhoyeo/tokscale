@@ -86,7 +86,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
 
-    WalkDir::new(root)
+    let mut paths: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
         .par_bridge()
         .filter_map(|e| e.ok())
@@ -149,7 +149,12 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
             }
         })
         .map(|e| e.path().to_path_buf())
-        .collect()
+        .collect();
+    // Sort for deterministic ordering. sort_unstable() is sufficient (no stability
+    // requirement for PathBuf) and avoids allocation. Note: ordering is byte-lexical,
+    // not case-normalized (known Windows/macOS caveat for mixed-case paths).
+    paths.sort_unstable();
+    paths
 }
 
 /// Parse a `TOKSCALE_EXTRA_DIRS`-formatted string into (ClientId, path) pairs.
@@ -218,7 +223,6 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
                 | ClientId::Codex
                 | ClientId::OpenClaw
                 | ClientId::RooCode
-                | ClientId::KiloCode
                 | ClientId::Kilo
         ) {
             continue;
@@ -226,13 +230,13 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
 
         let def = client_id.data();
         let path = def.resolve_path(home_dir);
-        tasks.push((*client_id, path, def.pattern));
+        tasks.push((*client_id, path, def.pattern()));
     }
 
     // Extra scan directories from TOKSCALE_EXTRA_DIRS env var
     let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
     for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
-        let pattern = client_id.data().pattern;
+        let pattern = client_id.data().pattern();
         tasks.push((client_id, path, pattern));
     }
 
@@ -252,7 +256,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         tasks.push((
             ClientId::OpenCode,
             opencode_path,
-            ClientId::OpenCode.data().pattern,
+            ClientId::OpenCode.data().pattern(),
         ));
     }
 
@@ -261,21 +265,25 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         let codex_home =
             std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir));
         let codex_path = ClientId::Codex.data().resolve_path(home_dir);
-        tasks.push((ClientId::Codex, codex_path, ClientId::Codex.data().pattern));
+        tasks.push((
+            ClientId::Codex,
+            codex_path,
+            ClientId::Codex.data().pattern(),
+        ));
 
         // Codex archived sessions: ~/.codex/archived_sessions/**/*.jsonl
         let codex_archived_path = format!("{}/archived_sessions", codex_home);
         tasks.push((
             ClientId::Codex,
             codex_archived_path,
-            ClientId::Codex.data().pattern,
+            ClientId::Codex.data().pattern(),
         ));
 
         // Codex headless: <headless_root>/codex/*.jsonl
         for root in &headless_roots {
             let codex_headless_path = root.join("codex");
             let path = codex_headless_path.to_string_lossy().to_string();
-            tasks.push((ClientId::Codex, path, ClientId::Codex.data().pattern));
+            tasks.push((ClientId::Codex, path, ClientId::Codex.data().pattern()));
         }
     }
 
@@ -285,7 +293,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         tasks.push((
             ClientId::OpenClaw,
             openclaw_path,
-            ClientId::OpenClaw.data().pattern,
+            ClientId::OpenClaw.data().pattern(),
         ));
 
         // Legacy paths (Clawd -> Moltbot -> OpenClaw rebrand history)
@@ -293,21 +301,21 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         tasks.push((
             ClientId::OpenClaw,
             clawdbot_path,
-            ClientId::OpenClaw.data().pattern,
+            ClientId::OpenClaw.data().pattern(),
         ));
 
         let moltbot_path = format!("{}/.moltbot/agents", home_dir);
         tasks.push((
             ClientId::OpenClaw,
             moltbot_path,
-            ClientId::OpenClaw.data().pattern,
+            ClientId::OpenClaw.data().pattern(),
         ));
 
         let moldbot_path = format!("{}/.moldbot/agents", home_dir);
         tasks.push((
             ClientId::OpenClaw,
             moldbot_path,
-            ClientId::OpenClaw.data().pattern,
+            ClientId::OpenClaw.data().pattern(),
         ));
     }
 
@@ -325,7 +333,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         tasks.push((
             ClientId::RooCode,
             local_path,
-            ClientId::RooCode.data().pattern,
+            ClientId::RooCode.data().pattern(),
         ));
 
         let server_path = format!(
@@ -335,34 +343,27 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
         tasks.push((
             ClientId::RooCode,
             server_path,
-            ClientId::RooCode.data().pattern,
+            ClientId::RooCode.data().pattern(),
         ));
     }
 
-    if enabled.contains(&ClientId::KiloCode) {
-        let local_path = ClientId::KiloCode.data().resolve_path(home_dir);
-        tasks.push((
-            ClientId::KiloCode,
-            local_path,
-            ClientId::KiloCode.data().pattern,
-        ));
+    if enabled.contains(&ClientId::Kilo) {
+        let local_path = ClientId::Kilo.data().resolve_path(home_dir);
+        tasks.push((ClientId::Kilo, local_path, ClientId::Kilo.data().pattern()));
 
         let server_path = format!(
             "{}/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks",
             home_dir
         );
-        tasks.push((
-            ClientId::KiloCode,
-            server_path,
-            ClientId::KiloCode.data().pattern,
-        ));
+        tasks.push((ClientId::Kilo, server_path, ClientId::Kilo.data().pattern()));
     }
 
-    // Kilo CLI: SQLite database at ~/.local/share/kilo/kilo.db
     if enabled.contains(&ClientId::Kilo) {
-        let kilo_db_path = ClientId::Kilo.data().resolve_path(home_dir);
-        if std::path::Path::new(&kilo_db_path).exists() {
-            result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        if let Some(cli_source) = ClientId::Kilo.data().source_by_tag("cli") {
+            let kilo_db_path = cli_source.resolve_path(home_dir);
+            if std::path::Path::new(&kilo_db_path).exists() {
+                result.kilo_db = Some(PathBuf::from(kilo_db_path));
+            }
         }
     }
 
@@ -583,6 +584,33 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let files = scan_directory(dir.path().to_str().unwrap(), "*.json");
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_scan_directory_deterministic_order() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        for name in ["zebra.jsonl", "alpha.jsonl", "middle.jsonl", "beta.jsonl"] {
+            File::create(path.join(name)).unwrap();
+        }
+
+        let first = scan_directory(path.to_str().unwrap(), "*.jsonl");
+        let second = scan_directory(path.to_str().unwrap(), "*.jsonl");
+        let third = scan_directory(path.to_str().unwrap(), "*.jsonl");
+
+        assert_eq!(first, second, "Repeated scans must return identical order");
+        assert_eq!(second, third, "Repeated scans must return identical order");
+
+        let names: Vec<_> = first
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["alpha.jsonl", "beta.jsonl", "middle.jsonl", "zebra.jsonl"],
+            "Results must be lexically sorted"
+        );
     }
 
     fn setup_mock_opencode_dir(base: &std::path::Path) {
@@ -945,10 +973,10 @@ mod tests {
         let home = dir.path();
         setup_mock_kilocode_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["kilocode".to_string()]);
-        assert_eq!(result.get(ClientId::KiloCode).len(), 2);
+        let result = scan_all_clients(home.to_str().unwrap(), &["kilo".to_string()]);
+        assert_eq!(result.get(ClientId::Kilo).len(), 2);
         assert!(result
-            .get(ClientId::KiloCode)
+            .get(ClientId::Kilo)
             .iter()
             .all(|p| p.ends_with("ui_messages.json")));
     }

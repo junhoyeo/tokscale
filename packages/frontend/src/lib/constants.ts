@@ -38,6 +38,7 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   qwen: "Qwen",
   roocode: "Roo Code",
   kilocode: "Kilo",
+  kilo: "Kilo",
   mux: "Mux",
   synthetic: "Synthetic",
 };
@@ -58,6 +59,7 @@ export const SOURCE_LOGOS: Record<string, string> = {
   qwen: `${GITHUB_CDN_BASE}/client-qwen.png`,
   roocode: `${GITHUB_CDN_BASE}/client-roocode.png`,
   kilocode: `${GITHUB_CDN_BASE}/client-kilocode.png`,
+  kilo: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   mux: `${GITHUB_CDN_BASE}/client-mux.png`,
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
 };
@@ -76,6 +78,7 @@ export const SOURCE_COLORS: Record<string, string> = {
   qwen: "#1A73E8",
   roocode: "#10B981",
   kilocode: "#F59E0B",
+  kilo: "#F59E0B",
   mux: "#171717",
   synthetic: "#4ADE80",
 };

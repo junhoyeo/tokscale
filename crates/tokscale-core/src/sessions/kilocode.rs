@@ -7,7 +7,7 @@ use super::UnifiedMessage;
 use std::path::Path;
 
 pub fn parse_kilocode_file(path: &Path) -> Vec<UnifiedMessage> {
-    parse_roo_kilo_file(path, "kilocode")
+    parse_roo_kilo_file(path, "kilo")
 }
 
 #[cfg(test)]
@@ -46,7 +46,7 @@ mod tests {
 
         let messages = parse_kilocode_file(&task_dir.join("ui_messages.json"));
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "kilocode");
+        assert_eq!(messages[0].client, "kilo");
         assert_eq!(messages[0].provider_id, "openai");
         assert_eq!(messages[0].model_id, "gpt-5");
         assert_eq!(messages[0].session_id, "kilo-task-1");
