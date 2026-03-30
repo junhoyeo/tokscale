@@ -113,6 +113,31 @@ describe("renderProfileBadgeSvg", () => {
     expect(svg).toContain("#0073FF");
   });
 
+  it("rejects invalid hex lengths (5/7 digits)", () => {
+    expect(renderProfileBadgeSvg(mockStats, { color: "12345" })).toContain("#0073FF");
+    expect(renderProfileBadgeSvg(mockStats, { color: "1234567" })).toContain("#0073FF");
+  });
+
+  it("truncates excessively long labels", () => {
+    const longLabel = "A".repeat(80);
+    const svg = renderProfileBadgeSvg(mockStats, { label: longLabel });
+
+    expect(svg).not.toContain(longLabel);
+    expect(svg).toContain("A".repeat(40));
+  });
+
+  it("renders 0 for NaN/Infinity token values", () => {
+    const nanSvg = renderProfileBadgeSvg(
+      { ...mockStats, stats: { ...mockStats.stats, totalTokens: NaN } },
+    );
+    const infSvg = renderProfileBadgeSvg(
+      { ...mockStats, stats: { ...mockStats.stats, totalTokens: Infinity } },
+    );
+
+    expect(nanSvg).toContain(">0<");
+    expect(infSvg).toContain(">0<");
+  });
+
   it("escapes XML in label and value", () => {
     const svg = renderProfileBadgeSvg(mockStats, { label: '<script>alert("xss")</script>' });
 
@@ -235,5 +260,13 @@ describe("renderBadgeErrorSvg", () => {
 
     expect(svg).toContain("user &lt;unknown&gt;");
     expect(svg).not.toContain("user <unknown>");
+  });
+
+  it("truncates excessively long labels in error badges", () => {
+    const longLabel = "B".repeat(80);
+    const svg = renderBadgeErrorSvg("error", { label: longLabel });
+
+    expect(svg).not.toContain(longLabel);
+    expect(svg).toContain("B".repeat(40));
   });
 });

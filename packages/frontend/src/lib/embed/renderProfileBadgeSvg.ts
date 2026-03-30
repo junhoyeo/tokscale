@@ -21,6 +21,7 @@ const HORIZ_PADDING = 6;
 // ~6.8px/char at Verdana 11px — shields.io standard heuristic
 const CHAR_WIDTH = 6.8;
 const LABEL_BG = "#555";
+const MAX_LABEL_LENGTH = 40;
 
 const METRIC_COLORS: Record<BadgeMetric, string> = {
   tokens: "0073FF",
@@ -52,7 +53,7 @@ function formatMetricValue(data: UserEmbedStats, metric: BadgeMetric, compact: b
 function parseColor(color: string | undefined, fallback: string): string {
   if (!color) return fallback;
   const hex = color.replace(/^#/, "");
-  if (/^[0-9a-fA-F]{3,8}$/.test(hex)) return hex;
+  if (/^(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(hex)) return hex;
   return fallback;
 }
 
@@ -118,7 +119,8 @@ export function renderProfileBadgeSvg(
     ? (options.metric as BadgeMetric)
     : "tokens";
   const style: BadgeStyle = options.style === "flat-square" ? "flat-square" : "flat";
-  const label = options.label ?? METRIC_LABELS[metric];
+  const rawLabel = options.label ?? METRIC_LABELS[metric];
+  const label = rawLabel.length > MAX_LABEL_LENGTH ? rawLabel.slice(0, MAX_LABEL_LENGTH) : rawLabel;
   const compact = options.compact ?? false;
   const valueBg = parseColor(options.color, METRIC_COLORS[metric]);
   const value = formatMetricValue(data, metric, compact);
@@ -134,7 +136,8 @@ export function renderBadgeErrorSvg(
   options: Pick<RenderProfileBadgeOptions, "style" | "label"> = {},
 ): string {
   const style: BadgeStyle = options.style === "flat-square" ? "flat-square" : "flat";
-  const label = options.label ?? "Tokscale";
+  const rawLabel = options.label ?? "Tokscale";
+  const label = rawLabel.length > MAX_LABEL_LENGTH ? rawLabel.slice(0, MAX_LABEL_LENGTH) : rawLabel;
   const value = message;
 
   if (style === "flat-square") {
