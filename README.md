@@ -493,10 +493,17 @@ Environment variables override config file values. For CI/CD or one-off use:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
+| `TOKSCALE_API_URL` | `https://tokscale.ai` | Overrides the API base URL used by `login` and `submit` |
+| `TOKSCALE_SOURCE_ID` | auto-generated per machine | Overrides the stable source ID attached to `submit` payloads |
+| `TOKSCALE_SOURCE_NAME` | `CLI on <hostname>` | Overrides the human-readable source name attached to `submit` payloads |
 
 ```bash
 # Example: Increase timeout for very large datasets
 TOKSCALE_NATIVE_TIMEOUT_MS=600000 tokscale graph --output data.json
+
+# Example: submit two local test sources without using two machines
+TOKSCALE_SOURCE_ID=machine-a tokscale submit
+TOKSCALE_SOURCE_ID=machine-b TOKSCALE_SOURCE_NAME="Work Laptop" tokscale submit
 ```
 
 > **Note**: For persistent changes, prefer setting `nativeTimeoutMs` in `~/.config/tokscale/settings.json`. Environment variables are best for one-off overrides or CI/CD.

@@ -85,7 +85,11 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
       totalCost: Number(result.totalCost) || 0,
       submissionCount: Number(result.submissionCount) || 0,
       rank,
-      updatedAt: result.updatedAt?.toISOString() || null,
+      updatedAt: result.updatedAt instanceof Date
+        ? result.updatedAt.toISOString()
+        : result.updatedAt
+        ? new Date(result.updatedAt).toISOString()
+        : null,
     },
   };
 }
