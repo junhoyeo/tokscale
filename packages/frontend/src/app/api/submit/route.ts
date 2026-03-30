@@ -51,6 +51,51 @@ function normalizeOptionalString(value: string | undefined): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
+async function loadUserSubmitMetrics(userId: string) {
+  const [userAggregates, userDayAggregates, userSubmissions] = await Promise.all([
+    db
+      .select({
+        totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)::bigint`,
+        totalCost: sql<string>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4))), 0)::text`,
+        dateStart: sql<string>`MIN(${submissions.dateStart})`,
+        dateEnd: sql<string>`MAX(${submissions.dateEnd})`,
+      })
+      .from(submissions)
+      .where(eq(submissions.userId, userId)),
+    db
+      .select({
+        activeDays: sql<number>`COUNT(DISTINCT ${dailyBreakdown.date})::int`,
+      })
+      .from(dailyBreakdown)
+      .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
+      .where(eq(submissions.userId, userId)),
+    db
+      .select({
+        sourcesUsed: submissions.sourcesUsed,
+      })
+      .from(submissions)
+      .where(eq(submissions.userId, userId)),
+  ]);
+
+  const userClients = new Set<string>();
+  for (const submission of userSubmissions) {
+    for (const client of submission.sourcesUsed || []) {
+      userClients.add(client);
+    }
+  }
+
+  return {
+    totalTokens: userAggregates?.totalTokens ?? 0,
+    totalCost: parseFloat(userAggregates?.totalCost ?? "0"),
+    dateRange: {
+      start: userAggregates?.dateStart ?? null,
+      end: userAggregates?.dateEnd ?? null,
+    },
+    activeDays: userDayAggregates?.activeDays ?? 0,
+    clients: Array.from(userClients).sort(),
+  };
+}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -423,53 +468,13 @@ export async function POST(request: Request) {
         })
         .where(eq(submissions.id, submissionId));
 
-      const [userAggregates] = await tx
-        .select({
-          totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)::bigint`,
-          totalCost: sql<string>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4))), 0)::text`,
-          dateStart: sql<string>`MIN(${submissions.dateStart})`,
-          dateEnd: sql<string>`MAX(${submissions.dateEnd})`,
-        })
-        .from(submissions)
-        .where(eq(submissions.userId, tokenRecord.userId));
-
-      const [userDayAggregates] = await tx
-        .select({
-          activeDays: sql<number>`COUNT(DISTINCT ${dailyBreakdown.date})::int`,
-        })
-        .from(dailyBreakdown)
-        .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
-        .where(eq(submissions.userId, tokenRecord.userId));
-
-      const userSubmissions = await tx
-        .select({
-          sourcesUsed: submissions.sourcesUsed,
-        })
-        .from(submissions)
-        .where(eq(submissions.userId, tokenRecord.userId));
-
-      const userClients = new Set<string>();
-      for (const submission of userSubmissions) {
-        for (const client of submission.sourcesUsed || []) {
-          userClients.add(client);
-        }
-      }
-
       return {
         submissionId,
         isNewSubmission,
-        metrics: {
-          totalTokens: userAggregates.totalTokens,
-          totalCost: parseFloat(userAggregates.totalCost),
-          dateRange: {
-            start: userAggregates.dateStart,
-            end: userAggregates.dateEnd,
-          },
-          activeDays: userDayAggregates.activeDays,
-          clients: Array.from(userClients).sort(),
-        },
       };
     });
+
+    const metrics = await loadUserSubmitMetrics(tokenRecord.userId);
 
     try {
       revalidateTag("leaderboard", "max");
@@ -484,7 +489,7 @@ export async function POST(request: Request) {
       success: true,
       submissionId: result.submissionId,
       username: tokenRecord.username,
-      metrics: result.metrics,
+      metrics,
       mode: result.isNewSubmission ? "create" : "merge",
       warnings: validation.warnings.length > 0 ? validation.warnings : undefined,
     });

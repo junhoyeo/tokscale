@@ -3,7 +3,8 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const mockState = vi.hoisted(() => {
   type Row = Record<string, unknown>;
 
-  const selectResults: Row[][] = [];
+  const txSelectResults: Row[][] = [];
+  const dbSelectResults: Row[][] = [];
   const insertReturningResults: Row[][] = [];
   const whereCalls: Array<{ table: unknown; condition: unknown }> = [];
   const insertCalls: Array<{ table: unknown; values: unknown }> = [];
@@ -57,8 +58,12 @@ const mockState = vi.hoisted(() => {
     }
   );
 
-  function nextSelectResult() {
-    return selectResults.shift() ?? [];
+  function nextTxSelectResult() {
+    return txSelectResults.shift() ?? [];
+  }
+
+  function nextDbSelectResult() {
+    return dbSelectResults.shift() ?? [];
   }
 
   function nextInsertReturningResult() {
@@ -79,7 +84,17 @@ const mockState = vi.hoisted(() => {
       }),
       for: vi.fn(() => builder),
       limit: vi.fn(() => builder),
-      then: (resolve: (value: unknown) => unknown) => resolve(nextSelectResult()),
+      then: (resolve: (value: unknown) => unknown) => resolve(nextTxSelectResult()),
+    };
+    return builder;
+  }
+
+  function createDbSelectBuilder() {
+    const builder = {
+      from: vi.fn(() => builder),
+      innerJoin: vi.fn(() => builder),
+      where: vi.fn(() => builder),
+      then: (resolve: (value: unknown) => unknown) => resolve(nextDbSelectResult()),
     };
     return builder;
   }
@@ -123,6 +138,7 @@ const mockState = vi.hoisted(() => {
     generateSubmissionHash: vi.fn(() => "submission-hash"),
     revalidateTag: vi.fn(),
     db: {
+      select: vi.fn(() => createDbSelectBuilder()),
       transaction,
     },
     tables,
@@ -134,7 +150,8 @@ const mockState = vi.hoisted(() => {
     insertCalls,
     updateCalls,
     reset() {
-      selectResults.length = 0;
+      txSelectResults.length = 0;
+      dbSelectResults.length = 0;
       insertReturningResults.length = 0;
       whereCalls.length = 0;
       insertCalls.length = 0;
@@ -143,6 +160,7 @@ const mockState = vi.hoisted(() => {
       this.validateSubmission.mockReset();
       this.generateSubmissionHash.mockClear();
       this.revalidateTag.mockClear();
+      this.db.select.mockClear();
       transaction.mockClear();
       eq.mockClear();
       and.mockClear();
@@ -150,8 +168,11 @@ const mockState = vi.hoisted(() => {
       sql.mockClear();
       sql.join.mockClear();
     },
-    pushSelectResult(rows: Row[]) {
-      selectResults.push(rows);
+    pushTxSelectResult(rows: Row[]) {
+      txSelectResults.push(rows);
+    },
+    pushDbSelectResult(rows: Row[]) {
+      dbSelectResults.push(rows);
     },
     pushInsertReturningResult(rows: Row[]) {
       insertReturningResults.push(rows);
@@ -306,10 +327,10 @@ beforeEach(() => {
 });
 
 function queueSuccessfulTransaction(existingSubmissionRows: Array<Record<string, unknown>> = []) {
-  mockState.pushSelectResult(existingSubmissionRows);
+  mockState.pushTxSelectResult(existingSubmissionRows);
   mockState.pushInsertReturningResult([{ id: "submission-1" }]);
-  mockState.pushSelectResult([]);
-  mockState.pushSelectResult([
+  mockState.pushTxSelectResult([]);
+  mockState.pushTxSelectResult([
     {
       totalTokens: 150,
       totalCost: "1.5000",
@@ -321,7 +342,7 @@ function queueSuccessfulTransaction(existingSubmissionRows: Array<Record<string,
       rowCount: 1,
     },
   ]);
-  mockState.pushSelectResult([
+  mockState.pushTxSelectResult([
     {
       sourceBreakdown: {
         claude: {
@@ -349,7 +370,7 @@ function queueSuccessfulTransaction(existingSubmissionRows: Array<Record<string,
       },
     },
   ]);
-  mockState.pushSelectResult([
+  mockState.pushDbSelectResult([
     {
       totalTokens: 150,
       totalCost: "1.5000",
@@ -357,8 +378,8 @@ function queueSuccessfulTransaction(existingSubmissionRows: Array<Record<string,
       dateEnd: "2026-03-01",
     },
   ]);
-  mockState.pushSelectResult([{ activeDays: 1 }]);
-  mockState.pushSelectResult([{ sourcesUsed: ["claude"] }]);
+  mockState.pushDbSelectResult([{ activeDays: 1 }]);
+  mockState.pushDbSelectResult([{ sourcesUsed: ["claude"] }]);
 }
 
 describe("POST /api/submit source scoping", () => {

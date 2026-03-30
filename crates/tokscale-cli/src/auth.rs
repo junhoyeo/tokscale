@@ -180,7 +180,9 @@ fn acquire_source_id_lock() -> Result<SourceIdLock> {
         }
     }
 
-    anyhow::bail!("Timed out waiting for source ID lock");
+    anyhow::bail!(
+        "Could not acquire source ID lock after 100 retries (~2500ms)"
+    );
 }
 
 fn write_source_id(path: &Path, source_id: &str) -> Result<()> {

@@ -506,6 +506,8 @@ TOKSCALE_SOURCE_ID=machine-a tokscale submit
 TOKSCALE_SOURCE_ID=machine-b TOKSCALE_SOURCE_NAME="Work Laptop" tokscale submit
 ```
 
+> `TOKSCALE_SOURCE_NAME` is stored per `sourceId`. A later submit with the same `sourceId` and a new non-empty `TOKSCALE_SOURCE_NAME` updates the stored display name for that source.
+
 > **Note**: For persistent changes, prefer setting `nativeTimeoutMs` in `~/.config/tokscale/settings.json`. Environment variables are best for one-off overrides or CI/CD.
 
 ### Headless Mode
