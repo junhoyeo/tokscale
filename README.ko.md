@@ -104,6 +104,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
 - [소셜 플랫폼](#소셜-플랫폼)
   - [기능](#기능-2)
   - [GitHub 프로필 임베드 위젯](#github-프로필-임베드-위젯)
+  - [GitHub 프로필 뱃지](#github-프로필-뱃지)
   - [시작하기](#시작하기)
   - [데이터 검증](#데이터-검증)
 - [Wrapped 2025](#wrapped-2025)
@@ -617,6 +618,26 @@ GitHub 프로필 README에 Tokscale 공개 통계를 직접 임베드할 수 있
   - `compact=1` 컴팩트 레이아웃 + 축약 숫자 표기법 사용 (예: `1.2M`, `$3.4K`)
 - 예시:
   - `https://tokscale.ai/api/embed/<username>/svg?theme=light&sort=cost&compact=1`
+
+### GitHub 프로필 뱃지
+
+shields.io 스타일의 더 간결한 뱃지를 사용할 수도 있습니다:
+
+```md
+![Tokscale Tokens](https://tokscale.ai/api/badge/<username>/svg)
+```
+
+- `<username>`을 GitHub 사용자명으로 교체하세요
+- 선택적 쿼리 파라미터:
+  - `metric=tokens` (기본값), `metric=cost`, 또는 `metric=rank`
+  - `style=flat` (기본값) 또는 `style=flat-square`
+  - `sort=tokens` (기본값) 또는 `sort=cost` 랭킹 기준 제어
+  - `compact=1` 간결한 숫자 표기 사용 (예: `1.2M`, `$3.4K`)
+  - `label=<텍스트>` 왼쪽 라벨 커스텀
+  - `color=<hex>` 오른쪽 배경색 커스텀 (예: `color=ff5733`)
+- 예시:
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=cost&compact=1`
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=rank&sort=cost&style=flat-square`
 
 ### 시작하기
 

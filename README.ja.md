@@ -104,6 +104,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
 - [ソーシャルプラットフォーム](#ソーシャルプラットフォーム)
   - [機能](#機能-2)
   - [GitHubプロフィール埋め込みウィジェット](#githubプロフィール埋め込みウィジェット)
+  - [GitHubプロフィールバッジ](#githubプロフィールバッジ)
   - [はじめに](#はじめに)
   - [データ検証](#データ検証)
 - [Wrapped 2025](#wrapped-2025)
@@ -618,6 +619,26 @@ GitHubプロフィールREADMEにTokscaleの公開統計を直接埋め込むこ
   - `compact=1` コンパクトレイアウト + コンパクトな数値表記（例：`1.2M`、`$3.4K`）
 - 例：
   - `https://tokscale.ai/api/embed/<username>/svg?theme=light&sort=cost&compact=1`
+
+### GitHubプロフィールバッジ
+
+shields.ioスタイルのよりコンパクトなバッジも使用できます：
+
+```md
+![Tokscale Tokens](https://tokscale.ai/api/badge/<username>/svg)
+```
+
+- `<username>`をGitHubユーザー名に置き換えてください
+- オプションのクエリパラメータ：
+  - `metric=tokens`（デフォルト）、`metric=cost`、または`metric=rank`
+  - `style=flat`（デフォルト）または`style=flat-square`
+  - `sort=tokens`（デフォルト）または`sort=cost` ランキング基準を制御
+  - `compact=1` コンパクトな数値表記を使用（例：`1.2M`、`$3.4K`）
+  - `label=<テキスト>` 左側のラベルをカスタマイズ
+  - `color=<hex>` 右側の背景色をカスタマイズ（例：`color=ff5733`）
+- 例：
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=cost&compact=1`
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=rank&sort=cost&style=flat-square`
 
 ### はじめに
 

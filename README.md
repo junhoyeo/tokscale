@@ -621,6 +621,26 @@ You can embed your public Tokscale stats directly in your GitHub profile README:
 - Example:
   - `https://tokscale.ai/api/embed/<username>/svg?theme=light&sort=cost&compact=1`
 
+### GitHub Profile Badge
+
+You can also use a shields.io-style badge for a more compact display:
+
+```md
+![Tokscale Tokens](https://tokscale.ai/api/badge/<username>/svg)
+```
+
+- Replace `<username>` with your GitHub username
+- Optional query params:
+  - `metric=tokens` (default), `metric=cost`, or `metric=rank`
+  - `style=flat` (default) or `style=flat-square`
+  - `sort=tokens` (default) or `sort=cost` to control ranking basis
+  - `compact=1` to use compact number notation (e.g., `1.2M`, `$3.4K`)
+  - `label=<text>` to override the left-side label
+  - `color=<hex>` to override the right-side color (e.g., `color=ff5733`)
+- Examples:
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=cost&compact=1`
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=rank&sort=cost&style=flat-square`
+
 ### Getting Started
 
 1. **Login** - Run `tokscale login` to authenticate via GitHub
