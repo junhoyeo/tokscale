@@ -941,8 +941,8 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         clients
     });
 
-    let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+    let pricing = load_pricing_for_local_reports().await;
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1068,8 +1068,8 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         clients
     });
 
-    let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+    let pricing = load_pricing_for_local_reports().await;
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1120,7 +1120,10 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     })
 }
 
-pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
+async fn generate_graph_with_loaded_pricing(
+    options: ReportOptions,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<GraphResult, String> {
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -1134,8 +1137,7 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
         clients
     });
 
-    let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing);
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1145,6 +1147,16 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
     let result = aggregator::generate_graph_result(contributions, processing_time_ms);
 
     Ok(result)
+}
+
+pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
+    let pricing = pricing::PricingService::get_or_init().await?;
+    generate_graph_with_loaded_pricing(options, Some(&pricing)).await
+}
+
+pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
+    let pricing = load_pricing_for_local_reports().await;
+    generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
 }
 
 fn filter_messages_for_report(
@@ -1219,7 +1231,7 @@ where
     fresh.ok().or_else(|| stale().map(Arc::new))
 }
 
-async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+async fn load_pricing_for_local_reports() -> Option<Arc<pricing::PricingService>> {
     // Interactive/local views should pick up newly released model pricing as soon
     // as a fresh fetch succeeds, but still remain usable offline by falling back
     // to any cached dataset when the network path fails.
@@ -1569,7 +1581,7 @@ pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    let pricing = load_pricing_for_local_parse().await;
+    let pricing = load_pricing_for_local_reports().await;
     parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
 }
 

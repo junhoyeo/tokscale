@@ -31,10 +31,12 @@ fn prime_pricing_cache(base: &Path) {
 ///   <tmp>/.local/share/opencode/storage/message/session1/msg_a.json  (2024-06-15, claude-sonnet-4-20250514, anthropic)
 ///   <tmp>/.local/share/opencode/storage/message/session1/msg_b.json  (2024-06-15, claude-sonnet-4-20250514, anthropic)
 ///   <tmp>/.local/share/opencode/storage/message/session2/msg_c.json  (2025-01-10, gpt-4o, openai)
-fn create_temp_fixture_dir() -> TempDir {
+fn create_temp_fixture_dir_with_pricing_cache(prime_cache: bool) -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
-    prime_pricing_cache(base);
+    if prime_cache {
+        prime_pricing_cache(base);
+    }
 
     // Session 1: two messages on 2024-06-15 using claude-sonnet-4
     let session1 = base.join(".local/share/opencode/storage/message/session1");
@@ -101,6 +103,14 @@ fn create_temp_fixture_dir() -> TempDir {
     tmp
 }
 
+fn create_temp_fixture_dir() -> TempDir {
+    create_temp_fixture_dir_with_pricing_cache(true)
+}
+
+fn create_temp_fixture_dir_without_pricing_cache() -> TempDir {
+    create_temp_fixture_dir_with_pricing_cache(false)
+}
+
 /// Create an empty fixture dir with no session data.
 fn create_empty_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
@@ -165,6 +175,31 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"));
     cmd
+}
+
+fn offline_cmd_with_home(tmp: &Path) -> Command {
+    let mut cmd = cmd_with_home(tmp);
+    cmd.env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9");
+    cmd
+}
+
+fn write_pricing_cache(base: &Path, timestamp: u64) {
+    let litellm = format!(
+        r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001}},"claude-sonnet-4-20250514":{{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015}}}}}}"#,
+        timestamp
+    );
+    let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
+
+    for dir in [
+        base.join("Library/Caches/tokscale"),
+        base.join(".cache/tokscale"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("pricing-litellm.json"), &litellm).unwrap();
+        fs::write(dir.join("pricing-openrouter.json"), &openrouter).unwrap();
+    }
 }
 
 // ── Existing tests ─────────────────────────────────────────────────────────
@@ -332,9 +367,11 @@ fn test_headless_command_invalid_client() {
 
 #[test]
 fn test_models_with_invalid_date_format() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("models")
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .arg("models")
         .arg("--light")
+        .arg("--no-spinner")
         .arg("--since")
         .arg("invalid-date")
         .assert()
@@ -343,9 +380,11 @@ fn test_models_with_invalid_date_format() {
 
 #[test]
 fn test_models_with_invalid_year() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("models")
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .arg("models")
         .arg("--light")
+        .arg("--no-spinner")
         .arg("--year")
         .arg("not-a-year")
         .assert()
@@ -596,6 +635,88 @@ fn test_models_json_output() {
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
     assert!(first.get("cost").is_some());
+}
+
+#[test]
+fn test_models_json_offline_without_pricing_cache_still_succeeds() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalInput"].as_i64().unwrap(), 2400);
+    assert_eq!(json["totalOutput"].as_i64().unwrap(), 1000);
+    assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
+    assert_eq!(json["entries"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["month"].as_str().unwrap(), "2024-06");
+    assert_eq!(entries[1]["month"].as_str().unwrap(), "2025-01");
+}
+
+#[test]
+fn test_graph_offline_without_pricing_cache_still_succeeds() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["graph", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["totalTokens"].as_i64().unwrap(), 3950);
+    assert_eq!(json["summary"]["activeDays"].as_i64().unwrap(), 2);
+    assert_eq!(json["contributions"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_pricing_cache(tmp.path(), 1);
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.0209).abs() < 1e-9,
+        "unexpected totalCost: {total_cost}"
+    );
 }
 
 #[test]
@@ -891,8 +1012,9 @@ fn test_pricing_command_invalid_provider() {
 
 #[test]
 fn test_clients_command() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("clients")
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .arg("clients")
         .assert()
         .success()
         .stdout(predicate::str::contains("OpenCode").or(predicate::str::contains("opencode")))
@@ -901,7 +1023,8 @@ fn test_clients_command() {
 
 #[test]
 fn test_clients_json() {
-    let output = cargo_bin_cmd!("tokscale")
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
         .args(["clients", "--json"])
         .output()
         .unwrap();
