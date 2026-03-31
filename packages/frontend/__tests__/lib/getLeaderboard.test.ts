@@ -243,6 +243,34 @@ describe("period leaderboard data", () => {
     });
   });
 
+  it("filters period leaderboards by username while preserving each user's true rank", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
+    mockState.setPeriodRows(rows);
+
+    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "ali");
+
+    expect(leaderboard.users).toHaveLength(1);
+    expect(leaderboard.users[0]).toMatchObject({
+      rank: 2,
+      username: "alice",
+      totalTokens: 250,
+      totalCost: 3,
+    });
+    expect(leaderboard.pagination).toMatchObject({
+      totalUsers: 1,
+      totalPages: 1,
+      hasNext: false,
+      hasPrev: false,
+    });
+    expect(leaderboard.stats).toMatchObject({
+      totalTokens: 1250,
+      totalCost: 12.5,
+      totalSubmissions: null,
+      uniqueUsers: 2,
+    });
+  });
+
   it("uses the same daily totals when computing week rank", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));

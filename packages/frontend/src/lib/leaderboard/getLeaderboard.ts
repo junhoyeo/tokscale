@@ -48,6 +48,10 @@ interface AllTimeLeaderboardDbRow {
   schemaVersion: number | null;
 }
 
+interface RankedLeaderboardDbRow extends AllTimeLeaderboardDbRow {
+  rank: number | string | null;
+}
+
 function toUtcDateString(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
@@ -149,28 +153,44 @@ function aggregatePeriodRows(
   );
 }
 
+function matchesLeaderboardSearch(
+  user: Pick<LeaderboardUser, "username">,
+  search: string
+): boolean {
+  if (!search) {
+    return true;
+  }
+
+  return user.username.toLowerCase().includes(search.toLowerCase());
+}
+
 function buildPeriodLeaderboardData(
   rows: LeaderboardPeriodRow[],
   page: number,
   limit: number,
   period: Period,
-  sortBy: SortBy = "tokens"
+  sortBy: SortBy = "tokens",
+  search: string = ""
 ): LeaderboardData {
   const offset = (page - 1) * limit;
   const aggregatedUsers = aggregatePeriodRows(rows, sortBy);
-  const pagedUsers = aggregatedUsers.slice(offset, offset + limit);
+  const rankedUsers = aggregatedUsers.map((user, index) => ({
+    ...user,
+    rank: index + 1,
+  }));
+  const filteredUsers = rankedUsers.filter((user) =>
+    matchesLeaderboardSearch(user, search)
+  );
+  const pagedUsers = filteredUsers.slice(offset, offset + limit);
 
   return {
-    users: pagedUsers.map((user, index) => ({
-      ...user,
-      rank: offset + index + 1,
-    })),
+    users: pagedUsers,
     pagination: {
       page,
       limit,
-      totalUsers: aggregatedUsers.length,
-      totalPages: Math.ceil(aggregatedUsers.length / limit),
-      hasNext: offset + limit < aggregatedUsers.length,
+      totalUsers: filteredUsers.length,
+      totalPages: Math.ceil(filteredUsers.length / limit),
+      hasNext: offset + limit < filteredUsers.length,
       hasPrev: page > 1,
     },
     stats: {
@@ -258,7 +278,7 @@ async function fetchLeaderboardData(
 ): Promise<LeaderboardData> {
   if (period !== "all") {
     const rows = await fetchPeriodLeaderboardRows(period);
-    return buildPeriodLeaderboardData(rows, page, limit, period, sortBy);
+    return buildPeriodLeaderboardData(rows, page, limit, period, sortBy, search);
   }
 
   const offset = (page - 1) * limit;
@@ -327,7 +347,7 @@ async function fetchLeaderboardData(
       .from(submissions);
 
     return {
-      users: results.map((row) => ({
+      users: (results as RankedLeaderboardDbRow[]).map((row) => ({
         rank: Number(row.rank),
         userId: row.userId,
         username: row.username,

@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import type { ClientType } from '@/lib/types';
-import { validateSubmission } from '@/lib/validation/submission';
+import { describe, it, expect } from 'vitest';
+import type { ClientType } from "../../src/lib/types";
+import { validateSubmission } from "../../src/lib/validation/submission";
 
 /**
  * Test suite for POST /api/submit - Client-Level Merge
@@ -207,7 +207,6 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
     it('should update submitted client data', () => {
       // Same client submitted again should replace, not add
-      const existingClaude = { tokens: 1000, cost: 10, modelId: 'claude-sonnet-4', input: 600, output: 400, cacheRead: 0, cacheWrite: 0, messages: 5 };
       const newClaude = { tokens: 1500, cost: 15, modelId: 'claude-sonnet-4', input: 900, output: 600, cacheRead: 0, cacheWrite: 0, messages: 8 };
       
       // After merge, should be new values, not sum
@@ -312,8 +311,6 @@ describe('POST /api/submit - Client-Level Merge', () => {
           { client: 'opencode', modelId: 'gpt-4o', cost: 5, tokens: { input: 300, output: 200, cacheRead: 0, cacheWrite: 0 }, messages: 3 },
         ],
       };
-      
-      const submittedClients = new Set(['claude']);
       
       // No claude data to update for this day
       const claudeInDay = dayWithOnlyOpencode.clients.find(client => client.client === 'claude');

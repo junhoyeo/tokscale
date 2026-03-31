@@ -150,12 +150,22 @@ fn load_root_sessions(conn: &Connection) -> Vec<CrushSession> {
 
 fn load_assistant_buckets(conn: &Connection) -> HashMap<String, Vec<DayBucket>> {
     let query = r#"
-        SELECT m.session_id, m.created_at
-        FROM messages m
-        JOIN sessions s ON s.id = m.session_id
-        WHERE s.parent_session_id IS NULL
-          AND m.role = 'assistant'
-        ORDER BY m.session_id ASC, m.created_at ASC
+        WITH RECURSIVE session_tree(root_session_id, session_id) AS (
+            SELECT id, id
+            FROM sessions
+            WHERE parent_session_id IS NULL
+
+            UNION ALL
+
+            SELECT st.root_session_id, s.id
+            FROM sessions s
+            JOIN session_tree st ON s.parent_session_id = st.session_id
+        )
+        SELECT st.root_session_id, m.created_at
+        FROM session_tree st
+        JOIN messages m ON m.session_id = st.session_id
+        WHERE m.role = 'assistant'
+        ORDER BY st.root_session_id ASC, m.created_at ASC
     "#;
 
     let mut stmt = match conn.prepare(query) {
@@ -328,11 +338,11 @@ mod tests {
         assert_eq!(messages[0].provider_id, CRUSH_PROVIDER_ID);
         assert_eq!(messages[0].timestamp, day_one * 1000);
         assert_eq!(messages[0].message_count, 1);
-        assert!((messages[0].cost - 10.0).abs() < 1e-9);
+        assert!((messages[0].cost - 7.5).abs() < 1e-9);
 
         assert_eq!(messages[1].timestamp, day_two * 1000);
-        assert_eq!(messages[1].message_count, 2);
-        assert!((messages[1].cost - 20.0).abs() < 1e-9);
+        assert_eq!(messages[1].message_count, 3);
+        assert!((messages[1].cost - 22.5).abs() < 1e-9);
         assert!(
             (messages.iter().map(|msg| msg.cost).sum::<f64>() - 30.0).abs() < 1e-9,
             "allocated cost must sum back to the stored session total"
@@ -381,6 +391,38 @@ mod tests {
         assert_eq!(messages[0].timestamp, created_at_ms);
         assert_eq!(messages[0].message_count, 1);
         assert_eq!(messages[0].cost, 2.0);
+    }
+
+    #[test]
+    fn test_parse_crush_sqlite_includes_child_session_assistant_messages() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_test_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+
+        let day_one = 1_742_300_000_i64;
+        let day_two = 1_742_386_400_i64;
+
+        insert_root_session(&conn, "root-1", 4, 40.0, day_two, day_one);
+        insert_child_session(&conn, "child-1", "root-1");
+        insert_message(&conn, "msg-1", "root-1", "assistant", day_one, 0);
+        insert_message(&conn, "msg-2", "child-1", "assistant", day_two, 0);
+
+        let messages = parse_crush_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            2,
+            "root-session cost should be distributed across assistant messages in descendant sessions too"
+        );
+        assert_eq!(messages[0].timestamp, day_one * 1000);
+        assert_eq!(messages[0].message_count, 1);
+        assert!((messages[0].cost - 20.0).abs() < 1e-9);
+
+        assert_eq!(messages[1].timestamp, day_two * 1000);
+        assert_eq!(messages[1].message_count, 1);
+        assert!((messages[1].cost - 20.0).abs() < 1e-9);
+        assert!(messages
+            .iter()
+            .all(|msg| msg.session_id.ends_with(":root-1")));
     }
 
     #[test]

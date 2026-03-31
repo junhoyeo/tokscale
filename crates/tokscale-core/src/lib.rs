@@ -887,14 +887,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(kilo_messages);
     }
 
-    for db_path in &scan_result.crush_dbs {
-        let crush_messages: Vec<UnifiedMessage> = sessions::crush::parse_crush_sqlite(db_path)
-            .into_iter()
-            .map(|mut msg| {
-                apply_pricing_if_available(&mut msg, pricing);
-                msg
-            })
-            .collect();
+    for source in &scan_result.crush_dbs {
+        let crush_messages: Vec<UnifiedMessage> =
+            sessions::crush::parse_crush_sqlite(&source.db_path)
+                .into_iter()
+                .map(|mut msg| {
+                    msg.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect();
         all_messages.extend(crush_messages);
     }
 
@@ -1615,10 +1617,13 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let crush_msgs: Vec<ParsedMessage> = scan_result
         .crush_dbs
         .par_iter()
-        .flat_map(|db_path| {
-            sessions::crush::parse_crush_sqlite(db_path)
+        .flat_map(|source| {
+            sessions::crush::parse_crush_sqlite(&source.db_path)
                 .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
+                .map(|mut msg| {
+                    msg.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
+                    unified_to_parsed(&msg)
+                })
                 .collect::<Vec<_>>()
         })
         .collect();

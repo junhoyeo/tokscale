@@ -8,8 +8,16 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::clients::ClientId;
+use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
 use serde::Deserialize;
 use serde_json::Value;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrushDbSource {
+    pub db_path: PathBuf,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
+}
 
 /// Result of scanning all session directories
 #[derive(Debug)]
@@ -18,7 +26,7 @@ pub struct ScanResult {
     pub opencode_db: Option<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
-    pub crush_dbs: Vec<PathBuf>,
+    pub crush_dbs: Vec<CrushDbSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -224,7 +232,7 @@ fn resolve_crush_data_dir(project: &CrushProject) -> PathBuf {
     }
 }
 
-fn scan_crush_registry(registry_path: &Path) -> Vec<PathBuf> {
+fn scan_crush_registry(registry_path: &Path) -> Vec<CrushDbSource> {
     let registry = match std::fs::read_to_string(registry_path) {
         Ok(contents) => contents,
         Err(_) => return Vec::new(),
@@ -238,19 +246,28 @@ fn scan_crush_registry(registry_path: &Path) -> Vec<PathBuf> {
     list.projects
         .into_iter()
         .filter_map(|project| serde_json::from_value::<CrushProject>(project).ok())
-        .filter_map(|project| crush_db_path(&resolve_crush_data_dir(&project)))
+        .filter_map(|project| {
+            let db_path = crush_db_path(&resolve_crush_data_dir(&project))?;
+            let workspace_key = normalize_workspace_key(&project.path);
+            let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+            Some(CrushDbSource {
+                db_path,
+                workspace_key,
+                workspace_label,
+            })
+        })
         .collect()
 }
 
-fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource> {
     let registry_path = PathBuf::from(
         ClientId::Crush
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots),
     );
     let mut dbs = scan_crush_registry(&registry_path);
-    dbs.sort();
-    dbs.dedup();
+    dbs.sort_by(|a, b| a.db_path.cmp(&b.db_path));
+    dbs.dedup_by(|a, b| a.db_path == b.db_path);
     dbs
 }
 
@@ -1043,8 +1060,16 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                project_a.join(".crush").join("crush.db"),
-                project_b_data.join("crush.db"),
+                CrushDbSource {
+                    db_path: project_a.join(".crush").join("crush.db"),
+                    workspace_key: Some(project_a.display().to_string()),
+                    workspace_label: Some("project-a".to_string()),
+                },
+                CrushDbSource {
+                    db_path: project_b_data.join("crush.db"),
+                    workspace_key: Some(dir.path().join("project-b").display().to_string()),
+                    workspace_label: Some("project-b".to_string()),
+                },
             ]
         );
     }
@@ -1071,7 +1096,14 @@ mod tests {
         setup_mock_crush_registry(&registry_path, &projects_json);
 
         let result = scan_crush_registry(&registry_path);
-        assert_eq!(result, vec![valid_project.join(".crush").join("crush.db")]);
+        assert_eq!(
+            result,
+            vec![CrushDbSource {
+                db_path: valid_project.join(".crush").join("crush.db"),
+                workspace_key: Some(valid_project.display().to_string()),
+                workspace_label: Some("valid-project".to_string()),
+            }]
+        );
     }
 
     #[test]
@@ -1135,7 +1167,14 @@ mod tests {
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
         let result = scan_all_clients(home.to_str().unwrap(), &["crush".to_string()]);
-        assert_eq!(result.crush_dbs, vec![data_dir.join("crush.db")]);
+        assert_eq!(
+            result.crush_dbs,
+            vec![CrushDbSource {
+                db_path: data_dir.join("crush.db"),
+                workspace_key: Some(project.display().to_string()),
+                workspace_label: Some("project".to_string()),
+            }]
+        );
         assert!(result.get(ClientId::Crush).is_empty());
 
         restore_env("XDG_DATA_HOME", previous_xdg);
