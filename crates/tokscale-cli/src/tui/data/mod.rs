@@ -230,6 +230,7 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
+            use_env_roots: false,
         };
 
         let messages = if Handle::try_current().is_ok() {
