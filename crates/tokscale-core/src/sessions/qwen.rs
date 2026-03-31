@@ -4,7 +4,7 @@
 //! Token data comes from assistant messages with usageMetadata field.
 
 use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
-use super::UnifiedMessage;
+use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -80,6 +80,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
     };
 
     let file_mtime = file_modified_timestamp_ms(path);
+    let (workspace_key, workspace_label) = qwen_workspace_from_path(path);
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
@@ -136,7 +137,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         let line_session_id =
             extract_session_id_with_fallback(path, qwen_line.session_id.as_deref());
 
-        messages.push(UnifiedMessage::new(
+        let mut unified = UnifiedMessage::new(
             "qwen",
             model,
             DEFAULT_PROVIDER,
@@ -150,10 +151,29 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning,
             },
             0.0, // Cost calculated later by pricing resolver
-        ));
+        );
+        unified.set_workspace(workspace_key.clone(), workspace_label.clone());
+        messages.push(unified);
     }
 
     messages
+}
+
+fn qwen_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
+    let components: Vec<String> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect();
+
+    for window in components.windows(4).rev() {
+        if window[0] == "projects" && !window[1].is_empty() && window[2] == "chats" {
+            let key = normalize_workspace_key(&window[1]);
+            let label = key.as_deref().and_then(workspace_label_from_key);
+            return (key, label);
+        }
+    }
+
+    (None, None)
 }
 
 #[cfg(test)]
@@ -181,6 +201,21 @@ mod tests {
         (temp_dir, path)
     }
 
+    fn create_project_test_file(
+        content: &str,
+        project: &str,
+        filename: &str,
+    ) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(format!("projects/{project}/chats/{filename}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        (temp_dir, path)
+    }
+
     #[test]
     fn test_parse_qwen_valid_assistant_message() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "d96bf338", "usageMetadata": {"promptTokenCount": 12414, "candidatesTokenCount": 76, "thoughtsTokenCount": 39, "cachedContentTokenCount": 0}}"#;
@@ -199,6 +234,8 @@ mod tests {
         assert_eq!(messages[0].tokens.reasoning, 39);
         assert_eq!(messages[0].tokens.cache_read, 0);
         assert_eq!(messages[0].tokens.cache_write, 0);
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].workspace_label, None);
     }
 
     #[test]
@@ -220,6 +257,39 @@ mod tests {
         assert_eq!(messages[1].tokens.output, 400);
         assert_eq!(messages[1].tokens.reasoning, 20);
         assert_eq!(messages[1].tokens.cache_read, 10);
+    }
+
+    #[test]
+    fn test_workspace_metadata_from_qwen_project_path() {
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "d96bf338", "usageMetadata": {"promptTokenCount": 12414, "candidatesTokenCount": 76, "thoughtsTokenCount": 39, "cachedContentTokenCount": 0}}"#;
+        let (_dir, path) = create_project_test_file(content, "test_project", "abc123");
+
+        let messages = parse_qwen_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key, Some("test_project".to_string()));
+        assert_eq!(
+            messages[0].workspace_label,
+            Some("test_project".to_string())
+        );
+    }
+
+    #[test]
+    fn test_workspace_metadata_ignores_unanchored_projects_segments() {
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "d96bf338", "usageMetadata": {"promptTokenCount": 12414, "candidatesTokenCount": 76, "thoughtsTokenCount": 39, "cachedContentTokenCount": 0}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("projects/noise/not-chats/demo/.qwen/projects/real_project/chats/abc123.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+
+        let messages = parse_qwen_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("real_project"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("real_project"));
     }
 
     #[test]

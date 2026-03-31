@@ -838,6 +838,8 @@ impl App {
         let tie_breaker = |a: &&ModelUsage, b: &&ModelUsage| {
             a.model
                 .cmp(&b.model)
+                .then_with(|| a.workspace_label.cmp(&b.workspace_label))
+                .then_with(|| a.workspace_key.cmp(&b.workspace_key))
                 .then_with(|| a.provider.cmp(&b.provider))
                 .then_with(|| a.client.cmp(&b.client))
         };
@@ -1047,6 +1049,8 @@ mod tests {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
             ModelUsage {
                 model: "model2".to_string(),
@@ -1055,6 +1059,8 @@ mod tests {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
         ];
 
@@ -1090,6 +1096,8 @@ mod tests {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
             ModelUsage {
                 model: "model2".to_string(),
@@ -1098,6 +1106,8 @@ mod tests {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
         ];
 
@@ -1132,6 +1142,8 @@ mod tests {
             tokens: TokenBreakdown::default(),
             cost: 0.0,
             session_count: 1,
+            workspace_key: None,
+            workspace_label: None,
         }];
 
         // Set selection beyond bounds
@@ -1224,6 +1236,8 @@ mod tests {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             })
             .collect();
         app

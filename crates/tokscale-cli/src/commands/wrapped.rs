@@ -217,6 +217,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         Some(
             parse_local_clients(LocalParseOptions {
                 home_dir: None,
+                use_env_roots: true,
                 clients: Some(local_clients),
                 since: Some(since.clone()),
                 until: Some(until.clone()),
@@ -230,6 +231,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
 
     let graph = generate_graph(ReportOptions {
         home_dir: None,
+        use_env_roots: true,
         clients: Some(graph_clients),
         since: Some(since),
         until: Some(until),

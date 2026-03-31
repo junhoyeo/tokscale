@@ -6,14 +6,39 @@ use ratatui::widgets::{
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
 use super::widgets::{format_tokens, get_model_color};
 use crate::tui::app::App;
+use tokscale_core::GroupBy;
 
 struct ModelRowData {
     model: String,
+    workspace_label: Option<String>,
     tokens_input: u64,
     tokens_output: u64,
     tokens_cache_read: u64,
     tokens_cache_write: u64,
     cost: f64,
+}
+
+fn overview_model_label(group_by: &GroupBy, model: &str, workspace_label: Option<&str>) -> String {
+    if *group_by == GroupBy::WorkspaceModel {
+        format!(
+            "{} / {}",
+            workspace_label.unwrap_or("Unknown workspace"),
+            model
+        )
+    } else {
+        model.to_string()
+    }
+}
+
+fn overview_color_key<'a>(group_by: &GroupBy, model: &'a str) -> &'a str {
+    if *group_by == GroupBy::WorkspaceModel {
+        model
+            .rsplit_once(" / ")
+            .map(|(_, base_model)| base_model)
+            .unwrap_or(model)
+    } else {
+        model
+    }
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -41,6 +66,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
     let daily = &app.data.daily;
+    let group_by = app.group_by.borrow().clone();
     let mut sorted_daily: Vec<_> = daily.iter().collect();
     sorted_daily.sort_by(|a, b| a.date.cmp(&b.date));
 
@@ -55,11 +81,11 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
 
             let models: Vec<ModelSegment> = d
                 .models
-                .iter()
-                .map(|(model_name, info)| ModelSegment {
-                    model_id: model_name.clone(),
+                .values()
+                .map(|info| ModelSegment {
+                    model_id: info.display_name.clone(),
                     tokens: info.tokens.total(),
-                    color: get_model_color(model_name),
+                    color: get_model_color(overview_color_key(&group_by, &info.color_key)),
                 })
                 .collect();
 
@@ -78,12 +104,18 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
     let legend_limit = if app.is_narrow() { 3 } else { 5 };
     let max_name_width = if app.is_narrow() { 12 } else { 18 };
     let muted_color = app.theme.muted;
+    let group_by = app.group_by.borrow().clone();
 
     let top_models: Vec<(String, Color)> = app
         .get_sorted_models()
         .iter()
         .take(legend_limit)
-        .map(|m| (m.model.clone(), get_model_color(&m.model)))
+        .map(|m| {
+            (
+                overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
+                get_model_color(&m.model),
+            )
+        })
         .collect();
 
     if top_models.is_empty() {
@@ -123,12 +155,14 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
     let is_very_narrow = app.is_very_narrow();
     let sort_field = app.sort_field;
     let total_cost = app.data.total_cost;
+    let group_by = app.group_by.borrow().clone();
 
     let models_data: Vec<ModelRowData> = app
         .get_sorted_models()
         .iter()
         .map(|m| ModelRowData {
             model: m.model.clone(),
+            workspace_label: m.workspace_label.clone(),
             tokens_input: m.tokens.input,
             tokens_output: m.tokens.output,
             tokens_cache_read: m.tokens.cache_read,
@@ -210,7 +244,9 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         };
 
         let model_color = get_model_color(&model.model);
-        let name = truncate_string(&model.model, max_name_width);
+        let display_name =
+            overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
+        let name = truncate_string(&display_name, max_name_width);
         let percentage = if model.cost.is_finite() && total.is_finite() && total > 0.0 {
             (model.cost / total) * 100.0
         } else {

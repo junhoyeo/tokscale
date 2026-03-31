@@ -29,6 +29,8 @@ pub struct UnifiedMessage {
     pub model_id: String,
     pub provider_id: String,
     pub session_id: String,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub timestamp: i64,
     pub date: String,
     pub tokens: TokenBreakdown,
@@ -45,36 +47,43 @@ const fn default_message_count() -> i32 {
 
 pub fn normalize_agent_name(agent: &str) -> String {
     let trimmed = agent.trim();
-    let agent_lower = trimmed.to_lowercase();
+    let stripped = strip_agent_prefix(trimmed);
+    let agent_lower = stripped.to_lowercase();
 
     if agent_lower.contains("plan") {
         if agent_lower.contains("omo") || agent_lower.contains("sisyphus") {
             return "Planner-Sisyphus".to_string();
         }
-        return trimmed.to_string();
+        return titlecase_agent(stripped);
     }
 
     if agent_lower == "omo" || agent_lower == "sisyphus" {
         return "Sisyphus".to_string();
     }
 
-    trimmed.to_string()
+    if agent_lower == "orchestrator-sisyphus" {
+        return "Atlas".to_string();
+    }
+
+    titlecase_agent(stripped)
 }
 
 pub fn normalize_opencode_agent_name(agent: &str) -> String {
     let trimmed = agent.trim();
-    let agent_lower = trimmed.to_lowercase();
+    let stripped = strip_agent_prefix(trimmed);
+    let agent_lower = stripped.to_lowercase();
 
     if let Some(normalized) = normalize_oh_my_opencode_agent_name(&agent_lower) {
         return normalized;
     }
 
-    normalize_agent_name(trimmed)
+    normalize_agent_name(stripped)
 }
 
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     let normalized = match agent_lower {
         "sisyphus (ultraworker)" | "sisyphus" => "Sisyphus",
+        "orchestrator-sisyphus" => "Atlas",
         "hephaestus (deep agent)" | "hephaestus" => "Hephaestus",
         "prometheus (plan builder)" | "prometheus (planner)" | "prometheus" => "Prometheus",
         "atlas (plan executor)" | "atlas" => "Atlas",
@@ -86,6 +95,46 @@ fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     };
 
     Some(normalized.to_string())
+}
+
+fn strip_agent_prefix(name: &str) -> &str {
+    for prefix in &["astrape:", "oh-my-claudecode:", "oh-my-codex:"] {
+        if name
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            return &name[prefix.len()..];
+        }
+    }
+    name
+}
+
+fn titlecase_word(word: &str) -> String {
+    match word.to_lowercase().as_str() {
+        "ui" => "UI".to_string(),
+        "ux" => "UX".to_string(),
+        "api" => "API".to_string(),
+        _ => {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    upper + &chars.collect::<String>()
+                }
+            }
+        }
+    }
+}
+
+fn titlecase_agent(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    name.split('-')
+        .map(titlecase_word)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl UnifiedMessage {
@@ -177,6 +226,8 @@ impl UnifiedMessage {
             model_id: model_id.into(),
             provider_id: provider_id.into(),
             session_id: session_id.into(),
+            workspace_key: None,
+            workspace_label: None,
             timestamp,
             date,
             tokens,
@@ -187,6 +238,15 @@ impl UnifiedMessage {
         }
     }
 
+    pub fn set_workspace(
+        &mut self,
+        workspace_key: Option<String>,
+        workspace_label: Option<String>,
+    ) {
+        self.workspace_key = workspace_key;
+        self.workspace_label = workspace_label;
+    }
+
     pub(crate) fn refresh_derived_fields(&mut self) {
         self.date = timestamp_to_date(self.timestamp);
     }
@@ -195,6 +255,46 @@ impl UnifiedMessage {
         self.timestamp = timestamp;
         self.refresh_derived_fields();
     }
+}
+
+pub fn normalize_workspace_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let preserve_unc_prefix = trimmed.starts_with("\\\\") || trimmed.starts_with("//");
+    let mut normalized = trimmed.replace('\\', "/");
+
+    if preserve_unc_prefix {
+        let body = normalized.trim_start_matches('/');
+        let mut collapsed = body.to_string();
+        while collapsed.contains("//") {
+            collapsed = collapsed.replace("//", "/");
+        }
+        normalized = format!("//{}", collapsed);
+    } else {
+        while normalized.contains("//") {
+            normalized = normalized.replace("//", "/");
+        }
+    }
+
+    let minimum_len = if preserve_unc_prefix { 2 } else { 1 };
+    if normalized.len() > minimum_len {
+        normalized = normalized.trim_end_matches('/').to_string();
+    }
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+pub fn workspace_label_from_key(key: &str) -> Option<String> {
+    key.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
 }
 
 /// Convert Unix milliseconds to a local YYYY-MM-DD date string.
@@ -267,6 +367,44 @@ mod tests {
         assert_eq!(msg.date, timestamp_to_date(1733011200000));
         assert_eq!(msg.cost, 0.05);
         assert_eq!(msg.agent, None);
+        assert_eq!(msg.workspace_key, None);
+        assert_eq!(msg.workspace_label, None);
+    }
+
+    #[test]
+    fn test_normalize_workspace_key_normalizes_slashes_and_trailing_separator() {
+        assert_eq!(
+            normalize_workspace_key(r"C:\Users\alice\repo\"),
+            Some("C:/Users/alice/repo".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_key("/Users/alice//repo/"),
+            Some("/Users/alice/repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_workspace_key_preserves_unc_prefix() {
+        assert_eq!(
+            normalize_workspace_key(r"\\server\share\repo\"),
+            Some("//server/share/repo".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_key("//server//share///repo/"),
+            Some("//server/share/repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_workspace_label_from_key_uses_last_path_segment() {
+        assert_eq!(
+            workspace_label_from_key("/Users/alice/my-repo"),
+            Some("my-repo".to_string())
+        );
+        assert_eq!(
+            workspace_label_from_key("encoded-project-key"),
+            Some("encoded-project-key".to_string())
+        );
     }
 
     #[test]
@@ -331,7 +469,44 @@ mod tests {
         assert_eq!(normalize_agent_name("Planner-Sisyphus"), "Planner-Sisyphus");
         assert_eq!(normalize_agent_name("omo-plan"), "Planner-Sisyphus");
 
-        assert_eq!(normalize_agent_name("explore"), "explore");
+        assert_eq!(normalize_agent_name("orchestrator-sisyphus"), "Atlas");
+        assert_eq!(
+            normalize_opencode_agent_name("orchestrator-sisyphus"),
+            "Atlas"
+        );
+        assert_eq!(normalize_agent_name("explore"), "Explore");
         assert_eq!(normalize_agent_name("CustomAgent"), "CustomAgent");
+
+        assert_eq!(normalize_agent_name("executor"), "Executor");
+        assert_eq!(
+            normalize_agent_name("task-orchestrator"),
+            "Task Orchestrator"
+        );
+        assert_eq!(normalize_agent_name("git-committer"), "Git Committer");
+        assert_eq!(
+            normalize_agent_name("frontend-ui-ux-engineer"),
+            "Frontend UI UX Engineer"
+        );
+        assert_eq!(
+            normalize_agent_name("astrape:executor-high"),
+            "Executor High"
+        );
+        assert_eq!(
+            normalize_agent_name("oh-my-claudecode:code-reviewer"),
+            "Code Reviewer"
+        );
+        assert_eq!(normalize_agent_name("oh-my-codex:librarian"), "Librarian");
+        assert_eq!(normalize_agent_name("astrape:executor"), "Executor");
+        assert_eq!(normalize_agent_name("plan-reviewer"), "Plan Reviewer");
+        assert_eq!(normalize_agent_name("astrape:planner"), "Planner");
+
+        assert_eq!(
+            normalize_opencode_agent_name("astrape:sisyphus"),
+            "Sisyphus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("oh-my-claudecode:executor"),
+            "Executor"
+        );
     }
 }

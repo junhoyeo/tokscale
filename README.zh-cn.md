@@ -105,6 +105,7 @@
 - [社交平台](#社交平台)
   - [功能](#功能-2)
   - [GitHub 个人资料嵌入小组件](#github-个人资料嵌入小组件)
+  - [GitHub 个人资料徽章](#github-个人资料徽章)
   - [入门](#入门)
   - [数据验证](#数据验证)
 - [Wrapped 2025](#wrapped-2025)
@@ -622,6 +623,26 @@ Tokscale 包含一个社交平台，您可以在其中分享使用数据并与�
   - `compact=1` 使用紧凑布局 + 紧凑数字表示法（例如 `1.2M`、`$3.4K`）
 - 示例：
   - `https://tokscale.ai/api/embed/<username>/svg?theme=light&sort=cost&compact=1`
+
+### GitHub 个人资料徽章
+
+您还可以使用 shields.io 风格的更紧凑的徽章：
+
+```md
+![Tokscale Tokens](https://tokscale.ai/api/badge/<username>/svg)
+```
+
+- 将 `<username>` 替换为您的 GitHub 用户名
+- 可选查询参数：
+  - `metric=tokens`（默认）、`metric=cost` 或 `metric=rank`
+  - `style=flat`（默认）或 `style=flat-square`
+  - `sort=tokens`（默认）或 `sort=cost` 控制排名依据
+  - `compact=1` 使用紧凑数字表示（例如 `1.2M`、`$3.4K`）
+  - `label=<文本>` 自定义左侧标签
+  - `color=<hex>` 自定义右侧背景颜色（例如 `color=ff5733`）
+- 示例：
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=cost&compact=1`
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=rank&sort=cost&style=flat-square`
 
 ### 入门
 

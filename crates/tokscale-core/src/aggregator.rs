@@ -453,6 +453,8 @@ mod tests {
             model_id: model.to_string(),
             provider_id: "test-provider".to_string(),
             session_id: "test-session".to_string(),
+            workspace_key: None,
+            workspace_label: None,
             timestamp,
             date: date.to_string(),
             tokens: TokenBreakdown {

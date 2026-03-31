@@ -9,18 +9,33 @@ pub enum PathRoot {
 }
 
 impl PathRoot {
-    pub fn resolve(&self, home_dir: &str) -> String {
+    pub fn resolve_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
         match self {
             PathRoot::Home => home_dir.to_string(),
-            PathRoot::XdgData => std::env::var("XDG_DATA_HOME")
-                .unwrap_or_else(|_| format!("{}/.local/share", home_dir)),
+            PathRoot::XdgData => {
+                if use_env_roots {
+                    std::env::var("XDG_DATA_HOME")
+                        .unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+                } else {
+                    format!("{}/.local/share", home_dir)
+                }
+            }
             PathRoot::EnvVar {
                 var,
                 fallback_relative,
             } => {
-                std::env::var(var).unwrap_or_else(|_| format!("{}/{}", home_dir, fallback_relative))
+                if use_env_roots {
+                    std::env::var(var)
+                        .unwrap_or_else(|_| format!("{}/{}", home_dir, fallback_relative))
+                } else {
+                    format!("{}/{}", home_dir, fallback_relative)
+                }
             }
         }
+    }
+
+    pub fn resolve(&self, home_dir: &str) -> String {
+        self.resolve_with_env_strategy(home_dir, true)
     }
 }
 
@@ -36,8 +51,16 @@ pub struct ClientDef {
 }
 
 impl ClientDef {
+    pub fn resolve_path_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
+        format!(
+            "{}/{}",
+            self.root.resolve_with_env_strategy(home_dir, use_env_roots),
+            self.relative_path
+        )
+    }
+
     pub fn resolve_path(&self, home_dir: &str) -> String {
-        format!("{}/{}", self.root.resolve(home_dir), self.relative_path)
+        self.resolve_path_with_env_strategy(home_dir, true)
     }
 }
 
@@ -83,7 +106,8 @@ macro_rules! define_clients {
 
             #[allow(clippy::should_implement_trait)]
             pub fn from_str(s: &str) -> Option<ClientId> {
-                Self::ALL.iter().copied().find(|c| c.as_str() == s)
+                let normalized = if s == "kilocode" { "kilo" } else { s };
+                Self::ALL.iter().copied().find(|c| c.as_str() == normalized)
             }
         }
 
@@ -356,6 +380,18 @@ mod tests {
     }
 
     #[test]
+    fn test_path_root_xdg_data_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-home") };
+
+        let resolved = PathRoot::XdgData.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.local/share");
+
+        restore_env("XDG_DATA_HOME", previous);
+    }
+
+    #[test]
     fn test_path_root_env_var_uses_env_when_set() {
         let _guard = env_lock().lock().unwrap();
         let var = "TOKSCALE_TEST_PATH_ROOT";
@@ -384,6 +420,23 @@ mod tests {
             fallback_relative: ".fallback",
         };
         let resolved = root.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/home/.fallback");
+
+        restore_env(var, previous);
+    }
+
+    #[test]
+    fn test_path_root_env_var_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "TOKSCALE_TEST_PATH_ROOT";
+        let previous = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "/tmp/custom-root") };
+
+        let root = PathRoot::EnvVar {
+            var,
+            fallback_relative: ".fallback",
+        };
+        let resolved = root.resolve_with_env_strategy("/tmp/home", false);
         assert_eq!(resolved, "/tmp/home/.fallback");
 
         restore_env(var, previous);
