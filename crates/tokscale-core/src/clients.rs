@@ -106,8 +106,7 @@ macro_rules! define_clients {
 
             #[allow(clippy::should_implement_trait)]
             pub fn from_str(s: &str) -> Option<ClientId> {
-                let normalized = if s == "kilocode" { "kilo" } else { s };
-                Self::ALL.iter().copied().find(|c| c.as_str() == normalized)
+                Self::ALL.iter().copied().find(|c| c.as_str() == s)
             }
         }
 

@@ -242,8 +242,12 @@ fn scan_crush_registry(registry_path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn discover_crush_dbs(home_dir: &str) -> Vec<PathBuf> {
-    let registry_path = PathBuf::from(ClientId::Crush.data().resolve_path(home_dir));
+fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let registry_path = PathBuf::from(
+        ClientId::Crush
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots),
+    );
     let mut dbs = scan_crush_registry(&registry_path);
     dbs.sort();
     dbs.dedup();
@@ -463,7 +467,7 @@ pub fn scan_all_clients_with_env_strategy(
     }
 
     if enabled.contains(&ClientId::Crush) {
-        result.crush_dbs = discover_crush_dbs(home_dir);
+        result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
     }
 
     // Execute scans in parallel
@@ -1095,7 +1099,7 @@ mod tests {
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
         std::env::set_current_dir(&nested).unwrap();
 
-        let result = discover_crush_dbs(home.to_str().unwrap());
+        let result = discover_crush_dbs(home.to_str().unwrap(), false);
         assert!(result.is_empty());
 
         restore_current_dir(&previous_dir);

@@ -304,6 +304,8 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Qwen,
         ClientId::RooCode,
         ClientId::KiloCode,
+        ClientId::Kilo,
+        ClientId::Mux,
         ClientId::Crush,
     ];
 
