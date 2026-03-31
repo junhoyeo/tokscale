@@ -170,4 +170,24 @@ describe("getUserEmbedStats", () => {
 
     expect(result?.stats.updatedAt).toBe("2026-03-29T10:00:00.000Z");
   });
+
+  it("normalizes aggregate ranks returned as strings", async () => {
+    mockState.pushSelectResult([
+      {
+        id: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 300,
+        totalCost: 3.5,
+        submissionCount: 5,
+        updatedAt: new Date("2026-03-29T10:00:00.000Z"),
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: "2" }]);
+
+    const result = await getUserEmbedStats("alice", "tokens");
+
+    expect(result?.stats.rank).toBe(2);
+  });
 });

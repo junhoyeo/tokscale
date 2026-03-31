@@ -70,7 +70,9 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
       SELECT rank FROM ranked WHERE user_id = ${result.id}
     `);
 
-    rank = (rankResult as unknown as { rank: number }[])[0]?.rank || null;
+    const rawRank = (rankResult as unknown as Array<{ rank: number | string | null }>)[0]?.rank;
+    const normalizedRank = rawRank == null ? null : Number(rawRank);
+    rank = normalizedRank !== null && Number.isFinite(normalizedRank) ? normalizedRank : null;
   }
 
   return {
