@@ -100,13 +100,17 @@ const mockState = vi.hoisted(() => {
   }
 
   function createInsertBuilder(table: unknown) {
+    const returning = vi.fn(async () => nextInsertReturningResult());
+    const insertStatement = {
+      onConflictDoNothing: vi.fn(() => insertStatement),
+      returning,
+      then: (resolve: (value: unknown) => unknown) => resolve([]),
+    };
+
     return {
       values: vi.fn((values: unknown) => {
         insertCalls.push({ table, values });
-        return {
-          returning: vi.fn(async () => nextInsertReturningResult()),
-          then: (resolve: (value: unknown) => unknown) => resolve([]),
-        };
+        return insertStatement;
       }),
     };
   }
@@ -382,6 +386,25 @@ function queueSuccessfulTransaction(existingSubmissionRows: Array<Record<string,
   mockState.pushDbSelectResult([{ sourcesUsed: ["claude"] }]);
 }
 
+function expectSubmissionLookup(condition: unknown) {
+  expect(mockState.whereCalls).toContainEqual({
+    table: mockState.tables.submissions,
+    condition,
+  });
+}
+
+function expectSubmissionInsertCount(count: number) {
+  expect(
+    mockState.insertCalls.filter((call) => call.table === mockState.tables.submissions)
+  ).toHaveLength(count);
+}
+
+function expectSubmissionUpdateCount(count: number) {
+  expect(
+    mockState.updateCalls.filter((call) => call.table === mockState.tables.submissions)
+  ).toHaveLength(count);
+}
+
 describe("POST /api/submit source scoping", () => {
   it("looks up and creates a source-scoped submission when sourceId is present", async () => {
     mockState.validateSubmission.mockReturnValue({
@@ -407,16 +430,14 @@ describe("POST /api/submit source scoping", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockState.whereCalls[0]).toEqual({
-      table: mockState.tables.submissions,
-      condition: {
-        type: "and",
-        conditions: [
-          { type: "eq", left: "submissions.userId", right: "user-1" },
-          { type: "eq", left: "submissions.sourceId", right: "machine-a" },
-        ],
-      },
+    expectSubmissionLookup({
+      type: "and",
+      conditions: [
+        { type: "eq", left: "submissions.userId", right: "user-1" },
+        { type: "eq", left: "submissions.sourceId", right: "machine-a" },
+      ],
     });
+    expectSubmissionInsertCount(1);
     expect(mockState.insertCalls[0]).toEqual({
       table: mockState.tables.submissions,
       values: expect.objectContaining({
@@ -425,6 +446,139 @@ describe("POST /api/submit source scoping", () => {
         sourceName: "MacBook Air",
       }),
     });
+  });
+
+  it("reuses an existing source-scoped submission on re-submit", async () => {
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: createSubmissionData({
+        sourceId: "machine-a",
+        sourceName: "MacBook Air",
+      }),
+      errors: [],
+      warnings: [],
+    });
+    queueSuccessfulTransaction([
+      {
+        id: "submission-existing",
+        sourceName: "MacBook Air",
+      },
+    ]);
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expectSubmissionLookup({
+      type: "and",
+      conditions: [
+        { type: "eq", left: "submissions.userId", right: "user-1" },
+        { type: "eq", left: "submissions.sourceId", right: "machine-a" },
+      ],
+    });
+    expectSubmissionInsertCount(0);
+    expectSubmissionUpdateCount(1);
+  });
+
+  it("recovers when the first insert loses a race for the same source", async () => {
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: createSubmissionData({
+        sourceId: "machine-a",
+        sourceName: "MacBook Air",
+      }),
+      errors: [],
+      warnings: [],
+    });
+    mockState.pushTxSelectResult([]);
+    mockState.pushInsertReturningResult([]);
+    mockState.pushTxSelectResult([
+      {
+        id: "submission-raced",
+      },
+    ]);
+    mockState.pushTxSelectResult([
+      {
+        totalTokens: 150,
+        totalCost: "1.5000",
+        inputTokens: 100,
+        outputTokens: 50,
+        dateStart: "2026-03-01",
+        dateEnd: "2026-03-01",
+        activeDays: 1,
+        rowCount: 1,
+      },
+    ]);
+    mockState.pushTxSelectResult([
+      {
+        sourceBreakdown: {
+          claude: {
+            tokens: 150,
+            cost: 1.5,
+            input: 100,
+            output: 50,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            messages: 2,
+            models: {
+              "claude-sonnet-4-20250514": {
+                tokens: 150,
+                cost: 1.5,
+                input: 100,
+                output: 50,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 2,
+              },
+            },
+          },
+        },
+      },
+    ]);
+    mockState.pushDbSelectResult([
+      {
+        totalTokens: 150,
+        totalCost: "1.5000",
+        dateStart: "2026-03-01",
+        dateEnd: "2026-03-01",
+      },
+    ]);
+    mockState.pushDbSelectResult([{ activeDays: 1 }]);
+    mockState.pushDbSelectResult([{ sourcesUsed: ["claude"] }]);
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expectSubmissionInsertCount(1);
+    expectSubmissionLookup({
+      type: "and",
+      conditions: [
+        { type: "eq", left: "submissions.userId", right: "user-1" },
+        { type: "eq", left: "submissions.sourceId", right: "machine-a" },
+      ],
+    });
+    expect(
+      mockState.whereCalls.filter((call) => call.table === mockState.tables.submissions)
+    ).toHaveLength(2);
   });
 
   it("uses the unsourced submission row when sourceId is absent", async () => {
@@ -448,15 +602,12 @@ describe("POST /api/submit source scoping", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockState.whereCalls[0]).toEqual({
-      table: mockState.tables.submissions,
-      condition: {
-        type: "and",
-        conditions: [
-          { type: "eq", left: "submissions.userId", right: "user-1" },
-          { type: "isNull", value: "submissions.sourceId" },
-        ],
-      },
+    expectSubmissionLookup({
+      type: "and",
+      conditions: [
+        { type: "eq", left: "submissions.userId", right: "user-1" },
+        { type: "isNull", value: "submissions.sourceId" },
+      ],
     });
     expect(mockState.insertCalls[0]).toEqual({
       table: mockState.tables.submissions,

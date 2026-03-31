@@ -4,8 +4,8 @@ use std::fs;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::thread;
-use std::time::Duration;
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
@@ -62,6 +62,10 @@ fn get_source_id_path() -> Result<PathBuf> {
 fn get_source_id_lock_path() -> Result<PathBuf> {
     Ok(home_dir()?.join(".config/tokscale/source-id.lock"))
 }
+
+const SOURCE_ID_LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+const SOURCE_ID_LOCK_STALE_AFTER: Duration = Duration::from_secs(2);
+const SOURCE_ID_LOCK_MAX_WAIT: Duration = Duration::from_secs(10);
 
 fn ensure_config_dir() -> Result<()> {
     let config_dir = home_dir()?.join(".config/tokscale");
@@ -144,44 +148,181 @@ fn read_source_id(path: &Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceIdLockState {
+    pid: u32,
+    created_at_ms: u128,
+}
+
+fn current_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn serialize_source_id_lock_state(state: SourceIdLockState) -> String {
+    format!(
+        "pid={}\ncreated_at_ms={}\n",
+        state.pid, state.created_at_ms
+    )
+}
+
+fn parse_source_id_lock_state(content: &str) -> Option<SourceIdLockState> {
+    let mut pid = None;
+    let mut created_at_ms = None;
+
+    for line in content.lines() {
+        let (key, value) = line.split_once('=')?;
+        match key.trim() {
+            "pid" => pid = value.trim().parse::<u32>().ok(),
+            "created_at_ms" => created_at_ms = value.trim().parse::<u128>().ok(),
+            _ => {}
+        }
+    }
+
+    Some(SourceIdLockState {
+        pid: pid?,
+        created_at_ms: created_at_ms?,
+    })
+}
+
+fn read_source_id_lock_state(path: &Path) -> Option<SourceIdLockState> {
+    let content = fs::read_to_string(path).ok()?;
+    parse_source_id_lock_state(&content)
+}
+
+fn lock_age(path: &Path, state: Option<SourceIdLockState>) -> Duration {
+    if let Some(state) = state {
+        let now_ms = current_unix_ms();
+        let age_ms = now_ms.saturating_sub(state.created_at_ms);
+        return Duration::from_millis(age_ms.min(u64::MAX as u128) as u64);
+    }
+
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .unwrap_or_default()
+}
+
+fn lock_owner_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid)])
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout.contains(&pid.to_string())
+                    && !stdout.contains("No tasks are running")
+            }
+            _ => false,
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+fn write_source_id_lock_state(
+    mut file: fs::File,
+    state: SourceIdLockState,
+) -> Result<()> {
+    let payload = serialize_source_id_lock_state(state);
+    file.write_all(payload.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn remove_source_id_lock_if_matches(path: &Path, expected: Option<SourceIdLockState>) -> bool {
+    let current_state = read_source_id_lock_state(path);
+    if current_state != expected {
+        return false;
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => false,
+    }
+}
+
 struct SourceIdLock {
     path: PathBuf,
+    state: SourceIdLockState,
 }
 
 impl Drop for SourceIdLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = remove_source_id_lock_if_matches(&self.path, Some(self.state));
     }
 }
 
 fn acquire_source_id_lock() -> Result<SourceIdLock> {
     ensure_config_dir()?;
     let lock_path = get_source_id_lock_path()?;
+    let deadline = Instant::now() + SOURCE_ID_LOCK_MAX_WAIT;
 
-    for _ in 0..100 {
+    loop {
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock_path)
         {
-            Ok(_) => return Ok(SourceIdLock { path: lock_path }),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Ok(metadata) = fs::metadata(&lock_path) {
-                    if let Ok(modified_at) = metadata.modified() {
-                        if modified_at.elapsed().unwrap_or_default() > Duration::from_secs(10) {
-                            let _ = fs::remove_file(&lock_path);
-                            continue;
-                        }
-                    }
+            Ok(file) => {
+                let state = SourceIdLockState {
+                    pid: std::process::id(),
+                    created_at_ms: current_unix_ms(),
+                };
+
+                if let Err(err) = write_source_id_lock_state(file, state) {
+                    let _ = fs::remove_file(&lock_path);
+                    return Err(err);
                 }
-                thread::sleep(Duration::from_millis(25));
+
+                return Ok(SourceIdLock {
+                    path: lock_path,
+                    state,
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let state = read_source_id_lock_state(&lock_path);
+                let age = lock_age(&lock_path, state);
+                let owner_is_alive = state
+                    .map(|lock_state| lock_owner_is_alive(lock_state.pid))
+                    .unwrap_or(false);
+
+                if !owner_is_alive && age >= SOURCE_ID_LOCK_STALE_AFTER {
+                    let _ = remove_source_id_lock_if_matches(&lock_path, state);
+                    continue;
+                }
+
+                if Instant::now() >= deadline {
+                    break;
+                }
+
+                thread::sleep(SOURCE_ID_LOCK_RETRY_DELAY);
             }
             Err(err) => return Err(err.into()),
         }
     }
 
     anyhow::bail!(
-        "Could not acquire source ID lock after 100 retries (~2500ms)"
+        "Could not acquire source ID lock after waiting for stale lock cleanup"
     );
 }
 
@@ -540,6 +681,52 @@ mod tests {
         unsafe {
             env::remove_var("TOKSCALE_API_URL");
         }
+    }
+
+    #[test]
+    fn test_source_id_lock_state_round_trip() {
+        let state = SourceIdLockState {
+            pid: 12345,
+            created_at_ms: 1_717_000_000_000,
+        };
+
+        let encoded = serialize_source_id_lock_state(state);
+        let decoded = parse_source_id_lock_state(&encoded);
+
+        assert_eq!(decoded, Some(state));
+    }
+
+    #[test]
+    fn test_source_id_lock_state_rejects_malformed_input() {
+        assert!(parse_source_id_lock_state("pid=abc\ncreated_at_ms=123\n").is_none());
+        assert!(parse_source_id_lock_state("just some text").is_none());
+    }
+
+    #[test]
+    fn test_source_id_lock_guard_only_removes_owned_lock_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let lock_path = temp_dir.path().join("source-id.lock");
+        let owned_state = SourceIdLockState {
+            pid: 12345,
+            created_at_ms: 1_717_000_000_000,
+        };
+        let newer_state = SourceIdLockState {
+            pid: 54321,
+            created_at_ms: 1_717_000_000_500,
+        };
+
+        fs::write(&lock_path, serialize_source_id_lock_state(owned_state)).unwrap();
+
+        let guard = SourceIdLock {
+            path: lock_path.clone(),
+            state: owned_state,
+        };
+
+        fs::write(&lock_path, serialize_source_id_lock_state(newer_state)).unwrap();
+        drop(guard);
+
+        let persisted = fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(persisted, serialize_source_id_lock_state(newer_state));
     }
 
     #[test]

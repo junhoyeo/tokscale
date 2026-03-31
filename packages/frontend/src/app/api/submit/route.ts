@@ -52,7 +52,7 @@ function normalizeOptionalString(value: string | undefined): string | null {
 }
 
 async function loadUserSubmitMetrics(userId: string) {
-  const [userAggregates, userDayAggregates, userSubmissions] = await Promise.all([
+  const [userAggregatesRows, userDayAggregatesRows, userSubmissionsRows] = await Promise.all([
     db
       .select({
         totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)::bigint`,
@@ -76,6 +76,10 @@ async function loadUserSubmitMetrics(userId: string) {
       .from(submissions)
       .where(eq(submissions.userId, userId)),
   ]);
+
+  const [userAggregates] = userAggregatesRows;
+  const [userDayAggregates] = userDayAggregatesRows;
+  const userSubmissions = userSubmissionsRows;
 
   const userClients = new Set<string>();
   for (const submission of userSubmissions) {
@@ -240,9 +244,34 @@ export async function POST(request: Request) {
             cliVersion: data.meta.version,
             submissionHash: generateSubmissionHash(hashData),
           })
+          .onConflictDoNothing()
           .returning({ id: submissions.id });
 
-        submissionId = newSubmission.id;
+        if (newSubmission) {
+          submissionId = newSubmission.id;
+        } else {
+          const [conflictedSubmission] = await tx
+            .select({ id: submissions.id })
+            .from(submissions)
+            .where(
+              sourceId
+                ? and(
+                    eq(submissions.userId, tokenRecord.userId),
+                    eq(submissions.sourceId, sourceId)
+                  )
+                : and(
+                    eq(submissions.userId, tokenRecord.userId),
+                    isNull(submissions.sourceId)
+                  )
+            )
+            .limit(1);
+
+          if (!conflictedSubmission) {
+            throw new Error("Submission row was not found after insert conflict");
+          }
+
+          submissionId = conflictedSubmission.id;
+        }
       }
 
       // ------------------------------------------
