@@ -257,6 +257,16 @@ type ModuleExports = typeof import("../../src/app/api/submit/route");
 
 let POST: ModuleExports["POST"];
 
+function serializeSqlCalls(): string[] {
+  return mockState.sql.mock.calls.map((call) => {
+    const [strings, ...values] = call as [TemplateStringsArray, ...unknown[]];
+    return Array.from(strings).reduce((text, part, index) => {
+      const nextValue = index < values.length ? String(values[index]) : "";
+      return `${text}${part}${nextValue}`;
+    }, "");
+  });
+}
+
 function createSubmissionData(metaOverrides: Partial<{ sourceId: string; sourceName: string }> = {}) {
   return {
     meta: {
@@ -617,5 +627,36 @@ describe("POST /api/submit source scoping", () => {
         sourceName: null,
       }),
     });
+  });
+
+  it("counts only token-bearing dates in response active-day metrics", async () => {
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: createSubmissionData({
+        sourceId: "machine-a",
+        sourceName: "MacBook Air",
+      }),
+      errors: [],
+      warnings: [],
+    });
+    queueSuccessfulTransaction();
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      serializeSqlCalls().some((text) =>
+        text.includes("COUNT(DISTINCT CASE WHEN dailyBreakdown.tokens > 0 THEN dailyBreakdown.date END)::int")
+      )
+    ).toBe(true);
   });
 });

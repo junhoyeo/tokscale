@@ -64,7 +64,7 @@ async function loadUserSubmitMetrics(userId: string) {
       .where(eq(submissions.userId, userId)),
     db
       .select({
-        activeDays: sql<number>`COUNT(DISTINCT ${dailyBreakdown.date})::int`,
+        activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
       })
       .from(dailyBreakdown)
       .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))

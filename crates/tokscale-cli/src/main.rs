@@ -3128,9 +3128,28 @@ fn run_submit_command(
 
     let api_url = auth::get_api_base_url();
 
-    let source_id = auth::get_submit_source_id()?;
-    let source_name = auth::get_submit_source_name();
-    let submit_payload = to_ts_token_contribution_data(&graph_result, Some(source_id), source_name);
+    let (source_id, source_name) = match auth::get_submit_source_id() {
+        Ok(source_id) => {
+            let source_name = if source_id.is_some() {
+                auth::get_submit_source_name()
+            } else {
+                None
+            };
+            (source_id, source_name)
+        }
+        Err(err) => {
+            eprintln!(
+                "{}",
+                format!(
+                    "  Warning: could not determine a stable source ID; continuing without source metadata: {}",
+                    err
+                )
+                .yellow()
+            );
+            (None, None)
+        }
+    };
+    let submit_payload = to_ts_token_contribution_data(&graph_result, source_id, source_name);
 
     let response = rt.block_on(async {
         reqwest::Client::new()

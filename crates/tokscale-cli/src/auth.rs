@@ -206,14 +206,14 @@ fn lock_age(path: &Path, state: Option<SourceIdLockState>) -> Duration {
         .unwrap_or_default()
 }
 
-fn lock_owner_is_alive(pid: u32) -> bool {
+fn lock_owner_is_alive(pid: u32) -> Option<bool> {
     #[cfg(unix)]
     {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .status()
+            .ok()
             .map(|status| status.success())
-            .unwrap_or(false)
     }
 
     #[cfg(windows)]
@@ -225,16 +225,19 @@ fn lock_owner_is_alive(pid: u32) -> bool {
         match output {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                stdout.contains(&pid.to_string())
-                    && !stdout.contains("No tasks are running")
+                Some(
+                    stdout.contains(&pid.to_string())
+                        && !stdout.contains("No tasks are running")
+                )
             }
-            _ => false,
+            Ok(_) => None,
+            Err(_) => None,
         }
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        false
+        None
     }
 }
 
@@ -302,11 +305,12 @@ fn acquire_source_id_lock() -> Result<SourceIdLock> {
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 let state = read_source_id_lock_state(&lock_path);
                 let age = lock_age(&lock_path, state);
-                let owner_is_alive = state
-                    .map(|lock_state| lock_owner_is_alive(lock_state.pid))
-                    .unwrap_or(false);
+                let owner_is_dead = match state {
+                    Some(lock_state) => matches!(lock_owner_is_alive(lock_state.pid), Some(false)),
+                    None => true,
+                };
 
-                if !owner_is_alive && age >= SOURCE_ID_LOCK_STALE_AFTER {
+                if owner_is_dead && age >= SOURCE_ID_LOCK_STALE_AFTER {
                     let _ = remove_source_id_lock_if_matches(&lock_path, state);
                     continue;
                 }
@@ -352,11 +356,11 @@ fn write_source_id(path: &Path, source_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn get_submit_source_id() -> Result<String> {
+pub fn get_submit_source_id() -> Result<Option<String>> {
     if let Some(source_id) = std::env::var_os("TOKSCALE_SOURCE_ID") {
         let trimmed = source_id.to_string_lossy().trim().to_string();
         if !trimmed.is_empty() {
-            return Ok(trimmed);
+            return Ok(Some(trimmed));
         }
     }
 
@@ -364,18 +368,18 @@ pub fn get_submit_source_id() -> Result<String> {
     let path = get_source_id_path()?;
 
     if let Some(existing) = read_source_id(&path) {
-        return Ok(existing);
+        return Ok(Some(existing));
     }
 
     let _lock = acquire_source_id_lock()?;
 
     if let Some(existing) = read_source_id(&path) {
-        return Ok(existing);
+        return Ok(Some(existing));
     }
 
     let source_id = uuid::Uuid::new_v4().to_string();
     write_source_id(&path, &source_id)?;
-    Ok(source_id)
+    Ok(Some(source_id))
 }
 
 pub fn get_submit_source_name() -> Option<String> {
