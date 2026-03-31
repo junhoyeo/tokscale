@@ -80,7 +80,8 @@ describe("validateSubmission", () => {
     );
 
     expect(result.valid).toBe(true);
-    expect(result.data?.meta.sourceId).toBeUndefined();
-    expect(result.data?.meta.sourceName).toBeUndefined();
+    expect(result.data).toBeDefined();
+    expect(result.data!.meta.sourceId).toBeUndefined();
+    expect(result.data!.meta.sourceName).toBeUndefined();
   });
 });

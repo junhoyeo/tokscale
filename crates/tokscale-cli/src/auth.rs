@@ -306,7 +306,10 @@ fn acquire_source_id_lock() -> Result<SourceIdLock> {
                 let state = read_source_id_lock_state(&lock_path);
                 let age = lock_age(&lock_path, state);
                 let owner_is_dead = match state {
-                    Some(lock_state) => matches!(lock_owner_is_alive(lock_state.pid), Some(false)),
+                    Some(lock_state) => match lock_owner_is_alive(lock_state.pid) {
+                        Some(is_alive) => !is_alive,
+                        None => age >= SOURCE_ID_LOCK_STALE_AFTER,
+                    },
                     None => true,
                 };
 
