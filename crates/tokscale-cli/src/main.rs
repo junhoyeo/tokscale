@@ -482,10 +482,7 @@ enum Commands {
         #[command(subcommand)]
         subcommand: CursorSubcommand,
     },
-    #[command(
-        about = "Delete all submitted usage data from the server",
-        visible_alias = "delete-data"
-    )]
+    #[command(about = "Delete all submitted usage data from the server")]
     DeleteSubmittedData,
 }
 
@@ -3803,13 +3800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_submitted_data_alias_parses() {
-        let cli = Cli::try_parse_from(["tokscale", "delete-data"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
-    }
-
-    #[test]
-    fn test_delete_submitted_data_primary_command_parses() {
+    fn test_delete_submitted_data_command_parses() {
         let cli = Cli::try_parse_from(["tokscale", "delete-submitted-data"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
     }
