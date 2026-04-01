@@ -61,4 +61,16 @@ describe("resolveSubmissionScope", () => {
       upgradeLegacyRow: false,
     });
   });
+
+  it("rejects unsourced submits for mixed-state accounts", () => {
+    const result = resolveSubmissionScope(
+      [
+        { id: "legacy-row", sourceId: null },
+        { id: "row-1", sourceId: "machine-a" },
+      ],
+      null
+    );
+
+    expect(result).toEqual({ kind: "rejectMissingSourceIdentity" });
+  });
 });

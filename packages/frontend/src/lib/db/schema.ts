@@ -12,7 +12,6 @@ import {
   integer,
   index,
   unique,
-  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
@@ -185,7 +184,6 @@ export const submissions = pgTable(
   },
   (table) => [
     index("idx_submissions_user_id").on(table.userId),
-    index("idx_submissions_user_source").on(table.userId, table.sourceId),
     index("idx_submissions_status").on(table.status),
     index("idx_submissions_total_tokens").on(table.totalTokens),
     index("idx_submissions_created_at").on(table.createdAt),
@@ -196,22 +194,9 @@ export const submissions = pgTable(
       table.totalCost,
       table.createdAt
     ),
-    uniqueIndex("submissions_user_unsourced_unique")
-      .on(table.userId)
-      .where(sql`${table.sourceId} is null`),
-    uniqueIndex("submissions_user_source_unique")
+    unique("submissions_user_source_unique")
       .on(table.userId, table.sourceId)
-      .where(sql`${table.sourceId} is not null`),
-    uniqueIndex("submissions_user_unsourced_hash_unique")
-      .on(table.userId, table.submissionHash)
-      .where(
-        sql`${table.submissionHash} is not null and ${table.sourceId} is null`
-      ),
-    uniqueIndex("submissions_user_source_hash_unique")
-      .on(table.userId, table.sourceId, table.submissionHash)
-      .where(
-        sql`${table.submissionHash} is not null and ${table.sourceId} is not null`
-      ),
+      .nullsNotDistinct(),
   ]
 );
 

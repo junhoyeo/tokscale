@@ -57,6 +57,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
 
       db
         .select({
+          id: submissions.id,
           sourcesUsed: submissions.sourcesUsed,
           modelsUsed: submissions.modelsUsed,
           updatedAt: submissions.updatedAt,
@@ -65,7 +66,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
         })
         .from(submissions)
         .where(eq(submissions.userId, user.id))
-        .orderBy(desc(submissions.updatedAt)),
+        .orderBy(desc(submissions.updatedAt), desc(submissions.id)),
 
       db.execute<{ rank: number }>(sql`
         WITH user_totals AS (

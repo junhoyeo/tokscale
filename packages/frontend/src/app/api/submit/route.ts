@@ -263,6 +263,7 @@ export async function POST(request: Request) {
         if (newSubmission) {
           submissionId = newSubmission.id;
         } else {
+          isNewSubmission = false;
           const [conflictedSubmission] = await tx
             .select({ id: submissions.id })
             .from(submissions)

@@ -1,5 +1,5 @@
 {
-  "id": "addf32e8-bc11-4942-b777-1e82b08a4ac6",
+  "id": "2c0e7540-105f-48f9-9103-41cbd0d2d0a1",
   "prevId": "4342d7b5-5562-431f-afd1-0dd773563dff",
   "version": "7",
   "dialect": "postgresql",
@@ -676,27 +676,6 @@
           "method": "btree",
           "with": {}
         },
-        "idx_submissions_user_source": {
-          "name": "idx_submissions_user_source",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "source_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "idx_submissions_status": {
           "name": "idx_submissions_status",
           "columns": [
@@ -795,94 +774,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "submissions_user_unsourced_unique": {
-          "name": "submissions_user_unsourced_unique",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"submissions\".\"source_id\" is null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "submissions_user_source_unique": {
-          "name": "submissions_user_source_unique",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "source_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"submissions\".\"source_id\" is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "submissions_user_unsourced_hash_unique": {
-          "name": "submissions_user_unsourced_hash_unique",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "submission_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"submissions\".\"submission_hash\" is not null and \"submissions\".\"source_id\" is null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "submissions_user_source_hash_unique": {
-          "name": "submissions_user_source_hash_unique",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "source_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "submission_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"submissions\".\"submission_hash\" is not null and \"submissions\".\"source_id\" is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -901,7 +792,16 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "submissions_user_source_unique": {
+          "name": "submissions_user_source_unique",
+          "nullsNotDistinct": true,
+          "columns": [
+            "user_id",
+            "source_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

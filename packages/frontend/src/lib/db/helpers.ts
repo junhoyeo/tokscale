@@ -59,6 +59,7 @@ export function resolveSubmissionScope(
   existingRows: SubmissionScopeRow[],
   incomingSourceId: string | null
 ): SubmissionScopeResolution {
+  const hasScopedRows = existingRows.some((row) => row.sourceId != null);
   const exactMatch = incomingSourceId
     ? existingRows.find((row) => row.sourceId === incomingSourceId)
     : undefined;
@@ -72,7 +73,6 @@ export function resolveSubmissionScope(
 
   const unsourcedRow =
     existingRows.find((row) => row.sourceId == null) ?? null;
-  const hasScopedRows = existingRows.some((row) => row.sourceId != null);
 
   if (incomingSourceId) {
     if (unsourcedRow && !hasScopedRows) {
@@ -86,16 +86,16 @@ export function resolveSubmissionScope(
     return { kind: "create" };
   }
 
+  if (hasScopedRows) {
+    return { kind: "rejectMissingSourceIdentity" };
+  }
+
   if (unsourcedRow) {
     return {
       kind: "existing",
       submissionId: unsourcedRow.id,
       upgradeLegacyRow: false,
     };
-  }
-
-  if (hasScopedRows) {
-    return { kind: "rejectMissingSourceIdentity" };
   }
 
   return { kind: "create" };
