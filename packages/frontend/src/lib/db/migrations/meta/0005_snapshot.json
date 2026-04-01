@@ -1,5 +1,5 @@
 {
-  "id": "2c0e7540-105f-48f9-9103-41cbd0d2d0a1",
+  "id": "c6a1cc6e-5949-4fd0-a3ec-ad23e35f48a8",
   "prevId": "4342d7b5-5562-431f-afd1-0dd773563dff",
   "version": "7",
   "dialect": "postgresql",
@@ -774,6 +774,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "submissions_user_unsourced_unique": {
+          "name": "submissions_user_unsourced_unique",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"submissions\".\"source_id\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -795,7 +811,7 @@
       "uniqueConstraints": {
         "submissions_user_source_unique": {
           "name": "submissions_user_source_unique",
-          "nullsNotDistinct": true,
+          "nullsNotDistinct": false,
           "columns": [
             "user_id",
             "source_id"

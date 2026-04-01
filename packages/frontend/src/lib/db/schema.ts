@@ -12,6 +12,7 @@ import {
   integer,
   index,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
@@ -195,8 +196,10 @@ export const submissions = pgTable(
       table.createdAt
     ),
     unique("submissions_user_source_unique")
-      .on(table.userId, table.sourceId)
-      .nullsNotDistinct(),
+      .on(table.userId, table.sourceId),
+    uniqueIndex("submissions_user_unsourced_unique")
+      .on(table.userId)
+      .where(sql`${table.sourceId} is null`),
   ]
 );
 

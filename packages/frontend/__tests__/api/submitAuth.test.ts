@@ -5,23 +5,48 @@ const mockState = vi.hoisted(() => {
   const validateSubmission = vi.fn();
   const generateSubmissionHash = vi.fn(() => "submission-hash");
   const revalidateTag = vi.fn();
+  const mergeClientBreakdowns = vi.fn();
+  const recalculateDayTotals = vi.fn();
+  const buildModelBreakdown = vi.fn();
+  const clientContributionToBreakdownData = vi.fn();
+  const mergeTimestampMs = vi.fn();
+  const resolveSubmissionScope = vi.fn();
   const selectResults: Array<Array<Record<string, unknown>>> = [];
 
   const submissions = {
     id: "submissions.id",
     userId: "submissions.userId",
+    sourceId: "submissions.sourceId",
     totalTokens: "submissions.totalTokens",
     totalCost: "submissions.totalCost",
+    inputTokens: "submissions.inputTokens",
+    outputTokens: "submissions.outputTokens",
+    cacheCreationTokens: "submissions.cacheCreationTokens",
+    cacheReadTokens: "submissions.cacheReadTokens",
+    schemaVersion: "submissions.schemaVersion",
+    updatedAt: "submissions.updatedAt",
+    cliVersion: "submissions.cliVersion",
     dateStart: "submissions.dateStart",
     dateEnd: "submissions.dateEnd",
     sourcesUsed: "submissions.sourcesUsed",
+    modelsUsed: "submissions.modelsUsed",
   };
 
   const dailyBreakdown = {
     id: "dailyBreakdown.id",
     submissionId: "dailyBreakdown.submissionId",
-    tokens: "dailyBreakdown.tokens",
     date: "dailyBreakdown.date",
+    tokens: "dailyBreakdown.tokens",
+    cost: "dailyBreakdown.cost",
+    inputTokens: "dailyBreakdown.inputTokens",
+    outputTokens: "dailyBreakdown.outputTokens",
+    timestampMs: "dailyBreakdown.timestampMs",
+    sourceBreakdown: "dailyBreakdown.sourceBreakdown",
+  };
+
+  const apiTokens = {
+    id: "apiTokens.id",
+    lastUsedAt: "apiTokens.lastUsedAt",
   };
 
   const eq = vi.fn(() => "eq");
@@ -56,6 +81,13 @@ const mockState = vi.hoisted(() => {
     validateSubmission,
     generateSubmissionHash,
     revalidateTag,
+    mergeClientBreakdowns,
+    recalculateDayTotals,
+    buildModelBreakdown,
+    clientContributionToBreakdownData,
+    mergeTimestampMs,
+    resolveSubmissionScope,
+    apiTokens,
     submissions,
     dailyBreakdown,
     eq,
@@ -68,6 +100,12 @@ const mockState = vi.hoisted(() => {
       validateSubmission.mockReset();
       generateSubmissionHash.mockClear();
       revalidateTag.mockClear();
+      mergeClientBreakdowns.mockReset();
+      recalculateDayTotals.mockReset();
+      buildModelBreakdown.mockReset();
+      clientContributionToBreakdownData.mockReset();
+      mergeTimestampMs.mockReset();
+      resolveSubmissionScope.mockReset();
       db.transaction.mockReset();
       db.select.mockClear();
       selectResults.length = 0;
@@ -92,6 +130,7 @@ vi.mock("@/lib/auth/personalTokens", () => ({
 
 vi.mock("@/lib/db", () => ({
   db: mockState.db,
+  apiTokens: mockState.apiTokens,
   submissions: mockState.submissions,
   dailyBreakdown: mockState.dailyBreakdown,
 }));
@@ -102,11 +141,12 @@ vi.mock("@/lib/validation/submission", () => ({
 }));
 
 vi.mock("@/lib/db/helpers", () => ({
-  mergeClientBreakdowns: vi.fn(),
-  recalculateDayTotals: vi.fn(),
-  buildModelBreakdown: vi.fn(),
-  clientContributionToBreakdownData: vi.fn(),
-  mergeTimestampMs: vi.fn(),
+  mergeClientBreakdowns: mockState.mergeClientBreakdowns,
+  recalculateDayTotals: mockState.recalculateDayTotals,
+  buildModelBreakdown: mockState.buildModelBreakdown,
+  clientContributionToBreakdownData: mockState.clientContributionToBreakdownData,
+  mergeTimestampMs: mockState.mergeTimestampMs,
+  resolveSubmissionScope: mockState.resolveSubmissionScope,
 }));
 
 vi.mock("drizzle-orm", () => ({
@@ -358,10 +398,42 @@ describe("POST /api/submit auth path", () => {
       errors: [],
       warnings: [],
     });
-    mockState.db.transaction.mockResolvedValue({
-      submissionId: "submission-1",
-      isNewSubmission: false,
+    const mockModelData = {
+      tokens: 1500,
+      cost: 1.5,
+      input: 1000,
+      output: 500,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 5,
+    };
+    const mockSourceBreakdown = {
+      claude: {
+        ...mockModelData,
+        models: {
+          "claude-sonnet-4": { ...mockModelData },
+        },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(mockModelData);
+    mockState.mergeClientBreakdowns.mockImplementation((_existing: unknown, incoming: unknown) => incoming);
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 1500,
+      cost: 1.5,
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
     });
+    mockState.buildModelBreakdown.mockReturnValue({
+      "claude-sonnet-4": 1500,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(null);
+    mockState.resolveSubmissionScope.mockReturnValue({ kind: "create" });
+
     mockState.pushSelectResult([
       {
         totalTokens: 1500,
@@ -372,6 +444,65 @@ describe("POST /api/submit auth path", () => {
     ]);
     mockState.pushSelectResult([{ activeDays: 1 }]);
     mockState.pushSelectResult([{ sourcesUsed: ["claude"] }]);
+    mockState.db.transaction.mockImplementation(async (callback) => {
+      const selectResults = [
+        [],
+        [{ id: "submission-1" }],
+        [],
+        [
+          {
+            totalTokens: 1500,
+            totalCost: "1.5000",
+            inputTokens: 1000,
+            outputTokens: 500,
+            dateStart: "2024-12-01",
+            dateEnd: "2024-12-01",
+            activeDays: 1,
+            rowCount: 1,
+          },
+        ],
+        [{ sourceBreakdown: mockSourceBreakdown }],
+      ];
+      const tx = {
+        update: vi.fn(() => {
+          const builder = {
+            set: vi.fn(() => ({
+              where: vi.fn(async () => []),
+            })),
+          };
+          return builder;
+        }),
+        select: vi.fn(() => {
+          const builder = {
+            from: vi.fn(() => builder),
+            where: vi.fn(() => builder),
+            limit: vi.fn(async () => selectResults.shift() ?? []),
+            for: vi.fn(async () => selectResults.shift() ?? []),
+            then: (resolve: (value: unknown) => unknown) =>
+              resolve(selectResults.shift() ?? []),
+          };
+          return builder;
+        }),
+        insert: vi.fn((table: unknown) => {
+          if (table === mockState.submissions) {
+            return {
+              values: vi.fn(() => ({
+                onConflictDoNothing: vi.fn(() => ({
+                  returning: vi.fn(async () => []),
+                })),
+              })),
+            };
+          }
+
+          return {
+            values: vi.fn(async () => []),
+          };
+        }),
+        execute: vi.fn(async () => []),
+      };
+
+      return callback(tx as never);
+    });
 
     const response = await POST(
       new Request("http://localhost:3000/api/submit", {
