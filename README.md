@@ -66,8 +66,9 @@
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ Yes |
-| <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/Kilo-Org/kilocode) | `~/.local/share/kilo/kilo.db` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (project registry; fallback: `~/.local/share/crush/projects.json`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | Re-attributed from other sources via `hf:` model prefix or `synthetic` provider (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ Yes |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
@@ -133,7 +134,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Kilo CLI, Mux, and Synthetic
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Cursor IDE, Gemini CLI, Amp, Droid, OpenClaw, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, and Synthetic
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -321,11 +322,14 @@ tokscale --roocode
 # Show only Kilo usage
 tokscale --kilocode
 
+# Show only Mux usage
+tokscale --mux
+
 # Show only Kilo CLI usage
 tokscale --kilo
 
-# Show only Mux usage
-tokscale --mux
+# Show only Crush usage
+tokscale --crush
 
 # Show only Synthetic (synthetic.new) usage
 tokscale --synthetic
@@ -579,7 +583,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Cursor, Gemini, Amp, Droid, OpenClaw, Pi, Kimi, Qwen, Roo Code, Kilo, Kilo CLI, Mux, Synthetic)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Cursor, Gemini, Amp, Droid, OpenClaw, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Synthetic)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -620,6 +624,26 @@ You can embed your public Tokscale stats directly in your GitHub profile README:
   - `compact=1` to use compact layout + compact number notation (e.g., `1.2M`, `$3.4K`)
 - Example:
   - `https://tokscale.ai/api/embed/<username>/svg?theme=light&sort=cost&compact=1`
+
+### GitHub Profile Badge
+
+You can also use a shields.io-style badge for a more compact display:
+
+```md
+![Tokscale Tokens](https://tokscale.ai/api/badge/<username>/svg)
+```
+
+- Replace `<username>` with your GitHub username
+- Optional query params:
+  - `metric=tokens` (default), `metric=cost`, or `metric=rank`
+  - `style=flat` (default) or `style=flat-square`
+  - `sort=tokens` (default) or `sort=cost` to control ranking basis
+  - `compact=1` to use compact number notation (e.g., `1.2M`, `$3.4K`)
+  - `label=<text>` to override the left-side label
+  - `color=<hex>` to override the right-side color (e.g., `color=ff5733`)
+- Examples:
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=cost&compact=1`
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=rank&sort=cost&style=flat-square`
 
 ### Getting Started
 
@@ -861,8 +885,9 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | Same path on all platforms |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage task logs |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage task logs |
-| Kilo CLI | `~/.local/share/kilo/kilo.db` | `%USERPROFILE%\.local\share\kilo\kilo.db` | SQLite database (fork of OpenCode) |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | Same path on all platforms |
+| Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | Uses `xdg-basedir` like OpenCode |
+| Crush | `$XDG_DATA_HOME/crush/` (fallback: `~/.local/share/crush/`) | `%USERPROFILE%\.local\share\crush\` (or `%XDG_DATA_HOME%\crush\` if set) | Uses XDG data directory with fallback |
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 
 > **Note**: On Windows, `~` expands to `%USERPROFILE%` (e.g., `C:\Users\YourName`). These tools intentionally use Unix-style paths (like `.local/share`) even on Windows for cross-platform consistency, rather than Windows-native paths like `%APPDATA%`.
@@ -1091,18 +1116,6 @@ Kilo uses the same task log shape as Roo Code. Tokscale applies the same rules:
 - parse `tokensIn`, `tokensOut`, `cacheReads`, `cacheWrites`, `cost`, and `apiProtocol` from `text` JSON
 - enrich model/agent metadata from sibling `api_conversation_history.json` when available
 
-### Kilo CLI
-
-Location: `~/.local/share/kilo/kilo.db`
-
-Kilo CLI is a terminal-based coding agent (fork of [OpenCode](https://github.com/sst/opencode)) that stores sessions in SQLite. Tokscale reads assistant messages with token data from the `message` table:
-
-- `modelID` → model identifier
-- `providerID` → provider (e.g., `anthropic`, `openai`)
-- `tokens.input`, `tokens.output`, `tokens.reasoning` → token counts
-- `tokens.cache.read`, `tokens.cache.write` → cache token counts
-- `time.created` → timestamp (Unix ms)
-
 ### Mux
 
 Location:
@@ -1112,6 +1125,18 @@ Mux stores cumulative per-session token usage in `session-usage.json` files. Eac
 - `input`, `cached` (cache reads), `cacheCreate` (cache writes), `output`, `reasoning`
 - Model names use `provider:model` format (e.g., `anthropic:claude-opus-4-6`) — tokscale strips the provider prefix for model identification
 - Sub-agent usage is automatically rolled up into parent sessions by Mux, so there is no double-counting
+
+### Kilo CLI
+
+Location: `~/.local/share/kilo/kilo.db`
+
+Kilo CLI stores session data in a SQLite database similar to OpenCode. Each message row contains per-message token breakdowns (input, output, cache read/write, reasoning) with model and provider attribution.
+
+### Crush
+
+Location: Project-level SQLite databases discovered via `$XDG_DATA_HOME/crush/projects.json` (fallback: `~/.local/share/crush/projects.json`)
+
+Crush stores usage in per-project SQLite databases (`crush.db`). Tokscale imports session-level cost totals from root sessions only, because Crush does not expose reliable per-message or per-model token accounting. Records appear as `model=session-total` with zero token breakdown.
 
 ### Synthetic (synthetic.new)
 

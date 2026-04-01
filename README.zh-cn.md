@@ -65,8 +65,9 @@
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ 支持 |
-| <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/Kilo-Org/kilocode) | `~/.local/share/kilo/kilo.db` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json`（项目注册表；回退路径：`~/.local/share/crush/projects.json`） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | 通过 `hf:` 模型前缀或 `synthetic` provider 从其他来源重归属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） | ✅ 支持 |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
@@ -104,6 +105,7 @@
 - [社交平台](#社交平台)
   - [功能](#功能-2)
   - [GitHub 个人资料嵌入小组件](#github-个人资料嵌入小组件)
+  - [GitHub 个人资料徽章](#github-个人资料徽章)
   - [入门](#入门)
   - [数据验证](#数据验证)
 - [Wrapped 2025](#wrapped-2025)
@@ -131,7 +133,7 @@
   - 9 种颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Kilo CLI、Mux 和 Synthetic 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush 和 Synthetic 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -319,11 +321,14 @@ tokscale --roocode
 # 仅显示 Kilo 使用量
 tokscale --kilocode
 
+# 仅显示 Mux 使用量
+tokscale --mux
+
 # 仅显示 Kilo CLI 使用量
 tokscale --kilo
 
-# 仅显示 Mux 使用量
-tokscale --mux
+# 仅显示 Crush 使用量
+tokscale --crush
 
 # 仅显示 Synthetic (synthetic.new) 使用量
 tokscale --synthetic
@@ -577,7 +582,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Cursor、Gemini、Amp、Droid、OpenClaw、Pi、Kimi、Qwen、Roo Code、Kilo、Kilo CLI、Mux、Synthetic）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Cursor、Gemini、Amp、Droid、OpenClaw、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Synthetic）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -618,6 +623,26 @@ Tokscale 包含一个社交平台，您可以在其中分享使用数据并与�
   - `compact=1` 使用紧凑布局 + 紧凑数字表示法（例如 `1.2M`、`$3.4K`）
 - 示例：
   - `https://tokscale.ai/api/embed/<username>/svg?theme=light&sort=cost&compact=1`
+
+### GitHub 个人资料徽章
+
+您还可以使用 shields.io 风格的更紧凑的徽章：
+
+```md
+![Tokscale Tokens](https://tokscale.ai/api/badge/<username>/svg)
+```
+
+- 将 `<username>` 替换为您的 GitHub 用户名
+- 可选查询参数：
+  - `metric=tokens`（默认）、`metric=cost` 或 `metric=rank`
+  - `style=flat`（默认）或 `style=flat-square`
+  - `sort=tokens`（默认）或 `sort=cost` 控制排名依据
+  - `compact=1` 使用紧凑数字表示（例如 `1.2M`、`$3.4K`）
+  - `label=<文本>` 自定义左侧标签
+  - `color=<hex>` 自定义右侧背景颜色（例如 `color=ff5733`）
+- 示例：
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=cost&compact=1`
+  - `https://tokscale.ai/api/badge/<username>/svg?metric=rank&sort=cost&style=flat-square`
 
 ### 入门
 
@@ -859,8 +884,9 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | 所有平台使用相同路径 |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage 任务日志 |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 任务日志 |
-| Kilo CLI | `~/.local/share/kilo/kilo.db` | `%USERPROFILE%\.local\share\kilo\kilo.db` | SQLite 数据库（OpenCode 分支） |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | 所有平台相同路径 |
+| Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | 与 OpenCode 一样使用 `xdg-basedir` |
+| Crush | `$XDG_DATA_HOME/crush/`（回退路径：`~/.local/share/crush/`） | `%USERPROFILE%\.local\share\crush\`（如果设置了 `%XDG_DATA_HOME%`，则为 `%XDG_DATA_HOME%\crush\`） | 使用带回退路径的 XDG 数据目录 |
 | Synthetic | 从其他来源重归属 | 从其他来源重归属 | 检测 `hf:` 模型前缀 + `synthetic` provider |
 
 > **注意**：在 Windows 上，`~` 扩展为 `%USERPROFILE%`（例如 `C:\Users\用户名`）。这些工具故意使用 Unix 风格的路径（如 `.local/share`）而不是 Windows 原生路径（如 `%APPDATA%`），以实现跨平台一致性。
@@ -1089,18 +1115,6 @@ Kilo 使用与 Roo Code 相同的任务日志格式。Tokscale 应用相同的�
 - 从 `text` JSON 中解析 `tokensIn`、`tokensOut`、`cacheReads`、`cacheWrites`、`cost` 和 `apiProtocol`
 - 在可用时从相邻的 `api_conversation_history.json` 中丰富模型/代理元数据
 
-### Kilo CLI
-
-位置: `~/.local/share/kilo/kilo.db`
-
-Kilo CLI 是 [OpenCode](https://github.com/sst/opencode) 的分支，是基于终端的编码代理，将会话存储在 SQLite 中。Tokscale 从 `message` 表中读取包含 token 数据的助手消息：
-
-- `modelID` → 模型标识符
-- `providerID` → 提供商（例如：`anthropic`、`openai`）
-- `tokens.input`、`tokens.output`、`tokens.reasoning` → token 数量
-- `tokens.cache.read`、`tokens.cache.write` → 缓存 token 数量
-- `time.created` → 时间戳（Unix ms）
-
 ### Mux
 
 位置:
@@ -1111,6 +1125,17 @@ Mux 在 `session-usage.json` 文件中存储每个会话的累计 Token 使用�
  模型名称使用 `provider:model` 格式（例如 `anthropic:claude-opus-4-6`）— tokscale 会去除 provider 前缀以识别模型
  子代理使用量由 Mux 自动汇总到父会话中，因此不存在重复计算
 
+### Kilo CLI
+
+位置：`~/.local/share/kilo/kilo.db`
+
+Kilo CLI 在类似于 OpenCode 的 SQLite 数据库中存储会话数据。每条消息行包含每条消息的 Token 细分（输入、输出、缓存读取/写入、推理）以及模型和提供商归属。
+
+### Crush
+
+位置：通过 `$XDG_DATA_HOME/crush/projects.json` 发现的项目级 SQLite 数据库（回退路径：`~/.local/share/crush/projects.json`）
+
+Crush 在项目级 SQLite 数据库（`crush.db`）中存储使用量。由于 Crush 不提供可靠的每条消息或每个模型的 Token 统计，Tokscale 仅导入根会话的会话级成本总计。记录显示为 `model=session-total`，Token 细分为零。
 
 ### Synthetic (synthetic.new)
 

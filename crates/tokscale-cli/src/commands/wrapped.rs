@@ -217,6 +217,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         Some(
             parse_local_clients(LocalParseOptions {
                 home_dir: None,
+                use_env_roots: true,
                 clients: Some(local_clients),
                 since: Some(since.clone()),
                 until: Some(until.clone()),
@@ -230,6 +231,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
 
     let graph = generate_graph(ReportOptions {
         home_dir: None,
+        use_env_roots: true,
         clients: Some(graph_clients),
         since: Some(since),
         until: Some(until),
@@ -1359,8 +1361,10 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "kimi" => Some("Kimi CLI"),
         "qwen" => Some("Qwen CLI"),
         "roocode" => Some("Roo Code"),
-        "kilo" => Some("Kilo"),
+        "kilocode" => Some("Kilo"),
+        "kilo" => Some("Kilo CLI"),
         "mux" => Some("Mux"),
+        "crush" => Some("Crush"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -1381,7 +1385,11 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
         "Roo Code" => Some("https://tokscale.ai/assets/logos/roocode.png"),
         "Kilo" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
+        "Kilo CLI" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
         "Mux" => Some("https://tokscale.ai/assets/logos/mux.png"),
+        "Crush" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png",
+        ),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
     }
@@ -2184,6 +2192,16 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_kilo() {
+        assert_eq!(client_display_name("kilo"), Some("Kilo CLI"));
+    }
+
+    #[test]
+    fn test_client_display_name_crush() {
+        assert_eq!(client_display_name("crush"), Some("Crush"));
+    }
+
+    #[test]
     fn test_client_display_name_unknown() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
@@ -2261,6 +2279,24 @@ mod tests {
         assert_eq!(
             client_logo_url("Pi"),
             Some("https://tokscale.ai/assets/logos/pi.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_kilo_cli() {
+        assert_eq!(
+            client_logo_url("Kilo CLI"),
+            Some("https://tokscale.ai/assets/logos/kilocode.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_crush() {
+        assert_eq!(
+            client_logo_url("Crush"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png"
+            )
         );
     }
 

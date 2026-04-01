@@ -65,7 +65,7 @@ describe("GET /api/leaderboard", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(getLeaderboardData).toHaveBeenCalledWith("all", 1, 10, "tokens");
+    expect(getLeaderboardData).toHaveBeenCalledWith("all", 1, 10, "tokens", "");
     expect(body.users[0].submissionFreshness).toEqual({
       lastUpdated: "2026-01-10T10:00:00.000Z",
       cliVersion: "1.4.2",

@@ -5,7 +5,7 @@
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
 };
-use super::UnifiedMessage;
+use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
@@ -43,6 +43,7 @@ pub struct ClaudeUsage {
 
 /// Parse a Claude Code JSONL file
 pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
+    let (workspace_key, workspace_label) = claude_workspace_from_path(path);
     let session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -52,7 +53,13 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     if path.extension().and_then(|s| s.to_str()) == Some("json") {
-        let json_messages = parse_claude_headless_json(path, &session_id, fallback_timestamp);
+        let json_messages = parse_claude_headless_json(
+            path,
+            &session_id,
+            fallback_timestamp,
+            workspace_key.clone(),
+            workspace_label.clone(),
+        );
         if !json_messages.is_empty() {
             return json_messages;
         }
@@ -141,7 +148,7 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     processed_hashes.insert(hash.clone(), messages.len());
                 });
 
-                messages.push(UnifiedMessage::new_with_dedup(
+                let mut unified = UnifiedMessage::new_with_dedup(
                     "claude",
                     model,
                     "anthropic",
@@ -156,7 +163,9 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     },
                     0.0,
                     dedup_key,
-                ));
+                );
+                unified.set_workspace(workspace_key.clone(), workspace_label.clone());
+                messages.push(unified);
                 handled = true;
             }
         }
@@ -171,6 +180,8 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
             &mut headless_state,
             fallback_timestamp,
         ) {
+            let mut message = message;
+            message.set_workspace(workspace_key.clone(), workspace_label.clone());
             messages.push(message);
         }
     }
@@ -178,10 +189,29 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
     if let Some(message) =
         finalize_headless_state(&mut headless_state, &session_id, fallback_timestamp)
     {
+        let mut message = message;
+        message.set_workspace(workspace_key, workspace_label);
         messages.push(message);
     }
 
     messages
+}
+
+fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
+    let components: Vec<String> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect();
+
+    for window in components.windows(3) {
+        if window[0] == ".claude" && window[1] == "projects" {
+            let key = normalize_workspace_key(&window[2]);
+            let label = key.as_deref().and_then(workspace_label_from_key);
+            return (key, label);
+        }
+    }
+
+    (None, None)
 }
 
 #[derive(Default)]
@@ -198,6 +228,8 @@ fn parse_claude_headless_json(
     path: &Path,
     session_id: &str,
     fallback_timestamp: i64,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
 ) -> Vec<UnifiedMessage> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -212,6 +244,8 @@ fn parse_claude_headless_json(
 
     let mut messages = Vec::with_capacity(1);
     if let Some(message) = extract_claude_headless_message(&value, session_id, fallback_timestamp) {
+        let mut message = message;
+        message.set_workspace(workspace_key, workspace_label);
         messages.push(message);
     }
 
@@ -366,13 +400,30 @@ fn finalize_headless_state(
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     fn create_test_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    fn create_project_file(
+        content: &str,
+        project: &str,
+        filename: &str,
+    ) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join(project)
+            .join(filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        (temp_dir, path)
     }
 
     #[test]
@@ -550,6 +601,18 @@ mod tests {
     }
 
     #[test]
+    fn test_headless_json_output_keeps_workspace_metadata() {
+        let content = r#"{"type":"message","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let (_dir, path) = create_project_file(content, "myproject", "session.json");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("myproject"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("myproject"));
+    }
+
+    #[test]
     fn test_headless_stream_output() {
         let content = r#"{"type":"message_start","timestamp":"2025-01-01T00:00:00Z","message":{"id":"msg_1","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}
 {"type":"message_delta","usage":{"output_tokens":80}}
@@ -563,5 +626,17 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 80);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 5);
+    }
+
+    #[test]
+    fn test_workspace_metadata_from_claude_project_path() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(content, "myproject", "session.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
+        assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
     }
 }

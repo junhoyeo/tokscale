@@ -7,6 +7,22 @@ use super::widgets::{
     format_cost, format_tokens, get_client_display_name, get_model_color, get_provider_display_name,
 };
 use crate::tui::app::{App, SortDirection, SortField};
+use tokscale_core::GroupBy;
+
+fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
+    model
+        .workspace_label
+        .as_deref()
+        .unwrap_or("Unknown workspace")
+}
+
+fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) -> String {
+    if *group_by == GroupBy::WorkspaceModel {
+        format!("{} / {}", workspace_label(model), model.model)
+    } else {
+        model.model.clone()
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -32,6 +48,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
+    let group_by = app.group_by.borrow().clone();
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
@@ -51,6 +68,20 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         vec!["Model", "Cost"]
     } else if is_narrow {
         vec!["Model", "Tokens", "Cost"]
+    } else if group_by == GroupBy::WorkspaceModel {
+        vec![
+            "#",
+            "Workspace",
+            "Model",
+            "Provider",
+            "Source",
+            "Input",
+            "Output",
+            "Cache Read",
+            "Cache Write",
+            "Total",
+            "Cost",
+        ]
     } else {
         vec![
             "#",
@@ -83,8 +114,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .enumerate()
             .map(|(i, h)| {
                 let indicator = match i {
-                    8 if !is_narrow => sort_indicator(SortField::Tokens),
-                    9 if !is_narrow => sort_indicator(SortField::Cost),
+                    9 if !is_narrow && group_by == GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Tokens)
+                    }
+                    10 if !is_narrow && group_by == GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Cost)
+                    }
+                    8 if !is_narrow && group_by != GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Tokens)
+                    }
+                    9 if !is_narrow && group_by != GroupBy::WorkspaceModel => {
+                        sort_indicator(SortField::Cost)
+                    }
                     1 if is_very_narrow => sort_indicator(SortField::Cost),
                     2 if is_narrow && !is_very_narrow => sort_indicator(SortField::Cost),
                     1 if is_narrow && !is_very_narrow => sort_indicator(SortField::Tokens),
@@ -118,15 +159,43 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_striped = idx % 2 == 1;
 
             let model_color = get_model_color(&model.model);
+            let display_name = model_display_name(model, &group_by);
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
-                    Cell::from(truncate(&model.model, 15)).style(Style::default().fg(model_color)),
+                    Cell::from(truncate(&display_name, 15)).style(Style::default().fg(model_color)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if is_narrow {
                 vec![
-                    Cell::from(truncate(&model.model, 25)).style(Style::default().fg(model_color)),
+                    Cell::from(truncate(&display_name, 25)).style(Style::default().fg(model_color)),
+                    Cell::from(format_tokens(model.tokens.total())),
+                    Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
+                ]
+            } else if group_by == GroupBy::WorkspaceModel {
+                vec![
+                    Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
+                    Cell::from(truncate(workspace_label(model), 18)).style(
+                        Style::default()
+                            .fg(theme_accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Cell::from(truncate(&model.model, 24)).style(
+                        Style::default()
+                            .fg(model_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Cell::from(get_provider_display_name(&model.provider)),
+                    Cell::from(get_client_display_name(&model.client))
+                        .style(Style::default().fg(theme_muted)),
+                    Cell::from(format_tokens(model.tokens.input))
+                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
+                    Cell::from(format_tokens(model.tokens.output))
+                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    Cell::from(format_tokens(model.tokens.cache_read))
+                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
+                    Cell::from(format_tokens(model.tokens.cache_write))
+                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
                     Cell::from(format_tokens(model.tokens.total())),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
@@ -173,6 +242,20 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(50),
             Constraint::Percentage(25),
             Constraint::Percentage(25),
+        ]
+    } else if group_by == GroupBy::WorkspaceModel {
+        vec![
+            Constraint::Length(3),
+            Constraint::Length(18),
+            Constraint::Min(20),
+            Constraint::Length(16),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(10),
         ]
     } else {
         vec![

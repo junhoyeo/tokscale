@@ -48,6 +48,11 @@ impl GroupByPickerDialog {
                 label: "Client + Provider + Model",
                 description: "Most granular — no merging",
             },
+            GroupByOption {
+                value: GroupBy::WorkspaceModel,
+                label: "Workspace + Model",
+                description: "Group local usage by workspace key, then model",
+            },
         ];
 
         let cursor = options.iter().position(|o| o.value == current).unwrap_or(1);

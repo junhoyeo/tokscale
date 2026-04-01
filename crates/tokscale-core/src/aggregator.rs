@@ -203,7 +203,10 @@ impl DayAccumulator {
 
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
         self.totals.cost += msg.cost;
-        self.totals.messages = self.totals.messages.saturating_add(1);
+        self.totals.messages = self
+            .totals
+            .messages
+            .saturating_add(msg.message_count.max(0));
 
         self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
         self.token_breakdown.output = self
@@ -265,7 +268,9 @@ impl DayAccumulator {
             .reasoning
             .saturating_add(msg.tokens.reasoning);
         client_entry.cost += msg.cost;
-        client_entry.messages = client_entry.messages.saturating_add(1);
+        client_entry.messages = client_entry
+            .messages
+            .saturating_add(msg.message_count.max(0));
 
         // Normalize provider order for deterministic output
         let mut providers: Vec<&str> = client_entry.provider_id.split(", ").collect();
@@ -448,6 +453,8 @@ mod tests {
             model_id: model.to_string(),
             provider_id: "test-provider".to_string(),
             session_id: "test-session".to_string(),
+            workspace_key: None,
+            workspace_label: None,
             timestamp,
             date: date.to_string(),
             tokens: TokenBreakdown {
@@ -458,6 +465,7 @@ mod tests {
                 reasoning: 0,
             },
             cost,
+            message_count: 1,
             agent: None,
             dedup_key: None,
         }

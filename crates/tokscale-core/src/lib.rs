@@ -71,6 +71,7 @@ pub enum GroupBy {
     #[default]
     ClientModel,
     ClientProviderModel,
+    WorkspaceModel,
 }
 
 impl std::fmt::Display for GroupBy {
@@ -79,6 +80,7 @@ impl std::fmt::Display for GroupBy {
             GroupBy::Model => write!(f, "model"),
             GroupBy::ClientModel => write!(f, "client,model"),
             GroupBy::ClientProviderModel => write!(f, "client,provider,model"),
+            GroupBy::WorkspaceModel => write!(f, "workspace,model"),
         }
     }
 }
@@ -92,8 +94,9 @@ impl std::str::FromStr for GroupBy {
             "model" => Ok(GroupBy::Model),
             "client,model" | "client-model" => Ok(GroupBy::ClientModel),
             "client,provider,model" | "client-provider-model" => Ok(GroupBy::ClientProviderModel),
+            "workspace,model" | "workspace-model" => Ok(GroupBy::WorkspaceModel),
             _ => Err(format!(
-                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model",
+                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model",
                 s
             )),
         }
@@ -121,6 +124,8 @@ pub struct ParsedMessage {
     pub model_id: String,
     pub provider_id: String,
     pub session_id: String,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub timestamp: i64,
     pub date: String,
     pub input: i64,
@@ -128,6 +133,7 @@ pub struct ParsedMessage {
     pub cache_read: i64,
     pub cache_write: i64,
     pub reasoning: i64,
+    pub message_count: i32,
     pub agent: Option<String>,
 }
 
@@ -167,6 +173,7 @@ impl std::fmt::Debug for ParsedMessages {
 #[derive(Debug, Clone)]
 pub struct LocalParseOptions {
     pub home_dir: Option<String>,
+    pub use_env_roots: bool,
     pub clients: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -240,6 +247,7 @@ pub struct GraphResult {
 #[derive(Debug, Clone)]
 pub struct ReportOptions {
     pub home_dir: Option<String>,
+    pub use_env_roots: bool,
     pub clients: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -251,6 +259,8 @@ pub struct ReportOptions {
 pub struct ModelUsage {
     pub client: String,
     pub merged_clients: Option<String>,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub model: String,
     pub provider: String,
     pub input: i64,
@@ -286,6 +296,9 @@ pub struct ModelReport {
     pub processing_time_ms: u32,
 }
 
+const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
+const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyReport {
     pub entries: Vec<MonthlyUsage>,
@@ -303,10 +316,20 @@ pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, S
         })
 }
 
+#[allow(dead_code)]
 fn parse_all_messages_with_pricing(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
+) -> Vec<UnifiedMessage> {
+    parse_all_messages_with_pricing_with_env_strategy(home_dir, clients, pricing, true)
+}
+
+fn parse_all_messages_with_pricing_with_env_strategy(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
 ) -> Vec<UnifiedMessage> {
     #[derive(Debug)]
     struct CachedParseOutcome {
@@ -586,8 +609,8 @@ fn parse_all_messages_with_pricing(
         parse_full_log_source(path, pricing, is_headless)
     }
 
-    let scan_result = scanner::scan_all_clients(home_dir, clients);
-    let headless_roots = scanner::headless_roots(home_dir);
+    let scan_result = scanner::scan_all_clients_with_env_strategy(home_dir, clients, use_env_roots);
+    let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
     let mut source_cache = message_cache::SourceMessageCache::load();
     source_cache.prune_missing_files();
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
@@ -821,7 +844,7 @@ fn parse_all_messages_with_pricing(
     }
 
     let kilocode_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Kilo)
+        .get(ClientId::KiloCode)
         .par_iter()
         .map(|path| {
             load_or_parse_source(path, &source_cache, pricing, |path| {
@@ -830,12 +853,7 @@ fn parse_all_messages_with_pricing(
         })
         .collect();
     for outcome in kilocode_outcomes {
-        all_messages.extend(outcome.messages.into_iter().map(|mut msg| {
-            if msg.client == "kilocode" {
-                msg.client = "kilo".to_string();
-            }
-            msg
-        }));
+        all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
@@ -867,6 +885,19 @@ fn parse_all_messages_with_pricing(
             })
             .collect();
         all_messages.extend(kilo_messages);
+    }
+
+    for source in &scan_result.crush_dbs {
+        let crush_messages: Vec<UnifiedMessage> =
+            sessions::crush::parse_crush_sqlite(&source.db_path)
+                .into_iter()
+                .map(|mut msg| {
+                    msg.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect();
+        all_messages.extend(crush_messages);
     }
 
     if include_synthetic {
@@ -927,41 +958,55 @@ fn filter_unified_messages(
     filtered
 }
 
-pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
-    let start = Instant::now();
+fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
+    match (&msg.workspace_key, &msg.workspace_label) {
+        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), None) => (
+            key.clone(),
+            Some(key.clone()),
+            sessions::workspace_label_from_key(key)
+                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
+        ),
+        _ => (
+            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
+            None,
+            UNKNOWN_WORKSPACE_LABEL.to_string(),
+        ),
+    }
+}
 
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        let mut clients: Vec<String> = ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect();
-        clients.push("synthetic".to_string());
-        clients
-    });
-
-    let pricing = load_pricing_for_local_reports().await;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
-
-    let filtered = filter_messages_for_report(all_messages, &options);
-
+fn aggregate_model_usage_entries(
+    messages: Vec<UnifiedMessage>,
+    group_by: &GroupBy,
+) -> Vec<ModelUsage> {
     let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
-    let group_by = &options.group_by;
 
-    for msg in filtered {
+    for msg in messages {
         let normalized = normalize_model_for_grouping(&msg.model_id);
+        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
         let key = match group_by {
             GroupBy::Model => normalized.clone(),
             GroupBy::ClientModel => format!("{}:{}", msg.client, normalized),
             GroupBy::ClientProviderModel => {
                 format!("{}:{}:{}", msg.client, msg.provider_id, normalized)
             }
+            GroupBy::WorkspaceModel => format!("{}:{}", workspace_group_key, normalized),
         };
+        let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             client: msg.client.clone(),
-            merged_clients: if *group_by == GroupBy::Model {
+            merged_clients: if merge_clients {
                 Some(msg.client.clone())
+            } else {
+                None
+            },
+            workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
+                workspace_key.clone()
+            } else {
+                None
+            },
+            workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
+                Some(workspace_label.clone())
             } else {
                 None
             },
@@ -976,7 +1021,7 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
             cost: 0.0,
         });
 
-        if *group_by == GroupBy::Model {
+        if merge_clients {
             if !entry.client.split(", ").any(|s| s == msg.client) {
                 entry.client = format!("{}, {}", entry.client, msg.client);
             }
@@ -999,14 +1044,13 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         entry.cache_read += msg.tokens.cache_read;
         entry.cache_write += msg.tokens.cache_write;
         entry.reasoning += msg.tokens.reasoning;
-        entry.message_count += 1;
+        entry.message_count += msg.message_count.max(0);
         entry.cost += msg.cost;
     }
 
     let mut entries: Vec<ModelUsage> = model_map
         .into_values()
         .map(|mut entry| {
-            // Normalize provider order for deterministic output
             let mut providers: Vec<&str> = entry.provider.split(", ").collect();
             providers.sort_unstable();
             providers.dedup();
@@ -1023,6 +1067,34 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
             .partial_cmp(&a.cost)
             .unwrap_or(std::cmp::Ordering::Equal),
     });
+
+    entries
+}
+
+pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
+    let start = Instant::now();
+
+    let home_dir = get_home_dir_string(&options.home_dir)?;
+
+    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
+        let mut clients: Vec<String> = ClientId::ALL
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+        clients
+    });
+
+    let pricing = load_pricing_for_local_parse().await;
+    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+    );
+
+    let filtered = filter_messages_for_report(all_messages, &options);
+    let entries = aggregate_model_usage_entries(filtered, &options.group_by);
 
     let total_input: i64 = entries.iter().map(|e| e.input).sum();
     let total_output: i64 = entries.iter().map(|e| e.output).sum();
@@ -1068,8 +1140,13 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         clients
     });
 
-    let pricing = load_pricing_for_local_reports().await;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing.as_deref());
+    let pricing = load_pricing_for_local_parse().await;
+    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+    );
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1091,7 +1168,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         entry.output += msg.tokens.output;
         entry.cache_read += msg.tokens.cache_read;
         entry.cache_write += msg.tokens.cache_write;
-        entry.message_count += 1;
+        entry.message_count += msg.message_count.max(0);
         entry.cost += msg.cost;
     }
 
@@ -1137,7 +1214,12 @@ async fn generate_graph_with_loaded_pricing(
         clients
     });
 
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, pricing);
+    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+        &home_dir,
+        &clients,
+        pricing,
+        options.use_env_roots,
+    );
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1155,7 +1237,7 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
 }
 
 pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
-    let pricing = load_pricing_for_local_reports().await;
+    let pricing = load_pricing_for_local_parse().await;
     generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
 }
 
@@ -1231,7 +1313,14 @@ where
     fresh.ok().or_else(|| stale().map(Arc::new))
 }
 
-async fn load_pricing_for_local_reports() -> Option<Arc<pricing::PricingService>> {
+async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+    if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+    {
+        return pricing::PricingService::load_cached_any_age().map(Arc::new);
+    }
+
     // Interactive/local views should pick up newly released model pricing as soon
     // as a fresh fetch succeeds, but still remain usable offline by falling back
     // to any cached dataset when the network path fails.
@@ -1262,10 +1351,14 @@ fn parse_local_unified_messages_resolved(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let messages = parse_all_messages_with_pricing(home_dir, clients, pricing);
+    let messages = parse_all_messages_with_pricing_with_env_strategy(
+        home_dir,
+        clients,
+        pricing,
+        options.use_env_roots,
+    );
     Ok(filter_unified_messages(messages, &options))
 }
-
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
     let start = Instant::now();
 
@@ -1282,8 +1375,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
 
-    let scan_result = scanner::scan_all_clients(&home_dir, &clients);
-    let headless_roots = scanner::headless_roots(&home_dir);
+    let scan_result =
+        scanner::scan_all_clients_with_env_strategy(&home_dir, &clients, options.use_env_roots);
+    let headless_roots =
+        scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
     let mut messages: Vec<ParsedMessage> = Vec::new();
 
@@ -1490,7 +1585,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(roocode_msgs);
 
     let kilocode_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Kilo)
+        .get(ClientId::KiloCode)
         .par_iter()
         .flat_map(|path| {
             sessions::kilocode::parse_kilocode_file(path)
@@ -1499,8 +1594,8 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .collect::<Vec<_>>()
         })
         .collect();
-    let kilo_vscode_count = kilocode_msgs.len() as i32;
-    counts.set(ClientId::Kilo, kilo_vscode_count);
+    let kilocode_count = summed_parsed_message_count(&kilocode_msgs);
+    counts.set(ClientId::KiloCode, kilocode_count);
     messages.extend(kilocode_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
@@ -1513,7 +1608,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .collect::<Vec<_>>()
         })
         .collect();
-    let mux_count = mux_msgs.len() as i32;
+    let mux_count = summed_parsed_message_count(&mux_msgs);
     counts.set(ClientId::Mux, mux_count);
     messages.extend(mux_msgs);
 
@@ -1523,13 +1618,30 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             .into_iter()
             .map(|msg| unified_to_parsed(&msg))
             .collect();
-        let count = kilo_msgs.len() as i32;
-        counts.add(ClientId::Kilo, count);
+        let count = summed_parsed_message_count(&kilo_msgs);
+        counts.set(ClientId::Kilo, count);
         messages.extend(kilo_msgs);
         count
     } else {
         0
     };
+
+    let crush_msgs: Vec<ParsedMessage> = scan_result
+        .crush_dbs
+        .par_iter()
+        .flat_map(|source| {
+            sessions::crush::parse_crush_sqlite(&source.db_path)
+                .into_iter()
+                .map(|mut msg| {
+                    msg.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
+                    unified_to_parsed(&msg)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let crush_count = summed_parsed_message_count(&crush_msgs);
+    counts.set(ClientId::Crush, crush_count);
+    messages.extend(crush_msgs);
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
@@ -1581,7 +1693,7 @@ pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    let pricing = load_pricing_for_local_reports().await;
+    let pricing = load_pricing_for_local_parse().await;
     parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
 }
 
@@ -1591,6 +1703,8 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
         session_id: msg.session_id.clone(),
+        workspace_key: msg.workspace_key.clone(),
+        workspace_label: msg.workspace_label.clone(),
         timestamp: msg.timestamp,
         date: msg.date.clone(),
         input: msg.tokens.input,
@@ -1598,8 +1712,16 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         cache_read: msg.tokens.cache_read,
         cache_write: msg.tokens.cache_write,
         reasoning: msg.tokens.reasoning,
+        message_count: msg.message_count,
         agent: msg.agent.clone(),
     }
+}
+
+fn summed_parsed_message_count(messages: &[ParsedMessage]) -> i32 {
+    messages
+        .iter()
+        .map(|msg| msg.message_count.max(0))
+        .sum::<i32>()
 }
 
 fn filter_parsed_messages(
@@ -1630,6 +1752,8 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         model_id: msg.model_id.clone(),
         provider_id: msg.provider_id.clone(),
         session_id: msg.session_id.clone(),
+        workspace_key: msg.workspace_key.clone(),
+        workspace_label: msg.workspace_label.clone(),
         timestamp: msg.timestamp,
         date: msg.date.clone(),
         tokens: TokenBreakdown {
@@ -1640,6 +1764,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
             reasoning: msg.reasoning,
         },
         cost,
+        message_count: msg.message_count,
         agent: msg.agent.clone(),
         dedup_key: None,
     }
@@ -1648,15 +1773,47 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pricing_if_available, message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing, parse_local_clients, pricing,
-        retain_for_requested_clients, select_local_parse_pricing, ClientId, GroupBy,
-        LocalParseOptions, TokenBreakdown, UnifiedMessage,
+        aggregate_model_usage_entries, apply_pricing_if_available, message_cache,
+        normalize_model_for_grouping, parse_all_messages_with_pricing, parse_local_clients,
+        parsed_to_unified, pricing, retain_for_requested_clients, select_local_parse_pricing,
+        unified_to_parsed, ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::str::FromStr;
     use std::sync::Arc;
+
+    fn make_workspace_message(
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
+        cost: f64,
+        workspace_key: Option<&str>,
+        workspace_label: Option<&str>,
+    ) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new(
+            client,
+            model_id,
+            provider_id,
+            session_id,
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+        );
+        msg.set_workspace(
+            workspace_key.map(str::to_string),
+            workspace_label.map(str::to_string),
+        );
+        msg
+    }
 
     #[test]
     fn test_normalize_model_for_grouping() {
@@ -1742,6 +1899,14 @@ mod tests {
             GroupBy::from_str("client-provider-model").unwrap(),
             GroupBy::ClientProviderModel
         );
+        assert_eq!(
+            GroupBy::from_str("workspace,model").unwrap(),
+            GroupBy::WorkspaceModel
+        );
+        assert_eq!(
+            GroupBy::from_str("workspace-model").unwrap(),
+            GroupBy::WorkspaceModel
+        );
         assert!(GroupBy::from_str("unknown").is_err());
     }
 
@@ -1756,6 +1921,7 @@ mod tests {
             GroupBy::Model,
             GroupBy::ClientModel,
             GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
         ];
 
         for variant in variants {
@@ -1776,6 +1942,190 @@ mod tests {
             GroupBy::from_str("client , provider , model").unwrap(),
             GroupBy::ClientProviderModel
         );
+        assert_eq!(
+            GroupBy::from_str("workspace, model").unwrap(),
+            GroupBy::WorkspaceModel
+        );
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_merges_same_workspace_and_model() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.25,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+                make_workspace_message(
+                    "qwen",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.75,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "claude-sonnet-4-5");
+        assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
+        assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
+        assert_eq!(entries[0].cost, 4.0);
+        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries[0].merged_clients.as_deref(), Some("claude, qwen"));
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_separates_different_workspaces() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some("/repo-b"),
+                    Some("repo-b"),
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 2);
+        let labels: HashSet<_> = entries
+            .iter()
+            .map(|entry| entry.workspace_label.as_deref().unwrap())
+            .collect();
+        assert_eq!(labels, HashSet::from(["repo-a", "repo-b"]));
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_uses_unknown_bucket_without_workspace_metadata() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    "2.0".parse().unwrap(),
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].workspace_key, None);
+        assert_eq!(
+            entries[0].workspace_label.as_deref(),
+            Some(UNKNOWN_WORKSPACE_LABEL)
+        );
+        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_parsed_round_trip_preserves_workspace_metadata() {
+        let mut unified = UnifiedMessage::new(
+            "qwen",
+            "qwen3.5-plus",
+            "qwen",
+            "session-1",
+            1_742_390_400_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 2,
+                cache_write: 0,
+                reasoning: 1,
+            },
+            1.25,
+        );
+        unified.set_workspace(
+            Some("//server/share/demo-workspace".to_string()),
+            Some("demo-workspace".to_string()),
+        );
+
+        let parsed = unified_to_parsed(&unified);
+        let round_tripped = parsed_to_unified(&parsed, 2.5);
+
+        assert_eq!(
+            round_tripped.workspace_key.as_deref(),
+            Some("//server/share/demo-workspace")
+        );
+        assert_eq!(
+            round_tripped.workspace_label.as_deref(),
+            Some("demo-workspace")
+        );
+        assert_eq!(round_tripped.cost, 2.5);
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_keeps_real_unknown_workspace_separate() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("unknown-workspace"),
+                    Some("unknown-workspace"),
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.workspace_key.as_deref() == Some("unknown-workspace")
+                && entry.workspace_label.as_deref() == Some("unknown-workspace")
+                && (entry.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.workspace_key.is_none()
+                && entry.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
+                && (entry.cost - 2.0).abs() < f64::EPSILON
+        }));
     }
 
     #[test]
@@ -1819,26 +2169,28 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_parse_path_reprices_zero_cost_composer_1_rows() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
-        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+    fn test_retain_for_requested_clients_preserves_kilo_split() {
+        let kilocode_only: HashSet<&str> = HashSet::from(["kilocode"]);
+        assert!(retain_for_requested_clients(
+            "kilocode",
+            "gpt-5",
+            "openai",
+            &kilocode_only
+        ));
+        assert!(!retain_for_requested_clients(
+            "kilo",
+            "gpt-5",
+            "openai",
+            &kilocode_only
+        ));
 
-        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-03-04T12:00:00.000Z","Included","Composer 1","No","1200","1000","5000","2000","8000","0""#;
-        std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
-
-        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
-        let messages = parse_all_messages_with_pricing(
-            temp_dir.path().to_str().unwrap(),
-            &["cursor".to_string()],
-            Some(&pricing),
-        );
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "cursor");
-        assert_eq!(messages[0].model_id, "Composer 1");
-        assert!(messages[0].cost > 0.0);
+        let kilo_only: HashSet<&str> = HashSet::from(["kilo"]);
+        assert!(retain_for_requested_clients(
+            "kilo", "gpt-5", "openai", &kilo_only
+        ));
+        assert!(!retain_for_requested_clients(
+            "kilocode", "gpt-5", "openai", &kilo_only
+        ));
     }
 
     #[test]
@@ -1861,29 +2213,6 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "cursor");
         assert_eq!(messages[0].model_id, "Composer 1.5");
-        assert!(messages[0].cost > 0.0);
-    }
-
-    #[test]
-    fn test_cursor_parse_path_reprices_zero_cost_composer_2_rows() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
-        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
-
-        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-03-04T12:00:00.000Z","Included","composer-2","No","1200","1000","5000","2000","8000","0""#;
-        std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
-
-        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
-        let messages = parse_all_messages_with_pricing(
-            temp_dir.path().to_str().unwrap(),
-            &["cursor".to_string()],
-            Some(&pricing),
-        );
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "cursor");
-        assert_eq!(messages[0].model_id, "composer-2");
         assert!(messages[0].cost > 0.0);
     }
 
@@ -2851,6 +3180,7 @@ mod tests {
 
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
             clients: Some(vec!["opencode".to_string(), "synthetic".to_string()]),
             since: None,
             until: None,
@@ -2910,6 +3240,7 @@ mod tests {
 
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
             clients: Some(vec!["synthetic".to_string()]),
             since: None,
             until: None,

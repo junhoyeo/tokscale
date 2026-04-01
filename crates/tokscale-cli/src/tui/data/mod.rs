@@ -35,6 +35,8 @@ pub struct ModelUsage {
     pub model: String,
     pub provider: String,
     pub client: String,
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub session_count: u32,
@@ -52,6 +54,8 @@ pub struct AgentUsage {
 #[derive(Debug, Clone)]
 pub struct DailyModelInfo {
     pub client: String,
+    pub display_name: String,
+    pub color_key: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
 }
@@ -96,6 +100,37 @@ pub struct DataLoader {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+}
+
+const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
+const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
+
+fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
+    match (&msg.workspace_key, &msg.workspace_label) {
+        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), None) => (
+            key.clone(),
+            Some(key.clone()),
+            tokscale_core::sessions::workspace_label_from_key(key)
+                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
+        ),
+        _ => (
+            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
+            None,
+            UNKNOWN_WORKSPACE_LABEL.to_string(),
+        ),
+    }
+}
+
+fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
+    format!("{workspace_label} / {model}")
+}
+
+fn workspace_model_daily_key(workspace_group_key: &str, model: &str) -> String {
+    format!(
+        "{}:{workspace_group_key}:{model}",
+        workspace_group_key.len()
+    )
 }
 
 impl DataLoader {
@@ -143,6 +178,7 @@ impl DataLoader {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
+            use_env_roots: true,
             clients: Some(sources),
             since: self.since.clone(),
             until: self.until.clone(),
@@ -166,6 +202,60 @@ impl DataLoader {
         self.aggregate_messages(messages, group_by)
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn load_with_pricing(
+        &self,
+        enabled_clients: &[ClientId],
+        group_by: &GroupBy,
+        include_synthetic: bool,
+        pricing: &tokscale_core::pricing::PricingService,
+    ) -> Result<UsageData> {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+            .to_string_lossy()
+            .to_string();
+
+        let mut sources: Vec<String> = enabled_clients
+            .iter()
+            .map(|client| client.as_str().to_string())
+            .collect();
+        if include_synthetic {
+            sources.push("synthetic".to_string());
+        }
+
+        let opts = LocalParseOptions {
+            home_dir: Some(home),
+            clients: Some(sources),
+            since: self.since.clone(),
+            until: self.until.clone(),
+            year: self.year.clone(),
+            use_env_roots: false,
+        };
+
+        let messages = if Handle::try_current().is_ok() {
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let rt = Runtime::new().map_err(|e| e.to_string())?;
+                    rt.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
+                        opts,
+                        Some(pricing),
+                    ))
+                })
+                .join()
+                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
+            })
+        } else {
+            Runtime::new()?.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
+                opts,
+                Some(pricing),
+            ))
+        }
+        .map_err(anyhow::Error::msg)?;
+
+        self.aggregate_messages(messages, group_by)
+    }
+
     fn aggregate_messages(
         &self,
         messages: Vec<UnifiedMessage>,
@@ -179,26 +269,39 @@ impl DataLoader {
 
         for msg in &messages {
             let normalized_model = normalize_model_for_grouping(&msg.model_id);
+            let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
             let key = match group_by {
                 GroupBy::Model => normalized_model.clone(),
                 GroupBy::ClientModel => format!("{}:{}", msg.client, normalized_model),
                 GroupBy::ClientProviderModel => {
                     format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model)
                 }
+                GroupBy::WorkspaceModel => {
+                    format!("{}:{}", workspace_group_key, normalized_model)
+                }
             };
+            let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
                 provider: msg.provider_id.clone(),
                 client: msg.client.clone(),
+                workspace_key: if *group_by == GroupBy::WorkspaceModel {
+                    workspace_key.clone()
+                } else {
+                    None
+                },
+                workspace_label: if *group_by == GroupBy::WorkspaceModel {
+                    Some(workspace_label.clone())
+                } else {
+                    None
+                },
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 session_count: 0,
             });
 
-            if *group_by == GroupBy::Model
-                && !model_entry.client.split(", ").any(|s| s == msg.client)
-            {
+            if merge_clients && !model_entry.client.split(", ").any(|s| s == msg.client) {
                 model_entry.client = format!("{}, {}", model_entry.client, msg.client);
             }
 
@@ -281,7 +384,9 @@ impl DataLoader {
                     .reasoning
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
                 agent_entry.cost += msg_cost;
-                agent_entry.message_count = agent_entry.message_count.saturating_add(1);
+                agent_entry.message_count = agent_entry
+                    .message_count
+                    .saturating_add(msg.message_count.max(0) as u32);
 
                 agent_clients
                     .entry(normalized_agent)
@@ -324,11 +429,23 @@ impl DataLoader {
                 };
                 daily_entry.cost += msg_cost;
 
+                let daily_model_key = if *group_by == GroupBy::WorkspaceModel {
+                    workspace_model_daily_key(&workspace_group_key, &normalized_model)
+                } else {
+                    normalized_model.clone()
+                };
+
                 let model_info = daily_entry
                     .models
-                    .entry(normalized_model.clone())
+                    .entry(daily_model_key)
                     .or_insert_with(|| DailyModelInfo {
                         client: msg.client.clone(),
+                        display_name: if *group_by == GroupBy::WorkspaceModel {
+                            workspace_model_display_label(&workspace_label, &normalized_model)
+                        } else {
+                            normalized_model.clone()
+                        },
+                        color_key: normalized_model.clone(),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                     });
@@ -534,6 +651,7 @@ fn calculate_streaks_for_today(daily: &[DailyUsage], today: NaiveDate) -> (u32, 
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::collections::HashMap;
     use std::env;
     use std::fs;
     use tempfile::TempDir;
@@ -596,6 +714,7 @@ mod tests {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
+            use_env_roots: true,
             clients: Some(sources),
             since: loader.since.clone(),
             until: loader.until.clone(),
@@ -635,10 +754,41 @@ mod tests {
         );
     }
 
+    fn make_workspace_message(
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
+        cost: f64,
+        workspace_key: Option<&str>,
+        workspace_label: Option<&str>,
+    ) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new(
+            client,
+            model_id,
+            provider_id,
+            session_id,
+            1_735_689_600_000,
+            tokscale_core::TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+        );
+        msg.set_workspace(
+            workspace_key.map(str::to_string),
+            workspace_label.map(str::to_string),
+        );
+        msg
+    }
+
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 14);
+        assert_eq!(clients.len(), 16);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -651,8 +801,10 @@ mod tests {
         assert_eq!(clients[9], ClientId::Kimi);
         assert_eq!(clients[10], ClientId::Qwen);
         assert_eq!(clients[11], ClientId::RooCode);
-        assert_eq!(clients[12], ClientId::Kilo);
+        assert_eq!(clients[12], ClientId::KiloCode);
         assert_eq!(clients[13], ClientId::Mux);
+        assert_eq!(clients[14], ClientId::Kilo);
+        assert_eq!(clients[15], ClientId::Crush);
     }
 
     #[test]
@@ -693,8 +845,19 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::RooCode),
             "Roo Code"
         );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Kilo), "Kilo");
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::KiloCode),
+            "KiloCode"
+        );
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Mux), "Mux");
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Kilo),
+            "Kilo CLI"
+        );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Crush),
+            "Crush"
+        );
     }
 
     #[test]
@@ -711,8 +874,10 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimi), '0');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Qwen), 'w');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), 'r');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), 'k');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::KiloCode), 'k');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), 'x');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), 'l');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), 'h');
     }
 
     #[test]
@@ -761,9 +926,17 @@ mod tests {
         );
         assert_eq!(
             crate::tui::client_ui::from_hotkey('k'),
+            Some(ClientId::KiloCode)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('l'),
             Some(ClientId::Kilo)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('x'), Some(ClientId::Mux));
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('h'),
+            Some(ClientId::Crush)
+        );
         assert_eq!(crate::tui::client_ui::from_hotkey('a'), None);
     }
 
@@ -907,11 +1080,222 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.agents.len(), 1);
-        assert_eq!(usage.agents[0].agent, "builder");
+        assert_eq!(usage.agents[0].agent, "Builder");
         assert_eq!(usage.agents[0].clients, "opencode, roocode");
         assert_eq!(usage.agents[0].message_count, 2);
         assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
         assert_eq!(usage.agents[0].tokens.total(), 45);
+    }
+
+    #[test]
+    fn test_aggregate_messages_groups_by_workspace_and_model() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.25,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "qwen",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.75,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].workspace_key.as_deref(), Some("/repo-a"));
+        assert_eq!(usage.models[0].workspace_label.as_deref(), Some("repo-a"));
+        assert_eq!(usage.models[0].model, "claude-sonnet-4-5");
+        assert_eq!(usage.models[0].client, "claude, qwen");
+        assert_eq!(usage.models[0].session_count, 2);
+        assert_eq!(usage.models[0].cost, 4.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_keeps_unknown_bucket_visible() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].workspace_key, None);
+        assert_eq!(
+            usage.models[0].workspace_label.as_deref(),
+            Some(UNKNOWN_WORKSPACE_LABEL)
+        );
+        assert_eq!(usage.models[0].session_count, 2);
+        assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_keeps_real_unknown_workspace_separate() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("unknown-workspace"),
+                        Some("unknown-workspace"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("unknown-workspace")
+                && model.workspace_label.as_deref() == Some("unknown-workspace")
+                && (model.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.is_none()
+                && model.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
+                && (model.cost - 2.0).abs() < f64::EPSILON
+        }));
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_splits_daily_models_by_workspace() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("/repo-b"),
+                        Some("repo-b"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let daily_keys: Vec<_> = usage.daily[0].models.keys().cloned().collect();
+        assert_eq!(daily_keys.len(), 2);
+        assert_ne!(daily_keys[0], daily_keys[1]);
+        let daily_display_names: Vec<_> = usage.daily[0]
+            .models
+            .values()
+            .map(|info| info.display_name.clone())
+            .collect();
+        assert_eq!(
+            daily_display_names,
+            vec![
+                "repo-a / claude-sonnet-4-5".to_string(),
+                "repo-b / claude-sonnet-4-5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_disambiguates_identical_labels() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("/srv/team-a/demo"),
+                        Some("demo"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("/srv/team-b/demo"),
+                        Some("demo"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        assert_eq!(usage.daily[0].models.len(), 2);
+        let display_names: Vec<_> = usage.daily[0]
+            .models
+            .values()
+            .map(|info| info.display_name.clone())
+            .collect();
+        assert_eq!(
+            display_names,
+            vec![
+                "demo / claude-sonnet-4-5".to_string(),
+                "demo / claude-sonnet-4-5".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1199,13 +1583,13 @@ after"#,
         );
 
         assert_eq!(usage.agents.len(), 2);
-        assert_eq!(usage.agents[0].agent, "architect");
+        assert_eq!(usage.agents[0].agent, "Architect");
         assert_eq!(usage.agents[0].clients, "roocode");
         assert_eq!(usage.agents[0].message_count, 2);
         assert_cost_matches(usage.agents[0].cost, architect_expected);
         assert_eq!(usage.agents[0].tokens.total(), 734_000);
 
-        assert_eq!(usage.agents[1].agent, "reviewer");
+        assert_eq!(usage.agents[1].agent, "Reviewer");
         assert_eq!(usage.agents[1].message_count, 2);
         assert_cost_matches(usage.agents[1].cost, reviewer_expected);
         assert_eq!(usage.agents[1].tokens.total(), 147_000);

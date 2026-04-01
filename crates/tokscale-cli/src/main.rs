@@ -75,11 +75,17 @@ struct Cli {
     #[arg(long, help = "Show only Roo Code usage")]
     roocode: bool,
 
-    #[arg(long, alias = "kilocode", help = "Show only Kilo usage")]
+    #[arg(long, help = "Show only KiloCode usage")]
+    kilocode: bool,
+
+    #[arg(long, help = "Show only Kilo CLI usage")]
     kilo: bool,
 
     #[arg(long, help = "Show only Mux usage")]
     mux: bool,
+
+    #[arg(long, help = "Show only Crush usage")]
+    crush: bool,
 
     #[arg(long, help = "Show only Synthetic usage")]
     synthetic: bool,
@@ -102,6 +108,14 @@ struct Cli {
     #[arg(long, help = "Filter by year (YYYY)")]
     year: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "PATH",
+        global = true,
+        help = "Read local session data from this home directory for local report commands"
+    )]
+    home: Option<String>,
+
     #[arg(long, help = "Show processing time")]
     benchmark: bool,
 
@@ -109,7 +123,7 @@ struct Cli {
         long,
         value_name = "STRATEGY",
         default_value = "client,model",
-        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model"
+        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model"
     )]
     group_by: String,
 
@@ -149,10 +163,14 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, alias = "kilocode", help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
+        kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -173,7 +191,7 @@ enum Commands {
             long,
             value_name = "STRATEGY",
             default_value = "client,model",
-            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model"
+            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model"
         )]
         group_by: String,
         #[arg(long, help = "Disable spinner")]
@@ -209,10 +227,14 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, alias = "kilocode", help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
+        kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -281,10 +303,14 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, alias = "kilocode", help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
+        kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -330,10 +356,14 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, alias = "kilocode", help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
+        kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Show only today's usage")]
@@ -375,10 +405,14 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, alias = "kilocode", help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
+        kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(long, help = "Submit only today's usage")]
@@ -442,10 +476,14 @@ enum Commands {
         qwen: bool,
         #[arg(long, help = "Show only Roo Code usage")]
         roocode: bool,
-        #[arg(long, alias = "kilocode", help = "Show only Kilo usage")]
+        #[arg(long, help = "Show only KiloCode usage")]
+        kilocode: bool,
+        #[arg(long, help = "Show only Kilo CLI usage")]
         kilo: bool,
         #[arg(long, help = "Show only Mux usage")]
         mux: bool,
+        #[arg(long, help = "Show only Crush usage")]
+        crush: bool,
         #[arg(long, help = "Show only Synthetic usage")]
         synthetic: bool,
         #[arg(
@@ -467,6 +505,8 @@ enum Commands {
         #[command(subcommand)]
         subcommand: CursorSubcommand,
     },
+    #[command(about = "Delete all submitted usage data from the server")]
+    DeleteSubmittedData,
 }
 
 #[derive(Subcommand)]
@@ -528,8 +568,10 @@ fn main() -> Result<()> {
             kimi,
             qwen,
             roocode,
+            kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -560,8 +602,10 @@ fn main() -> Result<()> {
                 kimi,
                 qwen,
                 roocode,
+                kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -569,6 +613,7 @@ fn main() -> Result<()> {
             if json || light || !can_use_tui {
                 run_models_report(
                     json,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -581,6 +626,7 @@ fn main() -> Result<()> {
                     group_by,
                 )
             } else {
+                ensure_home_supported_for_tui(&cli.home)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -608,8 +654,10 @@ fn main() -> Result<()> {
             kimi,
             qwen,
             roocode,
+            kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -633,8 +681,10 @@ fn main() -> Result<()> {
                 kimi,
                 qwen,
                 roocode,
+                kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -642,6 +692,7 @@ fn main() -> Result<()> {
             if json || light || !can_use_tui {
                 run_monthly_report(
                     json,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -653,6 +704,7 @@ fn main() -> Result<()> {
                     month,
                 )
             } else {
+                ensure_home_supported_for_tui(&cli.home)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -670,11 +722,26 @@ fn main() -> Result<()> {
             json,
             provider,
             no_spinner,
-        }) => run_pricing_lookup(&model_id, json, provider.as_deref(), no_spinner),
-        Some(Commands::Clients { json }) => run_clients_command(json),
-        Some(Commands::Login) => run_login_command(),
-        Some(Commands::Logout) => run_logout_command(),
-        Some(Commands::Whoami) => run_whoami_command(),
+        }) => {
+            reject_unsupported_home_override(&cli.home, "pricing")?;
+            run_pricing_lookup(&model_id, json, provider.as_deref(), no_spinner)
+        }
+        Some(Commands::Clients { json }) => {
+            reject_unsupported_home_override(&cli.home, "clients")?;
+            run_clients_command(json)
+        }
+        Some(Commands::Login) => {
+            reject_unsupported_home_override(&cli.home, "login")?;
+            run_login_command()
+        }
+        Some(Commands::Logout) => {
+            reject_unsupported_home_override(&cli.home, "logout")?;
+            run_logout_command()
+        }
+        Some(Commands::Whoami) => {
+            reject_unsupported_home_override(&cli.home, "whoami")?;
+            run_whoami_command()
+        }
         Some(Commands::Graph {
             output,
             opencode,
@@ -689,8 +756,10 @@ fn main() -> Result<()> {
             kimi,
             qwen,
             roocode,
+            kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -714,13 +783,24 @@ fn main() -> Result<()> {
                 kimi,
                 qwen,
                 roocode,
+                kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
             let year = normalize_year_filter(today, week, month, year);
-            run_graph_command(output, clients, since, until, year, benchmark, no_spinner)
+            run_graph_command(
+                output,
+                cli.home.clone(),
+                clients,
+                since,
+                until,
+                year,
+                benchmark,
+                no_spinner,
+            )
         }
         Some(Commands::Tui {
             opencode,
@@ -735,8 +815,10 @@ fn main() -> Result<()> {
             kimi,
             qwen,
             roocode,
+            kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -745,6 +827,7 @@ fn main() -> Result<()> {
             until,
             year,
         }) => {
+            ensure_home_supported_for_tui(&cli.home)?;
             let clients = build_client_filter(ClientFlags {
                 opencode,
                 claude,
@@ -758,8 +841,10 @@ fn main() -> Result<()> {
                 kimi,
                 qwen,
                 roocode,
+                kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -788,8 +873,10 @@ fn main() -> Result<()> {
             kimi,
             qwen,
             roocode,
+            kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             today,
             week,
@@ -799,6 +886,7 @@ fn main() -> Result<()> {
             year,
             dry_run,
         }) => {
+            reject_unsupported_home_override(&cli.home, "submit")?;
             let clients = build_client_filter(ClientFlags {
                 opencode,
                 claude,
@@ -812,8 +900,10 @@ fn main() -> Result<()> {
                 kimi,
                 qwen,
                 roocode,
+                kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             let (since, until) = build_date_filter(today, week, month, since, until);
@@ -826,7 +916,10 @@ fn main() -> Result<()> {
             format,
             output,
             no_auto_flags,
-        }) => run_headless_command(&source, args, format, output, no_auto_flags),
+        }) => {
+            reject_unsupported_home_override(&cli.home, "headless")?;
+            run_headless_command(&source, args, format, output, no_auto_flags)
+        }
         Some(Commands::Wrapped {
             output,
             year,
@@ -842,8 +935,10 @@ fn main() -> Result<()> {
             kimi,
             qwen,
             roocode,
+            kilocode,
             kilo,
             mux,
+            crush,
             synthetic,
             short,
             agents,
@@ -851,6 +946,7 @@ fn main() -> Result<()> {
             disable_pinned,
             no_spinner: _,
         }) => {
+            reject_unsupported_home_override(&cli.home, "wrapped")?;
             let client_filter = build_client_filter(ClientFlags {
                 opencode,
                 claude,
@@ -864,8 +960,10 @@ fn main() -> Result<()> {
                 kimi,
                 qwen,
                 roocode,
+                kilocode,
                 kilo,
                 mux,
+                crush,
                 synthetic,
             });
             run_wrapped_command(
@@ -878,7 +976,14 @@ fn main() -> Result<()> {
                 disable_pinned,
             )
         }
-        Some(Commands::Cursor { subcommand }) => run_cursor_command(subcommand),
+        Some(Commands::Cursor { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "cursor")?;
+            run_cursor_command(subcommand)
+        }
+        Some(Commands::DeleteSubmittedData) => {
+            reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
+            run_delete_data_command()
+        }
         None => {
             let clients = build_client_filter(ClientFlags {
                 opencode: cli.opencode,
@@ -893,8 +998,10 @@ fn main() -> Result<()> {
                 kimi: cli.kimi,
                 qwen: cli.qwen,
                 roocode: cli.roocode,
+                kilocode: cli.kilocode,
                 kilo: cli.kilo,
                 mux: cli.mux,
+                crush: cli.crush,
                 synthetic: cli.synthetic,
             });
             let (since, until) =
@@ -908,6 +1015,7 @@ fn main() -> Result<()> {
             if cli.json {
                 run_models_report(
                     cli.json,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -922,6 +1030,7 @@ fn main() -> Result<()> {
             } else if cli.light || !can_use_tui {
                 run_models_report(
                     false,
+                    cli.home.clone(),
                     clients,
                     since,
                     until,
@@ -934,6 +1043,7 @@ fn main() -> Result<()> {
                     group_by,
                 )
             } else {
+                ensure_home_supported_for_tui(&cli.home)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -962,8 +1072,10 @@ struct ClientFlags {
     kimi: bool,
     qwen: bool,
     roocode: bool,
+    kilocode: bool,
     kilo: bool,
     mux: bool,
+    crush: bool,
     synthetic: bool,
 }
 
@@ -983,8 +1095,10 @@ fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
         (ClientId::Kimi, flags.kimi),
         (ClientId::Qwen, flags.qwen),
         (ClientId::RooCode, flags.roocode),
+        (ClientId::KiloCode, flags.kilocode),
         (ClientId::Kilo, flags.kilo),
         (ClientId::Mux, flags.mux),
+        (ClientId::Crush, flags.crush),
     ]
     .into_iter()
     .filter(|(_, enabled)| *enabled)
@@ -1000,6 +1114,40 @@ fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
     } else {
         Some(clients)
     }
+}
+
+fn default_submit_clients() -> Vec<String> {
+    let mut clients: Vec<String> = tokscale_core::ClientId::iter()
+        .filter(|client| client.submit_default())
+        .map(|client| client.as_str().to_string())
+        .collect();
+    clients.push("synthetic".to_string());
+    clients
+}
+
+fn reject_unsupported_home_override(home_dir: &Option<String>, command: &str) -> Result<()> {
+    if home_dir.is_some() {
+        return Err(anyhow::anyhow!(
+            "--home is currently supported only for local report commands. It is not supported for `{}`.",
+            command
+        ));
+    }
+
+    Ok(())
+}
+
+fn use_env_roots(home_dir: &Option<String>) -> bool {
+    home_dir.is_none()
+}
+
+fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
+    if home_dir.is_some() {
+        return Err(anyhow::anyhow!(
+            "--home is currently supported for local report commands only. Use `--json`, `--light`, `models`, `monthly`, or `graph` instead of TUI mode."
+        ));
+    }
+
+    Ok(())
 }
 
 fn build_date_filter(
@@ -1235,6 +1383,7 @@ impl Drop for LightSpinner {
 #[allow(clippy::too_many_arguments)]
 fn run_models_report(
     json: bool,
+    home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
@@ -1257,12 +1406,14 @@ fn run_models_report(
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
             get_model_report(ReportOptions {
-                home_dir: None,
+                home_dir,
+                use_env_roots,
                 clients,
                 since,
                 until,
@@ -1285,6 +1436,10 @@ fn run_models_report(
         struct ModelUsageJson {
             client: String,
             merged_clients: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            workspace_key: Option<serde_json::Value>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            workspace_label: Option<String>,
             model: String,
             provider: String,
             input: i64,
@@ -1316,6 +1471,20 @@ fn run_models_report(
                 .entries
                 .into_iter()
                 .map(|e| ModelUsageJson {
+                    workspace_key: if group_by == GroupBy::WorkspaceModel {
+                        Some(
+                            e.workspace_key
+                                .map(serde_json::Value::String)
+                                .unwrap_or(serde_json::Value::Null),
+                        )
+                    } else {
+                        None
+                    },
+                    workspace_label: if group_by == GroupBy::WorkspaceModel {
+                        e.workspace_label
+                    } else {
+                        None
+                    },
                     client: e.client,
                     merged_clients: e.merged_clients,
                     model: e.model,
@@ -1355,6 +1524,8 @@ fn run_models_report(
         };
         table.set_content_arrangement(arrangement);
         table.enforce_styling();
+
+        let workspace_name = |label: Option<&str>| label.unwrap_or("Unknown workspace").to_string();
 
         if compact {
             match group_by {
@@ -1441,6 +1612,32 @@ fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
+                        Cell::new(format_currency(report.total_cost))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    ]);
+                }
+                GroupBy::WorkspaceModel => {
+                    table.set_header(vec![
+                        Cell::new("Workspace").fg(Color::Cyan),
+                        Cell::new("Model").fg(Color::Cyan),
+                        Cell::new("Cost").fg(Color::Cyan),
+                    ]);
+
+                    for entry in &report.entries {
+                        table.add_row(vec![
+                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
+                            Cell::new(&entry.model),
+                            Cell::new(format_currency(entry.cost))
+                                .set_alignment(CellAlignment::Right),
+                        ]);
+                    }
+
+                    table.add_row(vec![
+                        Cell::new("Total")
+                            .fg(Color::Yellow)
+                            .add_attribute(Attribute::Bold),
+                        Cell::new(""),
                         Cell::new(format_currency(report.total_cost))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
@@ -1590,6 +1787,81 @@ fn run_models_report(
                             .set_alignment(CellAlignment::Right),
                     ]);
                 }
+                GroupBy::WorkspaceModel => {
+                    table.set_header(vec![
+                        Cell::new("Workspace").fg(Color::Cyan),
+                        Cell::new("Providers").fg(Color::Cyan),
+                        Cell::new("Sources").fg(Color::Cyan),
+                        Cell::new("Model").fg(Color::Cyan),
+                        Cell::new("Input").fg(Color::Cyan),
+                        Cell::new("Output").fg(Color::Cyan),
+                        Cell::new("Cache Write").fg(Color::Cyan),
+                        Cell::new("Cache Read").fg(Color::Cyan),
+                        Cell::new("Total").fg(Color::Cyan),
+                        Cell::new("Cost").fg(Color::Cyan),
+                    ]);
+
+                    for entry in &report.entries {
+                        let total =
+                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
+                        let capitalized_clients = clients_str
+                            .split(", ")
+                            .map(capitalize_client)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        table.add_row(vec![
+                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
+                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(capitalized_clients),
+                            Cell::new(&entry.model),
+                            Cell::new(format_tokens_with_commas(entry.input))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(entry.output))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(entry.cache_write))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(entry.cache_read))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(total))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_currency(entry.cost))
+                                .set_alignment(CellAlignment::Right),
+                        ]);
+                    }
+
+                    let total_all = report.total_input
+                        + report.total_output
+                        + report.total_cache_write
+                        + report.total_cache_read;
+                    table.add_row(vec![
+                        Cell::new("Total")
+                            .fg(Color::Yellow)
+                            .add_attribute(Attribute::Bold),
+                        Cell::new(""),
+                        Cell::new(""),
+                        Cell::new(""),
+                        Cell::new(format_tokens_with_commas(report.total_input))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(report.total_output))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(report.total_cache_write))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(report.total_cache_read))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_tokens_with_commas(total_all))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_currency(report.total_cost))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    ]);
+                }
             }
         }
 
@@ -1626,6 +1898,7 @@ fn run_models_report(
 #[allow(clippy::too_many_arguments)]
 fn run_monthly_report(
     json: bool,
+    home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
@@ -1647,12 +1920,14 @@ fn run_monthly_report(
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
             get_monthly_report(ReportOptions {
-                home_dir: None,
+                home_dir,
+                use_env_roots,
                 clients,
                 since,
                 until,
@@ -2163,6 +2438,7 @@ fn capitalize_client(client: &str) -> String {
         "gemini" => "Gemini".to_string(),
         "amp" => "Amp".to_string(),
         "droid" => "Droid".to_string(),
+        "crush" => "Crush".to_string(),
         "openclaw" => "openclaw".to_string(),
         "pi" => "Pi".to_string(),
         other => other.to_string(),
@@ -2177,6 +2453,7 @@ fn run_clients_command(json: bool) -> Result<()> {
 
     let parsed = parse_local_clients(LocalParseOptions {
         home_dir: Some(home_dir.to_string_lossy().to_string()),
+        use_env_roots: true,
         clients: Some(
             ClientId::iter()
                 .filter(|client| client.parse_local())
@@ -2655,6 +2932,135 @@ fn run_whoami_command() -> Result<()> {
     auth::whoami()
 }
 
+fn run_delete_data_command() -> Result<()> {
+    use colored::Colorize;
+    use std::io::{self, Write};
+    use tokio::runtime::Runtime;
+
+    let credentials = auth::load_credentials()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `tokscale login` first."))?;
+
+    println!("\n{}", "  ⚠ Delete all submitted usage data".red().bold());
+    println!("{}", "  This will permanently remove:".bright_black());
+    println!("{}", "    • Leaderboard entries".bright_black());
+    println!("{}", "    • Public profile stats".bright_black());
+    println!("{}", "    • Daily usage history".bright_black());
+    println!(
+        "{}",
+        "  Your account and API tokens will stay active.\n".bright_black()
+    );
+
+    print!(
+        "{}",
+        "  Are you sure you want to delete all submitted data? (y/N): ".white()
+    );
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().to_lowercase() != "y" {
+        println!("{}", "  Cancelled.".bright_black());
+        return Ok(());
+    }
+
+    print!(
+        "{}",
+        "  This cannot be undone. You will lose all historical token/cost data. Continue? (y/N): "
+            .white()
+    );
+    io::stdout().flush()?;
+    input.clear();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().to_lowercase() != "y" {
+        println!("{}", "  Cancelled.".bright_black());
+        return Ok(());
+    }
+
+    print!("{}", "  Type \"delete my data\" to confirm: ".white());
+    io::stdout().flush()?;
+    input.clear();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().to_lowercase() != "delete my data" {
+        println!("{}", "  Confirmation failed. Cancelled.".bright_black());
+        return Ok(());
+    }
+
+    println!("\n{}", "  Deleting submitted data...".bright_black());
+
+    let api_url = auth::get_api_base_url();
+    let rt = Runtime::new()?;
+
+    let response = rt.block_on(async {
+        reqwest::Client::new()
+            .delete(format!("{}/api/settings/submitted-data", api_url))
+            .header("Authorization", format!("Bearer {}", credentials.token))
+            .send()
+            .await
+    });
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            let body: serde_json::Value =
+                rt.block_on(async { resp.json().await }).unwrap_or_default();
+
+            match interpret_delete_submitted_data_response(status, &body)? {
+                DeleteSubmittedDataOutcome::Deleted(count) => {
+                    println!(
+                        "{}",
+                        format!(
+                            "  ✓ Deleted {} submission(s). Leaderboard and profile will refresh shortly.",
+                            count
+                        )
+                        .green()
+                    );
+                }
+                DeleteSubmittedDataOutcome::NotFound => {
+                    println!("{}", "  No submitted data found for this account.".yellow());
+                }
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Request failed: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteSubmittedDataOutcome {
+    Deleted(i64),
+    NotFound,
+}
+
+fn interpret_delete_submitted_data_response(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> Result<DeleteSubmittedDataOutcome> {
+    if status.is_success() {
+        let deleted = body
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let count = body
+            .get("deletedSubmissions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        if deleted {
+            Ok(DeleteSubmittedDataOutcome::Deleted(count))
+        } else {
+            Ok(DeleteSubmittedDataOutcome::NotFound)
+        }
+    } else {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        Err(anyhow::anyhow!("Failed ({}): {}", status, err))
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct StarCache {
@@ -2795,8 +3201,10 @@ fn prompt_star_repo(username: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_graph_command(
     output: Option<String>,
+    home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
@@ -2809,10 +3217,11 @@ fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let include_cursor = clients
-        .as_ref()
-        .is_none_or(|s| s.iter().any(|src| src == "cursor"));
-    let has_cursor_cache = cursor::has_cursor_usage_cache();
+    let include_cursor = home_dir.is_none()
+        && clients
+            .as_ref()
+            .is_none_or(|s| s.iter().any(|src| src == "cursor"));
+    let has_cursor_cache = include_cursor && cursor::has_cursor_usage_cache();
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
     if include_cursor && cursor::is_cursor_logged_in() {
@@ -2828,11 +3237,13 @@ fn run_graph_command(
     if show_progress {
         eprintln!("  Generating graph data...");
     }
+    let use_env_roots = use_env_roots(&home_dir);
     let rt = tokio::runtime::Runtime::new()?;
     let graph_result = rt
         .block_on(async {
             generate_local_graph_report(ReportOptions {
-                home_dir: None,
+                home_dir,
+                use_env_roots,
                 clients,
                 since,
                 until,
@@ -2984,6 +3395,8 @@ fn run_submit_command(
 
     println!("\n  {}\n", "Tokscale - Submit Usage Data".cyan());
 
+    let clients = clients.or_else(|| Some(default_submit_clients()));
+
     let include_cursor = clients
         .as_ref()
         .is_none_or(|s| s.iter().any(|src| src == "cursor"));
@@ -3014,6 +3427,7 @@ fn run_submit_command(
         .block_on(async {
             generate_graph(ReportOptions {
                 home_dir: None,
+                use_env_roots: true,
                 clients,
                 since,
                 until,
@@ -3202,7 +3616,7 @@ fn run_submit_command(
         let enabled_set: HashSet<ClientId> = all_clients.iter().copied().collect();
         let loader = DataLoader::with_filters(None, None, None, None);
         if let Ok(data) = loader.load(&all_clients, &GroupBy::default(), false) {
-            save_cached_data(&data, &enabled_set, false);
+            save_cached_data(&data, &enabled_set, false, &GroupBy::default());
         }
     }
 
@@ -3416,6 +3830,8 @@ fn run_headless_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use reqwest::StatusCode;
     use tokscale_core::{
         calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
         GraphMeta, GraphResult, TokenBreakdown, YearSummary,
@@ -3503,8 +3919,10 @@ mod tests {
             kimi: false,
             qwen: false,
             roocode: false,
+            kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: false,
         };
         assert_eq!(build_client_filter(flags), None);
@@ -3525,8 +3943,10 @@ mod tests {
             kimi: false,
             qwen: false,
             roocode: false,
+            kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: false,
         };
         assert_eq!(
@@ -3550,8 +3970,10 @@ mod tests {
             kimi: false,
             qwen: false,
             roocode: false,
+            kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: false,
         };
         assert_eq!(
@@ -3579,8 +4001,10 @@ mod tests {
             kimi: false,
             qwen: false,
             roocode: false,
+            kilocode: false,
             kilo: false,
             mux: false,
+            crush: false,
             synthetic: true,
         };
         assert_eq!(
@@ -3604,14 +4028,16 @@ mod tests {
             kimi: true,
             qwen: true,
             roocode: true,
+            kilocode: true,
             kilo: true,
             mux: true,
+            crush: true,
             synthetic: true,
         };
         let result = build_client_filter(flags);
         assert!(result.is_some());
         let sources = result.unwrap();
-        assert_eq!(sources.len(), 15);
+        assert_eq!(sources.len(), 17);
         assert!(sources.contains(&"opencode".to_string()));
         assert!(sources.contains(&"claude".to_string()));
         assert!(sources.contains(&"codex".to_string()));
@@ -3624,9 +4050,50 @@ mod tests {
         assert!(sources.contains(&"kimi".to_string()));
         assert!(sources.contains(&"qwen".to_string()));
         assert!(sources.contains(&"roocode".to_string()));
+        assert!(sources.contains(&"kilocode".to_string()));
         assert!(sources.contains(&"kilo".to_string()));
         assert!(sources.contains(&"mux".to_string()));
+        assert!(sources.contains(&"crush".to_string()));
         assert!(sources.contains(&"synthetic".to_string()));
+    }
+
+    #[test]
+    fn test_default_submit_clients_excludes_crush() {
+        let clients = default_submit_clients();
+        assert!(clients.contains(&"synthetic".to_string()));
+        assert!(!clients.contains(&"crush".to_string()));
+    }
+
+    #[test]
+    fn test_delete_submitted_data_command_parses() {
+        let cli = Cli::try_parse_from(["tokscale", "delete-submitted-data"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
+    }
+
+    #[test]
+    fn test_interpret_delete_submitted_data_response_success() {
+        let body = serde_json::json!({
+            "deleted": true,
+            "deletedSubmissions": 2
+        });
+
+        let outcome = interpret_delete_submitted_data_response(StatusCode::OK, &body).unwrap();
+        match outcome {
+            DeleteSubmittedDataOutcome::Deleted(count) => assert_eq!(count, 2),
+            DeleteSubmittedDataOutcome::NotFound => panic!("expected deleted outcome"),
+        }
+    }
+
+    #[test]
+    fn test_interpret_delete_submitted_data_response_failure() {
+        let body = serde_json::json!({
+            "error": "Not authenticated"
+        });
+
+        let err = interpret_delete_submitted_data_response(StatusCode::UNAUTHORIZED, &body)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Failed (401 Unauthorized): Not authenticated"));
     }
 
     #[test]
@@ -3787,6 +4254,11 @@ mod tests {
     #[test]
     fn test_capitalize_client_droid() {
         assert_eq!(capitalize_client("droid"), "Droid");
+    }
+
+    #[test]
+    fn test_capitalize_client_crush() {
+        assert_eq!(capitalize_client("crush"), "Crush");
     }
 
     #[test]

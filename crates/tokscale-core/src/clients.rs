@@ -9,328 +9,279 @@ pub enum PathRoot {
 }
 
 impl PathRoot {
-    pub fn resolve(&self, home_dir: &str) -> String {
+    pub fn resolve_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
         match self {
             PathRoot::Home => home_dir.to_string(),
-            PathRoot::XdgData => std::env::var("XDG_DATA_HOME")
-                .unwrap_or_else(|_| format!("{}/.local/share", home_dir)),
+            PathRoot::XdgData => {
+                if use_env_roots {
+                    std::env::var("XDG_DATA_HOME")
+                        .unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+                } else {
+                    format!("{}/.local/share", home_dir)
+                }
+            }
             PathRoot::EnvVar {
                 var,
                 fallback_relative,
             } => {
-                std::env::var(var).unwrap_or_else(|_| format!("{}/{}", home_dir, fallback_relative))
+                if use_env_roots {
+                    std::env::var(var)
+                        .unwrap_or_else(|_| format!("{}/{}", home_dir, fallback_relative))
+                } else {
+                    format!("{}/{}", home_dir, fallback_relative)
+                }
             }
         }
     }
-}
 
-#[derive(Debug, Clone, Copy)]
-pub struct SourceDef {
-    pub tag: &'static str,
-    pub root: PathRoot,
-    pub relative_path: &'static str,
-    pub pattern: &'static str,
-}
-
-impl SourceDef {
-    pub fn resolve_path(&self, home_dir: &str) -> String {
-        format!("{}/{}", self.root.resolve(home_dir), self.relative_path)
+    pub fn resolve(&self, home_dir: &str) -> String {
+        self.resolve_with_env_strategy(home_dir, true)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ClientDef {
     pub id: &'static str,
-    pub sources: &'static [SourceDef],
+    pub root: PathRoot,
+    pub relative_path: &'static str,
+    pub pattern: &'static str,
     pub headless: bool,
     pub parse_local: bool,
+    pub submit_default: bool,
 }
 
 impl ClientDef {
+    pub fn resolve_path_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
+        format!(
+            "{}/{}",
+            self.root.resolve_with_env_strategy(home_dir, use_env_roots),
+            self.relative_path
+        )
+    }
+
     pub fn resolve_path(&self, home_dir: &str) -> String {
-        self.sources
-            .first()
-            .map(|s| s.resolve_path(home_dir))
-            .unwrap_or_default()
-    }
-
-    pub fn primary_source(&self) -> Option<&'static SourceDef> {
-        self.sources.first()
-    }
-
-    pub fn source_by_tag(&self, tag: &str) -> Option<&'static SourceDef> {
-        self.sources.iter().find(|s| s.tag == tag)
-    }
-
-    pub fn pattern(&self) -> &'static str {
-        self.sources.first().map(|s| s.pattern).unwrap_or("")
+        self.resolve_path_with_env_strategy(home_dir, true)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(usize)]
-pub enum ClientId {
-    OpenCode = 0,
-    Claude = 1,
-    Codex = 2,
-    Cursor = 3,
-    Gemini = 4,
-    Amp = 5,
-    Droid = 6,
-    OpenClaw = 7,
-    Pi = 8,
-    Kimi = 9,
-    Qwen = 10,
-    RooCode = 11,
-    Kilo = 12,
-    Mux = 13,
+macro_rules! define_clients {
+    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr, submit_default: $sd:expr } ),+ $(,)? ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[repr(usize)]
+        pub enum ClientId {
+            $( $variant = $index ),+
+        }
+
+        impl ClientId {
+            pub const COUNT: usize = [ $( $index ),+ ].len();
+            pub const ALL: [ClientId; Self::COUNT] = [ $( ClientId::$variant ),+ ];
+
+            pub fn data(&self) -> &'static ClientDef {
+                &CLIENTS[*self as usize]
+            }
+
+            pub fn as_str(&self) -> &'static str {
+                self.data().id
+            }
+
+            pub fn file_pattern(&self) -> &'static str {
+                self.data().pattern
+            }
+
+            pub fn supports_headless(&self) -> bool {
+                self.data().headless
+            }
+
+            pub fn parse_local(&self) -> bool {
+                self.data().parse_local
+            }
+
+            pub fn submit_default(&self) -> bool {
+                self.data().submit_default
+            }
+
+            pub fn iter() -> impl Iterator<Item = ClientId> {
+                Self::ALL.iter().copied()
+            }
+
+            #[allow(clippy::should_implement_trait)]
+            pub fn from_str(s: &str) -> Option<ClientId> {
+                Self::ALL.iter().copied().find(|c| c.as_str() == s)
+            }
+        }
+
+        pub const CLIENTS: [ClientDef; ClientId::COUNT] = [
+            $( ClientDef {
+                id: $id,
+                root: $root,
+                relative_path: $rel,
+                pattern: $pat,
+                headless: $hl,
+                parse_local: $pl,
+                submit_default: $sd,
+            } ),+
+        ];
+
+        const _: () = {
+            let mut i = 0;
+            $(
+                assert!($index == i, "ClientId indices must be sequential");
+                i += 1;
+                let _ = i;
+            )+
+        };
+    };
 }
 
-impl ClientId {
-    pub const COUNT: usize = 14;
-    pub const ALL: [ClientId; Self::COUNT] = [
-        ClientId::OpenCode,
-        ClientId::Claude,
-        ClientId::Codex,
-        ClientId::Cursor,
-        ClientId::Gemini,
-        ClientId::Amp,
-        ClientId::Droid,
-        ClientId::OpenClaw,
-        ClientId::Pi,
-        ClientId::Kimi,
-        ClientId::Qwen,
-        ClientId::RooCode,
-        ClientId::Kilo,
-        ClientId::Mux,
-    ];
-
-    pub fn data(&self) -> &'static ClientDef {
-        &CLIENTS[*self as usize]
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        self.data().id
-    }
-
-    pub fn file_pattern(&self) -> &'static str {
-        self.data().pattern()
-    }
-
-    pub fn supports_headless(&self) -> bool {
-        self.data().headless
-    }
-
-    pub fn parse_local(&self) -> bool {
-        self.data().parse_local
-    }
-
-    pub fn iter() -> impl Iterator<Item = ClientId> {
-        Self::ALL.iter().copied()
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<ClientId> {
-        let normalized = if s == "kilocode" { "kilo" } else { s };
-        Self::ALL.iter().copied().find(|c| c.as_str() == normalized)
-    }
-}
-
-static SOURCES_OPENCODE: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::XdgData,
-    relative_path: "opencode/storage/message",
-    pattern: "*.json",
-}];
-
-static SOURCES_CLAUDE: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".claude/projects",
-    pattern: "*.jsonl",
-}];
-
-static SOURCES_CODEX: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::EnvVar {
-        var: "CODEX_HOME",
-        fallback_relative: ".codex",
-    },
-    relative_path: "sessions",
-    pattern: "*.jsonl",
-}];
-
-static SOURCES_CURSOR: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".config/tokscale/cursor-cache",
-    pattern: "usage*.csv",
-}];
-
-static SOURCES_GEMINI: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".gemini/tmp",
-    pattern: "*.json",
-}];
-
-static SOURCES_AMP: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::XdgData,
-    relative_path: "amp/threads",
-    pattern: "T-*.json",
-}];
-
-static SOURCES_DROID: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".factory/sessions",
-    pattern: "*.settings.json",
-}];
-
-static SOURCES_OPENCLAW: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".openclaw/agents",
-    pattern: "*.jsonl*",
-}];
-
-static SOURCES_PI: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".pi/agent/sessions",
-    pattern: "*.jsonl",
-}];
-
-static SOURCES_KIMI: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".kimi/sessions",
-    pattern: "wire.jsonl",
-}];
-
-static SOURCES_QWEN: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".qwen/projects",
-    pattern: "*.jsonl",
-}];
-
-static SOURCES_ROOCODE: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
-    pattern: "ui_messages.json",
-}];
-
-static SOURCES_KILO: [SourceDef; 2] = [
-    SourceDef {
-        tag: "vscode",
-        root: PathRoot::Home,
-        relative_path: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
-        pattern: "ui_messages.json",
-    },
-    SourceDef {
-        tag: "cli",
-        root: PathRoot::XdgData,
-        relative_path: "kilo/kilo.db",
-        pattern: "kilo.db",
-    },
-];
-
-static SOURCES_MUX: [SourceDef; 1] = [SourceDef {
-    tag: "default",
-    root: PathRoot::Home,
-    relative_path: ".mux/sessions",
-    pattern: "session-usage.json",
-}];
-
-pub static CLIENTS: [ClientDef; ClientId::COUNT] = [
-    ClientDef {
+define_clients!(
+    OpenCode = 0 => {
         id: "opencode",
-        sources: &SOURCES_OPENCODE,
+        root: PathRoot::XdgData,
+        relative: "opencode/storage/message",
+        pattern: "*.json",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Claude = 1 => {
         id: "claude",
-        sources: &SOURCES_CLAUDE,
+        root: PathRoot::Home,
+        relative: ".claude/projects",
+        pattern: "*.jsonl",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Codex = 2 => {
         id: "codex",
-        sources: &SOURCES_CODEX,
+        root: PathRoot::EnvVar {
+            var: "CODEX_HOME",
+            fallback_relative: ".codex",
+        },
+        relative: "sessions",
+        pattern: "*.jsonl",
         headless: true,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Cursor = 3 => {
         id: "cursor",
-        sources: &SOURCES_CURSOR,
+        root: PathRoot::Home,
+        relative: ".config/tokscale/cursor-cache",
+        pattern: "usage*.csv",
         headless: false,
         parse_local: false,
+        submit_default: true
     },
-    ClientDef {
+    Gemini = 4 => {
         id: "gemini",
-        sources: &SOURCES_GEMINI,
+        root: PathRoot::Home,
+        relative: ".gemini/tmp",
+        pattern: "*.json",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Amp = 5 => {
         id: "amp",
-        sources: &SOURCES_AMP,
+        root: PathRoot::XdgData,
+        relative: "amp/threads",
+        pattern: "T-*.json",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Droid = 6 => {
         id: "droid",
-        sources: &SOURCES_DROID,
+        root: PathRoot::Home,
+        relative: ".factory/sessions",
+        pattern: "*.settings.json",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    OpenClaw = 7 => {
         id: "openclaw",
-        sources: &SOURCES_OPENCLAW,
+        root: PathRoot::Home,
+        relative: ".openclaw/agents",
+        pattern: "*.jsonl*",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Pi = 8 => {
         id: "pi",
-        sources: &SOURCES_PI,
+        root: PathRoot::Home,
+        relative: ".pi/agent/sessions",
+        pattern: "*.jsonl",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Kimi = 9 => {
         id: "kimi",
-        sources: &SOURCES_KIMI,
+        root: PathRoot::Home,
+        relative: ".kimi/sessions",
+        pattern: "wire.jsonl",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Qwen = 10 => {
         id: "qwen",
-        sources: &SOURCES_QWEN,
+        root: PathRoot::Home,
+        relative: ".qwen/projects",
+        pattern: "*.jsonl",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    RooCode = 11 => {
         id: "roocode",
-        sources: &SOURCES_ROOCODE,
+        root: PathRoot::Home,
+        relative: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
+        pattern: "ui_messages.json",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
-        id: "kilo",
-        sources: &SOURCES_KILO,
+    KiloCode = 12 => {
+        id: "kilocode",
+        root: PathRoot::Home,
+        relative: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
+        pattern: "ui_messages.json",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-    ClientDef {
+    Mux = 13 => {
         id: "mux",
-        sources: &SOURCES_MUX,
+        root: PathRoot::Home,
+        relative: ".mux/sessions",
+        pattern: "session-usage.json",
         headless: false,
         parse_local: true,
+        submit_default: true
     },
-];
+    Kilo = 14 => {
+        id: "kilo",
+        root: PathRoot::XdgData,
+        relative: "kilo/kilo.db",
+        pattern: "kilo.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Crush = 15 => {
+        id: "crush",
+        root: PathRoot::XdgData,
+        relative: "crush/projects.json",
+        pattern: "projects.json",
+        headless: false,
+        parse_local: true,
+        submit_default: false
+    }
+);
 
 pub struct ClientCounts {
     counts: [i32; ClientId::COUNT],
@@ -381,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 14);
+        assert_eq!(ClientId::COUNT, 16);
     }
 
     #[test]
@@ -428,6 +379,18 @@ mod tests {
     }
 
     #[test]
+    fn test_path_root_xdg_data_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-home") };
+
+        let resolved = PathRoot::XdgData.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.local/share");
+
+        restore_env("XDG_DATA_HOME", previous);
+    }
+
+    #[test]
     fn test_path_root_env_var_uses_env_when_set() {
         let _guard = env_lock().lock().unwrap();
         let var = "TOKSCALE_TEST_PATH_ROOT";
@@ -462,14 +425,35 @@ mod tests {
     }
 
     #[test]
-    fn test_source_def_resolve_path() {
-        let source = SourceDef {
-            tag: "default",
+    fn test_path_root_env_var_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "TOKSCALE_TEST_PATH_ROOT";
+        let previous = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "/tmp/custom-root") };
+
+        let root = PathRoot::EnvVar {
+            var,
+            fallback_relative: ".fallback",
+        };
+        let resolved = root.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.fallback");
+
+        restore_env(var, previous);
+    }
+
+    #[test]
+    fn test_client_def_resolve_path_combines_root_and_relative() {
+        let client = ClientDef {
+            id: "test",
             root: PathRoot::Home,
             relative_path: ".test/sessions",
             pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+            submit_default: true,
         };
-        assert_eq!(source.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
+
+        assert_eq!(client.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
     }
 
     #[test]
@@ -491,10 +475,8 @@ mod tests {
 
     #[test]
     fn test_codex_root_uses_codex_home_env_var() {
-        let def = ClientId::Codex.data();
-        let source = def.primary_source().unwrap();
         assert_eq!(
-            source.root,
+            ClientId::Codex.data().root,
             PathRoot::EnvVar {
                 var: "CODEX_HOME",
                 fallback_relative: ".codex",
@@ -508,26 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn test_kilo_has_two_sources() {
-        let def = ClientId::Kilo.data();
-        assert_eq!(def.sources.len(), 2);
-        assert_eq!(def.sources[0].tag, "vscode");
-        assert_eq!(def.sources[1].tag, "cli");
-    }
-
-    #[test]
-    fn test_kilo_source_by_tag() {
-        let def = ClientId::Kilo.data();
-        let vscode = def.source_by_tag("vscode").unwrap();
-        assert!(vscode.relative_path.contains("kilocode.kilo-code"));
-
-        let cli = def.source_by_tag("cli").unwrap();
-        assert!(cli.relative_path.contains("kilo.db"));
-    }
-
-    #[test]
-    fn test_kilocode_alias_maps_to_kilo() {
-        assert_eq!(ClientId::from_str("kilocode"), Some(ClientId::Kilo));
-        assert_eq!(ClientId::from_str("kilo"), Some(ClientId::Kilo));
+    fn test_crush_submit_default_is_false() {
+        assert!(!ClientId::Crush.submit_default());
     }
 }
