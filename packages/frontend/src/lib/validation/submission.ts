@@ -81,9 +81,21 @@ const DataSummarySchema = z.object({
   models: z.array(z.string()),
 });
 
+const OptionalSourceMetadataSchema = z.preprocess(
+  (value) => {
+    if (typeof value === "string" && value.trim() === "") {
+      return undefined;
+    }
+    return value;
+  },
+  z.string().trim().min(1).max(255).optional()
+);
+
 const ExportMetaSchema = z.object({
   generatedAt: z.string(),
   version: z.string(),
+  sourceId: OptionalSourceMetadataSchema,
+  sourceName: OptionalSourceMetadataSchema,
   dateRange: z.object({
     start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),

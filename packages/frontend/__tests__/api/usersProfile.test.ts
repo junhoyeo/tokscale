@@ -163,7 +163,7 @@ describe("GET /api/users/[username]", () => {
         cacheReadTokens: 100,
         cacheCreationTokens: 50,
         reasoningTokens: 25,
-        submissionCount: 2,
+        submissionCount: 5,
         earliestDate: "2026-01-01",
         latestDate: "2026-03-10",
       },
@@ -174,6 +174,13 @@ describe("GET /api/users/[username]", () => {
         modelsUsed: ["claude-3-7-sonnet"],
         updatedAt: new Date("2026-01-10T10:00:00.000Z"),
         cliVersion: "1.4.2",
+        schemaVersion: 1,
+      },
+      {
+        sourcesUsed: ["claude"],
+        modelsUsed: ["gpt-4.1"],
+        updatedAt: new Date("2026-01-05T08:00:00.000Z"),
+        cliVersion: "1.4.0",
         schemaVersion: 1,
       },
     ]);
@@ -194,8 +201,9 @@ describe("GET /api/users/[username]", () => {
       isStale: true,
     });
     expect(body.updatedAt).toBe("2026-01-10T10:00:00.000Z");
-    expect(body.clients).toEqual(["cursor"]);
-    expect(body.models).toEqual(["claude-3-7-sonnet"]);
+    expect(body.stats.submissionCount).toBe(5);
+    expect(body.clients).toEqual(["claude", "cursor"]);
+    expect(body.models).toEqual(["claude-3-7-sonnet", "gpt-4.1"]);
   });
 
   it("returns null freshness metadata when the user has no submission yet", async () => {

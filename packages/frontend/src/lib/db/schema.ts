@@ -12,8 +12,9 @@ import {
   integer,
   index,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // ============================================================================
 // USERS
@@ -144,6 +145,8 @@ export const submissions = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    sourceId: varchar("source_id", { length: 255 }),
+    sourceName: varchar("source_name", { length: 255 }),
 
     totalTokens: bigint("total_tokens", { mode: "number" }).notNull(),
     totalCost: decimal("total_cost", { precision: 12, scale: 4 }).notNull(),
@@ -182,13 +185,33 @@ export const submissions = pgTable(
   },
   (table) => [
     index("idx_submissions_user_id").on(table.userId),
+    index("idx_submissions_user_source").on(table.userId, table.sourceId),
     index("idx_submissions_status").on(table.status),
     index("idx_submissions_total_tokens").on(table.totalTokens),
     index("idx_submissions_created_at").on(table.createdAt),
     index("idx_submissions_date_range").on(table.dateStart, table.dateEnd),
-    index("idx_submissions_leaderboard").on(table.userId, table.totalTokens, table.totalCost, table.createdAt),
-    unique("submissions_user_id_unique").on(table.userId),
-    unique("submissions_user_hash_unique").on(table.userId, table.submissionHash),
+    index("idx_submissions_leaderboard").on(
+      table.userId,
+      table.totalTokens,
+      table.totalCost,
+      table.createdAt
+    ),
+    uniqueIndex("submissions_user_unsourced_unique")
+      .on(table.userId)
+      .where(sql`${table.sourceId} is null`),
+    uniqueIndex("submissions_user_source_unique")
+      .on(table.userId, table.sourceId)
+      .where(sql`${table.sourceId} is not null`),
+    uniqueIndex("submissions_user_unsourced_hash_unique")
+      .on(table.userId, table.submissionHash)
+      .where(
+        sql`${table.submissionHash} is not null and ${table.sourceId} is null`
+      ),
+    uniqueIndex("submissions_user_source_hash_unique")
+      .on(table.userId, table.sourceId, table.submissionHash)
+      .where(
+        sql`${table.submissionHash} is not null and ${table.sourceId} is not null`
+      ),
   ]
 );
 

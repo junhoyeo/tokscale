@@ -78,6 +78,8 @@ export interface DataSummary {
 export interface ExportMeta {
   generatedAt: string;
   version: string;
+  sourceId?: string;
+  sourceName?: string;
   dateRange: {
     start: string;
     end: string;

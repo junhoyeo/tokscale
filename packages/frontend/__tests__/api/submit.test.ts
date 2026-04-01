@@ -176,6 +176,124 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(result.valid).toBe(true);
       expect(result.errors).toHaveLength(0);
     });
+
+    it("should accept source metadata for machine-scoped submissions", () => {
+      const payload = {
+        meta: {
+          generatedAt: new Date().toISOString(),
+          version: "1.0.0",
+          sourceId: "machine-123",
+          sourceName: "Workstation",
+          dateRange: { start: "2024-12-01", end: "2024-12-01" },
+        },
+        summary: {
+          totalTokens: 1500,
+          totalCost: 1.5,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 1.5,
+          maxCostInSingleDay: 1.5,
+          clients: ["claude" as const],
+          models: ["claude-sonnet-4"],
+        },
+        years: [{
+          year: "2024",
+          totalTokens: 1500,
+          totalCost: 1.5,
+          range: { start: "2024-12-01", end: "2024-12-01" },
+        }],
+        contributions: [{
+          date: "2024-12-01",
+          totals: { tokens: 1500, cost: 1.5, messages: 5 },
+          intensity: 2 as const,
+          tokenBreakdown: {
+            input: 1000,
+            output: 500,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          clients: [{
+            client: "claude" as const,
+            modelId: "claude-sonnet-4",
+            tokens: {
+              input: 1000,
+              output: 500,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 1.5,
+            messages: 5,
+          }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.data?.meta.sourceId).toBe("machine-123");
+      expect(result.data?.meta.sourceName).toBe("Workstation");
+    });
+
+    it("should normalize blank source metadata to undefined", () => {
+      const payload = {
+        meta: {
+          generatedAt: new Date().toISOString(),
+          version: "1.0.0",
+          sourceId: "   ",
+          sourceName: "",
+          dateRange: { start: "2024-12-01", end: "2024-12-01" },
+        },
+        summary: {
+          totalTokens: 1500,
+          totalCost: 1.5,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 1.5,
+          maxCostInSingleDay: 1.5,
+          clients: ["claude" as const],
+          models: ["claude-sonnet-4"],
+        },
+        years: [{
+          year: "2024",
+          totalTokens: 1500,
+          totalCost: 1.5,
+          range: { start: "2024-12-01", end: "2024-12-01" },
+        }],
+        contributions: [{
+          date: "2024-12-01",
+          totals: { tokens: 1500, cost: 1.5, messages: 5 },
+          intensity: 2 as const,
+          tokenBreakdown: {
+            input: 1000,
+            output: 500,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          clients: [{
+            client: "claude" as const,
+            modelId: "claude-sonnet-4",
+            tokens: {
+              input: 1000,
+              output: 500,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 1.5,
+            messages: 5,
+          }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.data?.meta.sourceId).toBeUndefined();
+      expect(result.data?.meta.sourceName).toBeUndefined();
+    });
   });
 
   describe('Client-Level Merge Logic', () => {

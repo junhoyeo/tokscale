@@ -2827,6 +2827,10 @@ struct TsDataSummary {
 struct TsExportMeta {
     generated_at: String,
     version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_name: Option<String>,
     date_range: DateRange,
 }
 
@@ -2839,11 +2843,17 @@ struct TsTokenContributionData {
     contributions: Vec<TsDailyContribution>,
 }
 
-fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenContributionData {
+fn to_ts_token_contribution_data(
+    graph: &tokscale_core::GraphResult,
+    source_id: Option<String>,
+    source_name: Option<String>,
+) -> TsTokenContributionData {
     TsTokenContributionData {
         meta: TsExportMeta {
             generated_at: graph.meta.generated_at.clone(),
             version: graph.meta.version.clone(),
+            source_id,
+            source_name,
             date_range: DateRange {
                 start: graph.meta.date_range_start.clone(),
                 end: graph.meta.date_range_end.clone(),
@@ -3255,7 +3265,7 @@ fn run_graph_command(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
-    let output_data = to_ts_token_contribution_data(&graph_result);
+    let output_data = to_ts_token_contribution_data(&graph_result, None, None);
     let json_output = serde_json::to_string_pretty(&output_data)?;
 
     if let Some(output_path) = output {
@@ -3502,7 +3512,29 @@ fn run_submit_command(
 
     let api_url = auth::get_api_base_url();
 
-    let submit_payload = to_ts_token_contribution_data(&graph_result);
+    let (source_id, source_name) = match auth::get_submit_source_id() {
+        Ok(source_id) => {
+            let source_name = if source_id.is_some() {
+                auth::get_submit_source_name()
+            } else {
+                None
+            };
+            (source_id, source_name)
+        }
+        Err(err) => {
+            eprintln!(
+                "{}",
+                format!(
+                    "  Warning: failed to determine submit source identity: {}",
+                    err
+                )
+                .yellow()
+            );
+            (None, None)
+        }
+    };
+
+    let submit_payload = to_ts_token_contribution_data(&graph_result, source_id, source_name);
 
     let response = rt.block_on(async {
         reqwest::Client::new()
@@ -3902,6 +3934,27 @@ mod tests {
             .find(|entry| entry.year == year)
             .cloned()
             .unwrap()
+    }
+
+    #[test]
+    fn test_to_ts_token_contribution_data_includes_source_metadata() {
+        let graph = graph_result_with_contributions(vec![daily_contribution(
+            "2026-03-24",
+            100,
+            1.25,
+            "claude",
+            "claude-sonnet",
+        )]);
+
+        let output = to_ts_token_contribution_data(
+            &graph,
+            Some("source-id-1".to_string()),
+            Some("Workstation".to_string()),
+        );
+        let payload = serde_json::to_value(output).unwrap();
+
+        assert_eq!(payload["meta"]["sourceId"], "source-id-1");
+        assert_eq!(payload["meta"]["sourceName"], "Workstation");
     }
 
     #[test]

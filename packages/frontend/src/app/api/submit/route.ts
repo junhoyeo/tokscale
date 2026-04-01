@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { db, apiTokens, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
@@ -14,8 +14,12 @@ import {
   buildModelBreakdown,
   clientContributionToBreakdownData,
   mergeTimestampMs,
+  resolveSubmissionScope,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
+
+const SOURCE_IDENTITY_REQUIRED_ERROR =
+  "Source identity is required for accounts with source-scoped submissions";
 
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -43,6 +47,62 @@ function normalizeSubmissionData(data: unknown): void {
       }
     }
   }
+}
+
+function normalizeOptionalString(value: string | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+async function loadUserSubmitMetrics(userId: string) {
+  const [userAggregatesRows, userDayAggregatesRows, userSubmissionsRows] =
+    await Promise.all([
+      db
+        .select({
+          totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)::bigint`,
+          totalCost: sql<string>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4))), 0)::text`,
+          dateStart: sql<string>`MIN(${submissions.dateStart})`,
+          dateEnd: sql<string>`MAX(${submissions.dateEnd})`,
+        })
+        .from(submissions)
+        .where(eq(submissions.userId, userId)),
+      db
+        .select({
+          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
+        })
+        .from(dailyBreakdown)
+        .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
+        .where(eq(submissions.userId, userId)),
+      db
+        .select({
+          sourcesUsed: submissions.sourcesUsed,
+        })
+        .from(submissions)
+        .where(eq(submissions.userId, userId)),
+    ]);
+
+  const [userAggregates] = userAggregatesRows;
+  const [userDayAggregates] = userDayAggregatesRows;
+  const userSubmissions = userSubmissionsRows;
+
+  const userClients = new Set<string>();
+  for (const submission of userSubmissions) {
+    for (const client of submission.sourcesUsed || []) {
+      userClients.add(client === "kilocode" ? "kilo" : client);
+    }
+  }
+
+  return {
+    totalTokens: userAggregates?.totalTokens ?? 0,
+    totalCost: parseFloat(userAggregates?.totalCost ?? "0"),
+    dateRange: {
+      start: userAggregates?.dateStart ?? null,
+      end: userAggregates?.dateEnd ?? null,
+    },
+    activeDays: userDayAggregates?.activeDays ?? 0,
+    clients: Array.from(userClients).sort(),
+  };
 }
 
 /**
@@ -133,6 +193,10 @@ export async function POST(request: Request) {
         clients: Array.from(submittedClients).sort(),
       },
     };
+    const sourceId = normalizeOptionalString(data.meta.sourceId);
+    const sourceName = sourceId
+      ? normalizeOptionalString(data.meta.sourceName)
+      : null;
 
     // ========================================
     // STEP 3: DATABASE OPERATIONS IN TRANSACTION
@@ -146,24 +210,39 @@ export async function POST(request: Request) {
       // ------------------------------------------
       // STEP 3a: Get or create user's submission
       // ------------------------------------------
-      const [existingSubmission] = await tx
-        .select({ id: submissions.id })
+      const existingSubmissionRows = await tx
+        .select({
+          id: submissions.id,
+          sourceId: submissions.sourceId,
+        })
         .from(submissions)
         .where(eq(submissions.userId, tokenRecord.userId))
-        .for('update')
-        .limit(1);
+        .for("update");
 
       let submissionId: string;
       let isNewSubmission = false;
+      let upgradeLegacyRow = false;
 
-      if (existingSubmission) {
-        submissionId = existingSubmission.id;
+      const scopeResolution = resolveSubmissionScope(
+        existingSubmissionRows,
+        sourceId
+      );
+
+      if (scopeResolution.kind === "rejectMissingSourceIdentity") {
+        throw new Error(SOURCE_IDENTITY_REQUIRED_ERROR);
+      }
+
+      if (scopeResolution.kind === "existing") {
+        submissionId = scopeResolution.submissionId;
+        upgradeLegacyRow = scopeResolution.upgradeLegacyRow;
       } else {
         isNewSubmission = true;
         const [newSubmission] = await tx
           .insert(submissions)
           .values({
             userId: tokenRecord.userId,
+            sourceId,
+            sourceName,
             totalTokens: 0,
             totalCost: "0",
             inputTokens: 0,
@@ -178,9 +257,34 @@ export async function POST(request: Request) {
             cliVersion: data.meta.version,
             submissionHash: generateSubmissionHash(hashData),
           })
+          .onConflictDoNothing()
           .returning({ id: submissions.id });
 
-        submissionId = newSubmission.id;
+        if (newSubmission) {
+          submissionId = newSubmission.id;
+        } else {
+          const [conflictedSubmission] = await tx
+            .select({ id: submissions.id })
+            .from(submissions)
+            .where(
+              sourceId
+                ? and(
+                    eq(submissions.userId, tokenRecord.userId),
+                    eq(submissions.sourceId, sourceId)
+                  )
+                : and(
+                    eq(submissions.userId, tokenRecord.userId),
+                    isNull(submissions.sourceId)
+                  )
+            )
+            .limit(1);
+
+          if (!conflictedSubmission) {
+            throw new Error("Submission row was not found after insert conflict");
+          }
+
+          submissionId = conflictedSubmission.id;
+        }
       }
 
       // ------------------------------------------
@@ -384,43 +488,44 @@ export async function POST(request: Request) {
       // ------------------------------------------
       // STEP 3e: Update submission record
       // ------------------------------------------
+      const submissionUpdate: Record<string, unknown> = {
+        totalTokens: aggregates.totalTokens,
+        totalCost: aggregates.totalCost,
+        inputTokens: aggregates.inputTokens,
+        outputTokens: aggregates.outputTokens,
+        cacheReadTokens: totalCacheRead,
+        cacheCreationTokens: totalCacheCreation,
+        reasoningTokens: totalReasoning,
+        dateStart: aggregates.dateStart,
+        dateEnd: aggregates.dateEnd,
+        sourcesUsed: Array.from(allClients),
+        modelsUsed: Array.from(allModels),
+        cliVersion: data.meta.version,
+        submissionHash: generateSubmissionHash(hashData),
+        submitCount: sql`COALESCE(submit_count, 0) + 1`,
+        schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c) => c.timestampMs != null) ? 1 : 0})`,
+        updatedAt: new Date(),
+      };
+
+      if (sourceName !== null) {
+        submissionUpdate.sourceName = sourceName;
+      }
+      if (sourceId !== null && upgradeLegacyRow) {
+        submissionUpdate.sourceId = sourceId;
+      }
+
       await tx
         .update(submissions)
-        .set({
-          totalTokens: aggregates.totalTokens,
-          totalCost: aggregates.totalCost,
-          inputTokens: aggregates.inputTokens,
-          outputTokens: aggregates.outputTokens,
-          cacheReadTokens: totalCacheRead,
-          cacheCreationTokens: totalCacheCreation,
-          reasoningTokens: totalReasoning,
-          dateStart: aggregates.dateStart,
-          dateEnd: aggregates.dateEnd,
-           sourcesUsed: Array.from(allClients),
-           modelsUsed: Array.from(allModels),
-          cliVersion: data.meta.version,
-          submissionHash: generateSubmissionHash(hashData),
-          submitCount: sql`COALESCE(submit_count, 0) + 1`,
-          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c) => c.timestampMs != null) ? 1 : 0})`,
-          updatedAt: new Date(),
-        })
+        .set(submissionUpdate)
         .where(eq(submissions.id, submissionId));
 
       return {
         submissionId,
         isNewSubmission,
-        metrics: {
-          totalTokens: aggregates.totalTokens,
-          totalCost: parseFloat(aggregates.totalCost),
-          dateRange: {
-            start: aggregates.dateStart,
-            end: aggregates.dateEnd,
-          },
-          activeDays: aggregates.activeDays,
-          clients: Array.from(allClients),
-        },
       };
     });
+
+    const metrics = await loadUserSubmitMetrics(tokenRecord.userId);
 
     try {
       revalidateTag("leaderboard", "max");
@@ -435,11 +540,20 @@ export async function POST(request: Request) {
       success: true,
       submissionId: result.submissionId,
       username: tokenRecord.username,
-      metrics: result.metrics,
+      metrics,
       mode: result.isNewSubmission ? "create" : "merge",
       warnings: validation.warnings.length > 0 ? validation.warnings : undefined,
     });
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === SOURCE_IDENTITY_REQUIRED_ERROR
+    ) {
+      return NextResponse.json(
+        { error: SOURCE_IDENTITY_REQUIRED_ERROR },
+        { status: 409 }
+      );
+    }
     console.error("Submit error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
