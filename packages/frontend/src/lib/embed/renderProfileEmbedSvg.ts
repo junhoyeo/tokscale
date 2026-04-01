@@ -1,4 +1,4 @@
-import type { UserEmbedStats } from "./getUserEmbedStats";
+import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
 import { escapeXml, formatCompact, formatNumber, formatCurrency } from "../format";
 
 export type EmbedTheme = "dark" | "light";
@@ -9,6 +9,7 @@ export interface RenderProfileEmbedOptions {
   compact?: boolean;
   compactNumbers?: boolean;
   sortBy?: EmbedSortBy;
+  contributions?: EmbedContributionDay[] | null;
 }
 
 type ThemePalette = {
@@ -30,6 +31,11 @@ type ThemePalette = {
   tokenGradientEnd: string;
   costAccent: string;
   highlight: string;
+  graphGrade0: string;
+  graphGrade1: string;
+  graphGrade2: string;
+  graphGrade3: string;
+  graphGrade4: string;
 };
 
 const THEMES: Record<EmbedTheme, ThemePalette> = {
@@ -52,6 +58,11 @@ const THEMES: Record<EmbedTheme, ThemePalette> = {
     tokenGradientEnd: "#B9DFF8",
     costAccent: "#53D18C",
     highlight: "rgba(83, 209, 243, 0.18)",
+    graphGrade0: "#161B22",
+    graphGrade1: "#0E4429",
+    graphGrade2: "#006D32",
+    graphGrade3: "#26A641",
+    graphGrade4: "#39D353",
   },
   light: {
     background: "#F6FAFF",
@@ -72,6 +83,11 @@ const THEMES: Record<EmbedTheme, ThemePalette> = {
     tokenGradientEnd: "#8FD6FF",
     costAccent: "#16804B",
     highlight: "rgba(83, 209, 243, 0.12)",
+    graphGrade0: "#EBEDF0",
+    graphGrade1: "#9BE9A8",
+    graphGrade2: "#40C463",
+    graphGrade3: "#30A14E",
+    graphGrade4: "#216E39",
   },
 };
 
@@ -134,15 +150,91 @@ function metricCard(args: {
   ].join("");
 }
 
+const GRAPH_CELL = 9;
+const GRAPH_GAP = 2;
+const GRAPH_STRIDE = GRAPH_CELL + GRAPH_GAP;
+const GRAPH_DAY_LABEL_W = 26;
+const GRAPH_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function renderContributionGrid(
+  contributions: EmbedContributionDay[],
+  palette: ThemePalette,
+  x: number,
+  y: number,
+): string {
+  const gridX = x + GRAPH_DAY_LABEL_W;
+  const intensityMap = new Map<string, number>();
+  for (const c of contributions) intensityMap.set(c.date, c.intensity);
+
+  const colors = [palette.graphGrade0, palette.graphGrade1, palette.graphGrade2, palette.graphGrade3, palette.graphGrade4];
+
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const start = new Date(today);
+  start.setUTCFullYear(start.getUTCFullYear() - 1);
+  start.setUTCDate(start.getUTCDate() + 1);
+  start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+
+  const diffDays = Math.ceil((today.getTime() - start.getTime()) / 86_400_000);
+  const numWeeks = Math.ceil((diffDays + 1) / 7);
+
+  const monthLabelY = y + 9;
+  const gridTopY = y + 14;
+  let svg = "";
+
+  let lastMonth = -1;
+  for (let w = 0; w < numWeeks; w++) {
+    const d = new Date(start);
+    d.setUTCDate(d.getUTCDate() + w * 7);
+    const m = d.getUTCMonth();
+    if (m !== lastMonth) {
+      lastMonth = m;
+      svg += `<text x="${gridX + w * GRAPH_STRIDE}" y="${monthLabelY}" fill="${palette.muted}" font-size="9" font-family="${FIGTREE_FONT_STACK}">${GRAPH_MONTH_NAMES[m]}</text>`;
+    }
+  }
+
+  const dayLabels: [number, string][] = [[1, "Mon"], [3, "Wed"], [5, "Fri"]];
+  for (const [row, label] of dayLabels) {
+    svg += `<text x="${x}" y="${gridTopY + row * GRAPH_STRIDE + GRAPH_CELL - 1}" fill="${palette.muted}" font-size="9" font-family="${FIGTREE_FONT_STACK}">${label}</text>`;
+  }
+
+  for (let w = 0; w < numWeeks; w++) {
+    for (let d = 0; d < 7; d++) {
+      const date = new Date(start);
+      date.setUTCDate(date.getUTCDate() + w * 7 + d);
+      if (date > today) continue;
+      const dateStr = date.toISOString().split("T")[0];
+      const intensity = intensityMap.get(dateStr) ?? 0;
+      svg += `<rect x="${gridX + w * GRAPH_STRIDE}" y="${gridTopY + d * GRAPH_STRIDE}" width="${GRAPH_CELL}" height="${GRAPH_CELL}" rx="2" fill="${colors[intensity]}"/>`;
+    }
+  }
+
+  const legendY = gridTopY + 7 * GRAPH_STRIDE + 6;
+  const gridRightX = gridX + (numWeeks - 1) * GRAPH_STRIDE + GRAPH_CELL;
+  const legendW = 28 + 5 * GRAPH_STRIDE + 28;
+  const legendX = gridRightX - legendW;
+  svg += `<text x="${legendX}" y="${legendY + GRAPH_CELL - 1}" fill="${palette.muted}" font-size="9" font-family="${FIGTREE_FONT_STACK}">Less</text>`;
+  let lx = legendX + 28;
+  for (let i = 0; i < 5; i++) {
+    svg += `<rect x="${lx}" y="${legendY}" width="${GRAPH_CELL}" height="${GRAPH_CELL}" rx="2" fill="${colors[i]}"/>`;
+    lx += GRAPH_STRIDE;
+  }
+  svg += `<text x="${lx + 3}" y="${legendY + GRAPH_CELL - 1}" fill="${palette.muted}" font-size="9" font-family="${FIGTREE_FONT_STACK}">More</text>`;
+
+  return svg;
+}
+
 function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedOptions = {}): string {
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const compact = options.compact ?? false;
   const compactNumbers = options.compactNumbers ?? false;
   const sortBy: EmbedSortBy = options.sortBy === "cost" ? "cost" : "tokens";
+  const contributions = (!compact && options.contributions) ? options.contributions : null;
   const palette = THEMES[theme];
 
   const width = compact ? 460 : 680;
-  const height = compact ? 162 : 186;
+  const graphSectionHeight = contributions ? 120 : 0;
+  const height = (compact ? 162 : 186) + graphSectionHeight;
   const rx = 18;
   const paddingX = compact ? 18 : 20;
   const headerY = compact ? 18 : 20;
@@ -269,6 +361,7 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
     palette,
     compact,
   })}
+  ${contributions ? renderContributionGrid(contributions, palette, paddingX, metricsY + metricHeight + 12) : ""}
   <text x="${paddingX}" y="${footerY}" fill="${palette.muted}" font-size="11" font-family="${FIGTREE_FONT_STACK}">${updated}</text>
   <text x="${width - paddingX}" y="${footerY}" fill="${palette.muted}" font-size="11" font-family="${FIGTREE_FONT_STACK}" text-anchor="end">tokscale.ai/u/${escapeXml(
     data.user.username
