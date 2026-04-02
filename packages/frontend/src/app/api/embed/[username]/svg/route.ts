@@ -70,7 +70,9 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       return createSvgResponse(svg, { status: 200 });
     }
 
-    const contributions = showGraph ? await getUserEmbedContributions(username) : null;
+    const contributions = showGraph && !compact
+      ? await getUserEmbedContributions(username).catch(() => null)
+      : null;
 
     const svg = renderProfileEmbedSvg(data, {
       theme,

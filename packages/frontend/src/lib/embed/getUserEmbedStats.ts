@@ -106,33 +106,38 @@ async function fetchUserEmbedContributions(username: string): Promise<EmbedContr
 
   if (!user) return null;
 
-  const oneYearAgo = new Date();
-  oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-  const cutoff = oneYearAgo.toISOString().split("T")[0];
+  // Use UTC-based date and include a 7-day buffer before "one year ago"
+  // so that all dates visible in the first week of the contribution grid are included.
+  const today = new Date();
+  const cutoffDate = new Date(Date.UTC(today.getUTCFullYear() - 1, today.getUTCMonth(), today.getUTCDate()));
+  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - 7);
+  const cutoff = cutoffDate.toISOString().split("T")[0];
 
   const rows = await db
-    .select({ date: dailyBreakdown.date, cost: dailyBreakdown.cost })
+    .select({
+      date: dailyBreakdown.date,
+      cost: sql<number>`sum(${dailyBreakdown.cost})`.as("cost"),
+    })
     .from(dailyBreakdown)
     .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
     .where(and(eq(submissions.userId, user.id), gte(dailyBreakdown.date, cutoff)))
+    .groupBy(dailyBreakdown.date)
     .orderBy(dailyBreakdown.date);
 
   if (rows.length === 0) return [];
 
-  const dayMap = new Map<string, number>();
-  for (const row of rows) {
-    dayMap.set(row.date, (dayMap.get(row.date) || 0) + (Number(row.cost) || 0));
-  }
-
-  const costs = Array.from(dayMap.values()).filter((c) => c > 0);
+  const costs = rows.map((row) => Number(row.cost) || 0).filter((c) => c > 0);
   const maxCost = Math.max(...costs, 0);
 
-  return Array.from(dayMap.entries()).map(([date, cost]) => ({
-    date,
-    intensity: (
-      maxCost === 0 ? 0 : cost === 0 ? 0 : cost <= maxCost * 0.25 ? 1 : cost <= maxCost * 0.5 ? 2 : cost <= maxCost * 0.75 ? 3 : 4
-    ) as 0 | 1 | 2 | 3 | 4,
-  }));
+  return rows.map((row) => {
+    const cost = Number(row.cost) || 0;
+    return {
+      date: row.date,
+      intensity: (
+        maxCost === 0 ? 0 : cost === 0 ? 0 : cost <= maxCost * 0.25 ? 1 : cost <= maxCost * 0.5 ? 2 : cost <= maxCost * 0.75 ? 3 : 4
+      ) as 0 | 1 | 2 | 3 | 4,
+    };
+  });
 }
 
 export function getUserEmbedContributions(username: string): Promise<EmbedContributionDay[] | null> {

@@ -313,7 +313,9 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
   const metricsW = width - px * 2;
   const metricW = (metricsW - metricsGap * 2) / 3;
   const rankColor = getRankColor(data.stats.rank, palette);
-  const rankAccent = getRankColor(data.stats.rank, palette);
+  const rankAccent = (data.stats.rank && data.stats.rank <= 3)
+    ? getRankColor(data.stats.rank, palette)
+    : palette.accentRank;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale profile stats for ${escapeXml(username)}">

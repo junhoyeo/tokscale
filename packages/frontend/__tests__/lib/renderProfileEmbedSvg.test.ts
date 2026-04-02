@@ -85,6 +85,17 @@ describe("renderProfileEmbedSvg", () => {
     expect(svg).toContain('fill="#E3B341"');
   });
 
+  it("uses amber accent bar for non-medal ranks instead of brand blue", () => {
+    const svg = renderProfileEmbedSvg({
+      ...mockStats,
+      stats: { ...mockStats.stats, rank: 42 },
+    });
+    const accRankMatch = svg.match(/id="acc-rank"[\s\S]*?<\/linearGradient>/);
+    expect(accRankMatch).toBeTruthy();
+    expect(accRankMatch![0]).toContain('stop-color="#D29922"');
+    expect(accRankMatch![0]).not.toContain('stop-color="#58A6FF"');
+  });
+
   it("renders redesigned card structure with brand icon and accent bars", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
