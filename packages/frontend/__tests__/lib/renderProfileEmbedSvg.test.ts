@@ -187,6 +187,68 @@ describe("renderProfileEmbedSvg", () => {
   });
 });
 
+describe("renderProfileEmbedSvg with contributions graph", () => {
+  const mockContributions = [
+    { date: "2026-01-15", intensity: 0 as const },
+    { date: "2026-02-10", intensity: 2 as const },
+    { date: "2026-02-20", intensity: 4 as const },
+  ];
+
+  it("extends card height when contributions provided", () => {
+    const withoutGraph = renderProfileEmbedSvg(mockStats);
+    const withGraph = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(withoutGraph).toContain('height="186"');
+    const heightMatch = withGraph.match(/height="(\d+)"/);
+    expect(heightMatch).toBeTruthy();
+    expect(Number(heightMatch![1])).toBeGreaterThan(186);
+  });
+
+  it("renders GitHub-style contribution grid cells", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(svg).toContain('rx="2"');
+    expect(svg).toContain('fill="#161B22"');
+    expect(svg).toContain("Less");
+    expect(svg).toContain("More");
+  });
+
+  it("renders day labels (Mon, Wed, Fri)", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(svg).toContain(">Mon<");
+    expect(svg).toContain(">Wed<");
+    expect(svg).toContain(">Fri<");
+  });
+
+  it("renders month labels", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(svg).toContain(">Jan<");
+  });
+
+  it("ignores contributions in compact mode", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { compact: true, contributions: mockContributions });
+
+    expect(svg).toContain('height="162"');
+    expect(svg).not.toContain("Less");
+    expect(svg).not.toContain("More");
+  });
+
+  it("uses light theme graph colors", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { theme: "light", contributions: mockContributions });
+
+    expect(svg).toContain('fill="#EBEDF0"');
+  });
+
+  it("does not render graph when contributions is null", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: null });
+
+    expect(svg).toContain('height="186"');
+    expect(svg).not.toContain("Less");
+  });
+});
+
 describe("renderProfileEmbedErrorSvg", () => {
   it("renders safe fallback SVG", () => {
     const svg = renderProfileEmbedErrorSvg("User <unknown>", { theme: "light" });
