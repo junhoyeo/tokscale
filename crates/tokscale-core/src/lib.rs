@@ -887,6 +887,19 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(kilo_messages);
     }
 
+    if let Some(db_path) = &scan_result.hermes_db {
+        let hermes_messages: Vec<UnifiedMessage> = sessions::hermes::parse_hermes_sqlite(db_path)
+            .into_iter()
+            .map(|mut msg| {
+                if msg.cost <= 0.0 {
+                    apply_pricing_if_available(&mut msg, pricing);
+                }
+                msg
+            })
+            .collect();
+        all_messages.extend(hermes_messages);
+    }
+
     for source in &scan_result.crush_dbs {
         let crush_messages: Vec<UnifiedMessage> =
             sessions::crush::parse_crush_sqlite(&source.db_path)
@@ -1609,6 +1622,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let count = summed_parsed_message_count(&kilo_msgs);
         counts.set(ClientId::Kilo, count);
         messages.extend(kilo_msgs);
+        count
+    } else {
+        0
+    };
+
+    let _hermes_count: i32 = if let Some(db_path) = &scan_result.hermes_db {
+        let hermes_msgs: Vec<ParsedMessage> = sessions::hermes::parse_hermes_sqlite(db_path)
+            .into_iter()
+            .map(|msg| unified_to_parsed(&msg))
+            .collect();
+        let count = summed_parsed_message_count(&hermes_msgs);
+        counts.set(ClientId::Hermes, count);
+        messages.extend(hermes_msgs);
         count
     } else {
         0

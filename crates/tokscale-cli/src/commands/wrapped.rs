@@ -1357,6 +1357,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "amp" => Some("Amp"),
         "droid" => Some("Droid"),
         "openclaw" => Some("OpenClaw"),
+        "hermes" => Some("Hermes Agent"),
         "pi" => Some("Pi"),
         "kimi" => Some("Kimi CLI"),
         "qwen" => Some("Qwen CLI"),
@@ -1380,6 +1381,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
         "Droid" => Some("https://tokscale.ai/assets/logos/droid.png"),
         "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
+        "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
         "Pi" => Some("https://tokscale.ai/assets/logos/pi.png"),
         "Kimi CLI" => Some("https://tokscale.ai/assets/logos/kimi.png"),
         "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
@@ -1732,6 +1734,7 @@ fn default_clients() -> Vec<String> {
         "amp".to_string(),
         "droid".to_string(),
         "openclaw".to_string(),
+        "hermes".to_string(),
         "pi".to_string(),
     ]
 }
@@ -2187,6 +2190,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_hermes() {
+        assert_eq!(client_display_name("hermes"), Some("Hermes Agent"));
+    }
+
+    #[test]
     fn test_client_display_name_pi() {
         assert_eq!(client_display_name("pi"), Some("Pi"));
     }
@@ -2271,6 +2279,14 @@ mod tests {
         assert_eq!(
             client_logo_url("OpenClaw"),
             Some("https://tokscale.ai/assets/logos/openclaw.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_hermes() {
+        assert_eq!(
+            client_logo_url("Hermes Agent"),
+            Some("https://tokscale.ai/assets/logos/hermes.png")
         );
     }
 

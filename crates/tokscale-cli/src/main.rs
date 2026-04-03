@@ -63,6 +63,9 @@ struct Cli {
     #[arg(long, help = "Show only OpenClaw usage")]
     openclaw: bool,
 
+    #[arg(long, help = "Show only Hermes Agent usage")]
+    hermes: bool,
+
     #[arg(long, help = "Show only Pi usage")]
     pi: bool,
 
@@ -155,6 +158,9 @@ enum Commands {
         droid: bool,
         #[arg(long, help = "Show only OpenClaw usage")]
         openclaw: bool,
+
+        #[arg(long, help = "Show only Hermes Agent usage")]
+        hermes: bool,
         #[arg(long, help = "Show only Pi usage")]
         pi: bool,
         #[arg(long, help = "Show only Kimi CLI usage")]
@@ -219,6 +225,9 @@ enum Commands {
         droid: bool,
         #[arg(long, help = "Show only OpenClaw usage")]
         openclaw: bool,
+
+        #[arg(long, help = "Show only Hermes Agent usage")]
+        hermes: bool,
         #[arg(long, help = "Show only Pi usage")]
         pi: bool,
         #[arg(long, help = "Show only Kimi CLI usage")]
@@ -295,6 +304,9 @@ enum Commands {
         droid: bool,
         #[arg(long, help = "Show only OpenClaw usage")]
         openclaw: bool,
+
+        #[arg(long, help = "Show only Hermes Agent usage")]
+        hermes: bool,
         #[arg(long, help = "Show only Pi usage")]
         pi: bool,
         #[arg(long, help = "Show only Kimi CLI usage")]
@@ -348,6 +360,9 @@ enum Commands {
         droid: bool,
         #[arg(long, help = "Show only OpenClaw usage")]
         openclaw: bool,
+
+        #[arg(long, help = "Show only Hermes Agent usage")]
+        hermes: bool,
         #[arg(long, help = "Show only Pi usage")]
         pi: bool,
         #[arg(long, help = "Show only Kimi CLI usage")]
@@ -397,6 +412,8 @@ enum Commands {
         droid: bool,
         #[arg(long, help = "Include only OpenClaw data")]
         openclaw: bool,
+        #[arg(long, help = "Include only Hermes Agent data")]
+        hermes: bool,
         #[arg(long, help = "Include only Pi data")]
         pi: bool,
         #[arg(long, help = "Include only Kimi CLI data")]
@@ -468,6 +485,9 @@ enum Commands {
         droid: bool,
         #[arg(long, help = "Show only OpenClaw usage")]
         openclaw: bool,
+
+        #[arg(long, help = "Show only Hermes Agent usage")]
+        hermes: bool,
         #[arg(long, help = "Show only Pi usage")]
         pi: bool,
         #[arg(long, help = "Show only Kimi CLI usage")]
@@ -564,6 +584,7 @@ fn main() -> Result<()> {
             amp,
             droid,
             openclaw,
+            hermes,
             pi,
             kimi,
             qwen,
@@ -598,6 +619,7 @@ fn main() -> Result<()> {
                 amp,
                 droid,
                 openclaw,
+                hermes,
                 pi,
                 kimi,
                 qwen,
@@ -650,6 +672,7 @@ fn main() -> Result<()> {
             amp,
             droid,
             openclaw,
+            hermes,
             pi,
             kimi,
             qwen,
@@ -677,6 +700,7 @@ fn main() -> Result<()> {
                 amp,
                 droid,
                 openclaw,
+                hermes,
                 pi,
                 kimi,
                 qwen,
@@ -752,6 +776,7 @@ fn main() -> Result<()> {
             amp,
             droid,
             openclaw,
+            hermes,
             pi,
             kimi,
             qwen,
@@ -779,6 +804,7 @@ fn main() -> Result<()> {
                 amp,
                 droid,
                 openclaw,
+                hermes,
                 pi,
                 kimi,
                 qwen,
@@ -811,6 +837,7 @@ fn main() -> Result<()> {
             amp,
             droid,
             openclaw,
+            hermes,
             pi,
             kimi,
             qwen,
@@ -837,6 +864,7 @@ fn main() -> Result<()> {
                 amp,
                 droid,
                 openclaw,
+                hermes,
                 pi,
                 kimi,
                 qwen,
@@ -869,6 +897,7 @@ fn main() -> Result<()> {
             amp,
             droid,
             openclaw,
+            hermes,
             pi,
             kimi,
             qwen,
@@ -896,6 +925,7 @@ fn main() -> Result<()> {
                 amp,
                 droid,
                 openclaw,
+                hermes,
                 pi,
                 kimi,
                 qwen,
@@ -931,6 +961,7 @@ fn main() -> Result<()> {
             amp,
             droid,
             openclaw,
+            hermes,
             pi,
             kimi,
             qwen,
@@ -956,6 +987,7 @@ fn main() -> Result<()> {
                 amp,
                 droid,
                 openclaw,
+                hermes,
                 pi,
                 kimi,
                 qwen,
@@ -994,6 +1026,7 @@ fn main() -> Result<()> {
                 amp: cli.amp,
                 droid: cli.droid,
                 openclaw: cli.openclaw,
+                hermes: cli.hermes,
                 pi: cli.pi,
                 kimi: cli.kimi,
                 qwen: cli.qwen,
@@ -1068,6 +1101,7 @@ struct ClientFlags {
     amp: bool,
     droid: bool,
     openclaw: bool,
+    hermes: bool,
     pi: bool,
     kimi: bool,
     qwen: bool,
@@ -1091,6 +1125,7 @@ fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
         (ClientId::Amp, flags.amp),
         (ClientId::Droid, flags.droid),
         (ClientId::OpenClaw, flags.openclaw),
+        (ClientId::Hermes, flags.hermes),
         (ClientId::Pi, flags.pi),
         (ClientId::Kimi, flags.kimi),
         (ClientId::Qwen, flags.qwen),
@@ -3915,6 +3950,7 @@ mod tests {
             amp: false,
             droid: false,
             openclaw: false,
+            hermes: false,
             pi: false,
             kimi: false,
             qwen: false,
@@ -3939,6 +3975,7 @@ mod tests {
             amp: false,
             droid: false,
             openclaw: false,
+            hermes: false,
             pi: false,
             kimi: false,
             qwen: false,
@@ -3966,6 +4003,7 @@ mod tests {
             amp: false,
             droid: false,
             openclaw: false,
+            hermes: false,
             pi: true,
             kimi: false,
             qwen: false,
@@ -3997,6 +4035,7 @@ mod tests {
             amp: false,
             droid: false,
             openclaw: false,
+            hermes: false,
             pi: false,
             kimi: false,
             qwen: false,
@@ -4024,6 +4063,7 @@ mod tests {
             amp: true,
             droid: true,
             openclaw: true,
+            hermes: true,
             pi: true,
             kimi: true,
             qwen: true,
@@ -4037,7 +4077,7 @@ mod tests {
         let result = build_client_filter(flags);
         assert!(result.is_some());
         let sources = result.unwrap();
-        assert_eq!(sources.len(), 17);
+        assert_eq!(sources.len(), 18);
         assert!(sources.contains(&"opencode".to_string()));
         assert!(sources.contains(&"claude".to_string()));
         assert!(sources.contains(&"codex".to_string()));
@@ -4046,6 +4086,7 @@ mod tests {
         assert!(sources.contains(&"amp".to_string()));
         assert!(sources.contains(&"droid".to_string()));
         assert!(sources.contains(&"openclaw".to_string()));
+        assert!(sources.contains(&"hermes".to_string()));
         assert!(sources.contains(&"pi".to_string()));
         assert!(sources.contains(&"kimi".to_string()));
         assert!(sources.contains(&"qwen".to_string()));

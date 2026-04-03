@@ -28,6 +28,7 @@ const SUPPORTED_SOURCES = [
   "amp",
   "droid",
   "openclaw",
+  "hermes",
   "pi",
   "kimi",
   "qwen",

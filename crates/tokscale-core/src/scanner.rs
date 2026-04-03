@@ -26,6 +26,7 @@ pub struct ScanResult {
     pub opencode_db: Option<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
+    pub hermes_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
@@ -38,6 +39,7 @@ impl Default for ScanResult {
             opencode_db: None,
             synthetic_db: None,
             kilo_db: None,
+            hermes_db: None,
             crush_dbs: Vec::new(),
             opencode_json_dir: None,
         }
@@ -273,10 +275,13 @@ fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource>
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
-    // rather than consuming scanned file lists, KiloCode uses dedicated local
+    // Kilo CLI and Hermes use SQLite database paths, Roo/KiloCode require local + remote
     // and server task roots, and Crush discovers SQLite DBs via the project
     // registry rather than scanned file paths.
-    !matches!(client_id, ClientId::Kilo | ClientId::Crush)
+    !matches!(
+        client_id,
+        ClientId::Kilo | ClientId::Crush | ClientId::Hermes
+    )
 }
 
 /// Scan all session client directories in parallel
@@ -313,6 +318,7 @@ pub fn scan_all_clients_with_env_strategy(
                 | ClientId::RooCode
                 | ClientId::KiloCode
                 | ClientId::Kilo
+                | ClientId::Hermes
                 | ClientId::Crush
         ) {
             continue;
@@ -480,6 +486,15 @@ pub fn scan_all_clients_with_env_strategy(
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&kilo_db_path).exists() {
             result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        }
+    }
+
+    if enabled.contains(&ClientId::Hermes) {
+        let hermes_db_path = ClientId::Hermes
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        if std::path::Path::new(&hermes_db_path).exists() {
+            result.hermes_db = Some(PathBuf::from(hermes_db_path));
         }
     }
 
