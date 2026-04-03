@@ -1040,12 +1040,6 @@ Cursor data is fetched from the Cursor API using your session token and cached l
 
 Location: `~/.openclaw/agents/*/sessions/sessions.json` (also scans legacy paths: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`)
 
-### Hermes Agent
-
-Location: `$HERMES_HOME/state.db` (fallback: `~/.hermes/state.db`)
-
-Hermes stores session-level usage in a SQLite `sessions` table. Tokscale imports rows where `model` is present and token or cost totals are non-zero, uses `started_at` as the timestamp, preserves `message_count`, and prefers `actual_cost_usd` over `estimated_cost_usd`.
-
 Index file pointing to JSONL session files:
 ```json
 {
@@ -1061,6 +1055,12 @@ Session JSONL format with model_change events and assistant messages:
 {"type":"model_change","provider":"openai-codex","modelId":"gpt-5.2"}
 {"type":"message","message":{"role":"assistant","usage":{"input":1660,"output":55,"cacheRead":108928,"cost":{"total":0.02}},"timestamp":1769753935279}}
 ```
+
+### Hermes Agent
+
+Location: `$HERMES_HOME/state.db` (fallback: `~/.hermes/state.db`)
+
+Hermes stores session-level usage in a SQLite `sessions` table. Tokscale imports rows where `model` is present and token or cost totals are non-zero, uses `started_at` as the timestamp, preserves `message_count`, and prefers `actual_cost_usd` over `estimated_cost_usd`.
 
 ### Pi
 

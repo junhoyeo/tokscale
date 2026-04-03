@@ -8,6 +8,7 @@ use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
 use std::path::Path;
+use tracing::warn;
 
 fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
     if timestamp > 1e12 {
@@ -20,9 +21,7 @@ fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
 fn resolved_provider(billing_provider: Option<String>, model_id: &str) -> String {
     billing_provider
         .filter(|provider| !provider.trim().is_empty())
-        .and_then(|provider| {
-            provider_identity::canonical_provider(&provider).or(Some(provider.trim().to_string()))
-        })
+        .and_then(|provider| provider_identity::canonical_provider(provider.trim()))
         .or_else(|| provider_identity::inferred_provider_from_model(model_id).map(str::to_string))
         .unwrap_or_else(|| "hermes".to_string())
 }
@@ -33,7 +32,14 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to open Hermes state database"
+            );
+            return Vec::new();
+        }
     };
 
     let query = r#"
@@ -65,7 +71,14 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 
     let mut stmt = match conn.prepare(query) {
         Ok(s) => s,
-        Err(_) => return Vec::new(),
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to prepare Hermes session query"
+            );
+            return Vec::new();
+        }
     };
 
     let rows = match stmt.query_map([], |row| {
@@ -85,45 +98,62 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         ))
     }) {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to execute Hermes session query"
+            );
+            return Vec::new();
+        }
     };
 
-    rows.flatten()
-        .map(
-            |(
-                session_id,
+    rows.filter_map(|row| match row {
+        Ok(row) => Some(row),
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to decode Hermes session row"
+            );
+            None
+        }
+    })
+    .map(
+        |(
+            session_id,
+            model_id,
+            billing_provider,
+            started_at,
+            message_count,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+            estimated_cost,
+            actual_cost,
+        )| {
+            let provider = resolved_provider(billing_provider, &model_id);
+            let mut msg = UnifiedMessage::new(
+                "hermes",
                 model_id,
-                billing_provider,
-                started_at,
-                message_count,
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning,
-                estimated_cost,
-                actual_cost,
-            )| {
-                let provider = resolved_provider(billing_provider, &model_id);
-                let mut msg = UnifiedMessage::new(
-                    "hermes",
-                    model_id,
-                    provider,
-                    session_id.clone(),
-                    timestamp_secs_to_ms(started_at),
-                    TokenBreakdown {
-                        input: input.max(0),
-                        output: output.max(0),
-                        cache_read: cache_read.max(0),
-                        cache_write: cache_write.max(0),
-                        reasoning: reasoning.max(0),
-                    },
-                    actual_cost.or(estimated_cost).unwrap_or(0.0).max(0.0),
-                );
-                msg.message_count = message_count.max(0);
-                msg.dedup_key = Some(session_id);
-                msg
-            },
-        )
-        .collect()
+                provider,
+                session_id.clone(),
+                timestamp_secs_to_ms(started_at),
+                TokenBreakdown {
+                    input: input.max(0),
+                    output: output.max(0),
+                    cache_read: cache_read.max(0),
+                    cache_write: cache_write.max(0),
+                    reasoning: reasoning.max(0),
+                },
+                actual_cost.or(estimated_cost).unwrap_or(0.0).max(0.0),
+            );
+            msg.message_count = message_count.max(0);
+            msg.dedup_key = Some(session_id);
+            msg
+        },
+    )
+    .collect()
 }

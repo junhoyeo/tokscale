@@ -2216,6 +2216,12 @@ mod tests {
         assert_eq!(client_display_name("Claude"), None); // case-sensitive
     }
 
+    #[test]
+    fn test_default_clients_includes_hermes() {
+        let clients = default_clients();
+        assert!(clients.iter().any(|client| client == "hermes"));
+    }
+
     // ========== client_logo_url tests ==========
 
     #[test]

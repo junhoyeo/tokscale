@@ -4077,7 +4077,8 @@ mod tests {
         let result = build_client_filter(flags);
         assert!(result.is_some());
         let sources = result.unwrap();
-        assert_eq!(sources.len(), 18);
+        let expected_len = tokscale_core::ClientId::iter().count() + 1; // synthetic is not in ClientId
+        assert_eq!(sources.len(), expected_len);
         assert!(sources.contains(&"opencode".to_string()));
         assert!(sources.contains(&"claude".to_string()));
         assert!(sources.contains(&"codex".to_string()));

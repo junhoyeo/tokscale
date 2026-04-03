@@ -1627,7 +1627,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         0
     };
 
-    let _hermes_count: i32 = if let Some(db_path) = &scan_result.hermes_db {
+    if let Some(db_path) = &scan_result.hermes_db {
         let hermes_msgs: Vec<ParsedMessage> = sessions::hermes::parse_hermes_sqlite(db_path)
             .into_iter()
             .map(|msg| unified_to_parsed(&msg))
@@ -1635,10 +1635,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let count = summed_parsed_message_count(&hermes_msgs);
         counts.set(ClientId::Hermes, count);
         messages.extend(hermes_msgs);
-        count
-    } else {
-        0
-    };
+    }
 
     let crush_msgs: Vec<ParsedMessage> = scan_result
         .crush_dbs

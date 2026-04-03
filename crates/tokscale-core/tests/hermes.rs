@@ -173,3 +173,40 @@ fn test_parse_hermes_sqlite_skips_empty_sessions_and_falls_back_to_estimated_cos
     assert_eq!(msg.cost, 1.25);
     assert_eq!(msg.message_count, 3);
 }
+
+#[test]
+fn test_parse_hermes_sqlite_ignores_unknown_billing_provider_and_falls_back_to_model_inference() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        r#"
+        INSERT INTO sessions (
+            id, source, model, started_at, message_count,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            billing_provider, estimated_cost_usd, actual_cost_usd
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            "session-unknown-provider",
+            "cli",
+            "gpt-5.4",
+            1_775_001_105.0_f64,
+            2_i64,
+            100_i64,
+            20_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+            Some("unknown".to_string()),
+            0.5_f64,
+            Option::<f64>::None,
+        ],
+    )
+    .unwrap();
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].provider_id, "openai");
+}
