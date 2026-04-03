@@ -2475,6 +2475,7 @@ fn capitalize_client(client: &str) -> String {
         "droid" => "Droid".to_string(),
         "crush" => "Crush".to_string(),
         "openclaw" => "openclaw".to_string(),
+        "hermes" => "Hermes Agent".to_string(),
         "pi" => "Pi".to_string(),
         other => other.to_string(),
     }
@@ -4306,6 +4307,11 @@ mod tests {
     #[test]
     fn test_capitalize_client_openclaw() {
         assert_eq!(capitalize_client("openclaw"), "openclaw");
+    }
+
+    #[test]
+    fn test_capitalize_client_hermes() {
+        assert_eq!(capitalize_client("hermes"), "Hermes Agent");
     }
 
     #[test]
