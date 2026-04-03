@@ -136,6 +136,13 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(data.contributions[0].clients[0].client).toBe('kilo');
     });
 
+    it('should support hermes client in submission payload', () => {
+      const data = createMockSubmissionData({ clients: ['hermes'] });
+
+      expect(data.summary.clients).toContain('hermes');
+      expect(data.contributions[0].clients[0].client).toBe('hermes');
+    });
+
     it('should pass validation for kilo client submissions', () => {
       const payload = {
         meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
