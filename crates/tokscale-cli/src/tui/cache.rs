@@ -110,6 +110,8 @@ struct CachedDailyModelInfo {
     color_key: String,
     tokens: CachedTokenBreakdown,
     cost: f64,
+    #[serde(default)]
+    messages: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +238,7 @@ impl From<&DailyModelInfo> for CachedDailyModelInfo {
             color_key: d.color_key.clone(),
             tokens: (&d.tokens).into(),
             cost: d.cost,
+            messages: d.messages,
         }
     }
 }
@@ -261,6 +264,7 @@ fn daily_model_info_from_cached(key: &str, value: CachedDailyModelInfo) -> Daily
         color_key,
         tokens: value.tokens.into(),
         cost: value.cost,
+        messages: value.messages,
     }
 }
 
@@ -1035,6 +1039,87 @@ mod tests {
             }
             other => panic!(
                 "expected fresh current-schema cache, got {:?}",
+                other_variant_name(&other)
+            ),
+        }
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_legacy_empty_client_falls_back_to_unknown() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 3,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [{
+      "date": "2026-03-18",
+      "tokens": {
+        "input": 10,
+        "output": 5,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0
+      },
+      "cost": 1.25,
+      "models": [[
+        "claude-sonnet-4-5",
+        {
+          "client": "",
+          "tokens": {
+            "input": 10,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 1.25
+        }
+      ]]
+    }],
+    "graph": null,
+    "totalTokens": 15,
+    "totalCost": 1.25,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_clients(&[ClientId::Claude]);
+        match load_cache(&clients, false, &GroupBy::Model) {
+            CacheResult::Stale(data) => {
+                assert!(
+                    data.daily[0].source_breakdown.contains_key("unknown"),
+                    "empty client should fall back to 'unknown'"
+                );
+                let unknown = data.daily[0].source_breakdown.get("unknown").unwrap();
+                assert_eq!(unknown.models.len(), 1);
+                let model = unknown.models.get("claude-sonnet-4-5").unwrap();
+                assert_eq!(model.tokens.total(), 15);
+            }
+            other => panic!(
+                "expected stale legacy cache, got {:?}",
                 other_variant_name(&other)
             ),
         }

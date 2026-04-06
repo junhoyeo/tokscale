@@ -87,11 +87,11 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             let date = d.date.format("%m/%d").to_string();
             let total = d.tokens.total();
 
-            let mut models_by_id = std::collections::BTreeMap::<String, ModelSegment>::new();
+            let mut models_by_key = std::collections::BTreeMap::<String, ModelSegment>::new();
             for source_info in d.source_breakdown.values() {
-                for info in source_info.models.values() {
-                    let entry = models_by_id
-                        .entry(info.display_name.clone())
+                for (key, info) in &source_info.models {
+                    let entry = models_by_key
+                        .entry(key.clone())
                         .or_insert_with(|| ModelSegment {
                             model_id: info.display_name.clone(),
                             tokens: 0,
@@ -100,7 +100,7 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                     entry.tokens = entry.tokens.saturating_add(info.tokens.total());
                 }
             }
-            let models: Vec<ModelSegment> = models_by_id.into_values().collect();
+            let models: Vec<ModelSegment> = models_by_key.into_values().collect();
 
             StackedBarData {
                 date,

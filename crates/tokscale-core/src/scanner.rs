@@ -426,6 +426,7 @@ pub fn scan_all_clients_with_env_strategy(
         ));
     }
 
+    // Oh My Pi fork (https://github.com/can1357/oh-my-pi) — same JSONL format, different root
     if enabled.contains(&ClientId::Pi) {
         let omp_path = format!("{}/.omp/agent/sessions", home_dir);
         tasks.push((ClientId::Pi, omp_path, ClientId::Pi.data().pattern));

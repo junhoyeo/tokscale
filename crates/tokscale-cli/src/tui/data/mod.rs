@@ -53,11 +53,19 @@ pub struct AgentUsage {
 
 #[derive(Debug, Clone)]
 pub struct DailyModelInfo {
+    /// API provider identifier (e.g. "anthropic", "openai").
+    ///
+    /// **Caveat**: For `GroupBy::Model`, `GroupBy::ClientModel`, and
+    /// `GroupBy::WorkspaceModel`, multiple providers may be merged into a
+    /// single daily model entry.  In that case this field retains whichever
+    /// provider was seen first and is **not** authoritative.  Only treat it
+    /// as exact when `group_by == GroupBy::ClientProviderModel`.
     pub provider: String,
     pub display_name: String,
     pub color_key: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    pub messages: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +522,7 @@ impl DataLoader {
                         color_key: normalized_model.clone(),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
+                        messages: 0,
                     });
 
                 model_info.tokens.input = model_info
@@ -537,6 +546,9 @@ impl DataLoader {
                     .reasoning
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
                 model_info.cost += msg_cost;
+                model_info.messages = model_info
+                    .messages
+                    .saturating_add(msg.message_count.max(0) as u64);
             }
         }
 
@@ -1357,6 +1369,12 @@ mod tests {
         assert_eq!(usage.daily.len(), 1);
         let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
         assert_eq!(claude.models.len(), 2);
+
+        // Keys must differ even though display names are identical
+        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
+        assert_eq!(daily_keys.len(), 2);
+        assert_ne!(daily_keys[0], daily_keys[1]);
+
         let display_names: Vec<_> = claude
             .models
             .values()
@@ -1369,6 +1387,72 @@ mod tests {
                 "demo / claude-sonnet-4-5".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_aggregate_messages_client_provider_model_splits_providers_in_daily_breakdown() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 10,
+                            output: 5,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        1.0,
+                    ),
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "github-copilot",
+                        "session-2",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 20,
+                            output: 10,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        2.0,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+
+        let anthropic_key = "anthropic:claude-sonnet-4-5";
+        let copilot_key = "github-copilot:claude-sonnet-4-5";
+        let anthropic_model = claude.models.get(anthropic_key).unwrap();
+        assert_eq!(
+            anthropic_model.display_name,
+            "anthropic / claude-sonnet-4-5"
+        );
+        assert_eq!(anthropic_model.provider, "anthropic");
+        assert_eq!(anthropic_model.tokens.total(), 15);
+        assert_eq!(anthropic_model.messages, 1);
+
+        let copilot_model = claude.models.get(copilot_key).unwrap();
+        assert_eq!(
+            copilot_model.display_name,
+            "github-copilot / claude-sonnet-4-5"
+        );
+        assert_eq!(copilot_model.provider, "github-copilot");
+        assert_eq!(copilot_model.tokens.total(), 30);
+        assert_eq!(copilot_model.messages, 1);
     }
 
     #[test]
