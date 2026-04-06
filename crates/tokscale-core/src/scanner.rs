@@ -426,6 +426,11 @@ pub fn scan_all_clients_with_env_strategy(
         ));
     }
 
+    if enabled.contains(&ClientId::Pi) {
+        let omp_path = format!("{}/.omp/agent/sessions", home_dir);
+        tasks.push((ClientId::Pi, omp_path, ClientId::Pi.data().pattern));
+    }
+
     if include_synthetic {
         let xdg_data = if use_env_roots {
             std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
@@ -798,6 +803,14 @@ mod tests {
         file.write_all(b"{}").unwrap();
     }
 
+    fn setup_mock_omp_dir(base: &std::path::Path) {
+        let omp_path = base.join(".omp/agent/sessions/--omp-test--");
+        fs::create_dir_all(&omp_path).unwrap();
+        let mut file =
+            File::create(omp_path.join("2026-04-06T03-04-28Z_omp_ses_001.jsonl")).unwrap();
+        file.write_all(b"{}").unwrap();
+    }
+
     fn setup_mock_kimi_dir(base: &std::path::Path) {
         let kimi_session = base.join(".kimi/sessions/group1/session-uuid-1");
         fs::create_dir_all(&kimi_session).unwrap();
@@ -964,6 +977,29 @@ mod tests {
         assert_eq!(result.get(ClientId::Pi).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_omp_scanned_as_pi() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_omp_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
+        assert_eq!(result.get(ClientId::Pi).len(), 1);
+        assert!(result.get(ClientId::Pi)[0].ends_with("2026-04-06T03-04-28Z_omp_ses_001.jsonl"));
+        assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_pi_from_both_paths() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_pi_dir(home);
+        setup_mock_omp_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
+        assert_eq!(result.get(ClientId::Pi).len(), 2);
     }
 
     #[test]
