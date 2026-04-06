@@ -53,7 +53,7 @@ pub struct AgentUsage {
 
 #[derive(Debug, Clone)]
 pub struct DailyModelInfo {
-    pub client: String,
+    pub provider: String,
     pub display_name: String,
     pub color_key: String,
     pub tokens: TokenBreakdown,
@@ -61,11 +61,18 @@ pub struct DailyModelInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct DailySourceInfo {
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub models: BTreeMap<String, DailyModelInfo>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DailyUsage {
     pub date: NaiveDate,
     pub tokens: TokenBreakdown,
     pub cost: f64,
-    pub models: BTreeMap<String, DailyModelInfo>,
+    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +138,32 @@ fn workspace_model_daily_key(workspace_group_key: &str, model: &str) -> String {
         "{}:{workspace_group_key}:{model}",
         workspace_group_key.len()
     )
+}
+
+fn daily_source_model_key(
+    group_by: &GroupBy,
+    workspace_group_key: &str,
+    provider_id: &str,
+    model: &str,
+) -> String {
+    match group_by {
+        GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
+        GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
+        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+    }
+}
+
+fn daily_source_model_display_name(
+    group_by: &GroupBy,
+    workspace_label: &str,
+    provider_id: &str,
+    model: &str,
+) -> String {
+    match group_by {
+        GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
+        GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
+        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+    }
 }
 
 impl DataLoader {
@@ -399,7 +432,7 @@ impl DataLoader {
                     date,
                     tokens: TokenBreakdown::default(),
                     cost: 0.0,
-                    models: BTreeMap::new(),
+                    source_breakdown: BTreeMap::new(),
                 });
 
                 daily_entry.tokens.input = daily_entry
@@ -429,22 +462,55 @@ impl DataLoader {
                 };
                 daily_entry.cost += msg_cost;
 
-                let daily_model_key = if *group_by == GroupBy::WorkspaceModel {
-                    workspace_model_daily_key(&workspace_group_key, &normalized_model)
-                } else {
-                    normalized_model.clone()
-                };
+                let source_entry = daily_entry
+                    .source_breakdown
+                    .entry(msg.client.clone())
+                    .or_insert_with(|| DailySourceInfo {
+                        tokens: TokenBreakdown::default(),
+                        cost: 0.0,
+                        models: BTreeMap::new(),
+                    });
 
-                let model_info = daily_entry
+                source_entry.tokens.input = source_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                source_entry.tokens.output = source_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                source_entry.tokens.cache_read = source_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                source_entry.tokens.cache_write = source_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                source_entry.tokens.reasoning = source_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                source_entry.cost += msg_cost;
+
+                let daily_model_key = daily_source_model_key(
+                    group_by,
+                    &workspace_group_key,
+                    &msg.provider_id,
+                    &normalized_model,
+                );
+
+                let model_info = source_entry
                     .models
                     .entry(daily_model_key)
                     .or_insert_with(|| DailyModelInfo {
-                        client: msg.client.clone(),
-                        display_name: if *group_by == GroupBy::WorkspaceModel {
-                            workspace_model_display_label(&workspace_label, &normalized_model)
-                        } else {
-                            normalized_model.clone()
-                        },
+                        provider: msg.provider_id.clone(),
+                        display_name: daily_source_model_display_name(
+                            group_by,
+                            &workspace_label,
+                            &msg.provider_id,
+                            &normalized_model,
+                        ),
                         color_key: normalized_model.clone(),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
@@ -470,12 +536,7 @@ impl DataLoader {
                     .tokens
                     .reasoning
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                let model_msg_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
-                    msg.cost
-                } else {
-                    0.0
-                };
-                model_info.cost += model_msg_cost;
+                model_info.cost += msg_cost;
             }
         }
 
@@ -1035,7 +1096,7 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
-            models: BTreeMap::new(),
+            source_breakdown: BTreeMap::new(),
         }];
         let graph = build_contribution_graph_for_today(&daily, today);
         let last_day = graph
@@ -1246,10 +1307,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.daily.len(), 1);
-        let daily_keys: Vec<_> = usage.daily[0].models.keys().cloned().collect();
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
         assert_eq!(daily_keys.len(), 2);
         assert_ne!(daily_keys[0], daily_keys[1]);
-        let daily_display_names: Vec<_> = usage.daily[0]
+        let daily_display_names: Vec<_> = claude
             .models
             .values()
             .map(|info| info.display_name.clone())
@@ -1293,8 +1355,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.daily.len(), 1);
-        assert_eq!(usage.daily[0].models.len(), 2);
-        let display_names: Vec<_> = usage.daily[0]
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+        let display_names: Vec<_> = claude
             .models
             .values()
             .map(|info| info.display_name.clone())
@@ -1306,6 +1369,65 @@ mod tests {
                 "demo / claude-sonnet-4-5".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_aggregate_messages_keeps_same_model_split_across_sources_in_daily_breakdown() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 10,
+                            output: 5,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        1.0,
+                    ),
+                    UnifiedMessage::new(
+                        "cursor",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 20,
+                            output: 10,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        2.0,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        assert_eq!(usage.daily[0].source_breakdown.len(), 2);
+
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.cost, 1.0);
+        assert_eq!(claude.models.len(), 1);
+        let claude_model = claude.models.get("claude-sonnet-4-5").unwrap();
+        assert_eq!(claude_model.display_name, "claude-sonnet-4-5");
+        assert_eq!(claude_model.tokens.total(), 15);
+
+        let cursor = usage.daily[0].source_breakdown.get("cursor").unwrap();
+        assert_eq!(cursor.cost, 2.0);
+        assert_eq!(cursor.models.len(), 1);
+        let cursor_model = cursor.models.get("claude-sonnet-4-5").unwrap();
+        assert_eq!(cursor_model.display_name, "claude-sonnet-4-5");
+        assert_eq!(cursor_model.tokens.total(), 30);
     }
 
     #[test]
@@ -1674,13 +1796,13 @@ after"#,
                 date: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
-                models: BTreeMap::new(),
+                source_breakdown: BTreeMap::new(),
             },
             DailyUsage {
                 date: NaiveDate::from_ymd_opt(2026, 3, 3).unwrap(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
-                models: BTreeMap::new(),
+                source_breakdown: BTreeMap::new(),
             },
         ];
         let (current, longest) = calculate_streaks_for_today(&daily, today);

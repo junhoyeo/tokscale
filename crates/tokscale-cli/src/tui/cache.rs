@@ -3,7 +3,7 @@
 //! This module provides disk-based caching for TUI data to enable instant UI display
 //! while fresh data loads in the background (matching TypeScript implementation behavior).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 use tokscale_core::{ClientId, GroupBy};
 
 use super::data::{
-    AgentUsage, ContributionDay, DailyModelInfo, DailyUsage, GraphData, ModelUsage, TokenBreakdown,
-    UsageData,
+    AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
+    ModelUsage, TokenBreakdown, UsageData,
 };
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 4;
+const CACHE_SCHEMA_VERSION: u32 = 5;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -100,7 +100,10 @@ struct CachedAgentUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedDailyModelInfo {
+    #[serde(default)]
     client: String,
+    #[serde(default)]
+    provider: String,
     #[serde(default)]
     display_name: String,
     #[serde(default)]
@@ -111,11 +114,22 @@ struct CachedDailyModelInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CachedDailySourceInfo {
+    tokens: CachedTokenBreakdown,
+    cost: f64,
+    models: Vec<(String, CachedDailyModelInfo)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CachedDailyUsage {
     date: String, // NaiveDate serialized as string
     tokens: CachedTokenBreakdown,
     cost: f64,
-    models: Vec<(String, CachedDailyModelInfo)>, // HashMap as vec of tuples
+    #[serde(default)]
+    models: Vec<(String, CachedDailyModelInfo)>,
+    #[serde(default)]
+    source_breakdown: Vec<(String, CachedDailySourceInfo)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,7 +230,8 @@ impl From<CachedAgentUsage> for AgentUsage {
 impl From<&DailyModelInfo> for CachedDailyModelInfo {
     fn from(d: &DailyModelInfo) -> Self {
         Self {
-            client: d.client.clone(),
+            client: String::new(),
+            provider: d.provider.clone(),
             display_name: d.display_name.clone(),
             color_key: d.color_key.clone(),
             tokens: (&d.tokens).into(),
@@ -225,14 +240,57 @@ impl From<&DailyModelInfo> for CachedDailyModelInfo {
     }
 }
 
-impl From<CachedDailyModelInfo> for DailyModelInfo {
-    fn from(d: CachedDailyModelInfo) -> Self {
+fn daily_model_info_from_cached(key: &str, value: CachedDailyModelInfo) -> DailyModelInfo {
+    let display_name = if value.display_name.is_empty() {
+        key.to_string()
+    } else {
+        value.display_name
+    };
+    let color_key = if value.color_key.is_empty() {
+        display_name
+            .rsplit_once(" / ")
+            .map(|(_, base_model)| base_model.to_string())
+            .unwrap_or_else(|| display_name.clone())
+    } else {
+        value.color_key
+    };
+
+    DailyModelInfo {
+        provider: value.provider,
+        display_name,
+        color_key,
+        tokens: value.tokens.into(),
+        cost: value.cost,
+    }
+}
+
+impl From<&DailySourceInfo> for CachedDailySourceInfo {
+    fn from(source: &DailySourceInfo) -> Self {
         Self {
-            client: d.client,
-            display_name: d.display_name,
-            color_key: d.color_key,
-            tokens: d.tokens.into(),
-            cost: d.cost,
+            tokens: (&source.tokens).into(),
+            cost: source.cost,
+            models: source
+                .models
+                .iter()
+                .map(|(key, value)| (key.clone(), value.into()))
+                .collect(),
+        }
+    }
+}
+
+impl From<CachedDailySourceInfo> for DailySourceInfo {
+    fn from(source: CachedDailySourceInfo) -> Self {
+        Self {
+            tokens: source.tokens.into(),
+            cost: source.cost,
+            models: source
+                .models
+                .into_iter()
+                .map(|(key, value)| {
+                    let model_info = daily_model_info_from_cached(&key, value);
+                    (key, model_info)
+                })
+                .collect(),
         }
     }
 }
@@ -243,10 +301,11 @@ impl From<&DailyUsage> for CachedDailyUsage {
             date: d.date.to_string(),
             tokens: (&d.tokens).into(),
             cost: d.cost,
-            models: d
-                .models
+            models: Vec::new(),
+            source_breakdown: d
+                .source_breakdown
                 .iter()
-                .map(|(k, v)| (k.clone(), v.into()))
+                .map(|(key, value)| (key.clone(), value.into()))
                 .collect(),
         }
     }
@@ -257,39 +316,56 @@ impl TryFrom<CachedDailyUsage> for DailyUsage {
 
     fn try_from(d: CachedDailyUsage) -> Result<Self, Self::Error> {
         use chrono::NaiveDate;
+
+        let source_breakdown = if d.source_breakdown.is_empty() {
+            let mut legacy_sources: BTreeMap<String, DailySourceInfo> = BTreeMap::new();
+            for (key, value) in d.models {
+                let client = if value.client.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    value.client.clone()
+                };
+                let model_info = daily_model_info_from_cached(&key, value);
+                let source = legacy_sources
+                    .entry(client)
+                    .or_insert_with(|| DailySourceInfo {
+                        tokens: TokenBreakdown::default(),
+                        cost: 0.0,
+                        models: BTreeMap::new(),
+                    });
+                source.tokens.input = source.tokens.input.saturating_add(model_info.tokens.input);
+                source.tokens.output = source
+                    .tokens
+                    .output
+                    .saturating_add(model_info.tokens.output);
+                source.tokens.cache_read = source
+                    .tokens
+                    .cache_read
+                    .saturating_add(model_info.tokens.cache_read);
+                source.tokens.cache_write = source
+                    .tokens
+                    .cache_write
+                    .saturating_add(model_info.tokens.cache_write);
+                source.tokens.reasoning = source
+                    .tokens
+                    .reasoning
+                    .saturating_add(model_info.tokens.reasoning);
+                source.cost += model_info.cost;
+                source.models.insert(key, model_info);
+            }
+            legacy_sources
+        } else {
+            d.source_breakdown
+                .into_iter()
+                .map(|(key, value)| (key, value.into()))
+                .collect()
+        };
+
         Ok(Self {
             date: NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")?,
             tokens: d.tokens.into(),
             cost: d.cost,
-            models: d
-                .models
-                .into_iter()
-                .map(|(key, value)| {
-                    let display_name = if value.display_name.is_empty() {
-                        key.clone()
-                    } else {
-                        value.display_name.clone()
-                    };
-                    let color_key = if value.color_key.is_empty() {
-                        display_name
-                            .rsplit_once(" / ")
-                            .map(|(_, base_model)| base_model.to_string())
-                            .unwrap_or_else(|| display_name.clone())
-                    } else {
-                        value.color_key.clone()
-                    };
-                    (
-                        key,
-                        DailyModelInfo {
-                            client: value.client,
-                            display_name,
-                            color_key,
-                            tokens: value.tokens.into(),
-                            cost: value.cost,
-                        },
-                    )
-                })
-                .collect(),
+            source_breakdown,
         })
     }
 }
@@ -831,12 +907,134 @@ mod tests {
         let clients = make_clients(&[ClientId::Claude]);
         match load_cache(&clients, false, &GroupBy::Model) {
             CacheResult::Stale(data) => {
-                let daily_model = data.daily[0].models.get("claude-sonnet-4-5").unwrap();
+                let source = data.daily[0].source_breakdown.get("claude").unwrap();
+                let daily_model = source.models.get("claude-sonnet-4-5").unwrap();
                 assert_eq!(daily_model.display_name, "claude-sonnet-4-5");
                 assert_eq!(daily_model.color_key, "claude-sonnet-4-5");
             }
             other => panic!(
                 "expected stale legacy cache, got {:?}",
+                other_variant_name(&other)
+            ),
+        }
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_reads_source_breakdown_from_current_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 5,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude", "cursor"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [{
+      "date": "2026-03-18",
+      "tokens": {
+        "input": 30,
+        "output": 15,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0
+      },
+      "cost": 3.25,
+      "sourceBreakdown": [[
+        "claude",
+        {
+          "tokens": {
+            "input": 10,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 1.25,
+          "models": [[
+            "claude-sonnet-4-5",
+            {
+              "provider": "anthropic",
+              "displayName": "claude-sonnet-4-5",
+              "colorKey": "claude-sonnet-4-5",
+              "tokens": {
+                "input": 10,
+                "output": 5,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "reasoning": 0
+              },
+              "cost": 1.25
+            }
+          ]]
+        }
+      ], [
+        "cursor",
+        {
+          "tokens": {
+            "input": 20,
+            "output": 10,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 2.0,
+          "models": [[
+            "claude-sonnet-4-5",
+            {
+              "provider": "anthropic",
+              "displayName": "claude-sonnet-4-5",
+              "colorKey": "claude-sonnet-4-5",
+              "tokens": {
+                "input": 20,
+                "output": 10,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "reasoning": 0
+              },
+              "cost": 2.0
+            }
+          ]]
+        }
+      ]]
+    }],
+    "graph": null,
+    "totalTokens": 45,
+    "totalCost": 3.25,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_clients(&[ClientId::Claude, ClientId::Cursor]);
+        match load_cache(&clients, false, &GroupBy::Model) {
+            CacheResult::Fresh(data) => {
+                assert_eq!(data.daily[0].source_breakdown.len(), 2);
+                let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
+                let model = cursor.models.get("claude-sonnet-4-5").unwrap();
+                assert_eq!(model.provider, "anthropic");
+                assert_eq!(model.tokens.total(), 30);
+            }
+            other => panic!(
+                "expected fresh current-schema cache, got {:?}",
                 other_variant_name(&other)
             ),
         }
