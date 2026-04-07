@@ -3,7 +3,7 @@
 **Status:** Draft
 **Author:** (pending)
 **Date:** 2026-04-08
-**Scope:** `crates/tokscale-core/src/sessions/claudecode.rs`, scanner tweaks, Agents tab messaging
+**Scope:** `crates/tokscale-core/src/sessions/claudecode.rs`, Agents tab messaging (see §7 for the full file-touch list — the scanner is intentionally left unchanged because `WalkDir` already picks up sidechain files)
 
 ---
 
