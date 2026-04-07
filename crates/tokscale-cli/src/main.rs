@@ -1454,6 +1454,7 @@ fn run_models_report(
                 until,
                 year,
                 group_by: group_by.clone(),
+                scanner_settings: tui::settings::load_scanner_settings(),
             })
             .await
         })
@@ -1968,6 +1969,7 @@ fn run_monthly_report(
                 until,
                 year,
                 group_by: GroupBy::default(),
+                scanner_settings: tui::settings::load_scanner_settings(),
             })
             .await
         })
@@ -2499,6 +2501,7 @@ fn run_clients_command(json: bool) -> Result<()> {
         since: None,
         until: None,
         year: None,
+        scanner_settings: tui::settings::load_scanner_settings(),
     })
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -3285,6 +3288,7 @@ fn run_graph_command(
                 until,
                 year,
                 group_by: GroupBy::default(),
+                scanner_settings: tui::settings::load_scanner_settings(),
             })
             .await
         })
@@ -3469,6 +3473,7 @@ fn run_submit_command(
                 until,
                 year,
                 group_by: GroupBy::default(),
+                scanner_settings: tui::settings::load_scanner_settings(),
             })
             .await
         })

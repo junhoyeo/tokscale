@@ -170,7 +170,7 @@ impl std::fmt::Debug for ParsedMessages {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LocalParseOptions {
     pub home_dir: Option<String>,
     pub use_env_roots: bool,
@@ -178,6 +178,9 @@ pub struct LocalParseOptions {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+    /// Persistent scanner config loaded from `~/.config/tokscale/settings.json`.
+    /// Defaults to empty when callers don't care about user-configured paths.
+    pub scanner_settings: scanner::ScannerSettings,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -244,7 +247,7 @@ pub struct GraphResult {
     pub contributions: Vec<DailyContribution>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReportOptions {
     pub home_dir: Option<String>,
     pub use_env_roots: bool,
@@ -253,6 +256,9 @@ pub struct ReportOptions {
     pub until: Option<String>,
     pub year: Option<String>,
     pub group_by: GroupBy,
+    /// Persistent scanner config loaded from `~/.config/tokscale/settings.json`.
+    /// Defaults to empty when callers don't care about user-configured paths.
+    pub scanner_settings: scanner::ScannerSettings,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -322,7 +328,13 @@ fn parse_all_messages_with_pricing(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
 ) -> Vec<UnifiedMessage> {
-    parse_all_messages_with_pricing_with_env_strategy(home_dir, clients, pricing, true)
+    parse_all_messages_with_pricing_with_env_strategy(
+        home_dir,
+        clients,
+        pricing,
+        true,
+        &scanner::ScannerSettings::default(),
+    )
 }
 
 fn parse_all_messages_with_pricing_with_env_strategy(
@@ -330,6 +342,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
     use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
 ) -> Vec<UnifiedMessage> {
     #[derive(Debug)]
     struct CachedParseOutcome {
@@ -609,7 +622,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         parse_full_log_source(path, pricing, is_headless)
     }
 
-    let scan_result = scanner::scan_all_clients_with_env_strategy(home_dir, clients, use_env_roots);
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        home_dir,
+        clients,
+        use_env_roots,
+        scanner_settings,
+    );
     let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
     let mut source_cache = message_cache::SourceMessageCache::load();
     source_cache.prune_missing_files();
@@ -1113,6 +1131,7 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         &clients,
         pricing.as_deref(),
         options.use_env_roots,
+        &options.scanner_settings,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
@@ -1168,6 +1187,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         &clients,
         pricing.as_deref(),
         options.use_env_roots,
+        &options.scanner_settings,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
@@ -1241,6 +1261,7 @@ async fn generate_graph_with_loaded_pricing(
         &clients,
         pricing,
         options.use_env_roots,
+        &options.scanner_settings,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
@@ -1378,6 +1399,7 @@ fn parse_local_unified_messages_resolved(
         clients,
         pricing,
         options.use_env_roots,
+        &options.scanner_settings,
     );
     Ok(filter_unified_messages(messages, &options))
 }
@@ -1811,9 +1833,9 @@ mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, message_cache,
         normalize_model_for_grouping, parse_all_messages_with_pricing, parse_local_clients,
-        parsed_to_unified, pricing, retain_for_requested_clients, select_local_parse_pricing,
-        unified_to_parsed, ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
-        UNKNOWN_WORKSPACE_LABEL,
+        parsed_to_unified, pricing, retain_for_requested_clients, scanner,
+        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
+        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -3346,6 +3368,7 @@ mod tests {
             since: None,
             until: None,
             year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
         })
         .unwrap();
 
@@ -3406,6 +3429,7 @@ mod tests {
             since: None,
             until: None,
             year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
         })
         .unwrap();
 

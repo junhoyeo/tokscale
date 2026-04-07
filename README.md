@@ -984,6 +984,21 @@ OpenCode 1.2+ stores sessions in SQLite. Tokscale reads from SQLite first and fa
 
 OpenCode picks the db filename from the release channel the binary was built against: the `latest` and `beta` channels use `opencode.db`, while other channels use `opencode-<channel>.db` (e.g. `opencode-stable.db`, `opencode-nightly.db`). Tokscale scans all of them, so users running multiple channels side by side get a unified view.
 
+If you launched opencode with `OPENCODE_DB` pointing at a file outside `~/.local/share/opencode`, add the absolute path to `~/.config/tokscale/settings.json` so tokscale can find it on every run:
+
+```json
+{
+  "scanner": {
+    "opencodeDbPaths": [
+      "/custom/location/opencode.db",
+      "/another/location/opencode-stable.db"
+    ]
+  }
+}
+```
+
+Paths are merged with auto-discovery, deduped by canonical path, and non-existent entries are silently skipped (so stale config never breaks a scan). `opencode.db-wal`, `opencode.db-shm`, and other SQLite sidecars are rejected.
+
 Each message contains:
 ```json
 {

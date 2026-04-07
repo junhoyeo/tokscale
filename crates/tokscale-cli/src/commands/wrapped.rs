@@ -222,6 +222,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 since: Some(since.clone()),
                 until: Some(until.clone()),
                 year: Some(year.clone()),
+                scanner_settings: crate::tui::settings::load_scanner_settings(),
             })
             .map_err(anyhow::Error::msg)?,
         )
@@ -237,6 +238,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         until: Some(until),
         year: Some(year.clone()),
         group_by: GroupBy::default(),
+        scanner_settings: crate::tui::settings::load_scanner_settings(),
     })
     .await
     .map_err(anyhow::Error::msg)?;
