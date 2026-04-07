@@ -620,7 +620,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     // Parse OpenCode: read both SQLite (1.2+) and legacy JSON, deduplicate by message ID
     let mut opencode_seen: HashSet<String> = HashSet::new();
 
-    if let Some(db_path) = &scan_result.opencode_db {
+    for db_path in &scan_result.opencode_dbs {
         let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
             sessions::opencode::parse_opencode_sqlite(path)
         });
@@ -1402,20 +1402,24 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let mut seen: HashSet<String> = HashSet::new();
         let mut count: i32 = 0;
 
-        if let Some(db_path) = &scan_result.opencode_db {
+        for db_path in &scan_result.opencode_dbs {
             let sqlite_msgs: Vec<(String, ParsedMessage)> =
                 sessions::opencode::parse_opencode_sqlite(db_path)
                     .into_iter()
-                    .map(|msg| {
+                    .filter_map(|msg| {
                         let key = msg.dedup_key.clone().unwrap_or_default();
-                        (key, unified_to_parsed(&msg))
+                        // Dedup across multiple channel-suffixed dbs: the
+                        // same session can end up in both `opencode.db` and
+                        // `opencode-<channel>.db` if the user switches
+                        // channels mid-session.
+                        if !key.is_empty() && !seen.insert(key.clone()) {
+                            return None;
+                        }
+                        Some((key, unified_to_parsed(&msg)))
                     })
                     .collect();
             count += sqlite_msgs.len() as i32;
-            for (key, parsed) in sqlite_msgs {
-                if !key.is_empty() {
-                    seen.insert(key);
-                }
+            for (_key, parsed) in sqlite_msgs {
                 messages.push(parsed);
             }
         }

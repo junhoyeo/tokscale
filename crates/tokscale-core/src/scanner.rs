@@ -23,7 +23,14 @@ pub struct CrushDbSource {
 #[derive(Debug)]
 pub struct ScanResult {
     pub files: [Vec<PathBuf>; ClientId::COUNT],
-    pub opencode_db: Option<PathBuf>,
+    /// All OpenCode SQLite databases discovered under the data dir.
+    ///
+    /// Includes the default `opencode.db` (used by `latest`/`beta` channels
+    /// and anyone with `OPENCODE_DISABLE_CHANNEL_DB=1`) as well as any
+    /// channel-suffixed variants such as `opencode-stable.db`,
+    /// `opencode-nightly.db`, etc. See upstream logic in opencode's
+    /// `packages/opencode/src/storage/db.ts` (`getChannelPath`).
+    pub opencode_dbs: Vec<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
@@ -36,7 +43,7 @@ impl Default for ScanResult {
     fn default() -> Self {
         Self {
             files: std::array::from_fn(|_| Vec::new()),
-            opencode_db: None,
+            opencode_dbs: Vec::new(),
             synthetic_db: None,
             kilo_db: None,
             hermes_db: None,
@@ -220,6 +227,76 @@ struct CrushProject {
     data_dir: String,
 }
 
+/// Discover every OpenCode SQLite database under the opencode data dir.
+///
+/// Matches:
+/// - `opencode.db` (default, used by `latest`/`beta` channels or when
+///   `OPENCODE_DISABLE_CHANNEL_DB=1` is set)
+/// - `opencode-<channel>.db` where `<channel>` is the sanitized channel name
+///   opencode bakes into the build (e.g. `stable`, `nightly`). Upstream
+///   sanitizes channels with `/[^a-zA-Z0-9._-]/g -> "-"`, so the suffix we
+///   accept here mirrors that character class exactly.
+///
+/// Ignores WAL/SHM sidecar files (`opencode.db-wal`, `opencode.db-shm`, etc.)
+/// and anything that does not end in `.db`.
+///
+/// Returns a sorted, deterministic list for stable downstream behavior.
+pub(crate) fn discover_opencode_dbs(data_dir: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut dbs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() {
+                // Could be a symlink — accept it if it resolves to a file.
+                if !entry.path().is_file() {
+                    return None;
+                }
+            }
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if !is_opencode_db_filename(name) {
+                return None;
+            }
+            Some(path)
+        })
+        .collect();
+
+    dbs.sort_unstable();
+    dbs
+}
+
+/// Returns true if `name` matches the opencode db naming rule:
+/// `opencode.db` or `opencode-<channel>.db` with `<channel>` drawn from the
+/// same `[a-zA-Z0-9._-]` character class that opencode's `getChannelPath`
+/// normalizes to. Sidecar files (`.db-wal`, `.db-shm`, `.db-journal`) are
+/// rejected because they do not end in `.db`.
+fn is_opencode_db_filename(name: &str) -> bool {
+    // Strip the trailing `.db` — reject anything else so WAL/SHM sidecars
+    // (e.g. `opencode.db-wal`) are ignored.
+    let stem = match name.strip_suffix(".db") {
+        Some(stem) => stem,
+        None => return false,
+    };
+    if stem == "opencode" {
+        return true;
+    }
+    let channel = match stem.strip_prefix("opencode-") {
+        Some(channel) => channel,
+        None => return false,
+    };
+    if channel.is_empty() {
+        return false;
+    }
+    channel
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 fn crush_db_path(data_dir: &Path) -> Option<PathBuf> {
     let candidate = data_dir.join("crush.db");
     candidate.is_file().then_some(candidate)
@@ -346,11 +423,17 @@ pub fn scan_all_clients_with_env_strategy(
             format!("{}/.local/share", home_dir)
         };
 
-        // OpenCode 1.2+: SQLite database at ~/.local/share/opencode/opencode.db
-        let opencode_db_path = PathBuf::from(format!("{}/opencode/opencode.db", xdg_data));
-        if opencode_db_path.exists() {
-            result.opencode_db = Some(opencode_db_path);
-        }
+        // OpenCode 1.2+: SQLite database(s) at ~/.local/share/opencode/opencode*.db
+        //
+        // opencode picks its db filename at build time based on the release
+        // channel: `latest`/`beta` use `opencode.db`, other channels use
+        // `opencode-<channel>.db` (e.g. `opencode-stable.db`). A single user
+        // can run multiple channels side by side, so we pick up every match
+        // under the data dir. See `getChannelPath` in
+        // opencode/packages/opencode/src/storage/db.ts for the source of
+        // the naming rule.
+        let opencode_data_dir = PathBuf::from(format!("{}/opencode", xdg_data));
+        result.opencode_dbs = discover_opencode_dbs(&opencode_data_dir);
 
         // OpenCode legacy: JSON files at ~/.local/share/opencode/storage/message/*/*.json
         let opencode_path = ClientId::OpenCode
@@ -963,6 +1046,108 @@ mod tests {
         assert_eq!(
             result.opencode_json_dir,
             Some(home.join(".local/share/opencode/storage/message"))
+        );
+
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    fn test_is_opencode_db_filename_accepts_default_and_channel_variants() {
+        // Default channel (`latest`/`beta`) and explicit-disable use this name.
+        assert!(is_opencode_db_filename("opencode.db"));
+        // Channel-suffixed dbs, drawn from opencode's `[a-zA-Z0-9._-]`
+        // character class in getChannelPath.
+        assert!(is_opencode_db_filename("opencode-stable.db"));
+        assert!(is_opencode_db_filename("opencode-nightly.db"));
+        assert!(is_opencode_db_filename("opencode-canary.db"));
+        assert!(is_opencode_db_filename("opencode-local.db"));
+        assert!(is_opencode_db_filename("opencode-1.2.3.db"));
+        assert!(is_opencode_db_filename("opencode-pr_42.db"));
+    }
+
+    #[test]
+    fn test_is_opencode_db_filename_rejects_sidecars_and_unrelated_files() {
+        // WAL/SHM/journal sidecar files share the prefix — must be ignored
+        // so we don't try to "parse" them.
+        assert!(!is_opencode_db_filename("opencode.db-wal"));
+        assert!(!is_opencode_db_filename("opencode.db-shm"));
+        assert!(!is_opencode_db_filename("opencode.db-journal"));
+        assert!(!is_opencode_db_filename("opencode-stable.db-wal"));
+        // Unrelated / malformed names.
+        assert!(!is_opencode_db_filename("opencode"));
+        assert!(!is_opencode_db_filename("opencode-.db"));
+        assert!(!is_opencode_db_filename("opencode_stable.db"));
+        assert!(!is_opencode_db_filename("opencode-stable/beta.db"));
+        assert!(!is_opencode_db_filename("auth.json"));
+        assert!(!is_opencode_db_filename("other.db"));
+    }
+
+    #[test]
+    fn test_discover_opencode_dbs_finds_multiple_channels_and_skips_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().join("opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Real dbs for two channels running side by side — the case from
+        // junhoyeo/tokscale#387.
+        File::create(data_dir.join("opencode.db")).unwrap();
+        File::create(data_dir.join("opencode-stable.db")).unwrap();
+        // SQLite WAL/SHM sidecars that must not be treated as dbs.
+        File::create(data_dir.join("opencode.db-wal")).unwrap();
+        File::create(data_dir.join("opencode.db-shm")).unwrap();
+        File::create(data_dir.join("opencode-stable.db-wal")).unwrap();
+        // Unrelated files that live in the same dir.
+        File::create(data_dir.join("auth.json")).unwrap();
+
+        let found = discover_opencode_dbs(&data_dir);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["opencode-stable.db", "opencode.db"]);
+    }
+
+    #[test]
+    fn test_discover_opencode_dbs_returns_empty_for_missing_dir() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(discover_opencode_dbs(&missing).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_opencode_picks_up_channel_suffixed_dbs() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let data_dir = home.join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        File::create(data_dir.join("opencode.db")).unwrap();
+        File::create(data_dir.join("opencode-stable.db")).unwrap();
+        File::create(data_dir.join("opencode-nightly.db")).unwrap();
+        // Sidecars that must be ignored.
+        File::create(data_dir.join("opencode.db-wal")).unwrap();
+        File::create(data_dir.join("opencode-stable.db-shm")).unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["opencode".to_string()]);
+
+        let names: Vec<String> = result
+            .opencode_dbs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "opencode-nightly.db".to_string(),
+                "opencode-stable.db".to_string(),
+                "opencode.db".to_string(),
+            ],
+            "expected all channel dbs, got {names:?}"
         );
 
         restore_env("XDG_DATA_HOME", previous_xdg);
