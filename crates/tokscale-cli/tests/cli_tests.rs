@@ -1663,12 +1663,22 @@ fn test_submit_offline_without_pricing_cache_fails() {
     write_fake_credentials(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["submit", "--opencode", "--no-spinner", "--dry-run"])
+        .args(["submit", "--opencode", "--dry-run"])
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
         "submit should fail when pricing is unavailable; stdout: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+    // Verify failure is from pricing fetch, not from auth or argument errors
+    assert!(
+        !stderr.contains("Not logged in"),
+        "submit failed due to auth, not pricing: {stderr}"
+    );
+    assert!(
+        stderr.contains("error") || stderr.contains("Error"),
+        "stderr should contain a pricing/network error: {stderr}"
     );
 }
