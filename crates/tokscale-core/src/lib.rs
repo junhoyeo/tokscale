@@ -1419,8 +1419,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
 
-    let scan_result =
-        scanner::scan_all_clients_with_env_strategy(&home_dir, &clients, options.use_env_roots);
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        &home_dir,
+        &clients,
+        options.use_env_roots,
+        &options.scanner_settings,
+    );
     let headless_roots =
         scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
@@ -3441,5 +3445,87 @@ mod tests {
         assert_eq!(parsed.messages[0].client, "opencode");
         assert_eq!(parsed.messages[0].model_id, "deepseek-v3-0324");
         assert_eq!(parsed.messages[0].provider_id, "fireworks");
+    }
+
+    #[test]
+    fn test_parse_local_clients_honors_scanner_settings_opencode_db_paths() {
+        // Regression guard: `parse_local_clients` used to call
+        // `scan_all_clients_with_env_strategy`, which silently dropped
+        // `options.scanner_settings`. Users with
+        // `scanner.opencodeDbPaths` pointing at an OPENCODE_DB outside the
+        // XDG data dir would see no rows through the clients/wrapped
+        // command paths even though model/monthly/graph reports honored
+        // the same config.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // Deliberately do not create ~/.local/share/opencode so nothing
+        // is auto-discoverable; the only db the scanner can find must
+        // come from `scanner_settings`.
+        let outside_dir = temp_dir.path().join("elsewhere");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let external_db = outside_dir.join("opencode.db");
+
+        let conn = rusqlite::Connection::open(&external_db).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "ext-msg-1",
+                "ext-session",
+                r#"{
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4",
+                    "providerID": "anthropic",
+                    "tokens": { "input": 42, "output": 7, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                    "time": { "created": 1700000000000.0 }
+                }"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Without scanner_settings: no rows (nothing auto-discoverable).
+        let parsed_default = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed_default.counts.get(ClientId::OpenCode), 0);
+        assert!(parsed_default.messages.is_empty());
+
+        // With scanner_settings pointing at the external db: the user
+        // row must show up.
+        let parsed_with_settings = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                opencode_db_paths: vec![external_db.clone()],
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            parsed_with_settings.counts.get(ClientId::OpenCode),
+            1,
+            "scanner.opencodeDbPaths must reach the parse_local_clients path"
+        );
+        assert_eq!(parsed_with_settings.messages.len(), 1);
+        assert_eq!(parsed_with_settings.messages[0].client, "opencode");
+        assert_eq!(parsed_with_settings.messages[0].model_id, "claude-sonnet-4");
     }
 }
