@@ -9,8 +9,37 @@ use walkdir::WalkDir;
 
 use crate::clients::ClientId;
 use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// User-controlled scanner settings loaded from a config file.
+///
+/// This is the persistent, declarative counterpart to environment variables
+/// like `TOKSCALE_EXTRA_DIRS` — it lives on the `scanner` key inside
+/// `~/.config/tokscale/settings.json` and is threaded down into
+/// [`scan_all_clients_with_scanner_settings`].
+///
+/// `#[serde(default)]` at both the struct and field level guarantees that
+/// older settings.json files (which have no `scanner` key at all, or an
+/// empty `{}`) deserialize cleanly without errors.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScannerSettings {
+    /// Absolute paths to additional OpenCode SQLite databases to scan.
+    ///
+    /// Use this when the opencode binary was launched with `OPENCODE_DB`
+    /// pointing at a location outside the default `~/.local/share/opencode`
+    /// data directory, so tokscale's auto-discovery can't find it.
+    ///
+    /// Paths are merged into the auto-discovered
+    /// [`ScanResult::opencode_dbs`] list; duplicates (by canonical path)
+    /// are removed and non-existent entries are silently skipped so stale
+    /// config does not break the scan. WAL/SHM sidecar files are rejected
+    /// with the same [`is_opencode_db_filename`] check used for
+    /// auto-discovery.
+    #[serde(default)]
+    pub opencode_db_paths: Vec<PathBuf>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrushDbSource {
@@ -361,8 +390,94 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     )
 }
 
+/// Merge user-configured OpenCode db paths from [`ScannerSettings`] into the
+/// auto-discovered list, in-place.
+///
+/// Rules:
+/// - Non-existent paths are silently skipped so stale config never aborts a
+///   scan (the config outlives any single opencode install).
+/// - WAL/SHM/journal sidecars are rejected via [`is_opencode_db_filename`].
+/// - Duplicates are removed by canonicalized path comparison, so a user who
+///   explicitly lists an auto-discovered db in their config does not cause
+///   it to be parsed twice.
+///
+/// Kept as a separate helper so the unit tests can exercise the merge
+/// semantics without spinning up a full `scan_all_clients` run.
+pub(crate) fn merge_user_opencode_db_paths(
+    discovered: &mut Vec<PathBuf>,
+    extra_paths: &[PathBuf],
+) {
+    if extra_paths.is_empty() {
+        return;
+    }
+
+    // Build a canonical-path set of what we already have so we can dedup
+    // against auto-discovered entries. Fall back to the raw path if
+    // canonicalize fails (e.g. on a filesystem that doesn't support it),
+    // which preserves the pre-canonicalization behavior without silently
+    // dropping entries.
+    let mut seen: HashSet<PathBuf> = discovered
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+
+    for raw in extra_paths {
+        if !raw.is_file() {
+            // Stale config or wrong path — silently skip.
+            continue;
+        }
+        let Some(name) = raw.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_opencode_db_filename(name) {
+            // Reject sidecars (`.db-wal`, `.db-shm`) and anything that does
+            // not match the upstream channel-db naming rule.
+            continue;
+        }
+        let canonical = std::fs::canonicalize(raw).unwrap_or_else(|_| raw.clone());
+        if seen.insert(canonical) {
+            discovered.push(raw.clone());
+        }
+    }
+}
+
+/// Scan all session client directories in parallel, with user-controlled
+/// [`ScannerSettings`] merged in.
+///
+/// This is the preferred entry point when you have loaded persistent
+/// settings (e.g. from `~/.config/tokscale/settings.json`). Thin wrappers
+/// [`scan_all_clients_with_env_strategy`] and [`scan_all_clients`] call
+/// into this with `ScannerSettings::default()` for callers that don't care
+/// about the persistent config.
+pub fn scan_all_clients_with_scanner_settings(
+    home_dir: &str,
+    clients: &[String],
+    use_env_roots: bool,
+    scanner_settings: &ScannerSettings,
+) -> ScanResult {
+    let mut result =
+        scan_all_clients_with_env_strategy_inner(home_dir, clients, use_env_roots);
+    merge_user_opencode_db_paths(&mut result.opencode_dbs, &scanner_settings.opencode_db_paths);
+    result.opencode_dbs.sort_unstable();
+    result.opencode_dbs.dedup();
+    result
+}
+
 /// Scan all session client directories in parallel
 pub fn scan_all_clients_with_env_strategy(
+    home_dir: &str,
+    clients: &[String],
+    use_env_roots: bool,
+) -> ScanResult {
+    scan_all_clients_with_scanner_settings(
+        home_dir,
+        clients,
+        use_env_roots,
+        &ScannerSettings::default(),
+    )
+}
+
+fn scan_all_clients_with_env_strategy_inner(
     home_dir: &str,
     clients: &[String],
     use_env_roots: bool,
@@ -1112,6 +1227,129 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("does-not-exist");
         assert!(discover_opencode_dbs(&missing).is_empty());
+    }
+
+    #[test]
+    fn test_merge_user_opencode_db_paths_picks_up_path_outside_xdg() {
+        // Simulate `OPENCODE_DB=/arbitrary/abs/path/custom.db` upstream:
+        // the file is a real opencode db but lives outside
+        // `~/.local/share/opencode`, so auto-discovery never sees it.
+        let dir = TempDir::new().unwrap();
+        let outside = dir.path().join("somewhere-else");
+        fs::create_dir_all(&outside).unwrap();
+        let user_db = outside.join("opencode.db");
+        File::create(&user_db).unwrap();
+
+        let mut discovered: Vec<PathBuf> = Vec::new();
+        merge_user_opencode_db_paths(&mut discovered, std::slice::from_ref(&user_db));
+
+        assert_eq!(discovered, vec![user_db]);
+    }
+
+    #[test]
+    fn test_merge_user_opencode_db_paths_skips_nonexistent_and_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("opencode-stable.db");
+        File::create(&real).unwrap();
+        let wal = dir.path().join("opencode-stable.db-wal");
+        File::create(&wal).unwrap();
+        let missing = dir.path().join("opencode-missing.db"); // never created
+
+        let mut discovered: Vec<PathBuf> = Vec::new();
+        merge_user_opencode_db_paths(
+            &mut discovered,
+            &[real.clone(), wal.clone(), missing.clone()],
+        );
+
+        // Nonexistent path: silently skipped so stale config can't break a scan.
+        // Sidecar path: rejected by is_opencode_db_filename.
+        assert_eq!(discovered, vec![real]);
+    }
+
+    #[test]
+    fn test_merge_user_opencode_db_paths_dedups_against_auto_discovered() {
+        let dir = TempDir::new().unwrap();
+        let shared = dir.path().join("opencode.db");
+        File::create(&shared).unwrap();
+
+        // User explicitly lists a path that auto-discovery also found —
+        // must not double-parse the same sqlite file.
+        let mut discovered: Vec<PathBuf> = vec![shared.clone()];
+        merge_user_opencode_db_paths(&mut discovered, std::slice::from_ref(&shared));
+
+        assert_eq!(discovered, vec![shared]);
+    }
+
+    #[test]
+    fn test_scanner_settings_deserialize_from_json_camel_case() {
+        // This is the contract the CLI's settings.json relies on: the
+        // field is `opencodeDbPaths`, and an empty object or missing key
+        // must round-trip to Default without erroring.
+        let json = r#"{
+            "opencodeDbPaths": ["/one/opencode.db", "/two/opencode-stable.db"]
+        }"#;
+        let parsed: ScannerSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.opencode_db_paths.len(), 2);
+        assert_eq!(parsed.opencode_db_paths[0], PathBuf::from("/one/opencode.db"));
+        assert_eq!(
+            parsed.opencode_db_paths[1],
+            PathBuf::from("/two/opencode-stable.db")
+        );
+
+        let empty: ScannerSettings = serde_json::from_str("{}").unwrap();
+        assert!(empty.opencode_db_paths.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_merges_user_path() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // Auto-discoverable channel db inside XDG data dir.
+        let data_dir = home.join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        File::create(data_dir.join("opencode-stable.db")).unwrap();
+
+        // User-configured db living outside XDG_DATA_HOME, the way an
+        // `OPENCODE_DB=/abs/path/opencode.db` user would have it.
+        let outside_dir = home.join("elsewhere");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let outside_db = outside_dir.join("opencode.db");
+        File::create(&outside_db).unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
+
+        let settings = ScannerSettings {
+            opencode_db_paths: vec![outside_db.clone()],
+        };
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["opencode".to_string()],
+            true,
+            &settings,
+        );
+
+        // Both paths must appear — the auto-discovered stable db and the
+        // user-configured outside-XDG db.
+        let names: Vec<String> = result
+            .opencode_dbs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "opencode-stable.db"),
+            "expected auto-discovered opencode-stable.db, got {names:?}"
+        );
+        assert!(
+            result.opencode_dbs.iter().any(|p| p == &outside_db),
+            "expected user-configured {} in {:?}",
+            outside_db.display(),
+            result.opencode_dbs
+        );
+
+        restore_env("XDG_DATA_HOME", previous_xdg);
     }
 
     #[test]

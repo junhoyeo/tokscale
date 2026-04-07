@@ -224,6 +224,7 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
+            scanner_settings: crate::tui::settings::load_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -272,6 +273,7 @@ impl DataLoader {
             until: self.until.clone(),
             year: self.year.clone(),
             use_env_roots: false,
+            scanner_settings: crate::tui::settings::load_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -792,6 +794,7 @@ mod tests {
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
+            scanner_settings: crate::tui::settings::load_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
