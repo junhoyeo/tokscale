@@ -298,6 +298,16 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     }
 }
 
+fn write_fake_credentials(base: &Path) {
+    let creds_dir = base.join(".config/tokscale");
+    fs::create_dir_all(&creds_dir).unwrap();
+    fs::write(
+        creds_dir.join("credentials.json"),
+        r#"{"token":"fake","username":"testuser","createdAt":"2024-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+}
+
 // ── Existing tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -900,6 +910,12 @@ fn test_models_json_offline_without_pricing_cache_still_succeeds() {
     assert_eq!(json["totalOutput"].as_i64().unwrap(), 1000);
     assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
     assert_eq!(json["entries"].as_array().unwrap().len(), 2);
+    // Without pricing, embedded source costs are preserved (0.05 + 0.03 + 0.02)
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.10).abs() < 1e-9,
+        "unexpected totalCost without pricing: {total_cost}"
+    );
 }
 
 #[test]
@@ -920,6 +936,12 @@ fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["month"].as_str().unwrap(), "2024-06");
     assert_eq!(entries[1]["month"].as_str().unwrap(), "2025-01");
+    // Without pricing, embedded source costs are preserved
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.10).abs() < 1e-9,
+        "unexpected totalCost without pricing: {total_cost}"
+    );
 }
 
 #[test]
@@ -939,6 +961,12 @@ fn test_graph_offline_without_pricing_cache_still_succeeds() {
     assert_eq!(json["summary"]["totalTokens"].as_i64().unwrap(), 3950);
     assert_eq!(json["summary"]["activeDays"].as_i64().unwrap(), 2);
     assert_eq!(json["contributions"].as_array().unwrap().len(), 2);
+    // Without pricing, embedded source costs are preserved
+    let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.10).abs() < 1e-9,
+        "unexpected totalCost without pricing: {total_cost}"
+    );
 }
 
 #[test]
@@ -958,6 +986,52 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.0209).abs() < 1e-9,
+        "unexpected totalCost: {total_cost}"
+    );
+}
+
+#[test]
+fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_pricing_cache(tmp.path(), 1);
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.0209).abs() < 1e-9,
+        "unexpected totalCost: {total_cost}"
+    );
+}
+
+#[test]
+fn test_graph_offline_uses_stale_pricing_cache_when_available() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_pricing_cache(tmp.path(), 1);
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["graph", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
     assert!(
         (total_cost - 0.0209).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
@@ -1581,4 +1655,20 @@ fn test_root_with_group_by() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["groupBy"].as_str().unwrap(), "model");
+}
+
+#[test]
+fn test_submit_offline_without_pricing_cache_fails() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_fake_credentials(tmp.path());
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["submit", "--opencode", "--no-spinner", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "submit should fail when pricing is unavailable; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
