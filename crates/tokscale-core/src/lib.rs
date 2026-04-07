@@ -2559,12 +2559,20 @@ mod tests {
             conn.execute_batch(schema).unwrap();
             conn.execute(
                 "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-                rusqlite::params!["shared-msg", "session-shared", row(100, 1_700_000_000_000u64)],
+                rusqlite::params![
+                    "shared-msg",
+                    "session-shared",
+                    row(100, 1_700_000_000_000u64)
+                ],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-                rusqlite::params!["latest-only", "session-latest", row(200, 1_700_000_001_000u64)],
+                rusqlite::params![
+                    "latest-only",
+                    "session-latest",
+                    row(200, 1_700_000_001_000u64)
+                ],
             )
             .unwrap();
             drop(conn);
@@ -2575,12 +2583,20 @@ mod tests {
             conn.execute_batch(schema).unwrap();
             conn.execute(
                 "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-                rusqlite::params!["shared-msg", "session-shared", row(100, 1_700_000_000_000u64)],
+                rusqlite::params![
+                    "shared-msg",
+                    "session-shared",
+                    row(100, 1_700_000_000_000u64)
+                ],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-                rusqlite::params!["stable-only", "session-stable", row(300, 1_700_000_002_000u64)],
+                rusqlite::params![
+                    "stable-only",
+                    "session-stable",
+                    row(300, 1_700_000_002_000u64)
+                ],
             )
             .unwrap();
             drop(conn);
