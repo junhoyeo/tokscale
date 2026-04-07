@@ -403,10 +403,7 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
 ///
 /// Kept as a separate helper so the unit tests can exercise the merge
 /// semantics without spinning up a full `scan_all_clients` run.
-pub(crate) fn merge_user_opencode_db_paths(
-    discovered: &mut Vec<PathBuf>,
-    extra_paths: &[PathBuf],
-) {
+pub(crate) fn merge_user_opencode_db_paths(discovered: &mut Vec<PathBuf>, extra_paths: &[PathBuf]) {
     if extra_paths.is_empty() {
         return;
     }
@@ -455,12 +452,7 @@ pub fn scan_all_clients_with_scanner_settings(
     use_env_roots: bool,
     scanner_settings: &ScannerSettings,
 ) -> ScanResult {
-    let mut result =
-        scan_all_clients_with_env_strategy_inner(home_dir, clients, use_env_roots);
-    merge_user_opencode_db_paths(&mut result.opencode_dbs, &scanner_settings.opencode_db_paths);
-    result.opencode_dbs.sort_unstable();
-    result.opencode_dbs.dedup();
-    result
+    scan_all_clients_with_env_strategy_inner(home_dir, clients, use_env_roots, scanner_settings)
 }
 
 /// Scan all session client directories in parallel
@@ -481,6 +473,7 @@ fn scan_all_clients_with_env_strategy_inner(
     home_dir: &str,
     clients: &[String],
     use_env_roots: bool,
+    scanner_settings: &ScannerSettings,
 ) -> ScanResult {
     let mut result = ScanResult::default();
 
@@ -549,6 +542,19 @@ fn scan_all_clients_with_env_strategy_inner(
         // the naming rule.
         let opencode_data_dir = PathBuf::from(format!("{}/opencode", xdg_data));
         result.opencode_dbs = discover_opencode_dbs(&opencode_data_dir);
+
+        // Merge user-configured `scanner.opencodeDbPaths` here, INSIDE the
+        // `enabled.contains(&ClientId::OpenCode)` guard, so a request like
+        // `tokscale --claude` does not pull in OpenCode dbs the user pinned
+        // for unrelated reasons. Inflated OpenCode `counts` and wasted
+        // SQLite parsing work otherwise sneak past the message-level
+        // client filter that runs much later in the pipeline.
+        merge_user_opencode_db_paths(
+            &mut result.opencode_dbs,
+            &scanner_settings.opencode_db_paths,
+        );
+        result.opencode_dbs.sort_unstable();
+        result.opencode_dbs.dedup();
 
         // OpenCode legacy: JSON files at ~/.local/share/opencode/storage/message/*/*.json
         let opencode_path = ClientId::OpenCode
@@ -1290,7 +1296,10 @@ mod tests {
         }"#;
         let parsed: ScannerSettings = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.opencode_db_paths.len(), 2);
-        assert_eq!(parsed.opencode_db_paths[0], PathBuf::from("/one/opencode.db"));
+        assert_eq!(
+            parsed.opencode_db_paths[0],
+            PathBuf::from("/one/opencode.db")
+        );
         assert_eq!(
             parsed.opencode_db_paths[1],
             PathBuf::from("/two/opencode-stable.db")
@@ -1347,6 +1356,105 @@ mod tests {
             "expected user-configured {} in {:?}",
             outside_db.display(),
             result.opencode_dbs
+        );
+
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_respects_opencode_client_filter() {
+        // Regression guard: previously the scanner unconditionally
+        // merged `scanner.opencodeDbPaths` after the inner scan, which
+        // bypassed the existing `enabled.contains(&ClientId::OpenCode)`
+        // guard. A request like `tokscale --claude` would still pull in
+        // user-pinned OpenCode dbs and inflate `parse_local_clients`
+        // counts plus waste SQLite parsing work.
+        //
+        // The fix moves the merge inside the OpenCode-enabled block, so
+        // this test exercises the four canonical filter shapes:
+        //   1. ["claude"]    → opencode_dbs must be empty
+        //   2. ["opencode"]  → both auto + user-configured dbs present
+        //   3. ["synthetic"] → both present (synthetic enables all)
+        //   4. []            → both present (empty filter = all clients)
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        // Auto-discoverable channel db inside XDG data dir.
+        let data_dir = home.join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        let auto_db = data_dir.join("opencode.db");
+        File::create(&auto_db).unwrap();
+
+        // User-configured db living outside XDG_DATA_HOME (mirrors the
+        // `OPENCODE_DB=/abs/path/opencode.db` use case).
+        let outside_dir = home.join("elsewhere");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let outside_db = outside_dir.join("opencode.db");
+        File::create(&outside_db).unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
+
+        let settings = ScannerSettings {
+            opencode_db_paths: vec![outside_db.clone()],
+        };
+
+        let scan = |clients: &[&str]| {
+            let owned: Vec<String> = clients.iter().map(|s| s.to_string()).collect();
+            scan_all_clients_with_scanner_settings(home.to_str().unwrap(), &owned, true, &settings)
+        };
+
+        // 1. clients=["claude"] — OpenCode disabled, dbs must stay empty.
+        let claude_only = scan(&["claude"]);
+        assert!(
+            claude_only.opencode_dbs.is_empty(),
+            "scanner.opencodeDbPaths must NOT leak into a Claude-only scan, \
+             got {:?}",
+            claude_only.opencode_dbs
+        );
+
+        // 2. clients=["opencode"] — both auto-discovered + user-configured.
+        let opencode_only = scan(&["opencode"]);
+        assert!(
+            opencode_only.opencode_dbs.iter().any(|p| p == &auto_db),
+            "expected auto-discovered {} in {:?}",
+            auto_db.display(),
+            opencode_only.opencode_dbs
+        );
+        assert!(
+            opencode_only.opencode_dbs.iter().any(|p| p == &outside_db),
+            "expected user-configured {} in {:?}",
+            outside_db.display(),
+            opencode_only.opencode_dbs
+        );
+
+        // 3. clients=["synthetic"] — synthetic enables all clients, so
+        //    both dbs must be present.
+        let synthetic_only = scan(&["synthetic"]);
+        assert!(
+            synthetic_only.opencode_dbs.iter().any(|p| p == &auto_db),
+            "synthetic-only filter must enable OpenCode auto-discovery, got {:?}",
+            synthetic_only.opencode_dbs
+        );
+        assert!(
+            synthetic_only.opencode_dbs.iter().any(|p| p == &outside_db),
+            "synthetic-only filter must merge user-configured paths, got {:?}",
+            synthetic_only.opencode_dbs
+        );
+
+        // 4. clients=[] — empty filter = all clients = both dbs present.
+        let all_clients = scan(&[]);
+        assert!(
+            all_clients.opencode_dbs.iter().any(|p| p == &auto_db),
+            "empty client filter must enable OpenCode auto-discovery, got {:?}",
+            all_clients.opencode_dbs
+        );
+        assert!(
+            all_clients.opencode_dbs.iter().any(|p| p == &outside_db),
+            "empty client filter must merge user-configured paths, got {:?}",
+            all_clients.opencode_dbs
         );
 
         restore_env("XDG_DATA_HOME", previous_xdg);

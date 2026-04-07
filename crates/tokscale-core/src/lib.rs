@@ -3512,4 +3512,93 @@ mod tests {
         assert_eq!(parsed_with_settings.messages[0].client, "opencode");
         assert_eq!(parsed_with_settings.messages[0].model_id, "claude-sonnet-4");
     }
+
+    #[test]
+    fn test_parse_local_clients_claude_filter_ignores_scanner_settings_opencode_db_paths() {
+        // Regression guard for the scanner client-filter bypass: even
+        // when `scanner.opencodeDbPaths` pins an external opencode db,
+        // a `--clients claude` request must NOT pull in OpenCode rows.
+        // Before the fix, the merge ran outside the OpenCode-enabled
+        // guard so user-pinned dbs leaked through both `messages` and
+        // `counts` (the latter is computed before the message-level
+        // client filter, so even the post-filter pipeline could not
+        // hide a leaked count).
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        // Claude session: one assistant message, the only thing the
+        // filter should accept.
+        let claude_dir = temp_dir.path().join(".claude/projects/myproject");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("conversation.jsonl"),
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+        )
+        .unwrap();
+
+        // External opencode.db that the user has pinned via
+        // scanner.opencodeDbPaths. Without the fix, this would leak
+        // into the Claude-only result.
+        let outside_dir = temp_dir.path().join("elsewhere");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let external_db = outside_dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&external_db).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "leaked-opencode",
+                "should-not-show-up",
+                r#"{
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4",
+                    "providerID": "anthropic",
+                    "tokens": { "input": 9999, "output": 9999, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                    "time": { "created": 1700000000000.0 }
+                }"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["claude".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                opencode_db_paths: vec![external_db.clone()],
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            parsed.counts.get(ClientId::OpenCode),
+            0,
+            "OpenCode count must stay zero under a Claude-only filter even \
+             when scanner.opencodeDbPaths is set"
+        );
+        assert_eq!(
+            parsed.counts.get(ClientId::Claude),
+            1,
+            "Claude message must still be counted"
+        );
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "claude");
+        assert!(
+            parsed.messages.iter().all(|m| m.client != "opencode"),
+            "no OpenCode messages may leak into a Claude-only result, got {:?}",
+            parsed.messages
+        );
+    }
 }
