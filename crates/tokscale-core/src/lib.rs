@@ -621,16 +621,25 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let mut opencode_seen: HashSet<String> = HashSet::new();
 
     for db_path in &scan_result.opencode_dbs {
-        let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+        let CachedParseOutcome {
+            messages,
+            cache_entry,
+        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
             sessions::opencode::parse_opencode_sqlite(path)
         });
-        for message in &outcome.messages {
-            if let Some(ref key) = message.dedup_key {
-                opencode_seen.insert(key.clone());
-            }
-        }
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+
+        // Dedup across channel-suffixed dbs: the same session can end up in
+        // both `opencode.db` and `opencode-<channel>.db` if the user
+        // switches channels mid-session. `discover_opencode_dbs` returns
+        // paths in sorted order, so the first-seen copy is deterministic.
+        all_messages.extend(messages.into_iter().filter(|message| {
+            message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| opencode_seen.insert(key.clone()))
+        }));
+
+        if let Some(entry) = cache_entry {
             source_cache.insert(entry);
         }
     }
@@ -2499,6 +2508,115 @@ mod tests {
                 None,
             );
             assert_eq!(refreshed_messages.len(), 2);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
+        // Regression guard: a session that appears in both `opencode.db` and
+        // `opencode-<channel>.db` (e.g. the user switches channels mid-session)
+        // must only be counted once. Before the fix,
+        // `parse_all_messages_with_pricing_with_env_strategy` populated the
+        // `opencode_seen` set but never checked it before extending
+        // `all_messages`, so shared message IDs were double-counted.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let db_dir = source_home.path().join(".local/share/opencode");
+            std::fs::create_dir_all(&db_dir).unwrap();
+
+            let schema = "PRAGMA journal_mode=WAL;
+                 PRAGMA wal_autocheckpoint=0;
+                 CREATE TABLE message (
+                     id TEXT PRIMARY KEY,
+                     session_id TEXT NOT NULL,
+                     data TEXT NOT NULL
+                 );";
+            let row = |input: u64, ts: u64| {
+                format!(
+                    r#"{{
+                        "role": "assistant",
+                        "modelID": "claude-sonnet-4",
+                        "providerID": "anthropic",
+                        "tokens": {{ "input": {input}, "output": 10, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+                        "time": {{ "created": {ts}.0 }}
+                    }}"#
+                )
+            };
+
+            // opencode.db: shared message + one unique to this db
+            let default_db = db_dir.join("opencode.db");
+            let conn = rusqlite::Connection::open(&default_db).unwrap();
+            conn.execute_batch(schema).unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["shared-msg", "session-shared", row(100, 1_700_000_000_000u64)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["latest-only", "session-latest", row(200, 1_700_000_001_000u64)],
+            )
+            .unwrap();
+            drop(conn);
+
+            // opencode-stable.db: same shared message ID + one unique to this db
+            let stable_db = db_dir.join("opencode-stable.db");
+            let conn = rusqlite::Connection::open(&stable_db).unwrap();
+            conn.execute_batch(schema).unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["shared-msg", "session-shared", row(100, 1_700_000_000_000u64)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["stable-only", "session-stable", row(300, 1_700_000_002_000u64)],
+            )
+            .unwrap();
+            drop(conn);
+
+            // Cold cache: parse directly from source files.
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["opencode".to_string()],
+                None,
+            );
+            assert_eq!(
+                messages.len(),
+                3,
+                "expected 3 unique messages (shared + latest-only + stable-only), got {}",
+                messages.len()
+            );
+            let mut ids: Vec<String> = messages
+                .iter()
+                .filter_map(|m| m.dedup_key.clone())
+                .collect();
+            ids.sort();
+            assert_eq!(ids, vec!["latest-only", "shared-msg", "stable-only"]);
+
+            // Warm cache: second pass goes through `SourceMessageCache`. The
+            // per-db cache entries store un-deduped rows, so cross-db dedup
+            // still has to happen at the aggregation layer on every call.
+            let messages_warm = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["opencode".to_string()],
+                None,
+            );
+            assert_eq!(
+                messages_warm.len(),
+                3,
+                "warm cache must also dedup shared message across channel dbs"
+            );
         }
 
         match original_home {
