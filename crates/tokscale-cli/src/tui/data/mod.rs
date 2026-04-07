@@ -11,6 +11,21 @@ use tokscale_core::{
     LocalParseOptions,
 };
 
+/// Returns the scanner settings that `DataLoader` should use when building
+/// `LocalParseOptions`. Under `#[cfg(test)]` this intentionally ignores
+/// `~/.config/tokscale/settings.json` so data-loader unit tests stay
+/// hermetic across developer machines; production builds still honor
+/// user-configured paths.
+#[cfg(not(test))]
+fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
+    crate::tui::settings::load_scanner_settings()
+}
+
+#[cfg(test)]
+fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
+    tokscale_core::scanner::ScannerSettings::default()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TokenBreakdown {
     pub input: u64,
@@ -224,7 +239,7 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
-            scanner_settings: crate::tui::settings::load_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -273,7 +288,7 @@ impl DataLoader {
             until: self.until.clone(),
             year: self.year.clone(),
             use_env_roots: false,
-            scanner_settings: crate::tui::settings::load_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -794,7 +809,7 @@ mod tests {
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
-            scanner_settings: crate::tui::settings::load_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -1069,6 +1084,29 @@ mod tests {
         assert!(loader.since.is_none());
         assert!(loader.until.is_none());
         assert!(loader.year.is_none());
+    }
+
+    #[test]
+    fn test_data_loader_scanner_settings_is_hermetic_under_cfg_test() {
+        // Regression guard: the `#[cfg(test)]` branch of
+        // `data_loader_scanner_settings` must not read
+        // `~/.config/tokscale/settings.json`. Otherwise every DataLoader
+        // unit test becomes machine-dependent as soon as a developer
+        // pins extra OpenCode dbs in their real settings.json.
+        //
+        // This test cannot sandbox HOME (many of the sibling tests in
+        // this module would race against each other if it did), so
+        // instead it asserts the cfg(test) helper returns a default
+        // ScannerSettings regardless of what the real settings file
+        // contains on the developer's machine.
+        let settings = super::data_loader_scanner_settings();
+        assert!(
+            settings.opencode_db_paths.is_empty(),
+            "under #[cfg(test)] data_loader_scanner_settings must return \
+             ScannerSettings::default() so unit tests stay hermetic, but \
+             got {:?}",
+            settings.opencode_db_paths
+        );
     }
 
     #[test]
