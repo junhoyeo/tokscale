@@ -487,7 +487,15 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 ```json
 {
   "colorPalette": "blue",
-  "includeUnusedModels": false
+  "includeUnusedModels": false,
+  "scanner": {
+    "extraScanPaths": {
+      "codex": [
+        "/Users/me/workspace/project-a/.codex/sessions",
+        "/Users/me/workspace/project-b/.codex/archived_sessions"
+      ]
+    }
+  }
 }
 ```
 
@@ -498,6 +506,9 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `autoRefreshEnabled` | boolean | `false` | Enable auto-refresh in TUI |
 | `autoRefreshMs` | number | `60000` | Auto-refresh interval (30000-3600000ms) |
 | `nativeTimeoutMs` | number | `300000` | Maximum time for native subprocess processing (5000-3600000ms) |
+| `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
+
+Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories or imported Gemini/OpenClaw histories. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
 
 ### Environment Variables
 
@@ -506,13 +517,17 @@ Environment variables override config file values. For CI/CD or one-off use:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
+| `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
 
 ```bash
 # Example: Increase timeout for very large datasets
 TOKSCALE_NATIVE_TIMEOUT_MS=600000 tokscale graph --output data.json
+
+# Example: one-off extra scan roots
+TOKSCALE_EXTRA_DIRS='codex:/Users/me/workspace/project-a/.codex/sessions,gemini:/Users/me/imports/imac/gemini/tmp' tokscale
 ```
 
-> **Note**: For persistent changes, prefer setting `nativeTimeoutMs` in `~/.config/tokscale/settings.json`. Environment variables are best for one-off overrides or CI/CD.
+> **Note**: For persistent extra roots, prefer `scanner.extraScanPaths` in `~/.config/tokscale/settings.json`. `TOKSCALE_EXTRA_DIRS` is best for one-off overrides or CI/CD.
 
 ### Headless Mode
 
@@ -998,6 +1013,25 @@ If you launched opencode with `OPENCODE_DB` pointing at a file outside `~/.local
 ```
 
 Paths are merged with auto-discovery, deduped by canonical path, and non-existent entries are silently skipped (so stale config never breaks a scan). `opencode.db-wal`, `opencode.db-shm`, and other SQLite sidecars are rejected.
+
+If you keep sessions outside Tokscale's default home-root locations, you can also persist extra scan roots per client:
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": [
+        "/Users/me/workspace/project-a/.codex/sessions",
+        "/Users/me/workspace/project-b/.codex/archived_sessions"
+      ],
+      "gemini": ["/Users/me/imports/imac/gemini/tmp"],
+      "openclaw": ["/Users/me/imports/imac/openclaw/agents"]
+    }
+  }
+}
+```
+
+This is useful for project-level `.codex` directories and imported histories. Tokscale still scans its default roots, then merges `scanner.extraScanPaths` and `TOKSCALE_EXTRA_DIRS` on top with canonical-path deduplication. It does not auto-discover your whole workspace.
 
 Each message contains:
 ```json

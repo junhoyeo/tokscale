@@ -3,7 +3,7 @@
 //! Uses walkdir with rayon for parallel directory traversal.
 
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -39,6 +39,12 @@ pub struct ScannerSettings {
     /// auto-discovery.
     #[serde(default)]
     pub opencode_db_paths: Vec<PathBuf>,
+    /// Additional per-client scan roots loaded from settings.json.
+    ///
+    /// Keys use public client ids like `codex`, `gemini`, and `openclaw`
+    /// so the JSON stays stable and human-editable.
+    #[serde(default)]
+    pub extra_scan_paths: BTreeMap<String, Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +250,30 @@ pub fn parse_extra_dirs(value: &str, enabled: &HashSet<ClientId>) -> Vec<(Client
         .collect()
 }
 
+pub fn extra_scan_paths_for(
+    settings: &ScannerSettings,
+    enabled: &HashSet<ClientId>,
+) -> Vec<(ClientId, PathBuf)> {
+    settings
+        .extra_scan_paths
+        .iter()
+        .filter_map(|(client_str, paths)| {
+            let client_id = ClientId::from_str(client_str)?;
+            if !enabled.contains(&client_id) || !supports_extra_dir_scanning(client_id) {
+                return None;
+            }
+            Some(
+                paths
+                    .iter()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .cloned()
+                    .map(move |path| (client_id, path)),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct CrushProjectList {
     #[serde(default)]
@@ -390,6 +420,24 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     )
 }
 
+fn push_unique_scan_task(
+    tasks: &mut Vec<(ClientId, String, &'static str)>,
+    seen: &mut HashSet<(ClientId, PathBuf)>,
+    client_id: ClientId,
+    raw_path: impl Into<PathBuf>,
+) {
+    let raw_path = raw_path.into();
+    if raw_path.as_os_str().is_empty() {
+        return;
+    }
+
+    let key = std::fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
+    if seen.insert((client_id, key)) {
+        let pattern = client_id.data().pattern;
+        tasks.push((client_id, raw_path.to_string_lossy().to_string(), pattern));
+    }
+}
+
 /// Merge user-configured OpenCode db paths from [`ScannerSettings`] into the
 /// auto-discovered list, in-place.
 ///
@@ -493,6 +541,7 @@ fn scan_all_clients_with_env_strategy_inner(
 
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
+    let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
 
     for client_id in &enabled {
         if matches!(
@@ -511,7 +560,11 @@ fn scan_all_clients_with_env_strategy_inner(
 
         let def = client_id.data();
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((*client_id, path, def.pattern));
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
+    }
+
+    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
     // Extra scan directories are part of the caller's environment, so they are
@@ -519,8 +572,7 @@ fn scan_all_clients_with_env_strategy_inner(
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
         for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
-            let pattern = client_id.data().pattern;
-            tasks.push((client_id, path, pattern));
+            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
     }
 
@@ -561,11 +613,12 @@ fn scan_all_clients_with_env_strategy_inner(
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         result.opencode_json_dir = Some(PathBuf::from(&opencode_path));
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenCode,
             opencode_path,
-            ClientId::OpenCode.data().pattern,
-        ));
+        );
     }
 
     if enabled.contains(&ClientId::Codex) {
@@ -578,21 +631,30 @@ fn scan_all_clients_with_env_strategy_inner(
         let codex_path = ClientId::Codex
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((ClientId::Codex, codex_path, ClientId::Codex.data().pattern));
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Codex,
+            codex_path,
+        );
 
         // Codex archived sessions: ~/.codex/archived_sessions/**/*.jsonl
         let codex_archived_path = format!("{}/archived_sessions", codex_home);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::Codex,
             codex_archived_path,
-            ClientId::Codex.data().pattern,
-        ));
+        );
 
         // Codex headless: <headless_root>/codex/*.jsonl
         for root in &headless_roots {
-            let codex_headless_path = root.join("codex");
-            let path = codex_headless_path.to_string_lossy().to_string();
-            tasks.push((ClientId::Codex, path, ClientId::Codex.data().pattern));
+            push_unique_scan_task(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Codex,
+                root.join("codex"),
+            );
         }
     }
 
@@ -601,39 +663,43 @@ fn scan_all_clients_with_env_strategy_inner(
         let openclaw_path = ClientId::OpenClaw
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             openclaw_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
 
         // Legacy paths (Clawd -> Moltbot -> OpenClaw rebrand history)
         let clawdbot_path = format!("{}/.clawdbot/agents", home_dir);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             clawdbot_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
 
         let moltbot_path = format!("{}/.moltbot/agents", home_dir);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             moltbot_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
 
         let moldbot_path = format!("{}/.moldbot/agents", home_dir);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             moldbot_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
     }
 
     // Oh My Pi fork (https://github.com/can1357/oh-my-pi) — same JSONL format, different root
     if enabled.contains(&ClientId::Pi) {
         let omp_path = format!("{}/.omp/agent/sessions", home_dir);
-        tasks.push((ClientId::Pi, omp_path, ClientId::Pi.data().pattern));
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Pi, omp_path);
     }
 
     if include_synthetic {
@@ -652,42 +718,46 @@ fn scan_all_clients_with_env_strategy_inner(
         let local_path = ClientId::RooCode
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::RooCode,
             local_path,
-            ClientId::RooCode.data().pattern,
-        ));
+        );
 
         let server_path = format!(
             "{}/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
             home_dir
         );
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::RooCode,
             server_path,
-            ClientId::RooCode.data().pattern,
-        ));
+        );
     }
 
     if enabled.contains(&ClientId::KiloCode) {
         let local_path = ClientId::KiloCode
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::KiloCode,
             local_path,
-            ClientId::KiloCode.data().pattern,
-        ));
+        );
 
         let server_path = format!(
             "{}/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks",
             home_dir
         );
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::KiloCode,
             server_path,
-            ClientId::KiloCode.data().pattern,
-        ));
+        );
     }
 
     if enabled.contains(&ClientId::Kilo) {
@@ -1310,6 +1380,35 @@ mod tests {
     }
 
     #[test]
+    fn test_scanner_settings_deserialize_extra_scan_paths_camel_case() {
+        let json = r#"{
+            "extraScanPaths": {
+                "codex": [
+                    "/tmp/project-a/.codex/sessions",
+                    "/tmp/project-b/.codex/archived_sessions"
+                ],
+                "gemini": ["/tmp/imports/gemini/tmp"]
+            }
+        }"#;
+
+        let parsed: ScannerSettings = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(
+            serialized["extraScanPaths"]["codex"][0],
+            serde_json::json!("/tmp/project-a/.codex/sessions")
+        );
+        assert_eq!(
+            serialized["extraScanPaths"]["codex"][1],
+            serde_json::json!("/tmp/project-b/.codex/archived_sessions")
+        );
+        assert_eq!(
+            serialized["extraScanPaths"]["gemini"][0],
+            serde_json::json!("/tmp/imports/gemini/tmp")
+        );
+    }
+
+    #[test]
     #[serial]
     fn test_scan_all_clients_with_scanner_settings_merges_user_path() {
         let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
@@ -1332,6 +1431,7 @@ mod tests {
 
         let settings = ScannerSettings {
             opencode_db_paths: vec![outside_db.clone()],
+            ..Default::default()
         };
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
@@ -1359,6 +1459,77 @@ mod tests {
         );
 
         restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_merges_settings_extra_paths() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_root = home.join(".codex/sessions");
+        fs::create_dir_all(&default_root).unwrap();
+        File::create(default_root.join("default.jsonl")).unwrap();
+
+        let extra_root = home.join("workspace/project-a/.codex/sessions");
+        fs::create_dir_all(&extra_root).unwrap();
+        File::create(extra_root.join("extra.jsonl")).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "codex": [extra_root]
+            }
+        }))
+        .unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["codex".to_string()],
+            true,
+            &settings,
+        );
+
+        assert_eq!(result.get(ClientId::Codex).len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_dedups_settings_and_env_extra_paths() {
+        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_root = home.join(".codex/sessions");
+        fs::create_dir_all(&default_root).unwrap();
+        File::create(default_root.join("default.jsonl")).unwrap();
+
+        let extra_root = home.join("workspace/project-a/.codex/sessions");
+        fs::create_dir_all(&extra_root).unwrap();
+        File::create(extra_root.join("extra.jsonl")).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("codex:{}", extra_root.join("..").join("sessions").display()),
+            )
+        };
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "codex": [extra_root]
+            }
+        }))
+        .unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["codex".to_string()],
+            true,
+            &settings,
+        );
+
+        assert_eq!(result.get(ClientId::Codex).len(), 2);
+        restore_env("TOKSCALE_EXTRA_DIRS", previous);
     }
 
     #[test]
@@ -1399,6 +1570,7 @@ mod tests {
 
         let settings = ScannerSettings {
             opencode_db_paths: vec![outside_db.clone()],
+            ..Default::default()
         };
 
         let scan = |clients: &[&str]| {

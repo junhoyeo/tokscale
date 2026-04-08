@@ -308,6 +308,16 @@ fn write_fake_credentials(base: &Path) {
     .unwrap();
 }
 
+fn write_settings_json(base: &Path, body: &str) {
+    for dir in [
+        base.join(".config/tokscale"),
+        base.join("Library/Application Support/tokscale"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), body).unwrap();
+    }
+}
+
 // ── Existing tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -1441,6 +1451,67 @@ fn test_clients_json() {
         first.get("messageCount").is_some(),
         "Client entry should have 'messageCount' field"
     );
+}
+
+#[test]
+fn test_clients_json_includes_settings_extra_paths() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(
+        tmp.path(),
+        r#"{
+            "scanner": {
+                "extraScanPaths": {
+                    "codex": ["/tmp/project-a/.codex/sessions"]
+                }
+            }
+        }"#,
+    );
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let codex = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "codex")
+        .unwrap();
+
+    assert_eq!(
+        codex["extraPaths"][0]["path"],
+        serde_json::json!("/tmp/project-a/.codex/sessions")
+    );
+    assert_eq!(
+        codex["extraPaths"][0]["source"],
+        serde_json::json!("settings")
+    );
+}
+
+#[test]
+fn test_clients_command_includes_settings_extra_paths_text() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(
+        tmp.path(),
+        r#"{
+            "scanner": {
+                "extraScanPaths": {
+                    "codex": ["/tmp/project-a/.codex/sessions"]
+                }
+            }
+        }"#,
+    );
+
+    cmd_with_home(tmp.path())
+        .arg("clients")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "extra (settings): /tmp/project-a/.codex/sessions ✗",
+        ));
 }
 
 // ── Light mode tests ───────────────────────────────────────────────────────

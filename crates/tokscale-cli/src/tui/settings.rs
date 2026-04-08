@@ -216,6 +216,34 @@ mod tests {
     }
 
     #[test]
+    fn settings_load_reads_scanner_extra_scan_paths() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000,
+            "scanner": {
+                "extraScanPaths": {
+                    "codex": ["/tmp/project-a/.codex/sessions"],
+                    "openclaw": ["/tmp/imports/openclaw/agents"]
+                }
+            }
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(
+            serialized["scanner"]["extraScanPaths"]["codex"][0],
+            serde_json::json!("/tmp/project-a/.codex/sessions")
+        );
+        assert_eq!(
+            serialized["scanner"]["extraScanPaths"]["openclaw"][0],
+            serde_json::json!("/tmp/imports/openclaw/agents")
+        );
+    }
+
+    #[test]
     fn settings_accepts_empty_scanner_object() {
         // `"scanner": {}` is the documented "no-op" form; must be valid.
         let json = r#"{
@@ -241,6 +269,31 @@ mod tests {
         assert_eq!(
             parsed.scanner.opencode_db_paths,
             vec![PathBuf::from("/a/b/opencode.db")]
+        );
+    }
+
+    #[test]
+    fn settings_round_trips_scanner_extra_scan_paths_through_json() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000,
+            "scanner": {
+                "extraScanPaths": {
+                    "gemini": ["/tmp/imports/gemini/tmp"]
+                }
+            }
+        }"#;
+
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            round_trip["scanner"]["extraScanPaths"]["gemini"][0],
+            serde_json::json!("/tmp/imports/gemini/tmp")
         );
     }
 }

@@ -2484,10 +2484,11 @@ fn capitalize_client(client: &str) -> String {
 }
 
 fn run_clients_command(json: bool) -> Result<()> {
-    use tokscale_core::{parse_local_clients, ClientId, LocalParseOptions};
+    use tokscale_core::{extra_scan_paths_for, parse_local_clients, ClientId, LocalParseOptions};
 
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let scanner_settings = tui::settings::load_scanner_settings();
 
     let parsed = parse_local_clients(LocalParseOptions {
         home_dir: Some(home_dir.to_string_lossy().to_string()),
@@ -2501,7 +2502,7 @@ fn run_clients_command(json: bool) -> Result<()> {
         since: None,
         until: None,
         year: None,
-        scanner_settings: tui::settings::load_scanner_settings(),
+        scanner_settings: scanner_settings.clone(),
     })
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -2549,6 +2550,7 @@ fn run_clients_command(json: bool) -> Result<()> {
     struct ExtraPath {
         path: String,
         exists: bool,
+        source: String,
     }
 
     // Collect extra dirs from TOKSCALE_EXTRA_DIRS for display (reuse core parser)
@@ -2556,91 +2558,101 @@ fn run_clients_command(json: bool) -> Result<()> {
     let all_clients: std::collections::HashSet<ClientId> = ClientId::iter().collect();
     let extra_dirs: Vec<(ClientId, String)> =
         tokscale_core::parse_extra_dirs(&extra_dirs_val, &all_clients);
+    let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients);
 
-    let clients: Vec<ClientRow> = ClientId::iter()
-        .map(|client| {
-            let sessions_path = client.data().resolve_path(&home_dir.to_string_lossy());
-            let sessions_path_exists = Path::new(&sessions_path).exists();
-            let legacy_paths = if client == ClientId::OpenClaw {
-                vec![
-                    LegacyPath {
-                        path: home_dir
-                            .join(".clawdbot/agents")
-                            .to_string_lossy()
-                            .to_string(),
-                        exists: home_dir.join(".clawdbot/agents").exists(),
-                    },
-                    LegacyPath {
-                        path: home_dir
-                            .join(".moltbot/agents")
-                            .to_string_lossy()
-                            .to_string(),
-                        exists: home_dir.join(".moltbot/agents").exists(),
-                    },
-                    LegacyPath {
-                        path: home_dir
-                            .join(".moldbot/agents")
-                            .to_string_lossy()
-                            .to_string(),
-                        exists: home_dir.join(".moldbot/agents").exists(),
-                    },
-                ]
-            } else {
-                vec![]
-            };
-            let (headless_supported, headless_paths, headless_message_count) =
-                if client == ClientId::Codex {
-                    (
-                        true,
-                        headless_roots
-                            .iter()
-                            .map(|root| {
-                                let path = root.join(client.as_str());
-                                HeadlessPath {
-                                    path: path.to_string_lossy().to_string(),
-                                    exists: path.exists(),
-                                }
-                            })
-                            .collect(),
-                        headless_codex_count,
-                    )
+    let clients: Vec<ClientRow> =
+        ClientId::iter()
+            .map(|client| {
+                let sessions_path = client.data().resolve_path(&home_dir.to_string_lossy());
+                let sessions_path_exists = Path::new(&sessions_path).exists();
+                let legacy_paths = if client == ClientId::OpenClaw {
+                    vec![
+                        LegacyPath {
+                            path: home_dir
+                                .join(".clawdbot/agents")
+                                .to_string_lossy()
+                                .to_string(),
+                            exists: home_dir.join(".clawdbot/agents").exists(),
+                        },
+                        LegacyPath {
+                            path: home_dir
+                                .join(".moltbot/agents")
+                                .to_string_lossy()
+                                .to_string(),
+                            exists: home_dir.join(".moltbot/agents").exists(),
+                        },
+                        LegacyPath {
+                            path: home_dir
+                                .join(".moldbot/agents")
+                                .to_string_lossy()
+                                .to_string(),
+                            exists: home_dir.join(".moldbot/agents").exists(),
+                        },
+                    ]
                 } else {
-                    (false, vec![], 0)
+                    vec![]
                 };
+                let (headless_supported, headless_paths, headless_message_count) =
+                    if client == ClientId::Codex {
+                        (
+                            true,
+                            headless_roots
+                                .iter()
+                                .map(|root| {
+                                    let path = root.join(client.as_str());
+                                    HeadlessPath {
+                                        path: path.to_string_lossy().to_string(),
+                                        exists: path.exists(),
+                                    }
+                                })
+                                .collect(),
+                            headless_codex_count,
+                        )
+                    } else {
+                        (false, vec![], 0)
+                    };
 
-            let label = match client {
-                ClientId::Claude => "Claude Code",
-                ClientId::Codex => "Codex CLI",
-                ClientId::Gemini => "Gemini CLI",
-                ClientId::Cursor => "Cursor IDE",
-                ClientId::Kimi => "Kimi CLI",
-                _ => client_ui::display_name(client),
-            }
-            .to_string();
+                let label = match client {
+                    ClientId::Claude => "Claude Code",
+                    ClientId::Codex => "Codex CLI",
+                    ClientId::Gemini => "Gemini CLI",
+                    ClientId::Cursor => "Cursor IDE",
+                    ClientId::Kimi => "Kimi CLI",
+                    _ => client_ui::display_name(client),
+                }
+                .to_string();
 
-            let extra_paths: Vec<ExtraPath> = extra_dirs
-                .iter()
-                .filter(|(c, _)| *c == client)
-                .map(|(_, path)| ExtraPath {
-                    path: path.clone(),
-                    exists: Path::new(path).exists(),
-                })
-                .collect();
+                let mut extra_paths: Vec<ExtraPath> = settings_extra_dirs
+                    .iter()
+                    .filter(|(c, _)| *c == client)
+                    .map(|(_, path)| ExtraPath {
+                        path: path.to_string_lossy().to_string(),
+                        exists: path.exists(),
+                        source: "settings".to_string(),
+                    })
+                    .collect();
+                extra_paths.extend(extra_dirs.iter().filter(|(c, _)| *c == client).map(
+                    |(_, path)| ExtraPath {
+                        path: path.clone(),
+                        exists: Path::new(path).exists(),
+                        source: "env".to_string(),
+                    },
+                ));
 
-            ClientRow {
-                client: client.as_str().to_string(),
-                label,
-                sessions_path,
-                sessions_path_exists,
-                legacy_paths,
-                message_count: parsed.counts.get(client),
-                headless_supported,
-                headless_paths,
-                headless_message_count,
-                extra_paths,
-            }
-        })
-        .collect();
+                ClientRow {
+                    client: client.as_str().to_string(),
+                    label,
+                    sessions_path,
+                    sessions_path_exists,
+                    legacy_paths,
+                    message_count: parsed.counts.get(client),
+                    headless_supported,
+                    headless_paths,
+                    headless_message_count,
+                    extra_paths,
+                }
+            })
+            .collect();
 
     if json {
         #[derive(serde::Serialize)]
@@ -2703,15 +2715,31 @@ fn run_clients_command(json: bool) -> Result<()> {
             }
 
             if !row.extra_paths.is_empty() {
-                let extra_desc: Vec<String> = row
+                let settings_desc: Vec<String> = row
                     .extra_paths
                     .iter()
+                    .filter(|ep| ep.source == "settings")
                     .map(|ep| describe_path(&ep.path, ep.exists))
                     .collect();
-                println!(
-                    "  {}",
-                    format!("extra: {}", extra_desc.join(", ")).bright_black()
-                );
+                if !settings_desc.is_empty() {
+                    println!(
+                        "  {}",
+                        format!("extra (settings): {}", settings_desc.join(", ")).bright_black()
+                    );
+                }
+
+                let env_desc: Vec<String> = row
+                    .extra_paths
+                    .iter()
+                    .filter(|ep| ep.source == "env")
+                    .map(|ep| describe_path(&ep.path, ep.exists))
+                    .collect();
+                if !env_desc.is_empty() {
+                    println!(
+                        "  {}",
+                        format!("extra (env): {}", env_desc.join(", ")).bright_black()
+                    );
+                }
             }
 
             if row.headless_supported {
