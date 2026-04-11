@@ -9,11 +9,23 @@ Copilot must write OpenTelemetry JSONL locally before `tokscale` can read it.
 ```bash
 export COPILOT_OTEL_ENABLED=true
 export COPILOT_OTEL_EXPORTER_TYPE=file
-export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel.jsonl"
 mkdir -p "$HOME/.copilot/otel"
+export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel-$(date +%Y%m%d-%H%M%S).jsonl"
 ```
 
-Then use Copilot CLI normally. Its `chat` spans will be appended to the OTEL file.
+PowerShell:
+
+```powershell
+$otelDir = "$HOME/.copilot/otel"
+New-Item -ItemType Directory -Force -Path $otelDir | Out-Null
+$env:COPILOT_OTEL_ENABLED = "true"
+$env:COPILOT_OTEL_EXPORTER_TYPE = "file"
+$env:COPILOT_OTEL_FILE_EXPORTER_PATH = Join-Path $otelDir ("copilot-otel-{0}.jsonl" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+```
+
+This timestamped filename is the recommended setup because each run gets a fresh OTEL file instead of growing one large shared log forever.
+
+Then use Copilot CLI normally. Its `chat` spans will be written into that session-specific file, and `tokscale` will pick it up from `~/.copilot/otel/*.jsonl`.
 
 ## 2. Run `tokscale`
 
@@ -78,8 +90,8 @@ Instead:
 ```bash
 export COPILOT_OTEL_ENABLED=true
 export COPILOT_OTEL_EXPORTER_TYPE=file
-export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel.jsonl"
 mkdir -p "$HOME/.copilot/otel"
+export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel-$(date +%Y%m%d-%H%M%S).jsonl"
 
 # use Copilot CLI here
 
