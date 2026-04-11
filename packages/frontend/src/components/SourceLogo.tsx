@@ -32,6 +32,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/claude.jpg";
       case "codex":
         return "/assets/logos/openai.jpg";
+      case "copilot":
+        return "/assets/github-icon.svg";
       case "gemini":
         return "/assets/logos/gemini.png";
       case "cursor":

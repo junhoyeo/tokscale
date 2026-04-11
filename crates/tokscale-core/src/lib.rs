@@ -725,6 +725,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let copilot_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Copilot)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::copilot::parse_copilot_file(path)
+            })
+        })
+        .collect();
+    for outcome in copilot_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let gemini_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Gemini)
         .par_iter()
@@ -1521,6 +1537,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let codex_count = codex_msgs.len() as i32;
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
+
+    let copilot_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Copilot)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::copilot::parse_copilot_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let copilot_count = copilot_msgs.len() as i32;
+    counts.set(ClientId::Copilot, copilot_count);
+    messages.extend(copilot_msgs);
 
     let gemini_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Gemini)

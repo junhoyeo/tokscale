@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 17);
+        assert_eq!(clients.len(), 18);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -897,6 +897,7 @@ mod tests {
         assert_eq!(clients[14], ClientId::Kilo);
         assert_eq!(clients[15], ClientId::Crush);
         assert_eq!(clients[16], ClientId::Hermes);
+        assert_eq!(clients[17], ClientId::Copilot);
     }
 
     #[test]
@@ -912,6 +913,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Codex),
             "Codex"
+        );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Copilot),
+            "Copilot"
         );
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Cursor),
@@ -961,6 +966,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenCode), '1');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Claude), '2');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codex), '3');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Copilot), 'c');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cursor), '4');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gemini), '5');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Amp), '6');
@@ -990,6 +996,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('3'),
             Some(ClientId::Codex)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('c'),
+            Some(ClientId::Copilot)
         );
         assert_eq!(
             crate::tui::client_ui::from_hotkey('4'),

@@ -5,6 +5,7 @@
 pub mod amp;
 pub mod claudecode;
 pub mod codex;
+pub mod copilot;
 pub mod crush;
 pub mod cursor;
 pub mod droid;

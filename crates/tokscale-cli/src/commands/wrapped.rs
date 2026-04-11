@@ -1354,6 +1354,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "opencode" => Some("OpenCode"),
         "claude" => Some("Claude Code"),
         "codex" => Some("Codex CLI"),
+        "copilot" => Some("Copilot CLI"),
         "gemini" => Some("Gemini CLI"),
         s if s == ClientId::Cursor.as_str() => Some("Cursor IDE"),
         "amp" => Some("Amp"),
@@ -1378,6 +1379,9 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "OpenCode" => Some("https://tokscale.ai/assets/logos/opencode.png"),
         "Claude Code" => Some("https://tokscale.ai/assets/logos/claude.jpg"),
         "Codex CLI" => Some("https://tokscale.ai/assets/logos/openai.jpg"),
+        "Copilot CLI" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/packages/frontend/public/assets/github-icon.svg",
+        ),
         "Gemini CLI" => Some("https://tokscale.ai/assets/logos/gemini.png"),
         "Cursor IDE" => Some("https://tokscale.ai/assets/logos/cursor.jpg"),
         "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
@@ -1731,6 +1735,7 @@ fn default_clients() -> Vec<String> {
         "opencode".to_string(),
         "claude".to_string(),
         "codex".to_string(),
+        "copilot".to_string(),
         "gemini".to_string(),
         ClientId::Cursor.as_str().to_string(),
         "amp".to_string(),
@@ -2167,6 +2172,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_copilot() {
+        assert_eq!(client_display_name("copilot"), Some("Copilot CLI"));
+    }
+
+    #[test]
     fn test_client_display_name_gemini() {
         assert_eq!(client_display_name("gemini"), Some("Gemini CLI"));
     }
@@ -2224,6 +2234,12 @@ mod tests {
         assert!(clients.iter().any(|client| client == "hermes"));
     }
 
+    #[test]
+    fn test_default_clients_includes_copilot() {
+        let clients = default_clients();
+        assert!(clients.iter().any(|client| client == "copilot"));
+    }
+
     // ========== client_logo_url tests ==========
 
     #[test]
@@ -2247,6 +2263,16 @@ mod tests {
         assert_eq!(
             client_logo_url("Codex CLI"),
             Some("https://tokscale.ai/assets/logos/openai.jpg")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_copilot_cli() {
+        assert_eq!(
+            client_logo_url("Copilot CLI"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/packages/frontend/public/assets/github-icon.svg",
+            )
         );
     }
 

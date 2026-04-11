@@ -23,6 +23,7 @@ const SUPPORTED_SOURCES = [
   "opencode",
   "claude",
   "codex",
+  "copilot",
   "gemini",
   "cursor",
   "amp",

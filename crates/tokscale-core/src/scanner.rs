@@ -136,6 +136,24 @@ pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
     headless_roots_with_env_strategy(home_dir, true)
 }
 
+pub fn copilot_exporter_path_with_env_strategy(use_env_roots: bool) -> Option<PathBuf> {
+    if !use_env_roots {
+        return None;
+    }
+
+    let path = std::env::var("COPILOT_OTEL_FILE_EXPORTER_PATH").ok()?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+pub fn copilot_exporter_path() -> Option<PathBuf> {
+    copilot_exporter_path_with_env_strategy(true)
+}
+
 /// Scan a single directory for session files
 pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
     if !std::path::Path::new(root).exists() {
@@ -731,6 +749,16 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
+    if enabled.contains(&ClientId::Copilot) {
+        if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
+            if path.is_file() && seen.insert(path.clone()) {
+                let copilot_files = result.get_mut(ClientId::Copilot);
+                copilot_files.push(path);
+                copilot_files.sort_unstable();
+            }
+        }
+    }
+
     result
 }
 
@@ -755,6 +783,14 @@ mod tests {
 
     fn restore_current_dir(previous: &Path) {
         std::env::set_current_dir(previous).unwrap();
+    }
+
+    fn setup_mock_copilot_dir(home: &Path) {
+        let sessions_dir = home.join(".copilot/otel");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let file_path = sessions_dir.join("copilot.jsonl");
+        let mut file = File::create(file_path).unwrap();
+        writeln!(file, "{{\"type\":\"span\",\"name\":\"chat gpt-5.4-mini\"}}").unwrap();
     }
 
     #[test]
@@ -1554,6 +1590,43 @@ mod tests {
         let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
         assert_eq!(result.get(ClientId::Gemini).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_copilot() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_copilot_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+        );
+
+        assert_eq!(result.get(ClientId::Copilot).len(), 1);
+        assert!(result.get(ClientId::Copilot)[0].ends_with("copilot.jsonl"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_copilot_includes_explicit_exporter_file() {
+        let previous = std::env::var("COPILOT_OTEL_FILE_EXPORTER_PATH").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let explicit_dir = home.join("otel-export");
+        fs::create_dir_all(&explicit_dir).unwrap();
+        let explicit_file = explicit_dir.join("copilot-explicit.jsonl");
+        File::create(&explicit_file).unwrap();
+
+        unsafe { std::env::set_var("COPILOT_OTEL_FILE_EXPORTER_PATH", &explicit_file) };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["copilot".to_string()]);
+
+        assert_eq!(result.get(ClientId::Copilot), &vec![explicit_file]);
+
+        restore_env("COPILOT_OTEL_FILE_EXPORTER_PATH", previous);
     }
 
     #[test]
