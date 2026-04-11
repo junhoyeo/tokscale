@@ -51,7 +51,7 @@ export const SOURCE_LOGOS: Record<string, string> = {
   opencode: `${GITHUB_CDN_BASE}/client-opencode.png`,
   claude: `${GITHUB_CDN_BASE}/client-claude.jpg`,
   codex: `${GITHUB_CDN_BASE}/client-openai.jpg`,
-  copilot: "/assets/github-icon.svg",
+  copilot: `${GITHUB_CDN_BASE}/client-copilot.jpg`,
   gemini: `${GITHUB_CDN_BASE}/client-gemini.png`,
   cursor: `${GITHUB_CDN_BASE}/client-cursor.jpg`,
   amp: `${GITHUB_CDN_BASE}/client-amp.png`,

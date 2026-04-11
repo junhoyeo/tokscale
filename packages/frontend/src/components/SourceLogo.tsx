@@ -33,7 +33,7 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
       case "codex":
         return "/assets/logos/openai.jpg";
       case "copilot":
-        return "/assets/github-icon.svg";
+        return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg";
       case "gemini":
         return "/assets/logos/gemini.png";
       case "cursor":
