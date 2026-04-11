@@ -2556,6 +2556,8 @@ fn run_clients_command(json: bool) -> Result<()> {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         headless_paths: Vec<HeadlessPath>,
         headless_message_count: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
     }
@@ -2658,23 +2660,8 @@ fn run_clients_command(json: bool) -> Result<()> {
                     exists: Path::new(path).exists(),
                 })
                 .collect();
-            let extra_paths = if client == ClientId::Copilot {
-                let mut paths = extra_paths;
-                if let Some(path) = &copilot_exporter_path {
-                    if !paths
-                        .iter()
-                        .any(|extra| extra.path == path.to_string_lossy().as_ref())
-                    {
-                        paths.push(ExtraPath {
-                            path: path.to_string_lossy().to_string(),
-                            exists: path.exists(),
-                        });
-                    }
-                }
-                paths
-            } else {
-                extra_paths
-            };
+            let exporter_status = (client == ClientId::Copilot && copilot_exporter_path.is_some())
+                .then(|| "configured".to_string());
 
             ClientRow {
                 client: client.as_str().to_string(),
@@ -2686,6 +2673,7 @@ fn run_clients_command(json: bool) -> Result<()> {
                 headless_supported,
                 headless_paths,
                 headless_message_count,
+                exporter_status,
                 extra_paths,
             }
         })
@@ -2760,6 +2748,13 @@ fn run_clients_command(json: bool) -> Result<()> {
                 println!(
                     "  {}",
                     format!("extra: {}", extra_desc.join(", ")).bright_black()
+                );
+            }
+
+            if let Some(exporter_status) = row.exporter_status.as_ref() {
+                println!(
+                    "  {}",
+                    format!("exporter: {}", exporter_status).bright_black()
                 );
             }
 
