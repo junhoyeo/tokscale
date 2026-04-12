@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+type ParentSubagentTypeCache = HashMap<PathBuf, HashMap<String, String>>;
+
 /// Claude Code entry structure (from JSONL files)
 #[derive(Debug, Deserialize)]
 pub struct ClaudeEntry {
@@ -65,7 +67,12 @@ pub struct ClaudeUsage {
 /// Tier 1: Read the sibling `.meta.json` sidecar for the `agentType` field.
 /// Tier 2: Scan the parent session JSONL for the tool_use that spawned this agent.
 /// Tier 3: Fall back to a generic "claude-code-subagent" label.
-fn resolve_subagent_name(path: &Path, parent_session_id: Option<&str>) -> String {
+fn resolve_subagent_name(
+    path: &Path,
+    parent_session_id: Option<&str>,
+    entry_agent_id: Option<&str>,
+    parent_cache: &mut ParentSubagentTypeCache,
+) -> String {
     let stem = match path.file_stem().and_then(|s| s.to_str()) {
         Some(s) => s,
         None => return normalize_agent_name("claude-code-subagent"),
@@ -84,9 +91,15 @@ fn resolve_subagent_name(path: &Path, parent_session_id: Option<&str>) -> String
     }
 
     // Tier 2: parent session tool_use inference
-    if let (Some(parent_id), Some(agent_id)) = (parent_session_id, stem.strip_prefix("agent-")) {
+    let lookup_agent_id = entry_agent_id
+        .filter(|agent_id| !agent_id.trim().is_empty())
+        .map(|agent_id| agent_id.to_string())
+        .or_else(|| sidechain_agent_id_from_stem(stem));
+    if let (Some(parent_id), Some(agent_id)) = (parent_session_id, lookup_agent_id.as_deref()) {
         if let Some(parent_path) = find_parent_session_path(path, parent_id) {
-            if let Some(subagent_type) = lookup_subagent_type_in_parent(&parent_path, agent_id) {
+            if let Some(subagent_type) =
+                lookup_subagent_type_in_parent(&parent_path, agent_id, parent_cache)
+            {
                 return normalize_agent_name(&subagent_type);
             }
         }
@@ -135,7 +148,24 @@ fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> O
 /// - User messages with `tool_result` blocks whose text contains `agentId: <hex>`
 ///
 /// We join on `tool_use_id` to map `agentId → subagent_type`.
-fn lookup_subagent_type_in_parent(parent_path: &Path, target_agent_id: &str) -> Option<String> {
+fn lookup_subagent_type_in_parent(
+    parent_path: &Path,
+    target_agent_id: &str,
+    parent_cache: &mut ParentSubagentTypeCache,
+) -> Option<String> {
+    if !parent_cache.contains_key(parent_path) {
+        parent_cache.insert(
+            parent_path.to_path_buf(),
+            build_parent_subagent_type_lookup(parent_path)?,
+        );
+    }
+
+    parent_cache
+        .get(parent_path)
+        .and_then(|lookup| lookup.get(target_agent_id).cloned())
+}
+
+fn build_parent_subagent_type_lookup(parent_path: &Path) -> Option<HashMap<String, String>> {
     let file = std::fs::File::open(parent_path).ok()?;
     let reader = BufReader::new(file);
 
@@ -214,15 +244,28 @@ fn lookup_subagent_type_in_parent(parent_path: &Path, target_agent_id: &str) -> 
         }
     }
 
-    // Join: find the tool_use_id whose tool_result produced our target agentId,
-    // then look up the subagent_type from the corresponding tool_use.
+    let mut subagent_types = HashMap::new();
     for (tool_use_id, agent_id) in &agent_id_links {
-        if agent_id == target_agent_id {
-            return tool_use_types.get(tool_use_id).cloned();
+        if let Some(subagent_type) = tool_use_types.get(tool_use_id) {
+            subagent_types.insert(agent_id.clone(), subagent_type.clone());
         }
     }
 
-    None
+    Some(subagent_types)
+}
+
+fn sidechain_agent_id_from_stem(stem: &str) -> Option<String> {
+    let agent_stem = stem.strip_prefix("agent-")?;
+    if !agent_stem.contains('-') {
+        return Some(agent_stem.to_string());
+    }
+
+    let trailing_segment = agent_stem.rsplit('-').next()?;
+    if trailing_segment.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(trailing_segment.to_string())
+    } else {
+        Some(agent_stem.to_string())
+    }
 }
 
 /// Extract the `agentId` hex string from a tool_result text block.
@@ -244,6 +287,14 @@ fn extract_agent_id_from_text(text: &str) -> Option<String> {
 
 /// Parse a Claude Code JSONL file
 pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
+    let mut parent_cache = ParentSubagentTypeCache::new();
+    parse_claude_file_with_cache(path, &mut parent_cache)
+}
+
+pub fn parse_claude_file_with_cache(
+    path: &Path,
+    parent_cache: &mut ParentSubagentTypeCache,
+) -> Vec<UnifiedMessage> {
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
     let mut session_id = path
         .file_stem()
@@ -312,8 +363,12 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     if let Some(ref parent_id) = entry.session_id {
                         session_id = parent_id.clone();
                     }
-                    sidechain_agent =
-                        Some(resolve_subagent_name(path, entry.session_id.as_deref()));
+                    sidechain_agent = Some(resolve_subagent_name(
+                        path,
+                        entry.session_id.as_deref(),
+                        entry.agent_id.as_deref(),
+                        parent_cache,
+                    ));
                 }
             }
 
@@ -1407,6 +1462,76 @@ mod tests {
             extract_agent_id_from_text("agentId: "),
             None,
             "Empty agent id should return None"
+        );
+    }
+
+    #[test]
+    fn test_sidechain_agent_id_from_stem_extracts_aside_question_suffix() {
+        assert_eq!(
+            sidechain_agent_id_from_stem("agent-aside_question-0320a3d71bc1d01e"),
+            Some("0320a3d71bc1d01e".to_string())
+        );
+        assert_eq!(
+            sidechain_agent_id_from_stem("agent-flatagent1"),
+            Some("flatagent1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tier2_uses_entry_agent_id_when_filename_prefix_differs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let parent_session_id = "aside-parent-uuid";
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_aside_parent","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_aside","name":"Agent","input":{"subagent_type":"writer","prompt":"Summarize findings"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_aside","type":"tool_result","content":[{"type":"text","text":"agentId: 0320a3d71bc1d01e (use SendMessage)"}]}]}}"#;
+        std::fs::write(
+            project_dir.join(format!("{}.jsonl", parent_session_id)),
+            parent_content,
+        )
+        .unwrap();
+
+        let subagents_dir = project_dir.join(parent_session_id).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"aside-parent-uuid","agentId":"0320a3d71bc1d01e","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"aside-parent-uuid","agentId":"0320a3d71bc1d01e","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_aside","message":{"id":"msg_aside","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let sidechain_path = subagents_dir.join("agent-aside_question-0320a3d71bc1d01e.jsonl");
+        std::fs::write(&sidechain_path, sidechain_content).unwrap();
+
+        let messages = parse_claude_file(&sidechain_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent, Some("Writer".to_string()));
+    }
+
+    #[test]
+    fn test_parent_subagent_lookup_cache_reuses_parsed_parent_results() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let parent_path = temp_dir.path().join("parent.jsonl");
+        let initial_parent = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"explore"}},{"type":"tool_use","id":"toolu_b","name":"Agent","input":{"subagent_type":"executor"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"toolu_a","type":"tool_result","content":[{"type":"text","text":"agentId: cacheA"}]},{"tool_use_id":"toolu_b","type":"tool_result","content":[{"type":"text","text":"agentId: cacheB"}]}]}}"#;
+        std::fs::write(&parent_path, initial_parent).unwrap();
+
+        let mut parent_cache = ParentSubagentTypeCache::new();
+        assert_eq!(
+            lookup_subagent_type_in_parent(&parent_path, "cacheA", &mut parent_cache),
+            Some("explore".to_string())
+        );
+
+        std::fs::write(
+            &parent_path,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_b","name":"Agent","input":{"subagent_type":"writer"}}]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            lookup_subagent_type_in_parent(&parent_path, "cacheB", &mut parent_cache),
+            Some("executor".to_string())
         );
     }
 

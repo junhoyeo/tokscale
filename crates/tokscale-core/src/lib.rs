@@ -1633,8 +1633,8 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
         .get(ClientId::Claude)
         .par_iter()
-        .flat_map(|path| {
-            sessions::claudecode::parse_claude_file(path)
+        .map_init(std::collections::HashMap::new, |parent_cache, path| {
+            sessions::claudecode::parse_claude_file_with_cache(path, parent_cache)
                 .into_iter()
                 .map(|msg| {
                     let dedup_key = msg.dedup_key.clone().unwrap_or_default();
@@ -1642,6 +1642,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 })
                 .collect::<Vec<_>>()
         })
+        .flatten()
         .collect();
 
     let mut seen_keys: HashSet<String> = HashSet::new();
