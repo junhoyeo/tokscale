@@ -361,10 +361,8 @@ fn is_human_turn(raw_line: &str) -> bool {
             return false;
         }
         if let Some(content_start) = after_trimmed.strip_prefix('"') {
-            if after_trimmed.len() > 1 {
-                if content_start.starts_with('<') {
-                    return false;
-                }
+            if after_trimmed.len() > 1 && content_start.starts_with('<') {
+                return false;
             }
             return true;
         }
