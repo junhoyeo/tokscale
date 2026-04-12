@@ -180,6 +180,11 @@ function computeStreaks(contributions: EmbedContributionDay[]): { longest: numbe
   let cursor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
     .toISOString()
     .split("T")[0];
+  if (!activeSet.has(cursor)) {
+    const yesterday = new Date(cursor + "T00:00:00Z");
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    cursor = yesterday.toISOString().split("T")[0];
+  }
   while (activeSet.has(cursor)) {
     current++;
     const d = new Date(cursor + "T00:00:00Z");
