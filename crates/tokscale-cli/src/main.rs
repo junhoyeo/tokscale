@@ -1742,7 +1742,8 @@ fn run_models_report(
                             .map(capitalize_client)
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let total_tokens = entry.input + entry.output + entry.cache_read + entry.cache_write;
+                        let total_tokens =
+                            entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
                             Cell::new(capitalized_clients),
                             Cell::new(&entry.provider).add_attribute(Attribute::Dim),
@@ -1758,7 +1759,10 @@ fn run_models_report(
                         ]);
                     }
 
-                    let total_tokens = report.total_input + report.total_output + report.total_cache_read + report.total_cache_write;
+                    let total_tokens = report.total_input
+                        + report.total_output
+                        + report.total_cache_read
+                        + report.total_cache_write;
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -1791,7 +1795,8 @@ fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total_tokens = entry.input + entry.output + entry.cache_read + entry.cache_write;
+                        let total_tokens =
+                            entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
                             Cell::new(capitalize_client(&entry.client)),
                             Cell::new(&entry.provider).add_attribute(Attribute::Dim),
@@ -1807,7 +1812,10 @@ fn run_models_report(
                         ]);
                     }
 
-                    let total_tokens = report.total_input + report.total_output + report.total_cache_read + report.total_cache_write;
+                    let total_tokens = report.total_input
+                        + report.total_output
+                        + report.total_cache_read
+                        + report.total_cache_write;
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -2255,7 +2263,8 @@ fn run_monthly_report(
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                let total_tokens = entry.input + entry.output + entry.cache_read + entry.cache_write;
+                let total_tokens =
+                    entry.input + entry.output + entry.cache_read + entry.cache_write;
 
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
@@ -2281,11 +2290,11 @@ fn run_monthly_report(
                     .add_attribute(Attribute::Bold),
                 Cell::new(""),
                 Cell::new(format_tokens_with_commas(total_input))
-                .fg(Color::Yellow)
-                .set_alignment(CellAlignment::Right),
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_output))
-                .fg(Color::Yellow)
-                .set_alignment(CellAlignment::Right),
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
                 Cell::new(format_currency(report.total_cost))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
@@ -2530,7 +2539,8 @@ fn run_hourly_report(
 
             for entry in &report.entries {
                 let clients_col = {
-                    let mut c: Vec<String> = entry.clients.iter().map(|s| capitalize_client(s)).collect();
+                    let mut c: Vec<String> =
+                        entry.clients.iter().map(|s| capitalize_client(s)).collect();
                     c.sort();
                     c.join(", ")
                 };
@@ -2539,7 +2549,8 @@ fn run_hourly_report(
                 } else {
                     "—".to_string()
                 };
-                let total_tokens = entry.input + entry.output + entry.cache_read + entry.cache_write;
+                let total_tokens =
+                    entry.input + entry.output + entry.cache_read + entry.cache_write;
                 table.add_row(vec![
                     Cell::new(&entry.hour).fg(Color::White),
                     Cell::new(&clients_col),
@@ -2574,7 +2585,8 @@ fn run_hourly_report(
 
             for entry in &report.entries {
                 let clients_col = {
-                    let mut c: Vec<String> = entry.clients.iter().map(|s| capitalize_client(s)).collect();
+                    let mut c: Vec<String> =
+                        entry.clients.iter().map(|s| capitalize_client(s)).collect();
                     c.sort();
                     c.join(", ")
                 };
@@ -2595,7 +2607,11 @@ fn run_hourly_report(
                 let cache_hit = {
                     let paid = (entry.input as u64).saturating_add(entry.cache_write as u64);
                     if paid == 0 {
-                        if entry.cache_read > 0 { "∞".to_string() } else { "—".to_string() }
+                        if entry.cache_read > 0 {
+                            "∞".to_string()
+                        } else {
+                            "—".to_string()
+                        }
                     } else {
                         format!("{:.1}x", entry.cache_read as f64 / paid as f64)
                     }
@@ -2607,7 +2623,8 @@ fn run_hourly_report(
                     "—".to_string()
                 };
 
-                let total_tokens = entry.input + entry.output + entry.cache_read + entry.cache_write;
+                let total_tokens =
+                    entry.input + entry.output + entry.cache_read + entry.cache_write;
 
                 table.add_row(vec![
                     Cell::new(&entry.hour).fg(Color::White),
@@ -2652,10 +2669,7 @@ fn run_hourly_report(
         println!(
             "\n  {}  {}",
             "Total:".bold(),
-            format_currency(report.total_cost)
-                .green()
-                .bold()
-                .to_string()
+            format_currency(report.total_cost).green().bold()
         );
 
         if benchmark {
