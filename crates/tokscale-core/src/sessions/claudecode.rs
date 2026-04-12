@@ -191,11 +191,10 @@ fn lookup_subagent_type_in_parent(parent_path: &Path, target_agent_id: &str) -> 
                     }
                 }
                 "tool_result" if has_agent_id_text => {
-                    let tool_use_id =
-                        match block.get("tool_use_id").and_then(|i| i.as_str()) {
-                            Some(id) => id.to_string(),
-                            None => continue,
-                        };
+                    let tool_use_id = match block.get("tool_use_id").and_then(|i| i.as_str()) {
+                        Some(id) => id.to_string(),
+                        None => continue,
+                    };
                     // Walk content blocks looking for "agentId: <hex>" in text
                     let result_content = match block.get("content").and_then(|c| c.as_array()) {
                         Some(arr) => arr,
@@ -313,10 +312,8 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     if let Some(ref parent_id) = entry.session_id {
                         session_id = parent_id.clone();
                     }
-                    sidechain_agent = Some(resolve_subagent_name(
-                        path,
-                        entry.session_id.as_deref(),
-                    ));
+                    sidechain_agent =
+                        Some(resolve_subagent_name(path, entry.session_id.as_deref()));
                 }
             }
 
@@ -1405,10 +1402,7 @@ mod tests {
             extract_agent_id_from_text("agentId: abc123\n<usage>total_tokens: 5000</usage>"),
             Some("abc123".to_string())
         );
-        assert_eq!(
-            extract_agent_id_from_text("no agent id here"),
-            None
-        );
+        assert_eq!(extract_agent_id_from_text("no agent id here"), None);
         assert_eq!(
             extract_agent_id_from_text("agentId: "),
             None,

@@ -698,7 +698,10 @@ mod tests {
         let meta_path = dir.path().join("agent-abc123.meta.json");
         std::fs::write(&meta_path, br#"{"agentType":"explore"}"#).unwrap();
         let with_meta = SourceFingerprint::from_claude_code_path(&jsonl_path).unwrap();
-        assert_ne!(base, with_meta, "Adding meta sidecar should change fingerprint");
+        assert_ne!(
+            base, with_meta,
+            "Adding meta sidecar should change fingerprint"
+        );
 
         // Update meta sidecar → fingerprint changes again
         std::fs::write(&meta_path, br#"{"agentType":"executor"}"#).unwrap();

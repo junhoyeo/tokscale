@@ -718,7 +718,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 &source_cache,
                 pricing,
                 message_cache::SourceFingerprint::from_claude_code_path,
-                |path| sessions::claudecode::parse_claude_file(path),
+                sessions::claudecode::parse_claude_file,
             )
         })
         .collect();
