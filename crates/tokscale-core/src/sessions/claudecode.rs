@@ -76,7 +76,7 @@ fn resolve_subagent_name(path: &Path, parent_session_id: Option<&str>) -> String
     if let Ok(text) = std::fs::read_to_string(&meta_path) {
         if let Ok(meta) = serde_json::from_str::<AgentMetaFile>(&text) {
             if let Some(ref agent_type) = meta.agent_type {
-                if !agent_type.is_empty() {
+                if !agent_type.trim().is_empty() {
                     return normalize_agent_name(agent_type);
                 }
             }
