@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Claude Code entry structure (from JSONL files)
 #[derive(Debug, Deserialize)]
@@ -63,26 +63,184 @@ pub struct ClaudeUsage {
 /// Resolve the subagent display name for a sidechain transcript file.
 ///
 /// Tier 1: Read the sibling `.meta.json` sidecar for the `agentType` field.
+/// Tier 2: Scan the parent session JSONL for the tool_use that spawned this agent.
 /// Tier 3: Fall back to a generic "claude-code-subagent" label.
-///
-/// (Tier 2 — parent-session tool_use inference — is deferred to a follow-up.)
-fn resolve_subagent_name(path: &Path) -> String {
+fn resolve_subagent_name(path: &Path, parent_session_id: Option<&str>) -> String {
+    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return normalize_agent_name("claude-code-subagent"),
+    };
+
     // Tier 1: sibling meta.json (e.g. agent-abc123.meta.json next to agent-abc123.jsonl)
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        let meta_path = path.with_file_name(format!("{}.meta.json", stem));
-        if let Ok(text) = std::fs::read_to_string(&meta_path) {
-            if let Ok(meta) = serde_json::from_str::<AgentMetaFile>(&text) {
-                if let Some(ref agent_type) = meta.agent_type {
-                    if !agent_type.is_empty() {
-                        return normalize_agent_name(agent_type);
-                    }
+    let meta_path = path.with_file_name(format!("{}.meta.json", stem));
+    if let Ok(text) = std::fs::read_to_string(&meta_path) {
+        if let Ok(meta) = serde_json::from_str::<AgentMetaFile>(&text) {
+            if let Some(ref agent_type) = meta.agent_type {
+                if !agent_type.is_empty() {
+                    return normalize_agent_name(agent_type);
                 }
+            }
+        }
+    }
+
+    // Tier 2: parent session tool_use inference
+    if let (Some(parent_id), Some(agent_id)) = (parent_session_id, stem.strip_prefix("agent-")) {
+        if let Some(parent_path) = find_parent_session_path(path, parent_id) {
+            if let Some(subagent_type) = lookup_subagent_type_in_parent(&parent_path, agent_id) {
+                return normalize_agent_name(&subagent_type);
             }
         }
     }
 
     // Tier 3: generic fallback (still visible in the Agents tab)
     normalize_agent_name("claude-code-subagent")
+}
+
+/// Locate the parent main-session JSONL for a sidechain transcript.
+///
+/// Nested layout: `.../projects/<key>/<session>/subagents/agent-X.jsonl`
+///   → parent at `.../projects/<key>/<session>.jsonl`
+/// Flat layout: `.../projects/<key>/agent-X.jsonl`
+///   → parent at `.../projects/<key>/<session-id>.jsonl`
+fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+    let parent_filename = format!("{}.jsonl", parent_session_id);
+
+    // Nested layout: parent dir is 3 levels up (file → subagents → session-dir → project-dir)
+    if let Some(dir) = sidechain_path.parent() {
+        if dir.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+            if let Some(project_dir) = dir.parent().and_then(|d| d.parent()) {
+                let candidate = project_dir.join(&parent_filename);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // Flat layout: parent dir is 1 level up
+    if let Some(project_dir) = sidechain_path.parent() {
+        let candidate = project_dir.join(&parent_filename);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// Scan a parent session JSONL to recover `subagent_type` for a given `agent_id`.
+///
+/// The parent session contains:
+/// - Assistant messages with `tool_use` blocks (`name: "Agent"`, `input.subagent_type`)
+/// - User messages with `tool_result` blocks whose text contains `agentId: <hex>`
+///
+/// We join on `tool_use_id` to map `agentId → subagent_type`.
+fn lookup_subagent_type_in_parent(parent_path: &Path, target_agent_id: &str) -> Option<String> {
+    let file = std::fs::File::open(parent_path).ok()?;
+    let reader = BufReader::new(file);
+
+    // tool_use.id → subagent_type
+    let mut tool_use_types: HashMap<String, String> = HashMap::new();
+    // tool_use_id → agentId (from tool_result text)
+    let mut agent_id_links: HashMap<String, String> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Quick pre-filter: skip lines that can't contain what we need
+        let has_subagent_type = trimmed.contains("subagent_type");
+        let has_agent_id_text = trimmed.contains("agentId:");
+        if !has_subagent_type && !has_agent_id_text {
+            continue;
+        }
+
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let content = match value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
+            Some(arr) => arr,
+            None => continue,
+        };
+
+        for block in content {
+            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match block_type {
+                "tool_use" if has_subagent_type => {
+                    if let (Some(id), Some(subagent_type)) = (
+                        block.get("id").and_then(|i| i.as_str()),
+                        block
+                            .get("input")
+                            .and_then(|inp| inp.get("subagent_type"))
+                            .and_then(|s| s.as_str()),
+                    ) {
+                        tool_use_types.insert(id.to_string(), subagent_type.to_string());
+                    }
+                }
+                "tool_result" if has_agent_id_text => {
+                    let tool_use_id =
+                        match block.get("tool_use_id").and_then(|i| i.as_str()) {
+                            Some(id) => id.to_string(),
+                            None => continue,
+                        };
+                    // Walk content blocks looking for "agentId: <hex>" in text
+                    let result_content = match block.get("content").and_then(|c| c.as_array()) {
+                        Some(arr) => arr,
+                        None => continue,
+                    };
+                    for cb in result_content {
+                        if let Some(text) = cb.get("text").and_then(|t| t.as_str()) {
+                            if let Some(aid) = extract_agent_id_from_text(text) {
+                                agent_id_links.insert(tool_use_id.clone(), aid);
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Join: find the tool_use_id whose tool_result produced our target agentId,
+    // then look up the subagent_type from the corresponding tool_use.
+    for (tool_use_id, agent_id) in &agent_id_links {
+        if agent_id == target_agent_id {
+            return tool_use_types.get(tool_use_id).cloned();
+        }
+    }
+
+    None
+}
+
+/// Extract the `agentId` hex string from a tool_result text block.
+/// Matches the pattern `agentId: <alphanumeric>` written by Claude Code's Agent tool.
+fn extract_agent_id_from_text(text: &str) -> Option<String> {
+    let marker = "agentId: ";
+    let pos = text.find(marker)?;
+    let start = pos + marker.len();
+    let rest = &text[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(rest.len());
+    if end > 0 {
+        Some(rest[..end].to_string())
+    } else {
+        None
+    }
 }
 
 /// Parse a Claude Code JSONL file
@@ -155,7 +313,10 @@ pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
                     if let Some(ref parent_id) = entry.session_id {
                         session_id = parent_id.clone();
                     }
-                    sidechain_agent = Some(resolve_subagent_name(path));
+                    sidechain_agent = Some(resolve_subagent_name(
+                        path,
+                        entry.session_id.as_deref(),
+                    ));
                 }
             }
 
@@ -1107,5 +1268,209 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(messages[0].session_id, expected_stem);
+    }
+
+    // --- Tier 2: parent session tool_use inference tests ---
+
+    #[test]
+    fn test_tier2_recovers_agent_from_parent_tool_use() {
+        // Nested layout: sidechain without meta, but parent session has matching tool_use
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        // Create parent session file with tool_use (Agent) and tool_result (agentId)
+        let parent_session_id = "parent-tier2-uuid";
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_p1","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Agent","input":{"subagent_type":"document-specialist","prompt":"Research something"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_abc","type":"tool_result","content":[{"type":"text","text":"Found the docs"},{"type":"text","text":"agentId: t2agent1 (use SendMessage with to: 't2agent1' to continue this agent)\n<usage>total_tokens: 5000</usage>"}]}]}}"#;
+        let parent_path = project_dir.join(format!("{}.jsonl", parent_session_id));
+        std::fs::write(&parent_path, parent_content).unwrap();
+
+        // Create sidechain file (nested layout, no meta sidecar)
+        let subagents_dir = project_dir.join(parent_session_id).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"parent-tier2-uuid","agentId":"t2agent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"Research something"}}
+{"type":"assistant","isSidechain":true,"sessionId":"parent-tier2-uuid","agentId":"t2agent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_t2","message":{"id":"msg_t2","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":120}}}"#;
+        let sidechain_path = subagents_dir.join("agent-t2agent1.jsonl");
+        std::fs::write(&sidechain_path, sidechain_content).unwrap();
+
+        let messages = parse_claude_file(&sidechain_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent,
+            Some("Document Specialist".to_string()),
+            "Tier 2 should recover agent name from parent tool_use"
+        );
+        assert_eq!(messages[0].session_id, parent_session_id);
+    }
+
+    #[test]
+    fn test_tier2_flat_layout_recovers_agent() {
+        // Flat layout: sidechain file in same dir as parent, no meta sidecar
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let parent_session_id = "flat-parent-uuid";
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_fp","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_flat","name":"Agent","input":{"subagent_type":"explore","prompt":"Find files"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_flat","type":"tool_result","content":[{"type":"text","text":"agentId: flatagent1 (use SendMessage)"}]}]}}"#;
+        std::fs::write(
+            project_dir.join(format!("{}.jsonl", parent_session_id)),
+            parent_content,
+        )
+        .unwrap();
+
+        let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"flat-parent-uuid","agentId":"flatagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"flat-parent-uuid","agentId":"flatagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_flat","message":{"id":"msg_flat","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        std::fs::write(
+            project_dir.join("agent-flatagent1.jsonl"),
+            sidechain_content,
+        )
+        .unwrap();
+
+        let messages = parse_claude_file(&project_dir.join("agent-flatagent1.jsonl"));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent,
+            Some("Explore".to_string()),
+            "Tier 2 should work for flat layout too"
+        );
+    }
+
+    #[test]
+    fn test_tier1_takes_precedence_over_tier2() {
+        // When meta sidecar exists, Tier 1 wins even if parent has a different subagent_type
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let parent_session_id = "precedence-parent";
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_prec","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_prec","name":"Agent","input":{"subagent_type":"wrong-type","prompt":"task"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_prec","type":"tool_result","content":[{"type":"text","text":"agentId: precagent1 done"}]}]}}"#;
+        std::fs::write(
+            project_dir.join(format!("{}.jsonl", parent_session_id)),
+            parent_content,
+        )
+        .unwrap();
+
+        let subagents_dir = project_dir.join(parent_session_id).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+
+        let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"precedence-parent","agentId":"precagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"precedence-parent","agentId":"precagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_prec","message":{"id":"msg_prec2","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        std::fs::write(
+            subagents_dir.join("agent-precagent1.jsonl"),
+            sidechain_content,
+        )
+        .unwrap();
+        std::fs::write(
+            subagents_dir.join("agent-precagent1.meta.json"),
+            r#"{"agentType":"code-reviewer"}"#,
+        )
+        .unwrap();
+
+        let messages = parse_claude_file(&subagents_dir.join("agent-precagent1.jsonl"));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent,
+            Some("Code Reviewer".to_string()),
+            "Tier 1 (meta sidecar) should take precedence over Tier 2 (parent lookup)"
+        );
+    }
+
+    #[test]
+    fn test_extract_agent_id_from_text() {
+        assert_eq!(
+            extract_agent_id_from_text(
+                "agentId: a8f80f8f33163def2 (use SendMessage with to: 'a8f80f8f33163def2')"
+            ),
+            Some("a8f80f8f33163def2".to_string())
+        );
+        assert_eq!(
+            extract_agent_id_from_text("agentId: abc123\n<usage>total_tokens: 5000</usage>"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            extract_agent_id_from_text("no agent id here"),
+            None
+        );
+        assert_eq!(
+            extract_agent_id_from_text("agentId: "),
+            None,
+            "Empty agent id should return None"
+        );
+    }
+
+    #[test]
+    fn test_tier2_multiple_agents_in_same_parent() {
+        // Parent spawns multiple agents; each sidechain should get the correct type
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let parent_session_id = "multi-agent-parent";
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_ma1","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_m1","name":"Agent","input":{"subagent_type":"explore","prompt":"find files"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_m1","type":"tool_result","content":[{"type":"text","text":"agentId: multiA1 done"}]}]}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","message":{"id":"msg_ma2","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_m2","name":"Agent","input":{"subagent_type":"executor","prompt":"implement feature"}}],"usage":{"input_tokens":60,"output_tokens":40}}}
+{"type":"user","timestamp":"2024-12-01T10:00:03.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_m2","type":"tool_result","content":[{"type":"text","text":"agentId: multiB2 done"}]}]}}"#;
+        std::fs::write(
+            project_dir.join(format!("{}.jsonl", parent_session_id)),
+            parent_content,
+        )
+        .unwrap();
+
+        let subagents_dir = project_dir.join(parent_session_id).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+
+        let make_sidechain = |agent_id: &str| {
+            format!(
+                r#"{{"type":"user","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:00.500Z","message":{{"content":"task"}}}}
+{{"type":"assistant","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_{agent_id}","message":{{"id":"msg_{agent_id}","model":"claude-3-5-sonnet","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+            )
+        };
+
+        std::fs::write(
+            subagents_dir.join("agent-multiA1.jsonl"),
+            make_sidechain("multiA1"),
+        )
+        .unwrap();
+        std::fs::write(
+            subagents_dir.join("agent-multiB2.jsonl"),
+            make_sidechain("multiB2"),
+        )
+        .unwrap();
+
+        let msgs_a = parse_claude_file(&subagents_dir.join("agent-multiA1.jsonl"));
+        let msgs_b = parse_claude_file(&subagents_dir.join("agent-multiB2.jsonl"));
+
+        assert_eq!(
+            msgs_a[0].agent,
+            Some("Explore".to_string()),
+            "First agent should be explore"
+        );
+        assert_eq!(
+            msgs_b[0].agent,
+            Some("Executor".to_string()),
+            "Second agent should be executor"
+        );
     }
 }

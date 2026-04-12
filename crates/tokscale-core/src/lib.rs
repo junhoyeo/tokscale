@@ -713,9 +713,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Claude)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::claudecode::parse_claude_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_claude_code_path,
+                |path| sessions::claudecode::parse_claude_file(path),
+            )
         })
         .collect();
     let mut claude_messages_raw: Vec<(String, UnifiedMessage)> = Vec::new();
