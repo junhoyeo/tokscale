@@ -163,6 +163,13 @@ describe("renderIsometric3DEmbedSvg", () => {
     expect(darkSvg).toContain('fill="#1A212A"');
     expect(lightSvg).toContain('fill="#F6F8FA"');
   });
+
+  it("uses blue palette for graph cubes (matching frontend default)", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain('fill="#79b8ff"');
+    expect(svg).toContain('fill="#1A212A"');
+  });
 });
 
 describe("renderIsometric3DErrorSvg", () => {
