@@ -5,7 +5,9 @@
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
 };
-use super::{normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{
+    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
+};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
@@ -849,8 +851,13 @@ mod tests {
 {"type":"assistant","isSidechain":true,"sessionId":"parent-uuid-001","agentId":"abc123","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_s01","message":{"id":"msg_s01","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":50}}}"#;
         let meta = r#"{"agentType":"explore","description":"Find session creation UI"}"#;
 
-        let (_dir, path) =
-            create_sidechain_files("myproject", "parent-uuid-001", "agent-abc123", jsonl, Some(meta));
+        let (_dir, path) = create_sidechain_files(
+            "myproject",
+            "parent-uuid-001",
+            "agent-abc123",
+            jsonl,
+            Some(meta),
+        );
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
