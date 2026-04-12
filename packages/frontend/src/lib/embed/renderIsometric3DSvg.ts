@@ -17,12 +17,30 @@ type ThemePalette = {
   divider: string;
   boxBg: string;
   boxBorder: string;
-  graphGrade0: string;
-  graphGrade1: string;
-  graphGrade2: string;
-  graphGrade3: string;
-  graphGrade4: string;
+  graphGrade: [string, string, string, string, string];
 };
+
+const LEFT_FACTOR = 0.8367; // 0.7^0.5  — d3 .darker(0.5)
+const RIGHT_FACTOR = 0.7; //   0.7^1.0  — d3 .darker(1.0)
+
+function darken(hex: string, factor: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * factor)));
+  return `rgb(${c(r)},${c(g)},${c(b)})`;
+}
+
+function buildFaceCSS(theme: string, grades: string[]): string {
+  let css = "";
+  for (let i = 0; i < grades.length; i++) {
+    const hex = grades[i];
+    css += `.${theme}${i}-t{fill:${hex}}`;
+    css += `.${theme}${i}-l{fill:${darken(hex, LEFT_FACTOR)}}`;
+    css += `.${theme}${i}-r{fill:${darken(hex, RIGHT_FACTOR)}}`;
+  }
+  return css;
+}
 
 const THEMES: Record<EmbedTheme, ThemePalette> = {
   dark: {
@@ -39,11 +57,7 @@ const THEMES: Record<EmbedTheme, ThemePalette> = {
     divider: "#30363D",
     boxBg: "#1A212A",
     boxBorder: "#1E2733",
-    graphGrade0: "#1A212A",
-    graphGrade1: "#79b8ff",
-    graphGrade2: "#388bfd",
-    graphGrade3: "#1f6feb",
-    graphGrade4: "#0d419d",
+    graphGrade: ["#1A212A", "#79b8ff", "#388bfd", "#1f6feb", "#0d419d"],
   },
   light: {
     bgStart: "#FFFFFF",
@@ -59,11 +73,7 @@ const THEMES: Record<EmbedTheme, ThemePalette> = {
     divider: "#D0D7DE",
     boxBg: "#F6F8FA",
     boxBorder: "#D0D7DE",
-    graphGrade0: "#EBEDF0",
-    graphGrade1: "#79b8ff",
-    graphGrade2: "#388bfd",
-    graphGrade3: "#1f6feb",
-    graphGrade4: "#0d419d",
+    graphGrade: ["#EBEDF0", "#79b8ff", "#388bfd", "#1f6feb", "#0d419d"],
   },
 };
 
@@ -71,64 +81,48 @@ const FIGTREE_FONT_STACK = "Figtree, -apple-system, BlinkMacSystemFont, Segoe UI
 const FIGTREE_FONT_IMPORT = "https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700;800&amp;display=swap";
 
 const CELL = 10;
-const MAX_HEIGHT = 40;
-const BASE_HEIGHT = 2;
-const MIN_NON_ZERO_HEIGHT = 8;
+const W = 9;
+const TAN30 = 0.5774;
+const DY = +(CELL * TAN30).toFixed(2);
+const RIGHT_DY = +(W * TAN30).toFixed(2);
+const MAX_HEIGHT = 35;
+const MIN_HEIGHT = 2;
+const INTENSITY_HEIGHTS: readonly number[] = [MIN_HEIGHT, 8, 16, 26, MAX_HEIGHT];
+const ANIM_DUR = "2s";
 
 /**
- * 2:1 dimetric projection: col (X) goes screen right-down,
- * row (Y) goes screen left-down, z goes screen up.
+ * Isometric cube via <rect> + CSS transforms (matches github-profile-3d-contrib).
+ * Top face: skewY(-30) skewX(40.89) scale(1 1.15)
+ * Left face: skewY(30) scale(1 1.15)
+ * Right face: translate(W dy) skewY(-30) scale(1 1.15)
  */
-function toScreen(col: number, row: number, z: number = 0): { x: number; y: number } {
-  return {
-    x: (col - row) * CELL,
-    y: (col + row) * (CELL / 2) - z,
-  };
-}
-
-function darkenHex(hex: string, factor: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v * factor)));
-  return (
-    "#" +
-    clamp(r).toString(16).padStart(2, "0") +
-    clamp(g).toString(16).padStart(2, "0") +
-    clamp(b).toString(16).padStart(2, "0")
-  );
-}
-
-function pt(ox: number, oy: number, p: { x: number; y: number }): string {
-  return `${(ox + p.x).toFixed(1)},${(oy + p.y).toFixed(1)}`;
-}
-
 function renderCube(
-  ox: number,
-  oy: number,
-  col: number,
-  row: number,
+  x: number,
+  y: number,
   h: number,
-  color: string,
+  cls: string,
+  animate: boolean,
 ): string {
-  const tN = toScreen(col, row, h);
-  const tE = toScreen(col + 1, row, h);
-  const tS = toScreen(col + 1, row + 1, h);
-  const tW = toScreen(col, row + 1, h);
-  const bE = toScreen(col + 1, row, 0);
-  const bS = toScreen(col + 1, row + 1, 0);
-  const bW = toScreen(col, row + 1, 0);
+  const SCALE_Y = 1.15;
+  const faceH = +(h / SCALE_Y).toFixed(1);
+  const minFaceH = +(MIN_HEIGHT / SCALE_Y).toFixed(1);
+  const topT = `skewY(-30) skewX(40.89) scale(1 ${SCALE_Y})`;
+  const leftT = `skewY(30) scale(1 ${SCALE_Y})`;
+  const rightT = `translate(${W} ${RIGHT_DY}) skewY(-30) scale(1 ${SCALE_Y})`;
+  const fx = x.toFixed(1);
+  const fy = y.toFixed(1);
 
-  const topColor = color;
-  const leftColor = darkenHex(color, 0.7);
-  const rightColor = darkenHex(color, 0.85);
+  let anim = "";
+  let leftAnim = "";
+  let rightAnim = "";
+  if (animate && h > MIN_HEIGHT) {
+    const dropFrom = (y + h - MIN_HEIGHT).toFixed(1);
+    anim = `<animateTransform attributeName="transform" type="translate" values="${fx} ${dropFrom};${fx} ${fy}" dur="${ANIM_DUR}" repeatCount="1"/>`;
+    leftAnim = `<animate attributeName="height" values="${minFaceH};${faceH}" dur="${ANIM_DUR}" repeatCount="1"/>`;
+    rightAnim = leftAnim;
+  }
 
-  // Face orientation: left=Y+, right=X+, top=Z+
-  const left = `<polygon points="${pt(ox, oy, tW)} ${pt(ox, oy, tS)} ${pt(ox, oy, bS)} ${pt(ox, oy, bW)}" fill="${leftColor}" stroke="${leftColor}" stroke-width="0.5"/>`;
-  const right = `<polygon points="${pt(ox, oy, tE)} ${pt(ox, oy, bE)} ${pt(ox, oy, bS)} ${pt(ox, oy, tS)}" fill="${rightColor}" stroke="${rightColor}" stroke-width="0.5"/>`;
-  const top = `<polygon points="${pt(ox, oy, tN)} ${pt(ox, oy, tE)} ${pt(ox, oy, tS)} ${pt(ox, oy, tW)}" fill="${topColor}" stroke="${topColor}" stroke-width="0.5"/>`;
-
-  return left + right + top;
+  return `<g transform="translate(${fx} ${fy})">${anim}<rect stroke="none" x="0" y="0" width="${W}" height="${W}" transform="${topT}" class="${cls}-t"/><rect stroke="none" x="0" y="0" width="${W}" height="${faceH}" transform="${leftT}" class="${cls}-l">${leftAnim}</rect><rect stroke="none" x="0" y="0" width="${W}" height="${faceH}" transform="${rightT}" class="${cls}-r">${rightAnim}</rect></g>`;
 }
 
 function brandIcon(x: number, baselineY: number, color: string): string {
@@ -160,16 +154,6 @@ function formatShortDate(dateStr: string): string {
   return `${mm}/${dd}`;
 }
 
-function previousUtcDate(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() - 1);
-  return d.toISOString().split("T")[0];
-}
-
-function getContributionHeightValue(contribution: EmbedContributionDay): number {
-  return contribution.totalTokens > 0 ? contribution.totalTokens : contribution.totalCost;
-}
-
 function computeStreaks(contributions: EmbedContributionDay[]): { longest: number; current: number } {
   const activeSet = new Set<string>();
   for (const c of contributions) {
@@ -183,8 +167,7 @@ function computeStreaks(contributions: EmbedContributionDay[]): { longest: numbe
   for (let i = 1; i < sorted.length; i++) {
     const prev = new Date(sorted[i - 1] + "T00:00:00Z");
     const curr = new Date(sorted[i] + "T00:00:00Z");
-    const diff = (curr.getTime() - prev.getTime()) / 86_400_000;
-    if (diff === 1) {
+    if ((curr.getTime() - prev.getTime()) / 86_400_000 === 1) {
       run++;
       if (run > longest) longest = run;
     } else {
@@ -194,19 +177,14 @@ function computeStreaks(contributions: EmbedContributionDay[]): { longest: numbe
 
   let current = 0;
   const now = new Date();
-  const todayStr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  let cursor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
     .toISOString()
     .split("T")[0];
-  const yesterdayStr = previousUtcDate(todayStr);
-  let cursor = activeSet.has(todayStr)
-    ? todayStr
-    : activeSet.has(yesterdayStr)
-      ? yesterdayStr
-      : null;
-
-  while (cursor && activeSet.has(cursor)) {
+  while (activeSet.has(cursor)) {
     current++;
-    cursor = previousUtcDate(cursor);
+    const d = new Date(cursor + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() - 1);
+    cursor = d.toISOString().split("T")[0];
   }
 
   return { longest, current };
@@ -222,11 +200,11 @@ function renderStatsBox(
   palette: ThemePalette,
 ): string {
   const titleH = 20;
-  const itemH = 42;
+  const itemHWithSub = 42;
+  const itemHNoSub = 30;
   const footerH = footer ? 22 : 0;
   const boxPad = 10;
-  const innerH = items.length * itemH;
-
+  const innerH = items.reduce((sum, it) => sum + (it.sub ? itemHWithSub : itemHNoSub), 0);
   const boxY = y + titleH + 4;
   const boxInnerH = innerH + boxPad * 2 + footerH;
 
@@ -240,8 +218,10 @@ function renderStatsBox(
     svg += `<text x="${x + boxPad}" y="${iy + 30}" fill="${palette.text}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${escapeXml(item.label)}</text>`;
     if (item.sub) {
       svg += `<text x="${x + boxPad}" y="${iy + 40}" fill="${palette.muted}" font-size="9" font-family="${FIGTREE_FONT_STACK}">${escapeXml(item.sub)}</text>`;
+      iy += itemHWithSub;
+    } else {
+      iy += itemHNoSub;
     }
-    iy += itemH;
   }
 
   if (footer) {
@@ -258,17 +238,10 @@ export function renderIsometric3DEmbedSvg(
 ): string {
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = THEMES[theme];
+  const cls = theme === "dark" ? "d" : "l";
 
-  const contributionMap = new Map<string, EmbedContributionDay>();
-  for (const c of contributions) contributionMap.set(c.date, c);
-
-  const colors = [
-    palette.graphGrade0,
-    palette.graphGrade1,
-    palette.graphGrade2,
-    palette.graphGrade3,
-    palette.graphGrade4,
-  ];
+  const intensityMap = new Map<string, number>();
+  for (const c of contributions) intensityMap.set(c.date, c.intensity);
 
   const now = new Date();
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -283,18 +256,15 @@ export function renderIsometric3DEmbedSvg(
   const px = 24;
   const width = 680;
   const headerH = 70;
-  const gridXExtent = (numWeeks + 7) * CELL;
-  const gridYExtent = (numWeeks + 7) * (CELL / 2) + MAX_HEIGHT;
+  const gridRows = numWeeks + 7;
+  const gridYExtent = gridRows * DY + MAX_HEIGHT;
   const footerH = 30;
-  const height = headerH + gridYExtent + footerH;
+  const height = Math.ceil(headerH + gridYExtent + footerH);
   const rx = 16;
 
-  const gridOriginX = px + 7 * CELL + Math.max(0, (width - 2 * px - gridXExtent) / 2);
-  const gridOriginY = headerH + MAX_HEIGHT + 4;
-  const maxContributionHeightValue = contributions.reduce((max, contribution) => {
-    const value = getContributionHeightValue(contribution);
-    return value > max ? value : max;
-  }, 0);
+  const gridXExtent = gridRows * CELL + W + W;
+  const gridOriginX = +(px + 7 * CELL + Math.max(0, (width - 2 * px - gridXExtent) / 2)).toFixed(1);
+  const gridOriginY = +(headerH + MAX_HEIGHT + 4).toFixed(1);
 
   let cubes = "";
   for (let w = 0; w < numWeeks; w++) {
@@ -304,18 +274,13 @@ export function renderIsometric3DEmbedSvg(
       if (date > today) continue;
 
       const dateStr = date.toISOString().split("T")[0];
-      const contribution = contributionMap.get(dateStr);
-      const intensity = (contribution?.intensity ?? 0) as 0 | 1 | 2 | 3 | 4;
-      const heightValue = contribution ? getContributionHeightValue(contribution) : 0;
-      const h = heightValue > 0 && maxContributionHeightValue > 0
-        ? Math.max(
-            MIN_NON_ZERO_HEIGHT,
-            Math.round((heightValue / maxContributionHeightValue) * (MAX_HEIGHT - MIN_NON_ZERO_HEIGHT) + MIN_NON_ZERO_HEIGHT),
-          )
-        : BASE_HEIGHT;
-      const color = colors[intensity];
+      const intensity = (intensityMap.get(dateStr) ?? 0) as 0 | 1 | 2 | 3 | 4;
+      const h = INTENSITY_HEIGHTS[intensity];
 
-      cubes += renderCube(gridOriginX, gridOriginY, w, d, h, color);
+      const cubeX = gridOriginX + (w - d) * CELL;
+      const cubeY = gridOriginY + (w + d) * DY - h;
+
+      cubes += renderCube(cubeX, cubeY, h, `${cls}${intensity}`, true);
     }
   }
 
@@ -353,10 +318,19 @@ export function renderIsometric3DEmbedSvg(
     { value: `${streaks.current} days`, label: "Current" },
   ];
 
+  const faceCss = buildFaceCSS(cls, [...palette.graphGrade]);
+  const classCss = palette.graphGrade
+    .map((_, i) => `.${cls}${i}-t{${""}} .${cls}${i}-l{${""}} .${cls}${i}-r{${""}}`)
+    .join("");
+  void classCss;
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale 3D contribution graph for ${escapeXml(username)}">
   <defs>
-    <style>@import url('${FIGTREE_FONT_IMPORT}');</style>
+    <style>
+@import url('${FIGTREE_FONT_IMPORT}');
+${faceCss}
+    </style>
     <linearGradient id="bg" x1="0" y1="0" x2="${width}" y2="${height}" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="${palette.bgStart}"/>
       <stop offset="1" stop-color="${palette.bgEnd}"/>

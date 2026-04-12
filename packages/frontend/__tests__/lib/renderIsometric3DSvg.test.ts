@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   renderIsometric3DEmbedSvg,
   renderIsometric3DErrorSvg,
@@ -22,36 +22,29 @@ const mockStats: UserEmbedStats = {
 };
 
 const mockContributions: EmbedContributionDay[] = [
-  { date: "2026-01-15", totalTokens: 0, totalCost: 0, intensity: 0 },
-  { date: "2026-02-10", totalTokens: 100, totalCost: 1, intensity: 2 },
-  { date: "2026-02-20", totalTokens: 1000, totalCost: 10, intensity: 4 },
-  { date: "2026-03-01", totalTokens: 50, totalCost: 0.5, intensity: 1 },
-  { date: "2026-03-10", totalTokens: 500, totalCost: 5, intensity: 3 },
+  { date: "2026-01-15", intensity: 0 },
+  { date: "2026-02-10", intensity: 2 },
+  { date: "2026-02-20", intensity: 4 },
+  { date: "2026-03-01", intensity: 1 },
+  { date: "2026-03-10", intensity: 3 },
 ];
 
 describe("renderIsometric3DEmbedSvg", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-11T12:00:00.000Z"));
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-  it("renders a valid SVG with polygon elements", () => {
+  it("renders a valid SVG with rect-based isometric cubes", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
     expect(svg).toContain("<svg");
     expect(svg).toContain("</svg>");
-    expect(svg).toContain("<polygon");
+    expect(svg).toContain("<rect");
+    expect(svg).toContain("skewY");
   });
 
-  it("renders isometric cubes with three faces each (top, left, right)", () => {
+  it("renders three rect faces per cube (top, left, right via CSS classes)", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
-    const polygonCount = (svg.match(/<polygon/g) || []).length;
 
-    expect(polygonCount).toBeGreaterThan(0);
-    expect(polygonCount % 3).toBe(0);
+    expect(svg).toContain('class="d0-t"');
+    expect(svg).toContain('class="d0-l"');
+    expect(svg).toContain('class="d0-r"');
   });
 
   it("contains the username", () => {
@@ -132,38 +125,11 @@ describe("renderIsometric3DEmbedSvg", () => {
 
   it("handles empty contributions array gracefully", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, []);
-    const polygonCount = (svg.match(/<polygon/g) || []).length;
 
     expect(svg).toContain("<svg");
-    expect(polygonCount).toBeGreaterThan(0);
-    expect(polygonCount % 3).toBe(0);
+    expect(svg).toContain("skewY");
     expect(svg).toContain("0 active days");
     expect(svg).toContain("0 days");
-  });
-
-  it("counts the current streak from yesterday when today has no activity", () => {
-    const svg = renderIsometric3DEmbedSvg(mockStats, [
-      { date: "2026-03-08", totalTokens: 200, totalCost: 2, intensity: 2 },
-      { date: "2026-03-09", totalTokens: 300, totalCost: 3, intensity: 3 },
-      { date: "2026-03-10", totalTokens: 400, totalCost: 4, intensity: 4 },
-    ]);
-
-    expect(svg).toContain(">3 days</text>");
-  });
-
-  it("scales cube heights by actual token usage within the same intensity bucket", () => {
-    const svg = renderIsometric3DEmbedSvg(mockStats, [
-      { date: "2026-03-08", totalTokens: 10, totalCost: 1, intensity: 4 },
-      { date: "2026-03-09", totalTokens: 1000, totalCost: 2, intensity: 4 },
-    ]);
-    const topFaceMatches = [...svg.matchAll(/<polygon points="([^"]+)" fill="#0d419d" stroke="#0d419d"/g)];
-    const topFaceYs = topFaceMatches.map((match) => {
-      const firstPoint = match[1].split(" ")[0];
-      return Number(firstPoint.split(",")[1]);
-    }).sort((a, b) => a - b);
-
-    expect(topFaceYs).toHaveLength(2);
-    expect(topFaceYs[0]).toBeLessThan(topFaceYs[1]);
   });
 
   it("renders fixed-width SVG of 680px", () => {
@@ -200,8 +166,8 @@ describe("renderIsometric3DEmbedSvg", () => {
   it("uses blue palette for graph cubes (matching frontend default)", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain('fill="#79b8ff"');
-    expect(svg).toContain('fill="#1A212A"');
+    expect(svg).toContain("fill:#79b8ff");
+    expect(svg).toContain("fill:#1A212A");
   });
 });
 
