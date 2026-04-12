@@ -5,6 +5,10 @@ import {
   renderProfileEmbedSvg,
   type EmbedTheme,
 } from "@/lib/embed/renderProfileEmbedSvg";
+import {
+  renderIsometric3DEmbedSvg,
+  renderIsometric3DErrorSvg,
+} from "@/lib/embed/renderIsometric3DSvg";
 import { isValidGitHubUsername } from "@/lib/validation/username";
 
 export const revalidate = 60;
@@ -26,6 +30,10 @@ function parseSort(searchParams: URLSearchParams): EmbedSortBy {
 function parseGraph(searchParams: URLSearchParams): boolean {
   const value = searchParams.get("graph");
   return value === "1" || value === "true";
+}
+
+function parseView(searchParams: URLSearchParams): "2d" | "3d" {
+  return searchParams.get("view") === "3d" ? "3d" : "2d";
 }
 
 function createSvgResponse(svg: string, init?: { status?: number; cacheControl?: string }) {
@@ -53,9 +61,12 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   const compact = parseCompact(searchParams);
   const sortBy = parseSort(searchParams);
   const showGraph = parseGraph(searchParams);
+  const view = parseView(searchParams);
 
   if (!isValidGitHubUsername(username)) {
-    const svg = renderProfileEmbedErrorSvg("Invalid username format", { theme, compact: true });
+    const svg = view === "3d"
+      ? renderIsometric3DErrorSvg("Invalid username format", { theme })
+      : renderProfileEmbedErrorSvg("Invalid username format", { theme, compact: true });
     return createSvgResponse(svg, { status: 400, cacheControl: "no-store" });
   }
 
@@ -63,11 +74,31 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     const data = await getUserEmbedStats(username, sortBy);
 
     if (!data) {
-      const svg = renderProfileEmbedErrorSvg(`User @${username} was not found`, {
-        theme,
-        compact,
-      });
+      const svg = view === "3d"
+        ? renderIsometric3DErrorSvg(`User @${username} was not found`, { theme })
+        : renderProfileEmbedErrorSvg(`User @${username} was not found`, { theme, compact });
       return createSvgResponse(svg, { status: 200 });
+    }
+
+    if (view === "3d") {
+      const contributions = await getUserEmbedContributions(username).catch(() => null);
+
+      if (!contributions || contributions.length === 0) {
+        const svg = renderIsometric3DErrorSvg("No contribution data available yet", { theme });
+        return createSvgResponse(svg);
+      }
+
+      const svg = renderIsometric3DEmbedSvg(data, contributions, { theme });
+
+      console.info("[embed-svg-3d] success", {
+        username,
+        status: 200,
+        durationMs: Date.now() - startedAt,
+        sortBy,
+        theme,
+      });
+
+      return createSvgResponse(svg);
     }
 
     const contributions = showGraph && !compact
@@ -100,10 +131,9 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       error: error instanceof Error ? error.message : "unknown_error",
     });
 
-    const svg = renderProfileEmbedErrorSvg("Tokscale stats are temporarily unavailable", {
-      theme,
-      compact,
-    });
+    const svg = view === "3d"
+      ? renderIsometric3DErrorSvg("Tokscale stats are temporarily unavailable", { theme })
+      : renderProfileEmbedErrorSvg("Tokscale stats are temporarily unavailable", { theme, compact });
 
     return createSvgResponse(svg, {
       status: 500,

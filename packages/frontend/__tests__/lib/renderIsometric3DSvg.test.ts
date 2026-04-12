@@ -1,0 +1,160 @@
+import { describe, expect, it } from "vitest";
+import {
+  renderIsometric3DEmbedSvg,
+  renderIsometric3DErrorSvg,
+} from "../../src/lib/embed/renderIsometric3DSvg";
+import type { UserEmbedStats, EmbedContributionDay } from "../../src/lib/embed/getUserEmbedStats";
+
+const mockStats: UserEmbedStats = {
+  user: {
+    id: "user-id",
+    username: "octocat",
+    displayName: "The Octocat",
+    avatarUrl: null,
+  },
+  stats: {
+    totalTokens: 1234567,
+    totalCost: 42.42,
+    submissionCount: 7,
+    rank: 3,
+    updatedAt: "2026-02-24T00:00:00.000Z",
+  },
+};
+
+const mockContributions: EmbedContributionDay[] = [
+  { date: "2026-01-15", intensity: 0 },
+  { date: "2026-02-10", intensity: 2 },
+  { date: "2026-02-20", intensity: 4 },
+  { date: "2026-03-01", intensity: 1 },
+  { date: "2026-03-10", intensity: 3 },
+];
+
+describe("renderIsometric3DEmbedSvg", () => {
+  it("renders a valid SVG with polygon elements", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("<svg");
+    expect(svg).toContain("</svg>");
+    expect(svg).toContain("<polygon");
+  });
+
+  it("renders isometric cubes with three faces each (top, left, right)", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+    const polygonCount = (svg.match(/<polygon/g) || []).length;
+
+    expect(polygonCount).toBeGreaterThan(0);
+    expect(polygonCount % 3).toBe(0);
+  });
+
+  it("contains the username", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("@octocat");
+  });
+
+  it("contains stats values", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("#3");
+    expect(svg).toContain("tokens");
+  });
+
+  it("uses Figtree font", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("family=Figtree");
+    expect(svg).toContain('font-family="Figtree');
+  });
+
+  it("renders with dark theme by default", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain('stop-color="#0D1117"');
+  });
+
+  it("renders with light theme when specified", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions, { theme: "light" });
+
+    expect(svg).toContain('stop-color="#FFFFFF"');
+  });
+
+  it("uses different polygon fill colors for cube faces", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+    const fills = svg.match(/fill="(#[0-9a-fA-F]{6})"/g) || [];
+    const uniqueFills = new Set(fills);
+
+    expect(uniqueFills.size).toBeGreaterThan(3);
+  });
+
+  it("includes tokscale.ai profile link", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("tokscale.ai/u/octocat");
+  });
+
+  it("escapes XML in user-provided text", () => {
+    const svg = renderIsometric3DEmbedSvg(
+      {
+        ...mockStats,
+        user: { ...mockStats.user, username: "test<user" },
+      },
+      mockContributions,
+    );
+
+    expect(svg).toContain("@test&lt;user");
+    expect(svg).not.toContain("@test<user");
+  });
+
+  it("handles empty contributions array gracefully", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, []);
+    const polygonCount = (svg.match(/<polygon/g) || []).length;
+
+    expect(svg).toContain("<svg");
+    expect(polygonCount).toBeGreaterThan(0);
+    expect(polygonCount % 3).toBe(0);
+  });
+
+  it("renders fixed-width SVG of 680px", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain('width="680"');
+  });
+
+  it("shows rank as dash when null", () => {
+    const svg = renderIsometric3DEmbedSvg(
+      { ...mockStats, stats: { ...mockStats.stats, rank: null } },
+      mockContributions,
+    );
+
+    expect(svg).toContain("Rank");
+  });
+});
+
+describe("renderIsometric3DErrorSvg", () => {
+  it("renders a valid error SVG", () => {
+    const svg = renderIsometric3DErrorSvg("Something went wrong");
+
+    expect(svg).toContain("<svg");
+    expect(svg).toContain("Something went wrong");
+    expect(svg).toContain("Tokscale Stats");
+  });
+
+  it("escapes XML in error message", () => {
+    const svg = renderIsometric3DErrorSvg("User <unknown> not found");
+
+    expect(svg).toContain("User &lt;unknown&gt; not found");
+    expect(svg).not.toContain("User <unknown> not found");
+  });
+
+  it("supports light theme", () => {
+    const svg = renderIsometric3DErrorSvg("Error", { theme: "light" });
+
+    expect(svg).toContain('stop-color="#FFFFFF"');
+  });
+
+  it("uses Figtree font", () => {
+    const svg = renderIsometric3DErrorSvg("Error");
+
+    expect(svg).toContain("family=Figtree");
+  });
+});
