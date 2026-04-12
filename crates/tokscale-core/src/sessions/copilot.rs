@@ -101,13 +101,7 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
             provider_id,
             session_id,
             timestamp_ms,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning,
-            },
+            normalize_input_tokens(input, output, cache_read, cache_write, reasoning),
             0.0,
             Some(dedup_key),
         ));
@@ -143,6 +137,32 @@ fn attr_i64(attributes: &Map<String, Value>, key: &str) -> i64 {
         .and_then(value_as_i64)
         .unwrap_or(0)
         .max(0)
+}
+
+fn normalize_input_tokens(
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+) -> TokenBreakdown {
+    // OTEL reports input_tokens inclusive of cached input. Normalize it so
+    // Tokscale's input bucket remains the non-cached portion, consistent with
+    // cache-aware clients that report cache tokens separately.
+    let clamped_cache_read = cache_read.min(input).max(0);
+    let remaining_input = input.saturating_sub(clamped_cache_read);
+    let clamped_cache_write = cache_write.min(remaining_input).max(0);
+
+    TokenBreakdown {
+        input: input
+            .saturating_sub(clamped_cache_read)
+            .saturating_sub(clamped_cache_write)
+            .max(0),
+        output: output.max(0),
+        cache_read: clamped_cache_read,
+        cache_write: clamped_cache_write,
+        reasoning: reasoning.max(0),
+    }
 }
 
 fn first_non_empty_attr<'a>(attributes: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
@@ -193,7 +213,7 @@ mod tests {
         assert_eq!(message.model_id, "claude-sonnet-4");
         assert_eq!(message.provider_id, "anthropic");
         assert_eq!(message.session_id, "conv-1");
-        assert_eq!(message.tokens.input, 19_452);
+        assert_eq!(message.tokens.input, 19_329);
         assert_eq!(message.tokens.output, 281);
         assert_eq!(message.tokens.cache_read, 123);
         assert_eq!(message.tokens.reasoning, 128);
@@ -228,5 +248,32 @@ mod tests {
         assert_eq!(messages[0].session_id, "trace-fallback");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 9);
+    }
+
+    #[test]
+    fn test_parse_copilot_normalizes_cache_read_and_write_from_input() {
+        let content = r#"{"type":"span","traceId":"trace-cache","spanId":"span-cache","name":"chat gpt-5.4","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":20,"gen_ai.usage.cache_read.input_tokens":200,"gen_ai.usage.cache_write.input_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 750);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 200);
+        assert_eq!(messages[0].tokens.cache_write, 50);
+    }
+
+    #[test]
+    fn test_parse_copilot_clamps_cache_tokens_to_input() {
+        let content = r#"{"type":"span","traceId":"trace-clamp","spanId":"span-clamp","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":5,"gen_ai.usage.cache_read.input_tokens":90,"gen_ai.usage.cache_write.input_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages[0].tokens.cache_read, 90);
+        assert_eq!(messages[0].tokens.cache_write, 10);
     }
 }
