@@ -538,6 +538,9 @@ impl App {
         if self.current_tab == Tab::Hourly {
             self.sort_field = SortField::Date;
             self.sort_direction = SortDirection::Descending;
+        } else {
+            self.sort_field = SortField::Cost;
+            self.sort_direction = SortDirection::Descending;
         }
     }
 
@@ -807,17 +810,14 @@ impl App {
                 .get_sorted_daily()
                 .get(self.selected_index)
                 .map(|d| format!("{}: {} tokens, ${:.4}", d.date, d.tokens.total(), d.cost)),
-            Tab::Hourly => self
-                .get_sorted_hourly()
-                .get(self.selected_index)
-                .map(|h| {
-                    format!(
-                        "{}: {} tokens, ${:.4}",
-                        h.datetime.format("%Y-%m-%d %H:%M"),
-                        h.tokens.total(),
-                        h.cost
-                    )
-                }),
+            Tab::Hourly => self.get_sorted_hourly().get(self.selected_index).map(|h| {
+                format!(
+                    "{}: {} tokens, ${:.4}",
+                    h.datetime.format("%Y-%m-%d %H:%M"),
+                    h.tokens.total(),
+                    h.cost
+                )
+            }),
             Tab::Stats => None,
         };
 
@@ -1561,6 +1561,22 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Ascending);
 
         app.handle_key_event(key(KeyCode::Char('t')));
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_sort_defaults_restore_after_hourly() {
+        let mut app = make_app();
+
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.current_tab = Tab::Hourly;
+        app.apply_tab_sort_defaults();
+        assert_eq!(app.sort_field, SortField::Date);
+
+        app.current_tab = Tab::Models;
+        app.apply_tab_sort_defaults();
+        assert_eq!(app.sort_field, SortField::Cost);
         assert_eq!(app.sort_direction, SortDirection::Descending);
     }
 

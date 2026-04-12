@@ -44,6 +44,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let is_narrow = app.is_narrow();
     let is_very_narrow = app.is_very_narrow();
+    let has_turn_data = hourly.iter().any(|h| h.turn_count > 0);
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
@@ -51,19 +52,25 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_selection = app.theme.selection;
     let now = Local::now().naive_local();
-    let current_hour = now
-        .date()
-        .and_hms_opt(now.hour(), 0, 0)
-        .unwrap_or(now);
+    let current_hour = now.date().and_hms_opt(now.hour(), 0, 0).unwrap_or(now);
 
     let header_cells = if is_very_narrow {
         vec!["Hour", "Cost"]
     } else if is_narrow {
-        vec!["Hour", "Source", "Turn", "Msgs", "Tokens", "Cost"]
-    } else {
+        if has_turn_data {
+            vec!["Hour", "Source", "Turn", "Msgs", "Tokens", "Cost"]
+        } else {
+            vec!["Hour", "Source", "Msgs", "Tokens", "Cost"]
+        }
+    } else if has_turn_data {
         vec![
             "Hour", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×",
             "Total", "Cost",
+        ]
+    } else {
+        vec![
+            "Hour", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
+            "Cost",
         ]
     };
 
@@ -85,10 +92,14 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|(i, h)| {
                 let indicator = match (i, is_narrow, is_very_narrow) {
                     (0, _, _) => sort_indicator(SortField::Date),
-                    (9, false, false) => sort_indicator(SortField::Tokens),
-                    (4, true, false) => sort_indicator(SortField::Tokens),
-                    (10, false, false) => sort_indicator(SortField::Cost),
-                    (5, true, false) => sort_indicator(SortField::Cost),
+                    (9, false, false) if has_turn_data => sort_indicator(SortField::Tokens),
+                    (8, false, false) if !has_turn_data => sort_indicator(SortField::Tokens),
+                    (4, true, false) if has_turn_data => sort_indicator(SortField::Tokens),
+                    (3, true, false) if !has_turn_data => sort_indicator(SortField::Tokens),
+                    (10, false, false) if has_turn_data => sort_indicator(SortField::Cost),
+                    (9, false, false) if !has_turn_data => sort_indicator(SortField::Cost),
+                    (5, true, false) if has_turn_data => sort_indicator(SortField::Cost),
+                    (4, true, false) if !has_turn_data => sort_indicator(SortField::Cost),
                     (1, _, true) => sort_indicator(SortField::Cost),
                     _ => "",
                 };
@@ -140,12 +151,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if is_narrow {
-                let turn_str = if hour.turn_count > 0 {
-                    hour.turn_count.to_string()
-                } else {
-                    "\u{2014}".to_string()
-                };
-                vec![
+                let mut cells = vec![
                     Cell::from(hour.datetime.format("%Y-%m-%d %H:%M").to_string()).style(
                         if is_current {
                             Style::default()
@@ -156,18 +162,23 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                         },
                     ),
                     Cell::from(clients_str),
-                    Cell::from(turn_str),
+                ];
+                if has_turn_data {
+                    let turn_str = if hour.turn_count > 0 {
+                        hour.turn_count.to_string()
+                    } else {
+                        "\u{2014}".to_string()
+                    };
+                    cells.push(Cell::from(turn_str));
+                }
+                cells.extend([
                     Cell::from(hour.message_count.to_string()),
                     Cell::from(format_tokens(hour.tokens.total())),
                     Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
-                ]
+                ]);
+                cells
             } else {
-                let turn_str = if hour.turn_count > 0 {
-                    hour.turn_count.to_string()
-                } else {
-                    "\u{2014}".to_string()
-                };
-                vec![
+                let mut cells = vec![
                     Cell::from(hour.datetime.format("%Y-%m-%d %H:%M").to_string()).style(
                         if is_current {
                             Style::default()
@@ -178,7 +189,16 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                         },
                     ),
                     Cell::from(clients_str),
-                    Cell::from(turn_str),
+                ];
+                if has_turn_data {
+                    let turn_str = if hour.turn_count > 0 {
+                        hour.turn_count.to_string()
+                    } else {
+                        "\u{2014}".to_string()
+                    };
+                    cells.push(Cell::from(turn_str));
+                }
+                cells.extend([
                     Cell::from(hour.message_count.to_string()),
                     Cell::from(format_tokens(hour.tokens.input))
                         .style(Style::default().fg(Color::Rgb(100, 200, 100))),
@@ -196,7 +216,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     .style(Style::default().fg(Color::Cyan)),
                     Cell::from(format_tokens(hour.tokens.total())),
                     Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
-                ]
+                ]);
+                cells
             };
 
             let row_style = if is_selected {
@@ -215,7 +236,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let widths = if is_very_narrow {
         vec![Constraint::Percentage(60), Constraint::Percentage(40)]
-    } else if is_narrow {
+    } else if is_narrow && has_turn_data {
         vec![
             Constraint::Percentage(25),
             Constraint::Percentage(20),
@@ -224,10 +245,31 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(15),
             Constraint::Percentage(15),
         ]
-    } else {
+    } else if is_narrow {
+        vec![
+            Constraint::Percentage(30),
+            Constraint::Percentage(25),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+        ]
+    } else if has_turn_data {
         vec![
             Constraint::Length(18),
             Constraint::Length(14),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ]
+    } else {
+        vec![
+            Constraint::Length(18),
             Constraint::Length(6),
             Constraint::Length(6),
             Constraint::Length(10),

@@ -143,7 +143,6 @@ struct CachedDailyUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedHourlyModelInfo {
-    client: String,
     tokens: CachedTokenBreakdown,
     cost: f64,
 }
@@ -330,7 +329,6 @@ impl From<CachedDailySourceInfo> for DailySourceInfo {
 impl From<&HourlyModelInfo> for CachedHourlyModelInfo {
     fn from(h: &HourlyModelInfo) -> Self {
         Self {
-            client: h.client.clone(),
             tokens: (&h.tokens).into(),
             cost: h.cost,
         }
@@ -340,7 +338,6 @@ impl From<&HourlyModelInfo> for CachedHourlyModelInfo {
 impl From<CachedHourlyModelInfo> for HourlyModelInfo {
     fn from(h: CachedHourlyModelInfo) -> Self {
         Self {
-            client: h.client,
             tokens: h.tokens.into(),
             cost: h.cost,
         }

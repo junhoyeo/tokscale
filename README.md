@@ -132,7 +132,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 ## Features
 
 - **Interactive TUI Mode** - Beautiful terminal UI powered by Ratatui (default mode)
-  - 4 interactive views: Overview, Models, Daily, Stats
+  - 6 interactive views: Overview, Models, Daily, Hourly, Stats, Agents
   - Keyboard & mouse navigation
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
@@ -214,6 +214,7 @@ tokscale
 # Launch TUI with specific tab
 tokscale models    # Models tab
 tokscale monthly   # Daily view (shows daily breakdown)
+tokscale hourly    # Hourly tab
 
 # Use legacy CLI table output
 tokscale --light
@@ -236,9 +237,9 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
-- **4 Views**: Overview (chart + top models), Models, Daily, Stats (contribution graph)
+- **6 Views**: Overview (chart + top models), Models, Daily, Hourly, Stats (contribution graph), Agents
 - **Keyboard Navigation**:
-  - `1-4` or `←/→/Tab`: Switch views
+  - `1-6` or `←/→/Tab`: Switch views
   - `↑/↓`: Navigate lists
   - `c/d/t`: Sort by cost/date/tokens
   - `s`: Open source picker dialog

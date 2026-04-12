@@ -102,7 +102,6 @@ pub struct DailyUsage {
 
 #[derive(Debug, Clone)]
 pub struct HourlyModelInfo {
-    pub client: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
 }
@@ -644,7 +643,6 @@ impl DataLoader {
                     .models
                     .entry(normalized_model.clone())
                     .or_insert_with(|| HourlyModelInfo {
-                        client: msg.client.clone(),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                     });
@@ -678,7 +676,6 @@ impl DataLoader {
                 .total_cmp(&a.cost)
                 .then_with(|| a.model.cmp(&b.model))
                 .then_with(|| a.provider.cmp(&b.provider))
-                .then_with(|| a.client.cmp(&b.client))
         });
 
         for (agent, clients) in agent_clients {

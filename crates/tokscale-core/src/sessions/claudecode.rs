@@ -352,22 +352,15 @@ fn extract_claude_headless_message(
     ))
 }
 
-/// Check if a `type: "user"` JSONL entry represents genuine human input.
-///
-/// Returns false for tool results (content is a JSON array) and system/command
-/// messages (content is an XML-tagged string like `<local-command-stdout>`).
+/// Returns true if a `type: "user"` JSONL entry is genuine human input (not tool results or system messages).
 fn is_human_turn(raw_line: &str) -> bool {
-    // Quick heuristic on the raw JSON string to avoid a full re-parse.
-    // Tool results have `"content":[` (array), human input has `"content":"` (string).
     if let Some(pos) = raw_line.find("\"content\":") {
         let after = &raw_line[pos + 10..];
         let after_trimmed = after.trim_start();
         if after_trimmed.starts_with('[') {
-            // Array content → tool_result, not a human turn
             return false;
         }
         if after_trimmed.starts_with('"') {
-            // String content — check for XML-tagged system messages
             if after_trimmed.len() > 1 {
                 let content_start = &after_trimmed[1..];
                 if content_start.starts_with('<') {

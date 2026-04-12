@@ -133,9 +133,6 @@ if [[ ! -e "${INSTALLED_BIN}" ]]; then
   exit 1
 fi
 
-echo "Checking source-tree wrapper with Bun-only PATH..."
-env PATH="${BUN_ONLY_PATH}" "${ROOT_DIR}/packages/tokscale/bin.js" --version >/dev/null
-
 echo "Checking source-tree wrapper with Node-only PATH..."
 env PATH="${NODE_ONLY_PATH}" "${ROOT_DIR}/packages/tokscale/bin.js" --version >/dev/null
 

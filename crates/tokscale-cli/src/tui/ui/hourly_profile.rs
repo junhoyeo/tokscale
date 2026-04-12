@@ -43,10 +43,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .min(80);
 
     // Get date range
-    let first_date = hourly.first().map(|h| h.datetime.date());
-    let last_date = hourly.last().map(|h| h.datetime.date());
-    let date_range = match (first_date, last_date) {
-        (Some(f), Some(l)) => format!("{} to {}", f.format("%Y-%m-%d"), l.format("%Y-%m-%d")),
+    let min_date = hourly.iter().map(|h| h.datetime.date()).min();
+    let max_date = hourly.iter().map(|h| h.datetime.date()).max();
+    let date_range = match (min_date, max_date) {
+        (Some(mn), Some(mx)) if mn == mx => mn.format("%Y-%m-%d").to_string(),
+        (Some(mn), Some(mx)) => format!("{} to {}", mn.format("%Y-%m-%d"), mx.format("%Y-%m-%d")),
         _ => "No data".to_string(),
     };
 
