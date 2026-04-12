@@ -2412,6 +2412,7 @@ fn run_monthly_report(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_hourly_report(
     json: bool,
     home_dir: Option<String>,

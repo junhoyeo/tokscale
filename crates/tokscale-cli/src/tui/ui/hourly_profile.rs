@@ -39,8 +39,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let overhead = 36; // 34 + small margin
     let bar_width = (inner.width as usize)
         .saturating_sub(overhead)
-        .max(20)
-        .min(80);
+        .clamp(20, 80);
 
     // Get date range
     let min_date = hourly.iter().map(|h| h.datetime.date()).min();
