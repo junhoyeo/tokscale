@@ -52,11 +52,28 @@ describe("renderIsometric3DEmbedSvg", () => {
     expect(svg).toContain("@octocat");
   });
 
-  it("contains stats values", () => {
+  it("renders Token Usage stats box with cost and tokens", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain("#3");
-    expect(svg).toContain("tokens");
+    expect(svg).toContain("Token Usage");
+    expect(svg).toContain("Total");
+    expect(svg).toContain("Tokens");
+    expect(svg).toContain("active days");
+  });
+
+  it("renders Streaks stats box", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("Streaks");
+    expect(svg).toContain("Longest");
+    expect(svg).toContain("Current");
+    expect(svg).toContain("days");
+  });
+
+  it("computes active days from contributions with intensity > 0", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("4 active days");
   });
 
   it("uses Figtree font", () => {
@@ -112,6 +129,8 @@ describe("renderIsometric3DEmbedSvg", () => {
     expect(svg).toContain("<svg");
     expect(polygonCount).toBeGreaterThan(0);
     expect(polygonCount % 3).toBe(0);
+    expect(svg).toContain("0 active days");
+    expect(svg).toContain("0 days");
   });
 
   it("renders fixed-width SVG of 680px", () => {
@@ -127,6 +146,22 @@ describe("renderIsometric3DEmbedSvg", () => {
     );
 
     expect(svg).toContain("Rank");
+  });
+
+  it("shows date range from first to last active contribution", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).toContain("02/10");
+    expect(svg).toContain("03/10");
+    expect(svg).toContain("\u2192");
+  });
+
+  it("renders stats box backgrounds with theme-appropriate colors", () => {
+    const darkSvg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+    const lightSvg = renderIsometric3DEmbedSvg(mockStats, mockContributions, { theme: "light" });
+
+    expect(darkSvg).toContain('fill="#1A212A"');
+    expect(lightSvg).toContain('fill="#F6F8FA"');
   });
 });
 

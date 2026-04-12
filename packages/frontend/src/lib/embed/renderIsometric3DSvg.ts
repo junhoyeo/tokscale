@@ -13,7 +13,10 @@ type ThemePalette = {
   text: string;
   muted: string;
   brand: string;
+  accent: string;
   divider: string;
+  boxBg: string;
+  boxBorder: string;
   graphGrade0: string;
   graphGrade1: string;
   graphGrade2: string;
@@ -32,7 +35,10 @@ const THEMES: Record<EmbedTheme, ThemePalette> = {
     text: "#E6EDF3",
     muted: "#8B949E",
     brand: "#58A6FF",
+    accent: "#79B8FF",
     divider: "#30363D",
+    boxBg: "#1A212A",
+    boxBorder: "#1E2733",
     graphGrade0: "#161B22",
     graphGrade1: "#0E4429",
     graphGrade2: "#006D32",
@@ -49,7 +55,10 @@ const THEMES: Record<EmbedTheme, ThemePalette> = {
     text: "#1F2328",
     muted: "#656D76",
     brand: "#0969DA",
+    accent: "#0969DA",
     divider: "#D0D7DE",
+    boxBg: "#F6F8FA",
+    boxBorder: "#D0D7DE",
     graphGrade0: "#EBEDF0",
     graphGrade1: "#9BE9A8",
     graphGrade2: "#40C463",
@@ -142,6 +151,92 @@ function formatDateLabel(value: string | null): string {
   }).format(date)} (UTC)`;
 }
 
+function formatShortDate(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return dateStr;
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${mm}/${dd}`;
+}
+
+function computeStreaks(contributions: EmbedContributionDay[]): { longest: number; current: number } {
+  const activeSet = new Set<string>();
+  for (const c of contributions) {
+    if (c.intensity > 0) activeSet.add(c.date);
+  }
+  if (activeSet.size === 0) return { longest: 0, current: 0 };
+
+  const sorted = [...activeSet].sort();
+  let longest = 1;
+  let run = 1;
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = new Date(sorted[i - 1] + "T00:00:00Z");
+    const curr = new Date(sorted[i] + "T00:00:00Z");
+    const diff = (curr.getTime() - prev.getTime()) / 86_400_000;
+    if (diff === 1) {
+      run++;
+      if (run > longest) longest = run;
+    } else {
+      run = 1;
+    }
+  }
+
+  let current = 0;
+  const now = new Date();
+  const todayStr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+    .toISOString()
+    .split("T")[0];
+  let cursor = todayStr;
+  while (activeSet.has(cursor)) {
+    current++;
+    const d = new Date(cursor + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() - 1);
+    cursor = d.toISOString().split("T")[0];
+  }
+
+  return { longest, current };
+}
+
+function renderStatsBox(
+  x: number,
+  y: number,
+  w: number,
+  title: string,
+  items: Array<{ value: string; label: string; sub?: string }>,
+  footer: string | null,
+  palette: ThemePalette,
+): string {
+  const titleH = 20;
+  const itemH = 42;
+  const footerH = footer ? 22 : 0;
+  const boxPad = 10;
+  const innerH = items.length * itemH;
+  const totalH = titleH + boxPad * 2 + innerH + footerH;
+
+  const boxY = y + titleH + 4;
+  const boxInnerH = innerH + boxPad * 2 + footerH;
+
+  let svg = "";
+  svg += `<text x="${x}" y="${y + 13}" fill="${palette.text}" font-size="12" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(title)}</text>`;
+  svg += `<rect x="${x}" y="${boxY}" width="${w}" height="${boxInnerH}" rx="8" fill="${palette.boxBg}" stroke="${palette.boxBorder}" opacity="0.92"/>`;
+
+  let iy = boxY + boxPad;
+  for (const item of items) {
+    svg += `<text x="${x + boxPad}" y="${iy + 16}" fill="${palette.accent}" font-size="15" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(item.value)}</text>`;
+    svg += `<text x="${x + boxPad}" y="${iy + 30}" fill="${palette.text}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${escapeXml(item.label)}</text>`;
+    if (item.sub) {
+      svg += `<text x="${x + boxPad}" y="${iy + 40}" fill="${palette.muted}" font-size="9" font-family="${FIGTREE_FONT_STACK}">${escapeXml(item.sub)}</text>`;
+    }
+    iy += itemH;
+  }
+
+  if (footer) {
+    svg += `<text x="${x + boxPad}" y="${iy + 14}" fill="${palette.muted}" font-size="10" font-family="${FIGTREE_FONT_STACK}">${footer}</text>`;
+  }
+
+  return svg;
+}
+
 export function renderIsometric3DEmbedSvg(
   data: UserEmbedStats,
   contributions: EmbedContributionDay[],
@@ -176,8 +271,8 @@ export function renderIsometric3DEmbedSvg(
   const headerH = 70;
   const gridXExtent = (numWeeks + 7) * CELL;
   const gridYExtent = (numWeeks + 7) * (CELL / 2) + MAX_HEIGHT;
-  const statsH = 44;
-  const height = headerH + gridYExtent + statsH + 16;
+  const footerH = 30;
+  const height = headerH + gridYExtent + footerH;
   const rx = 16;
 
   const gridOriginX = px + 7 * CELL + Math.max(0, (width - 2 * px - gridXExtent) / 2);
@@ -204,9 +299,34 @@ export function renderIsometric3DEmbedSvg(
   const cost = formatCurrency(data.stats.totalCost, true);
   const rank = data.stats.rank ? `#${data.stats.rank}` : "\u2014";
   const updated = escapeXml(formatDateLabel(data.stats.updatedAt));
+  const footerY = height - 14;
 
-  const statsY = headerH + gridYExtent + 20;
-  const footerY = height - 16;
+  const activeDays = contributions.filter((c) => c.intensity > 0).length;
+  const activeDates = contributions.filter((c) => c.intensity > 0).map((c) => c.date).sort();
+  const dateRange =
+    activeDates.length >= 2
+      ? `${formatShortDate(activeDates[0])} \u2192 ${formatShortDate(activeDates[activeDates.length - 1])}`
+      : activeDates.length === 1
+        ? formatShortDate(activeDates[0])
+        : "";
+  const streaks = computeStreaks(contributions);
+
+  const statsBoxW = 148;
+  const tokenUsageX = width - px - statsBoxW;
+  const tokenUsageY = headerH + 8;
+  const tokenUsageItems: Array<{ value: string; label: string; sub?: string }> = [
+    { value: cost, label: "Total", sub: dateRange },
+    { value: tokens, label: "Tokens", sub: `${activeDays} active days` },
+  ];
+  const tokenUsageFooter = `Rank <tspan fill="${palette.accent}" font-weight="700">${escapeXml(rank)}</tspan>`;
+
+  const streaksBoxW = 130;
+  const streaksX = px;
+  const streaksY = height - footerH - 120;
+  const streaksItems: Array<{ value: string; label: string }> = [
+    { value: `${streaks.longest} days`, label: "Longest" },
+    { value: `${streaks.current} days`, label: "Current" },
+  ];
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale 3D contribution graph for ${escapeXml(username)}">
@@ -237,8 +357,8 @@ export function renderIsometric3DEmbedSvg(
   <text x="${px}" y="52" fill="${palette.text}" font-size="17" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(username)}</text>
   <rect x="${px}" y="62" width="${width - px * 2}" height="1" fill="url(#divider-grad)"/>
   ${cubes}
-  <text x="${px}" y="${statsY}" fill="${palette.text}" font-size="13" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(cost)}</text>
-  <text x="${px}" y="${statsY + 16}" fill="${palette.muted}" font-size="11" font-family="${FIGTREE_FONT_STACK}">${escapeXml(tokens)} tokens \u00b7 Rank ${escapeXml(rank)}</text>
+  ${renderStatsBox(tokenUsageX, tokenUsageY, statsBoxW, "Token Usage", tokenUsageItems, tokenUsageFooter, palette)}
+  ${renderStatsBox(streaksX, streaksY, streaksBoxW, "Streaks", streaksItems, null, palette)}
   <text x="${px}" y="${footerY}" fill="${palette.muted}" font-size="11" font-family="${FIGTREE_FONT_STACK}">${updated}</text>
   <text x="${width - px}" y="${footerY}" fill="${palette.muted}" font-size="11" font-family="${FIGTREE_FONT_STACK}" text-anchor="end">tokscale.ai/u/${escapeXml(data.user.username)}</text>
 </svg>`;
