@@ -42,7 +42,9 @@ refactor: extract streaming logic to separate module
 docs: update README with new CLI options
 ```
 
-### Commit Message Rules (CRITICAL)
+### Commit Message & PR Title Rules (CRITICAL)
+
+> These rules apply to **both commit messages AND pull request titles**. PR titles become the squash-merge commit message, so they must follow the same conventions.
 
 **DO:**
 - Describe the actual change in plain, technical terms
@@ -50,8 +52,9 @@ docs: update README with new CLI options
 - Use the format: `<type>(<scope>): <what changed and why>`
 
 **DON'T:**
-- Reference internal review labels (P0, P1, P2, etc.)
-- Mention "Oracle", "audit", "review findings" in commit messages
+- Reference internal review labels (P0, P1, P2, etc.) in commits or PR titles
+- Mention "Oracle", "audit", "review findings", "hardening" in commits or PR titles
+- Use agent-internal jargon: "wave", "hardening", "compliance", "verification pass"
 - Bundle multiple unrelated fixes into one commit
 - Use vague messages like "fix issues" or "address feedback"
 
@@ -69,6 +72,8 @@ fix: address P0 issues from Oracle review      ❌
 fix(hardening): Oracle Round 4 fixes           ❌
 fix: audit findings                            ❌
 fix: various improvements                      ❌
+fix(tui): harden unreleased changes — P0-P3    ❌  (PR title)
+fix: hardening wave 1 compliance fixes         ❌  (PR title)
 ```
 
 ## Agent Command Execution

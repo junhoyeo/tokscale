@@ -270,7 +270,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         vec![
             Constraint::Length(18),
-            Constraint::Length(6),
+            Constraint::Length(14),
             Constraint::Length(6),
             Constraint::Length(10),
             Constraint::Length(10),
