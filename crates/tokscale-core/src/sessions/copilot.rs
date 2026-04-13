@@ -53,10 +53,6 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
         let cache_write = attr_i64(attributes, "gen_ai.usage.cache_write.input_tokens");
         let reasoning = attr_i64(attributes, "gen_ai.usage.reasoning.output_tokens");
 
-        if input + output + cache_read + cache_write + reasoning == 0 {
-            continue;
-        }
-
         let model = first_non_empty_attr(
             attributes,
             &["gen_ai.response.model", "gen_ai.request.model"],
@@ -95,13 +91,18 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
             .or_else(|| span.get("startTime").and_then(timestamp_ms_from_value))
             .unwrap_or(fallback_timestamp);
 
+        let tokens = normalize_input_tokens(input, output, cache_read, cache_write, reasoning);
+        if tokens.total() == 0 {
+            continue;
+        }
+
         messages.push(UnifiedMessage::new_with_dedup(
             "copilot",
             model,
             provider_id,
             session_id,
             timestamp_ms,
-            normalize_input_tokens(input, output, cache_read, cache_write, reasoning),
+            tokens,
             0.0,
             Some(dedup_key),
         ));
@@ -275,5 +276,15 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 0);
         assert_eq!(messages[0].tokens.cache_read, 90);
         assert_eq!(messages[0].tokens.cache_write, 10);
+    }
+
+    #[test]
+    fn test_parse_copilot_skips_zero_token_message_after_normalization() {
+        let content = r#"{"type":"span","traceId":"trace-zero","spanId":"span-zero","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":0,"gen_ai.usage.cache_read.input_tokens":50,"gen_ai.usage.cache_write.input_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert!(messages.is_empty());
     }
 }
