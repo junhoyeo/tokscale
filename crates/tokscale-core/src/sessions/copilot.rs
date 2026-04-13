@@ -148,14 +148,14 @@ fn normalize_input_tokens(
     reasoning: i64,
 ) -> TokenBreakdown {
     // OTEL reports input_tokens inclusive of cache reads. Normalize only the
-    // cached-read portion out of input and preserve cache_write as a separate
-    // bucket until Copilot documents stronger semantics for cache creation.
-    let clamped_cache_read = cache_read.min(input).max(0);
+    // cached-read portion out of input, but preserve the reported cache buckets
+    // intact because pricing totals account for them separately.
+    let cache_read_for_input = cache_read.max(0).min(input.max(0));
 
     TokenBreakdown {
-        input: input.saturating_sub(clamped_cache_read).max(0),
+        input: input.saturating_sub(cache_read_for_input).max(0),
         output: output.max(0),
-        cache_read: clamped_cache_read,
+        cache_read: cache_read.max(0),
         cache_write: cache_write.max(0),
         reasoning: reasoning.max(0),
     }
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_copilot_keeps_cache_write_only_message() {
+    fn test_parse_copilot_keeps_cache_only_message() {
         let content = r#"{"type":"span","traceId":"trace-zero","spanId":"span-zero","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":0,"gen_ai.usage.cache_read.input_tokens":50,"gen_ai.usage.cache_write.input_tokens":20}}"#;
         let file = create_test_file(content);
 
@@ -282,7 +282,20 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 0);
-        assert_eq!(messages[0].tokens.cache_read, 0);
+        assert_eq!(messages[0].tokens.cache_read, 50);
         assert_eq!(messages[0].tokens.cache_write, 20);
+    }
+
+    #[test]
+    fn test_parse_copilot_keeps_cache_read_when_input_is_missing() {
+        let content = r#"{"type":"span","traceId":"trace-cache-read","spanId":"span-cache-read","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.cache_read.input_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.cache_write, 0);
     }
 }
