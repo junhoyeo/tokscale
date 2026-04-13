@@ -78,7 +78,7 @@ describe("GET /api/embed/[username]/svg", () => {
     expect(renderIsometric3DEmbedSvg).toHaveBeenCalledWith(
       expect.objectContaining({ user: expect.objectContaining({ username: "octocat" }) }),
       [],
-      { theme: "dark" },
+      { theme: "dark", compact: false },
     );
     expect(renderIsometric3DErrorSvg).not.toHaveBeenCalled();
     await expect(response.text()).resolves.toBe("<svg>3d</svg>");

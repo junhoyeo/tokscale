@@ -239,9 +239,10 @@ function renderStatsBox(
 export function renderIsometric3DEmbedSvg(
   data: UserEmbedStats,
   contributions: EmbedContributionDay[],
-  options: { theme?: EmbedTheme } = {},
+  options: { theme?: EmbedTheme; compact?: boolean } = {},
 ): string {
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
+  const compactNumbers = options.compact ?? false;
   const palette = THEMES[theme];
   const cls = theme === "dark" ? "d" : "l";
 
@@ -290,8 +291,8 @@ export function renderIsometric3DEmbedSvg(
   }
 
   const username = `@${data.user.username}`;
-  const tokens = formatNumber(data.stats.totalTokens, true);
-  const cost = formatCurrency(data.stats.totalCost, true);
+  const tokens = formatNumber(data.stats.totalTokens, compactNumbers);
+  const cost = formatCurrency(data.stats.totalCost, compactNumbers);
   const rank = data.stats.rank ? `#${data.stats.rank}` : "\u2014";
   const updated = escapeXml(formatDateLabel(data.stats.updatedAt));
   const footerY = height - 14;
@@ -306,7 +307,7 @@ export function renderIsometric3DEmbedSvg(
         : "";
   const streaks = computeStreaks(contributions);
 
-  const statsBoxW = 148;
+  const statsBoxW = compactNumbers ? 148 : 175;
   const tokenUsageX = width - px - statsBoxW;
   const tokenUsageY = headerH + 8;
   const tokenUsageItems: Array<{ value: string; label: string; sub?: string }> = [

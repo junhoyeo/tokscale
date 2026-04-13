@@ -88,7 +88,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         return createSvgResponse(svg);
       }
 
-      const svg = renderIsometric3DEmbedSvg(data, contributions, { theme });
+      const svg = renderIsometric3DEmbedSvg(data, contributions, { theme, compact });
 
       console.info("[embed-svg-3d] success", {
         username,
@@ -96,6 +96,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         durationMs: Date.now() - startedAt,
         sortBy,
         theme,
+        compact,
       });
 
       return createSvgResponse(svg);
