@@ -104,7 +104,6 @@ export function TabBar<T extends string>({
             key={tab.id}
             role="tab"
             aria-selected={isActive}
-            aria-controls={`tabpanel-${tab.id}`}
             tabIndex={isActive ? 0 : -1}
             onClick={() => onTabChange(tab.id)}
             onKeyDown={(e) => handleKeyDown(e, index)}

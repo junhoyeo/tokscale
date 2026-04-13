@@ -327,6 +327,16 @@ const ActionButton = styled.button`
   ${actionButtonStyles}
 `;
 
+const PrimaryActionButton = styled(ActionButton)`
+  background: linear-gradient(135deg, #169AFF 0%, #0A84FF 100%);
+  border-color: color-mix(in srgb, #9FD4FB 45%, var(--color-border-default));
+  color: #F8FBFF;
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--color-bg-default), 0 0 0 4px #169AFF;
+  }
+`;
+
 const ActionLink = styled.a`
   ${actionButtonStyles}
   text-decoration: none;
@@ -448,13 +458,13 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
         )}
 
         <ActionButtons>
-          <ActionButton
+          <PrimaryActionButton
             onClick={() => setIsEmbedDialogOpen(true)}
             aria-label={`Open GitHub README embed options for ${user.displayName || user.username}`}
           >
             <EmbedIcon />
             <ActionText>Embed</ActionText>
-          </ActionButton>
+          </PrimaryActionButton>
 
           <ActionButton
             onClick={handleShareClick}
@@ -639,6 +649,7 @@ export function ProfileTabBar({ activeTab, onTabChange }: ProfileTabBarProps) {
         return (
           <TabButton
             key={tab.id}
+            id={`tab-${tab.id}`}
             role="tab"
             aria-selected={isActive}
             aria-controls={`tabpanel-${tab.id}`}

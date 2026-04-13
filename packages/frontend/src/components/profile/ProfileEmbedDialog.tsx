@@ -50,7 +50,6 @@ export function ProfileEmbedDialog({
 
   const {
     embedUrl,
-    previewUrl,
     markdownSnippet,
     htmlSnippet,
     profileUrl,
@@ -69,7 +68,6 @@ export function ProfileEmbedDialog({
 
     return {
       embedUrl: resolvedEmbedUrl,
-      previewUrl: `${resolvedEmbedUrl}${query ? "&" : "?"}preview=1`,
       markdownSnippet: `[![Tokscale Stats](${resolvedEmbedUrl})](${resolvedProfileUrl})`,
       htmlSnippet: `<a href="${resolvedProfileUrl}"><img alt="Tokscale Stats for @${username}" src="${resolvedEmbedUrl}" /></a>`,
       profileUrl: resolvedProfileUrl,
@@ -120,7 +118,7 @@ export function ProfileEmbedDialog({
               <PreviewLabel>Live preview</PreviewLabel>
               <PreviewFrame>
                 <PreviewImage
-                  src={previewUrl}
+                  src={embedUrl}
                   alt={`Tokscale README embed preview for ${displayName || username}`}
                 />
               </PreviewFrame>
