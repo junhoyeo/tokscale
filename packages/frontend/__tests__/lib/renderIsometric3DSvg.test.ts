@@ -169,6 +169,17 @@ describe("renderIsometric3DEmbedSvg", () => {
     expect(svg).toContain("fill:#79b8ff");
     expect(svg).toContain("fill:#1A212A");
   });
+
+  it("scales cube heights by usage within the same intensity bucket", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, [
+      { date: "2026-02-10", intensity: 4, totalTokens: 1, totalCost: 1 },
+      { date: "2026-02-11", intensity: 4, totalTokens: 1000, totalCost: 10 },
+    ]);
+
+    expect(svg).toContain('height="7"');
+    expect(svg).toContain('height="30.4"');
+  });
+
 });
 
 describe("renderIsometric3DErrorSvg", () => {

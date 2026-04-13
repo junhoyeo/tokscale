@@ -87,7 +87,7 @@ const DY = +(CELL * TAN30).toFixed(2);
 const RIGHT_DY = +(W * TAN30).toFixed(2);
 const MAX_HEIGHT = 35;
 const MIN_HEIGHT = 2;
-const INTENSITY_HEIGHTS: readonly number[] = [MIN_HEIGHT, 8, 16, 26, MAX_HEIGHT];
+const MIN_NON_ZERO_HEIGHT = 8;
 const ANIM_DUR = "2s";
 
 /**
@@ -154,7 +154,20 @@ function formatShortDate(dateStr: string): string {
   return `${mm}/${dd}`;
 }
 
-function computeStreaks(contributions: EmbedContributionDay[]): { longest: number; current: number } {
+function previousUtcDate(dateStr: string): string {
+  const date = new Date(dateStr + "T00:00:00Z");
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().split("T")[0];
+}
+
+function getContributionHeightValue(contribution: EmbedContributionDay): number {
+  return contribution.totalTokens > 0 ? contribution.totalTokens : contribution.totalCost;
+}
+
+function computeStreaks(
+  contributions: EmbedContributionDay[],
+  referenceDate: Date = new Date(),
+): { longest: number; current: number } {
   const activeSet = new Set<string>();
   for (const c of contributions) {
     if (c.intensity > 0) activeSet.add(c.date);
@@ -176,20 +189,21 @@ function computeStreaks(contributions: EmbedContributionDay[]): { longest: numbe
   }
 
   let current = 0;
-  const now = new Date();
-  let cursor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  const todayStr = new Date(
+    Date.UTC(referenceDate.getUTCFullYear(), referenceDate.getUTCMonth(), referenceDate.getUTCDate()),
+  )
     .toISOString()
     .split("T")[0];
-  if (!activeSet.has(cursor)) {
-    const yesterday = new Date(cursor + "T00:00:00Z");
-    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-    cursor = yesterday.toISOString().split("T")[0];
-  }
-  while (activeSet.has(cursor)) {
+  const yesterdayStr = previousUtcDate(todayStr);
+  let cursor = activeSet.has(todayStr)
+    ? todayStr
+    : activeSet.has(yesterdayStr)
+      ? yesterdayStr
+      : null;
+
+  while (cursor && activeSet.has(cursor)) {
     current++;
-    const d = new Date(cursor + "T00:00:00Z");
-    d.setUTCDate(d.getUTCDate() - 1);
-    cursor = d.toISOString().split("T")[0];
+    cursor = previousUtcDate(cursor);
   }
 
   return { longest, current };
@@ -246,8 +260,8 @@ export function renderIsometric3DEmbedSvg(
   const palette = THEMES[theme];
   const cls = theme === "dark" ? "d" : "l";
 
-  const intensityMap = new Map<string, number>();
-  for (const c of contributions) intensityMap.set(c.date, c.intensity);
+  const contributionMap = new Map<string, EmbedContributionDay>();
+  for (const contribution of contributions) contributionMap.set(contribution.date, contribution);
 
   const now = new Date();
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -271,6 +285,10 @@ export function renderIsometric3DEmbedSvg(
   const gridXExtent = gridRows * CELL + W + W;
   const gridOriginX = +(px + 7 * CELL + Math.max(0, (width - 2 * px - gridXExtent) / 2)).toFixed(1);
   const gridOriginY = +(headerH + MAX_HEIGHT + 4).toFixed(1);
+  const maxContributionHeightValue = contributions.reduce((max, contribution) => {
+    const value = getContributionHeightValue(contribution);
+    return value > max ? value : max;
+  }, 0);
 
   let cubes = "";
   for (let w = 0; w < numWeeks; w++) {
@@ -280,8 +298,18 @@ export function renderIsometric3DEmbedSvg(
       if (date > today) continue;
 
       const dateStr = date.toISOString().split("T")[0];
-      const intensity = (intensityMap.get(dateStr) ?? 0) as 0 | 1 | 2 | 3 | 4;
-      const h = INTENSITY_HEIGHTS[intensity];
+      const contribution = contributionMap.get(dateStr);
+      const intensity = (contribution?.intensity ?? 0) as 0 | 1 | 2 | 3 | 4;
+      const heightValue = contribution ? getContributionHeightValue(contribution) : 0;
+      const h = heightValue > 0 && maxContributionHeightValue > 0
+        ? Math.max(
+            MIN_NON_ZERO_HEIGHT,
+            Math.round(
+              (heightValue / maxContributionHeightValue) * (MAX_HEIGHT - MIN_NON_ZERO_HEIGHT)
+                + MIN_NON_ZERO_HEIGHT,
+            ),
+          )
+        : MIN_HEIGHT;
 
       const cubeX = gridOriginX + (w - d) * CELL;
       const cubeY = gridOriginY + (w + d) * DY - h;
@@ -325,10 +353,6 @@ export function renderIsometric3DEmbedSvg(
   ];
 
   const faceCss = buildFaceCSS(cls, [...palette.graphGrade]);
-  const classCss = palette.graphGrade
-    .map((_, i) => `.${cls}${i}-t{${""}} .${cls}${i}-l{${""}} .${cls}${i}-r{${""}}`)
-    .join("");
-  void classCss;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale 3D contribution graph for ${escapeXml(username)}">
