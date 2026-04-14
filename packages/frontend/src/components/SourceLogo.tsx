@@ -59,6 +59,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/kilocode.png";
       case "mux":
         return "/assets/logos/mux.png";
+      case "crush":
+        return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png";
       case "synthetic":
         return "/assets/logos/synthetic.png";
       default:

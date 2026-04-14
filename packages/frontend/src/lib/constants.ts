@@ -42,6 +42,7 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   kilocode: "Kilo",
   kilo: "Kilo",
   mux: "Mux",
+  crush: "Crush",
   synthetic: "Synthetic",
 };
 
@@ -65,6 +66,7 @@ export const SOURCE_LOGOS: Record<string, string> = {
   kilocode: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   kilo: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   mux: `${GITHUB_CDN_BASE}/client-mux.png`,
+  crush: `${GITHUB_CDN_BASE}/client-crush.png`,
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
 };
 
@@ -86,6 +88,7 @@ export const SOURCE_COLORS: Record<string, string> = {
   kilocode: "#F59E0B",
   kilo: "#F59E0B",
   mux: "#171717",
+  crush: "#DC2626",
   synthetic: "#4ADE80",
 };
 
