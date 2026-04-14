@@ -665,10 +665,6 @@ export function Navigation() {
       });
   }, []);
 
-  useEffect(() => {
-    setIsMobileMenuOpen(false);
-  }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const closeMobileMenu = () => setIsMobileMenuOpen(false);
 
   return (
