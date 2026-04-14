@@ -1,12 +1,12 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import type { ColorPaletteName } from "./themes";
 import { DEFAULT_PALETTE } from "./themes";
-import { 
+import {
   type LeaderboardSortBy,
   SORT_BY_COOKIE_NAME,
-  isValidSortBy 
+  isValidSortBy,
 } from "./leaderboard/constants";
 
 export type { LeaderboardSortBy };
@@ -18,10 +18,11 @@ export interface Settings {
 
 const DEFAULT_SETTINGS: Settings = {
   paletteName: DEFAULT_PALETTE,
-  leaderboardSortBy: 'tokens',
+  leaderboardSortBy: "tokens",
 };
 
 const STORAGE_KEY = "tokscale-settings";
+const SETTINGS_EVENT = "tokscale-settings-changed";
 
 function setSortByCookie(sortBy: LeaderboardSortBy): void {
   if (typeof document === "undefined") return;
@@ -37,8 +38,8 @@ function getStoredSettings(): Settings {
       const parsed = JSON.parse(stored);
       return {
         paletteName: parsed.paletteName || DEFAULT_SETTINGS.paletteName,
-        leaderboardSortBy: isValidSortBy(parsed.leaderboardSortBy) 
-          ? parsed.leaderboardSortBy 
+        leaderboardSortBy: isValidSortBy(parsed.leaderboardSortBy)
+          ? parsed.leaderboardSortBy
           : DEFAULT_SETTINGS.leaderboardSortBy,
       };
     }
@@ -53,9 +54,33 @@ function saveSettings(settings: Settings): void {
   if (typeof window === "undefined") return;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    window.dispatchEvent(new Event(SETTINGS_EVENT));
   } catch {
     // localStorage might be full or disabled
   }
+}
+
+function subscribeToSettings(onStoreChange: () => void): () => void {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+
+  const handleStorage = (event: StorageEvent) => {
+    if (!event.key || event.key === STORAGE_KEY) {
+      onStoreChange();
+    }
+  };
+
+  window.addEventListener("storage", handleStorage);
+  window.addEventListener(SETTINGS_EVENT, onStoreChange);
+  return () => {
+    window.removeEventListener("storage", handleStorage);
+    window.removeEventListener(SETTINGS_EVENT, onStoreChange);
+  };
+}
+
+function subscribeToMounted(): () => void {
+  return () => {};
 }
 
 function applyDarkModeToDocument(): void {
@@ -66,35 +91,30 @@ function applyDarkModeToDocument(): void {
 }
 
 export function useSettings() {
-  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const mountedRef = useRef(false);
-  const [mounted, setMounted] = useState(false);
+  const settings = useSyncExternalStore(
+    subscribeToSettings,
+    getStoredSettings,
+    () => DEFAULT_SETTINGS,
+  );
+  const mounted = useSyncExternalStore(
+    subscribeToMounted,
+    () => true,
+    () => false,
+  );
 
   useEffect(() => {
     applyDarkModeToDocument();
-    const stored = getStoredSettings();
-    setSettings(stored);
-    setSortByCookie(stored.leaderboardSortBy);
-    mountedRef.current = true;
-    setMounted(true);
-  }, []);
+    setSortByCookie(settings.leaderboardSortBy);
+  }, [settings.leaderboardSortBy]);
 
   const setPalette = useCallback((paletteName: ColorPaletteName) => {
-    setSettings((prev) => {
-      const newSettings = { ...prev, paletteName };
-      saveSettings(newSettings);
-      return newSettings;
-    });
-  }, []);
+    saveSettings({ ...settings, paletteName });
+  }, [settings]);
 
   const setLeaderboardSort = useCallback((sortBy: LeaderboardSortBy) => {
-    setSettings((prev) => {
-      const newSettings = { ...prev, leaderboardSortBy: sortBy };
-      saveSettings(newSettings);
-      setSortByCookie(sortBy);
-      return newSettings;
-    });
-  }, []);
+    setSortByCookie(sortBy);
+    saveSettings({ ...settings, leaderboardSortBy: sortBy });
+  }, [settings]);
 
   return {
     paletteName: settings.paletteName,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, useId } from "react";
 import { getSvgPath } from "figma-squircle";
 
 export interface SquircleBorderDef {
@@ -23,9 +23,8 @@ export function useSquircleClip<T extends HTMLElement = HTMLElement>(
   borderWidth: number = 0
 ) {
   const ref = useRef<T | null>(null);
-  const clipIdRef = useRef(
-    `squircle-clip-${Math.random().toString(36).slice(2, 9)}`
-  );
+  const clipId = useId().replace(/:/g, "");
+  const baseId = `squircle-clip-${clipId}`;
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
 
   const clipResult = useMemo(() => {
@@ -33,7 +32,6 @@ export function useSquircleClip<T extends HTMLElement = HTMLElement>(
     if (width === 0 || height === 0)
       return { clipPath: "", svgDef: null, borderDef: null };
 
-    const baseId = clipIdRef.current;
     let borderDef: SquircleBorderDef | null = null;
 
     if (bottomOnly) {
@@ -97,7 +95,7 @@ export function useSquircleClip<T extends HTMLElement = HTMLElement>(
     }
 
     return { clipPath: `path('${outerPath}')`, svgDef: null, borderDef };
-  }, [dimensions, cornerRadius, cornerSmoothing, bottomOnly, borderWidth]);
+  }, [baseId, borderWidth, bottomOnly, cornerRadius, cornerSmoothing, dimensions]);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -114,7 +112,7 @@ export function useSquircleClip<T extends HTMLElement = HTMLElement>(
     return () => observer.disconnect();
   }, []);
 
-  const setRef = useCallback((node: T | null) => {
+  const setElementRef = useCallback((node: T | null) => {
     ref.current = node;
     if (node) {
       const { width, height } = node.getBoundingClientRect();
@@ -125,7 +123,7 @@ export function useSquircleClip<T extends HTMLElement = HTMLElement>(
   }, []);
 
   return {
-    ref: setRef,
+    setElementRef,
     clipPath: clipResult.clipPath,
     svgDef: clipResult.svgDef,
     borderDef: clipResult.borderDef,
