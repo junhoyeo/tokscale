@@ -186,7 +186,14 @@ impl PricingLookup {
             });
         }
 
-        let result = self.lookup_with_source_and_provider(model_id, None, provider_id);
+        let result = self
+            .lookup_with_source_and_provider(model_id, None, provider_id)
+            .or_else(|| {
+                // Anthropic models are available through both direct API and Vertex AI.
+                // If the primary provider lookup misses, try the counterpart.
+                let fallback = fallback_provider(provider_id?)?;
+                self.lookup_with_source_and_provider(model_id, None, Some(fallback))
+            });
 
         if let Ok(mut cache) = self.lookup_cache.write() {
             if cache.len() >= MAX_LOOKUP_CACHE_ENTRIES {
@@ -1202,6 +1209,18 @@ fn model_prefix_matches_provider(model_id: &str, provider_id: Option<&str>) -> b
     match (prefix_tag, hint_primary) {
         (Some(p), Some(h)) => p == h,
         _ => false,
+    }
+}
+
+/// Anthropic models are served through both the direct API (`anthropic/`) and
+/// Google Vertex AI (`vertex_ai/`).  When a lookup under one prefix misses,
+/// try the other so we always find pricing regardless of which dataset happens
+/// to be loaded.
+fn fallback_provider(provider: &str) -> Option<&'static str> {
+    match provider_identity::canonical_provider(provider)?.as_str() {
+        "anthropic" => Some("vertex_ai"),
+        "vertex_ai" => Some("anthropic"),
+        _ => None,
     }
 }
 
