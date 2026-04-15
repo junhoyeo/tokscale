@@ -1025,7 +1025,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         setError(null);
         setResolvedRequest({
           period: targetPeriod,
-          page: targetPage,
+          page: result.pagination.page,
           sortBy: targetSortBy,
           search: targetSearch,
           retryToken: targetRetryToken,
