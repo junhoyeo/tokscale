@@ -12,7 +12,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "moonshot" | "moonshotai" => "moonshotai",
         "meta" | "meta_llama" => "meta_llama",
         "azure" | "azure_ai" => "azure_ai",
-        "vertex" | "vertex_ai" => "vertex_ai",
+        "anthropic" | "vertex" | "vertex_ai" => "anthropic",
         "together" | "together_ai" => "together_ai",
         "fireworks" | "fireworks_ai" => "fireworks_ai",
         "google" | "gemini" => "google",
@@ -174,7 +174,7 @@ mod tests {
         let cases = [
             ("openai-codex", vec!["openai"]),
             ("gemini", vec!["google"]),
-            ("vertex", vec!["vertex_ai"]),
+            ("vertex", vec!["anthropic"]),
             ("azure", vec!["azure_ai"]),
             ("fireworks", vec!["fireworks_ai"]),
             ("openrouter/google", vec!["openrouter", "google"]),
