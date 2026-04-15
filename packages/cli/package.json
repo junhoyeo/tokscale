@@ -23,7 +23,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "bun run src/index.ts",
+    "dev": "bun src/index.ts",
     "start": "node dist/index.js",
     "prepublishOnly": "bun run build"
   },
