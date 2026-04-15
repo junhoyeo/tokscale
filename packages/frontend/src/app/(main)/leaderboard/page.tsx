@@ -8,6 +8,10 @@ import { getLeaderboardData, getUserRank } from "@/lib/leaderboard/getLeaderboar
 import type { LeaderboardData, SortBy } from "@/lib/leaderboard/types";
 import { getSession } from "@/lib/auth/session";
 import { SORT_BY_COOKIE_NAME, isValidSortBy } from "@/lib/leaderboard/constants";
+
+function isMissingDatabaseUrl(error: unknown): boolean {
+  return error instanceof Error && error.message === "DATABASE_URL environment variable is not set";
+}
 import LeaderboardClient from "./LeaderboardClient";
 
 function createEmptyLeaderboardData(sortBy: SortBy): LeaderboardData {
@@ -62,12 +66,27 @@ async function LeaderboardWithPreferences() {
   const sortBy: SortBy = isValidSortBy(sortByCookie) ? sortByCookie : "tokens";
 
   const [initialData, session] = await Promise.all([
-    getLeaderboardData("all", 1, 50, sortBy).catch(() => createEmptyLeaderboardData(sortBy)),
-    getSession().catch(() => null),
+    getLeaderboardData("all", 1, 50, sortBy).catch((error) => {
+      if (isMissingDatabaseUrl(error)) {
+        return createEmptyLeaderboardData(sortBy);
+      }
+      throw error;
+    }),
+    getSession().catch((error) => {
+      if (isMissingDatabaseUrl(error)) {
+        return null;
+      }
+      throw error;
+    }),
   ]);
 
   const initialUserRank = session
-    ? await getUserRank(session.username, "all", sortBy).catch(() => null)
+    ? await getUserRank(session.username, "all", sortBy).catch((error) => {
+        if (isMissingDatabaseUrl(error)) {
+          return null;
+        }
+        throw error;
+      })
     : null;
 
   return (
