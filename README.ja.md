@@ -723,10 +723,10 @@ cargo --version
 bun run build:core
 
 # 開発モードで実行（TUIを起動）
-cd packages/cli && bun src/cli.ts
+cd packages/cli && bun src/index.ts
 
 # またはレガシーCLIモードを使用
-cd packages/cli && bun src/cli.ts --light
+cd packages/cli && bun src/index.ts --light
 ```
 
 <details>

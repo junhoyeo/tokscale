@@ -723,10 +723,10 @@ cargo --version
 bun run build:core
 
 # 以开发模式运行（启动 TUI）
-cd packages/cli && bun src/cli.ts
+cd packages/cli && bun src/index.ts
 
 # 或使用传统 CLI 模式
-cd packages/cli && bun src/cli.ts --light
+cd packages/cli && bun src/index.ts --light
 ```
 
 <details>

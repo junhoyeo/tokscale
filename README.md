@@ -743,10 +743,10 @@ After following the [Development Setup](#development-setup), you can:
 bun run build:core
 
 # Run in development mode (launches TUI)
-cd packages/cli && bun src/cli.ts
+cd packages/cli && bun src/index.ts
 
 # Or use legacy CLI mode
-cd packages/cli && bun src/cli.ts --light
+cd packages/cli && bun src/index.ts --light
 ```
 
 <details>

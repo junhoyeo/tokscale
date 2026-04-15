@@ -722,10 +722,10 @@ cargo --version
 bun run build:core
 
 # 개발 모드로 실행 (TUI 실행)
-cd packages/cli && bun src/cli.ts
+cd packages/cli && bun src/index.ts
 
 # 또는 레거시 CLI 모드 사용
-cd packages/cli && bun src/cli.ts --light
+cd packages/cli && bun src/index.ts --light
 ```
 
 <details>
