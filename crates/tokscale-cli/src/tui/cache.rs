@@ -344,29 +344,27 @@ impl From<&HourlyModelInfo> for CachedHourlyModelInfo {
     }
 }
 
-impl From<CachedHourlyModelInfo> for HourlyModelInfo {
-    fn from(h: CachedHourlyModelInfo) -> Self {
-        let display_name = if h.display_name.is_empty() {
-            h.color_key.clone()
-        } else {
-            h.display_name
-        };
-        let color_key = if h.color_key.is_empty() {
-            display_name
-                .rsplit_once(" / ")
-                .map(|(_, base_model)| base_model.to_string())
-                .unwrap_or_else(|| display_name.clone())
-        } else {
-            h.color_key
-        };
+fn hourly_model_info_from_cached(key: &str, value: CachedHourlyModelInfo) -> HourlyModelInfo {
+    let display_name = if value.display_name.is_empty() {
+        key.to_string()
+    } else {
+        value.display_name
+    };
+    let color_key = if value.color_key.is_empty() {
+        display_name
+            .rsplit_once(" / ")
+            .map(|(_, base_model)| base_model.to_string())
+            .unwrap_or_else(|| display_name.clone())
+    } else {
+        value.color_key
+    };
 
-        Self {
-            provider: h.provider,
-            display_name,
-            color_key,
-            tokens: h.tokens.into(),
-            cost: h.cost,
-        }
+    HourlyModelInfo {
+        provider: value.provider,
+        display_name,
+        color_key,
+        tokens: value.tokens.into(),
+        cost: value.cost,
     }
 }
 
@@ -398,7 +396,14 @@ impl TryFrom<CachedHourlyUsage> for HourlyUsage {
             tokens: h.tokens.into(),
             cost: h.cost,
             clients: h.clients.into_iter().collect(),
-            models: h.models.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            models: h
+                .models
+                .into_iter()
+                .map(|(key, value)| {
+                    let model_info = hourly_model_info_from_cached(&key, value);
+                    (key, model_info)
+                })
+                .collect(),
             message_count: h.message_count,
             turn_count: h.turn_count,
         })
@@ -1153,6 +1158,85 @@ mod tests {
             }
             other => panic!(
                 "expected fresh current-schema cache, got {:?}",
+                other_variant_name(&other)
+            ),
+        }
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_stale_legacy_hourly_models_without_display_fields() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 5,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [{
+      "datetime": "2026-03-18 10:00:00",
+      "tokens": {
+        "input": 10,
+        "output": 5,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0
+      },
+      "cost": 1.25,
+      "clients": ["claude"],
+      "models": [[
+        "claude-sonnet-4-5",
+        {
+          "tokens": {
+            "input": 10,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 0
+          },
+          "cost": 1.25
+        }
+      ]],
+      "messageCount": 1,
+      "turnCount": 1
+    }],
+    "graph": null,
+    "totalTokens": 15,
+    "totalCost": 1.25,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_clients(&[ClientId::Claude]);
+        match load_cache(&clients, false, &GroupBy::Model) {
+            CacheResult::Fresh(data) | CacheResult::Stale(data) => {
+                let hourly_model = data.hourly[0].models.get("claude-sonnet-4-5").unwrap();
+                assert_eq!(hourly_model.display_name, "claude-sonnet-4-5");
+                assert_eq!(hourly_model.color_key, "claude-sonnet-4-5");
+            }
+            other => panic!(
+                "expected cache data, got {:?}",
                 other_variant_name(&other)
             ),
         }
