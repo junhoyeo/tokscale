@@ -129,8 +129,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|h| {
                     let models: Vec<ModelSegment> = h
                         .models
-                        .iter()
-                        .map(|(_, info)| ModelSegment {
+                        .values()
+                        .map(|info| ModelSegment {
                             model_id: info.display_name.clone(),
                             tokens: info.tokens.total(),
                             color: app.model_color_for(&info.provider, &info.color_key),

@@ -546,7 +546,8 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]));
 
                 for model_info in models {
-                    let model_color = app.model_color_for(&model_info.provider, &model_info.color_key);
+                    let model_color =
+                        app.model_color_for(&model_info.provider, &model_info.color_key);
                     lines.push(Line::from(vec![
                         Span::raw("  "),
                         Span::styled("●", Style::default().fg(model_color)),

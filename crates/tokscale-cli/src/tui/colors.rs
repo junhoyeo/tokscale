@@ -34,7 +34,10 @@ pub fn build_model_shade_map(models: &[ModelUsage]) -> HashMap<String, Color> {
         let mut ranked: Vec<(&str, f64)> = models_map.into_iter().collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         for (rank, (name, _)) in ranked.iter().enumerate() {
-            map.insert(model_shade_key(provider, name), get_provider_shade(provider, rank));
+            map.insert(
+                model_shade_key(provider, name),
+                get_provider_shade(provider, rank),
+            );
         }
     }
     map

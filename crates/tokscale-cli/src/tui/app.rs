@@ -2095,9 +2095,18 @@ mod tests {
         // All-zero costs (fresh data) must produce a stable shade assignment
         // across refreshes so the chart doesn't flicker.
         let ranks = |app: &App| {
-            let a = app.model_shade_map.get(&shade_key("anthropic", "claude-alpha")).copied();
-            let b = app.model_shade_map.get(&shade_key("anthropic", "claude-beta")).copied();
-            let c = app.model_shade_map.get(&shade_key("anthropic", "claude-gamma")).copied();
+            let a = app
+                .model_shade_map
+                .get(&shade_key("anthropic", "claude-alpha"))
+                .copied();
+            let b = app
+                .model_shade_map
+                .get(&shade_key("anthropic", "claude-beta"))
+                .copied();
+            let c = app
+                .model_shade_map
+                .get(&shade_key("anthropic", "claude-gamma"))
+                .copied();
             (a, b, c)
         };
 
