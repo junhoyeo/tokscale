@@ -60,15 +60,16 @@ pub fn format_cache_hit_rate(cache_read: u64, input: u64, cache_write: u64) -> S
 }
 
 pub fn get_model_color(model: &str) -> Color {
-    let provider = get_provider_from_model(model);
-    let config = TokscaleConfig::load();
-    if let Some(color) = config.get_provider_color(provider) {
-        return color;
-    }
-    get_provider_shade(provider, 0)
+    get_provider_shade(get_provider_from_model(model), 0)
 }
 
+/// Returns the shade for a given `(provider, rank)` pair.
+/// Honors `[colors.providers]` config overrides at every rank by deriving
+/// a 7-step lighten-to-white palette from the override base color.
 pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
+    if let Some(base) = TokscaleConfig::load().get_provider_color(provider) {
+        return shade_from_base(base, rank);
+    }
     let palette: &[(u8, u8, u8)] = match provider {
         "anthropic" => &ANTHROPIC_SHADES,
         "openai" => &OPENAI_SHADES,
@@ -77,11 +78,28 @@ pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
         "xai" => &XAI_SHADES,
         "meta" => &META_SHADES,
         "cursor" => &CURSOR_SHADES,
-        _ => &[(255, 255, 255)],
+        _ => &UNKNOWN_SHADES,
     };
     let idx = rank.min(palette.len() - 1);
     let (r, g, b) = palette[idx];
     Color::Rgb(r, g, b)
+}
+
+/// Generates a 7-step monochromatic palette from `base` by interpolating
+/// toward white. Factors roughly match the end-of-ramp lightness of the
+/// hardcoded palettes so overrides feel visually consistent.
+fn shade_from_base(base: Color, rank: usize) -> Color {
+    const FACTORS: [f32; 7] = [0.00, 0.11, 0.22, 0.33, 0.44, 0.56, 0.67];
+    let Color::Rgb(r, g, b) = base else {
+        return base;
+    };
+    let idx = rank.min(FACTORS.len() - 1);
+    let f = FACTORS[idx];
+    let lerp = |c: u8| -> u8 {
+        let c = c as f32;
+        (c + (255.0 - c) * f).round().clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(lerp(r), lerp(g), lerp(b))
 }
 
 const ANTHROPIC_SHADES: [(u8, u8, u8); 7] = [
@@ -144,8 +162,26 @@ const META_SHADES: [(u8, u8, u8); 7] = [
     (225, 226, 252), // #E1E2FC
 ];
 
-const CURSOR_SHADES: [(u8, u8, u8); 1] = [
-    (139, 92, 246), // #8B5CF6
+const CURSOR_SHADES: [(u8, u8, u8); 7] = [
+    (139, 92, 246),  // #8B5CF6
+    (154, 114, 247), // #9A72F7
+    (169, 135, 248), // #A987F8
+    (184, 156, 250), // #B89CFA
+    (199, 177, 251), // #C7B1FB
+    (215, 199, 252), // #D7C7FC
+    (230, 220, 253), // #E6DCFD
+];
+
+/// Neutral gray ramp for providers that don't match any known palette.
+/// Still produces distinct shades per rank instead of collapsing to white.
+const UNKNOWN_SHADES: [(u8, u8, u8); 7] = [
+    (136, 136, 136), // #888888
+    (156, 156, 156), // #9C9C9C
+    (176, 176, 176), // #B0B0B0
+    (196, 196, 196), // #C4C4C4
+    (212, 212, 212), // #D4D4D4
+    (228, 228, 228), // #E4E4E4
+    (244, 244, 244), // #F4F4F4
 ];
 
 pub fn get_provider_from_model(model: &str) -> &'static str {
@@ -244,5 +280,74 @@ fn capitalize_first(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(first) => first.to_uppercase().chain(chars).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shade_from_base_rank_0_equals_base() {
+        let base = Color::Rgb(255, 0, 0);
+        assert_eq!(shade_from_base(base, 0), base);
+    }
+
+    #[test]
+    fn shade_from_base_lightens_monotonically_toward_white() {
+        let base = Color::Rgb(0, 0, 0);
+        let mut prev_r: u8 = 0;
+        for rank in 0..7 {
+            let Color::Rgb(r, _, _) = shade_from_base(base, rank) else {
+                panic!("expected Rgb")
+            };
+            assert!(
+                r >= prev_r,
+                "shade at rank {} should not be darker than rank {}",
+                rank,
+                rank - 1
+            );
+            prev_r = r;
+        }
+    }
+
+    #[test]
+    fn shade_from_base_clamps_beyond_palette_length() {
+        let base = Color::Rgb(100, 100, 100);
+        // Rank beyond FACTORS.len() saturates to the lightest shade.
+        assert_eq!(shade_from_base(base, 100), shade_from_base(base, 6));
+    }
+
+    #[test]
+    fn shade_from_base_passes_through_non_rgb() {
+        // Indexed terminal colors can't be lightened channel-wise — return as-is.
+        assert_eq!(shade_from_base(Color::Indexed(42), 5), Color::Indexed(42));
+    }
+
+    #[test]
+    fn unknown_provider_returns_gray_ramp_not_pure_white() {
+        // Regression: the old fallback was [(255,255,255)], collapsing all
+        // unknown-provider models to pure white. Now each rank is a distinct
+        // gray so models stay distinguishable.
+        let rank_0 = get_provider_shade("some-new-provider", 0);
+        let rank_3 = get_provider_shade("some-new-provider", 3);
+        assert_ne!(rank_0, rank_3);
+        assert_ne!(rank_0, Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn cursor_provider_has_distinct_shades_per_rank() {
+        // Regression: CURSOR_SHADES used to be a single-entry palette so all
+        // Cursor models collapsed to one color.
+        let rank_0 = get_provider_shade("cursor", 0);
+        let rank_6 = get_provider_shade("cursor", 6);
+        assert_ne!(rank_0, rank_6);
+    }
+
+    #[test]
+    fn get_provider_shade_saturates_at_palette_end() {
+        let last = get_provider_shade("anthropic", 6);
+        let past_end = get_provider_shade("anthropic", 99);
+        assert_eq!(last, past_end);
     }
 }
