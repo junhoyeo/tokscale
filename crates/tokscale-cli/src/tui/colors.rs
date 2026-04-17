@@ -44,7 +44,7 @@ pub fn build_model_shade_map(models: &[ModelUsage]) -> HashMap<String, Color> {
 }
 
 fn provider_color_key<'a>(provider: &'a str, model: &'a str) -> &'a str {
-    if provider.contains(", ") {
+    if provider.is_empty() || provider.contains(", ") {
         get_provider_from_model(model)
     } else {
         provider
