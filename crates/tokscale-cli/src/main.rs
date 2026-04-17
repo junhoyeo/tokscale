@@ -5,7 +5,7 @@ mod tui;
 
 use crate::tui::client_ui;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,80 +39,11 @@ struct Cli {
     #[arg(long, help = "Use legacy CLI table output")]
     light: bool,
 
-    #[arg(long, help = "Show only OpenCode usage")]
-    opencode: bool,
+    #[command(flatten)]
+    clients: ClientFlags,
 
-    #[arg(long, help = "Show only Claude Code usage")]
-    claude: bool,
-
-    #[arg(long, help = "Show only Codex CLI usage")]
-    codex: bool,
-
-    #[arg(long, help = "Show only Copilot CLI usage")]
-    copilot: bool,
-
-    #[arg(long, help = "Show only Gemini CLI usage")]
-    gemini: bool,
-
-    #[arg(long, help = "Show only Cursor IDE usage")]
-    cursor: bool,
-
-    #[arg(long, help = "Show only Amp usage")]
-    amp: bool,
-
-    #[arg(long, help = "Show only Droid usage")]
-    droid: bool,
-
-    #[arg(long, help = "Show only OpenClaw usage")]
-    openclaw: bool,
-
-    #[arg(long, help = "Show only Hermes Agent usage")]
-    hermes: bool,
-
-    #[arg(long, help = "Show only Pi usage")]
-    pi: bool,
-
-    #[arg(long, help = "Show only Kimi CLI usage")]
-    kimi: bool,
-
-    #[arg(long, help = "Show only Qwen CLI usage")]
-    qwen: bool,
-
-    #[arg(long, help = "Show only Roo Code usage")]
-    roocode: bool,
-
-    #[arg(long, help = "Show only KiloCode usage")]
-    kilocode: bool,
-
-    #[arg(long, help = "Show only Kilo CLI usage")]
-    kilo: bool,
-
-    #[arg(long, help = "Show only Mux usage")]
-    mux: bool,
-
-    #[arg(long, help = "Show only Crush usage")]
-    crush: bool,
-
-    #[arg(long, help = "Show only Synthetic usage")]
-    synthetic: bool,
-
-    #[arg(long, help = "Show only today's usage")]
-    today: bool,
-
-    #[arg(long, help = "Show last 7 days")]
-    week: bool,
-
-    #[arg(long, help = "Show current month")]
-    month: bool,
-
-    #[arg(long, help = "Start date (YYYY-MM-DD)")]
-    since: Option<String>,
-
-    #[arg(long, help = "End date (YYYY-MM-DD)")]
-    until: Option<String>,
-
-    #[arg(long, help = "Filter by year (YYYY)")]
-    year: Option<String>,
+    #[command(flatten)]
+    date: DateRangeFlags,
 
     #[arg(
         long,
@@ -145,57 +76,10 @@ enum Commands {
         json: bool,
         #[arg(long)]
         light: bool,
-        #[arg(long, help = "Show only OpenCode usage")]
-        opencode: bool,
-        #[arg(long, help = "Show only Claude Code usage")]
-        claude: bool,
-        #[arg(long, help = "Show only Codex CLI usage")]
-        codex: bool,
-        #[arg(long, help = "Show only Copilot CLI usage")]
-        copilot: bool,
-        #[arg(long, help = "Show only Gemini CLI usage")]
-        gemini: bool,
-        #[arg(long, help = "Show only Cursor IDE usage")]
-        cursor: bool,
-        #[arg(long, help = "Show only Amp usage")]
-        amp: bool,
-        #[arg(long, help = "Show only Droid usage")]
-        droid: bool,
-        #[arg(long, help = "Show only OpenClaw usage")]
-        openclaw: bool,
-
-        #[arg(long, help = "Show only Hermes Agent usage")]
-        hermes: bool,
-        #[arg(long, help = "Show only Pi usage")]
-        pi: bool,
-        #[arg(long, help = "Show only Kimi CLI usage")]
-        kimi: bool,
-        #[arg(long, help = "Show only Qwen CLI usage")]
-        qwen: bool,
-        #[arg(long, help = "Show only Roo Code usage")]
-        roocode: bool,
-        #[arg(long, help = "Show only KiloCode usage")]
-        kilocode: bool,
-        #[arg(long, help = "Show only Kilo CLI usage")]
-        kilo: bool,
-        #[arg(long, help = "Show only Mux usage")]
-        mux: bool,
-        #[arg(long, help = "Show only Crush usage")]
-        crush: bool,
-        #[arg(long, help = "Show only Synthetic usage")]
-        synthetic: bool,
-        #[arg(long, help = "Show only today's usage")]
-        today: bool,
-        #[arg(long, help = "Show last 7 days")]
-        week: bool,
-        #[arg(long, help = "Show current month")]
-        month: bool,
-        #[arg(long, help = "Start date (YYYY-MM-DD)")]
-        since: Option<String>,
-        #[arg(long, help = "End date (YYYY-MM-DD)")]
-        until: Option<String>,
-        #[arg(long, help = "Filter by year (YYYY)")]
-        year: Option<String>,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
         #[arg(long, help = "Show processing time")]
         benchmark: bool,
         #[arg(
@@ -214,57 +98,10 @@ enum Commands {
         json: bool,
         #[arg(long)]
         light: bool,
-        #[arg(long, help = "Show only OpenCode usage")]
-        opencode: bool,
-        #[arg(long, help = "Show only Claude Code usage")]
-        claude: bool,
-        #[arg(long, help = "Show only Codex CLI usage")]
-        codex: bool,
-        #[arg(long, help = "Show only Copilot CLI usage")]
-        copilot: bool,
-        #[arg(long, help = "Show only Gemini CLI usage")]
-        gemini: bool,
-        #[arg(long, help = "Show only Cursor IDE usage")]
-        cursor: bool,
-        #[arg(long, help = "Show only Amp usage")]
-        amp: bool,
-        #[arg(long, help = "Show only Droid usage")]
-        droid: bool,
-        #[arg(long, help = "Show only OpenClaw usage")]
-        openclaw: bool,
-
-        #[arg(long, help = "Show only Hermes Agent usage")]
-        hermes: bool,
-        #[arg(long, help = "Show only Pi usage")]
-        pi: bool,
-        #[arg(long, help = "Show only Kimi CLI usage")]
-        kimi: bool,
-        #[arg(long, help = "Show only Qwen CLI usage")]
-        qwen: bool,
-        #[arg(long, help = "Show only Roo Code usage")]
-        roocode: bool,
-        #[arg(long, help = "Show only KiloCode usage")]
-        kilocode: bool,
-        #[arg(long, help = "Show only Kilo CLI usage")]
-        kilo: bool,
-        #[arg(long, help = "Show only Mux usage")]
-        mux: bool,
-        #[arg(long, help = "Show only Crush usage")]
-        crush: bool,
-        #[arg(long, help = "Show only Synthetic usage")]
-        synthetic: bool,
-        #[arg(long, help = "Show only today's usage")]
-        today: bool,
-        #[arg(long, help = "Show last 7 days")]
-        week: bool,
-        #[arg(long, help = "Show current month")]
-        month: bool,
-        #[arg(long, help = "Start date (YYYY-MM-DD)")]
-        since: Option<String>,
-        #[arg(long, help = "End date (YYYY-MM-DD)")]
-        until: Option<String>,
-        #[arg(long, help = "Filter by year (YYYY)")]
-        year: Option<String>,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
         #[arg(long, help = "Show processing time")]
         benchmark: bool,
         #[arg(long, help = "Disable spinner")]
@@ -276,56 +113,10 @@ enum Commands {
         json: bool,
         #[arg(long)]
         light: bool,
-        #[arg(long, help = "Show only OpenCode usage")]
-        opencode: bool,
-        #[arg(long, help = "Show only Claude Code usage")]
-        claude: bool,
-        #[arg(long, help = "Show only Codex CLI usage")]
-        codex: bool,
-        #[arg(long, help = "Show only Copilot CLI usage")]
-        copilot: bool,
-        #[arg(long, help = "Show only Gemini CLI usage")]
-        gemini: bool,
-        #[arg(long, help = "Show only Cursor IDE usage")]
-        cursor: bool,
-        #[arg(long, help = "Show only Amp usage")]
-        amp: bool,
-        #[arg(long, help = "Show only Droid usage")]
-        droid: bool,
-        #[arg(long, help = "Show only OpenClaw usage")]
-        openclaw: bool,
-        #[arg(long, help = "Show only Hermes Agent usage")]
-        hermes: bool,
-        #[arg(long, help = "Show only Pi usage")]
-        pi: bool,
-        #[arg(long, help = "Show only Kimi CLI usage")]
-        kimi: bool,
-        #[arg(long, help = "Show only Qwen CLI usage")]
-        qwen: bool,
-        #[arg(long, help = "Show only Roo Code usage")]
-        roocode: bool,
-        #[arg(long, help = "Show only KiloCode usage")]
-        kilocode: bool,
-        #[arg(long, help = "Show only Kilo CLI usage")]
-        kilo: bool,
-        #[arg(long, help = "Show only Mux usage")]
-        mux: bool,
-        #[arg(long, help = "Show only Crush usage")]
-        crush: bool,
-        #[arg(long, help = "Show only Synthetic usage")]
-        synthetic: bool,
-        #[arg(long, help = "Show only today's usage")]
-        today: bool,
-        #[arg(long, help = "Show last 7 days")]
-        week: bool,
-        #[arg(long, help = "Show current month")]
-        month: bool,
-        #[arg(long, help = "Start date (YYYY-MM-DD)")]
-        since: Option<String>,
-        #[arg(long, help = "End date (YYYY-MM-DD)")]
-        until: Option<String>,
-        #[arg(long, help = "Filter by year (YYYY)")]
-        year: Option<String>,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
         #[arg(long, help = "Show processing time")]
         benchmark: bool,
         #[arg(long, help = "Disable spinner")]
@@ -356,57 +147,10 @@ enum Commands {
     Graph {
         #[arg(long, help = "Write to file instead of stdout")]
         output: Option<String>,
-        #[arg(long, help = "Show only OpenCode usage")]
-        opencode: bool,
-        #[arg(long, help = "Show only Claude Code usage")]
-        claude: bool,
-        #[arg(long, help = "Show only Codex CLI usage")]
-        codex: bool,
-        #[arg(long, help = "Show only Copilot CLI usage")]
-        copilot: bool,
-        #[arg(long, help = "Show only Gemini CLI usage")]
-        gemini: bool,
-        #[arg(long, help = "Show only Cursor IDE usage")]
-        cursor: bool,
-        #[arg(long, help = "Show only Amp usage")]
-        amp: bool,
-        #[arg(long, help = "Show only Droid usage")]
-        droid: bool,
-        #[arg(long, help = "Show only OpenClaw usage")]
-        openclaw: bool,
-
-        #[arg(long, help = "Show only Hermes Agent usage")]
-        hermes: bool,
-        #[arg(long, help = "Show only Pi usage")]
-        pi: bool,
-        #[arg(long, help = "Show only Kimi CLI usage")]
-        kimi: bool,
-        #[arg(long, help = "Show only Qwen CLI usage")]
-        qwen: bool,
-        #[arg(long, help = "Show only Roo Code usage")]
-        roocode: bool,
-        #[arg(long, help = "Show only KiloCode usage")]
-        kilocode: bool,
-        #[arg(long, help = "Show only Kilo CLI usage")]
-        kilo: bool,
-        #[arg(long, help = "Show only Mux usage")]
-        mux: bool,
-        #[arg(long, help = "Show only Crush usage")]
-        crush: bool,
-        #[arg(long, help = "Show only Synthetic usage")]
-        synthetic: bool,
-        #[arg(long, help = "Show only today's usage")]
-        today: bool,
-        #[arg(long, help = "Show last 7 days")]
-        week: bool,
-        #[arg(long, help = "Show current month")]
-        month: bool,
-        #[arg(long, help = "Start date (YYYY-MM-DD)")]
-        since: Option<String>,
-        #[arg(long, help = "End date (YYYY-MM-DD)")]
-        until: Option<String>,
-        #[arg(long, help = "Filter by year (YYYY)")]
-        year: Option<String>,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
         #[arg(long, help = "Show processing time")]
         benchmark: bool,
         #[arg(long, help = "Disable spinner")]
@@ -414,110 +158,17 @@ enum Commands {
     },
     #[command(about = "Launch interactive TUI with optional filters")]
     Tui {
-        #[arg(long, help = "Show only OpenCode usage")]
-        opencode: bool,
-        #[arg(long, help = "Show only Claude Code usage")]
-        claude: bool,
-        #[arg(long, help = "Show only Codex CLI usage")]
-        codex: bool,
-        #[arg(long, help = "Show only Copilot CLI usage")]
-        copilot: bool,
-        #[arg(long, help = "Show only Gemini CLI usage")]
-        gemini: bool,
-        #[arg(long, help = "Show only Cursor IDE usage")]
-        cursor: bool,
-        #[arg(long, help = "Show only Amp usage")]
-        amp: bool,
-        #[arg(long, help = "Show only Droid usage")]
-        droid: bool,
-        #[arg(long, help = "Show only OpenClaw usage")]
-        openclaw: bool,
-
-        #[arg(long, help = "Show only Hermes Agent usage")]
-        hermes: bool,
-        #[arg(long, help = "Show only Pi usage")]
-        pi: bool,
-        #[arg(long, help = "Show only Kimi CLI usage")]
-        kimi: bool,
-        #[arg(long, help = "Show only Qwen CLI usage")]
-        qwen: bool,
-        #[arg(long, help = "Show only Roo Code usage")]
-        roocode: bool,
-        #[arg(long, help = "Show only KiloCode usage")]
-        kilocode: bool,
-        #[arg(long, help = "Show only Kilo CLI usage")]
-        kilo: bool,
-        #[arg(long, help = "Show only Mux usage")]
-        mux: bool,
-        #[arg(long, help = "Show only Crush usage")]
-        crush: bool,
-        #[arg(long, help = "Show only Synthetic usage")]
-        synthetic: bool,
-        #[arg(long, help = "Show only today's usage")]
-        today: bool,
-        #[arg(long, help = "Show last 7 days")]
-        week: bool,
-        #[arg(long, help = "Show current month")]
-        month: bool,
-        #[arg(long, help = "Start date (YYYY-MM-DD)")]
-        since: Option<String>,
-        #[arg(long, help = "End date (YYYY-MM-DD)")]
-        until: Option<String>,
-        #[arg(long, help = "Filter by year (YYYY)")]
-        year: Option<String>,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
     },
     #[command(about = "Submit usage data to the Tokscale social platform")]
     Submit {
-        #[arg(long, help = "Include only OpenCode data")]
-        opencode: bool,
-        #[arg(long, help = "Include only Claude Code data")]
-        claude: bool,
-        #[arg(long, help = "Include only Codex CLI data")]
-        codex: bool,
-        #[arg(long, help = "Include only Copilot CLI data")]
-        copilot: bool,
-        #[arg(long, help = "Include only Gemini CLI data")]
-        gemini: bool,
-        #[arg(long, help = "Include only Cursor IDE data")]
-        cursor: bool,
-        #[arg(long, help = "Include only Amp data")]
-        amp: bool,
-        #[arg(long, help = "Include only Droid data")]
-        droid: bool,
-        #[arg(long, help = "Include only OpenClaw data")]
-        openclaw: bool,
-        #[arg(long, help = "Include only Hermes Agent data")]
-        hermes: bool,
-        #[arg(long, help = "Include only Pi data")]
-        pi: bool,
-        #[arg(long, help = "Include only Kimi CLI data")]
-        kimi: bool,
-        #[arg(long, help = "Include only Qwen CLI data")]
-        qwen: bool,
-        #[arg(long, help = "Show only Roo Code usage")]
-        roocode: bool,
-        #[arg(long, help = "Show only KiloCode usage")]
-        kilocode: bool,
-        #[arg(long, help = "Show only Kilo CLI usage")]
-        kilo: bool,
-        #[arg(long, help = "Show only Mux usage")]
-        mux: bool,
-        #[arg(long, help = "Show only Crush usage")]
-        crush: bool,
-        #[arg(long, help = "Show only Synthetic usage")]
-        synthetic: bool,
-        #[arg(long, help = "Submit only today's usage")]
-        today: bool,
-        #[arg(long, help = "Submit last 7 days")]
-        week: bool,
-        #[arg(long, help = "Submit current month")]
-        month: bool,
-        #[arg(long, help = "Start date (YYYY-MM-DD)")]
-        since: Option<String>,
-        #[arg(long, help = "End date (YYYY-MM-DD)")]
-        until: Option<String>,
-        #[arg(long, help = "Filter by year (YYYY)")]
-        year: Option<String>,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
         #[arg(
             long,
             help = "Show what would be submitted without actually submitting"
@@ -543,45 +194,8 @@ enum Commands {
         output: Option<String>,
         #[arg(long, help = "Year to generate (default: current year)")]
         year: Option<String>,
-        #[arg(long, help = "Show only OpenCode usage")]
-        opencode: bool,
-        #[arg(long, help = "Show only Claude Code usage")]
-        claude: bool,
-        #[arg(long, help = "Show only Codex CLI usage")]
-        codex: bool,
-        #[arg(long, help = "Show only Copilot CLI usage")]
-        copilot: bool,
-        #[arg(long, help = "Show only Gemini CLI usage")]
-        gemini: bool,
-        #[arg(long, help = "Show only Cursor IDE usage")]
-        cursor: bool,
-        #[arg(long, help = "Show only Amp usage")]
-        amp: bool,
-        #[arg(long, help = "Show only Droid usage")]
-        droid: bool,
-        #[arg(long, help = "Show only OpenClaw usage")]
-        openclaw: bool,
-
-        #[arg(long, help = "Show only Hermes Agent usage")]
-        hermes: bool,
-        #[arg(long, help = "Show only Pi usage")]
-        pi: bool,
-        #[arg(long, help = "Show only Kimi CLI usage")]
-        kimi: bool,
-        #[arg(long, help = "Show only Qwen CLI usage")]
-        qwen: bool,
-        #[arg(long, help = "Show only Roo Code usage")]
-        roocode: bool,
-        #[arg(long, help = "Show only KiloCode usage")]
-        kilocode: bool,
-        #[arg(long, help = "Show only Kilo CLI usage")]
-        kilo: bool,
-        #[arg(long, help = "Show only Mux usage")]
-        mux: bool,
-        #[arg(long, help = "Show only Crush usage")]
-        crush: bool,
-        #[arg(long, help = "Show only Synthetic usage")]
-        synthetic: bool,
+        #[command(flatten)]
+        client_flags: ClientFlags,
         #[arg(
             long,
             help = "Display total tokens in abbreviated format (e.g., 7.14B)"
@@ -652,31 +266,8 @@ fn main() -> Result<()> {
         Some(Commands::Models {
             json,
             light,
-            opencode,
-            claude,
-            codex,
-            copilot,
-            gemini,
-            cursor,
-            amp,
-            droid,
-            openclaw,
-            hermes,
-            pi,
-            kimi,
-            qwen,
-            roocode,
-            kilocode,
-            kilo,
-            mux,
-            crush,
-            synthetic,
-            today,
-            week,
-            month,
-            since,
-            until,
-            year,
+            clients,
+            date,
             benchmark,
             group_by,
             no_spinner,
@@ -687,29 +278,12 @@ fn main() -> Result<()> {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             });
-            let clients = build_client_filter(ClientFlags {
-                opencode,
-                claude,
-                codex,
-                copilot,
-                gemini,
-                cursor,
-                amp,
-                droid,
-                openclaw,
-                hermes,
-                pi,
-                kimi,
-                qwen,
-                roocode,
-                kilocode,
-                kilo,
-                mux,
-                crush,
-                synthetic,
-            });
-            let (since, until) = build_date_filter(today, week, month, since, until);
-            let year = normalize_year_filter(today, week, month, year);
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let year = normalize_year_filter(today, week, month, date.year);
+            let clients = build_client_filter(clients);
             if json || light || !can_use_tui {
                 run_models_report(
                     json,
@@ -742,57 +316,17 @@ fn main() -> Result<()> {
         Some(Commands::Monthly {
             json,
             light,
-            opencode,
-            claude,
-            codex,
-            copilot,
-            gemini,
-            cursor,
-            amp,
-            droid,
-            openclaw,
-            hermes,
-            pi,
-            kimi,
-            qwen,
-            roocode,
-            kilocode,
-            kilo,
-            mux,
-            crush,
-            synthetic,
-            today,
-            week,
-            month,
-            since,
-            until,
-            year,
+            clients,
+            date,
             benchmark,
             no_spinner,
         }) => {
-            let clients = build_client_filter(ClientFlags {
-                opencode,
-                claude,
-                codex,
-                copilot,
-                gemini,
-                cursor,
-                amp,
-                droid,
-                openclaw,
-                hermes,
-                pi,
-                kimi,
-                qwen,
-                roocode,
-                kilocode,
-                kilo,
-                mux,
-                crush,
-                synthetic,
-            });
-            let (since, until) = build_date_filter(today, week, month, since, until);
-            let year = normalize_year_filter(today, week, month, year);
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let year = normalize_year_filter(today, week, month, date.year);
+            let clients = build_client_filter(clients);
             if json || light || !can_use_tui {
                 run_monthly_report(
                     json,
@@ -824,57 +358,17 @@ fn main() -> Result<()> {
         Some(Commands::Hourly {
             json,
             light: _,
-            opencode,
-            claude,
-            codex,
-            copilot,
-            gemini,
-            cursor,
-            amp,
-            droid,
-            openclaw,
-            hermes,
-            pi,
-            kimi,
-            qwen,
-            roocode,
-            kilocode,
-            kilo,
-            mux,
-            crush,
-            synthetic,
-            today,
-            week,
-            month,
-            since,
-            until,
-            year,
+            clients,
+            date,
             benchmark,
             no_spinner,
         }) => {
-            let clients = build_client_filter(ClientFlags {
-                opencode,
-                claude,
-                codex,
-                copilot,
-                gemini,
-                cursor,
-                amp,
-                droid,
-                openclaw,
-                hermes,
-                pi,
-                kimi,
-                qwen,
-                roocode,
-                kilocode,
-                kilo,
-                mux,
-                crush,
-                synthetic,
-            });
-            let (since, until) = build_date_filter(today, week, month, since, until);
-            let year = normalize_year_filter(today, week, month, year);
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let year = normalize_year_filter(today, week, month, date.year);
+            let clients = build_client_filter(clients);
             run_hourly_report(
                 json,
                 cli.home.clone(),
@@ -916,57 +410,17 @@ fn main() -> Result<()> {
         }
         Some(Commands::Graph {
             output,
-            opencode,
-            claude,
-            codex,
-            copilot,
-            gemini,
-            cursor,
-            amp,
-            droid,
-            openclaw,
-            hermes,
-            pi,
-            kimi,
-            qwen,
-            roocode,
-            kilocode,
-            kilo,
-            mux,
-            crush,
-            synthetic,
-            today,
-            week,
-            month,
-            since,
-            until,
-            year,
+            clients,
+            date,
             benchmark,
             no_spinner,
         }) => {
-            let clients = build_client_filter(ClientFlags {
-                opencode,
-                claude,
-                codex,
-                copilot,
-                gemini,
-                cursor,
-                amp,
-                droid,
-                openclaw,
-                hermes,
-                pi,
-                kimi,
-                qwen,
-                roocode,
-                kilocode,
-                kilo,
-                mux,
-                crush,
-                synthetic,
-            });
-            let (since, until) = build_date_filter(today, week, month, since, until);
-            let year = normalize_year_filter(today, week, month, year);
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let year = normalize_year_filter(today, week, month, date.year);
+            let clients = build_client_filter(clients);
             run_graph_command(
                 output,
                 cli.home.clone(),
@@ -978,57 +432,14 @@ fn main() -> Result<()> {
                 no_spinner,
             )
         }
-        Some(Commands::Tui {
-            opencode,
-            claude,
-            codex,
-            copilot,
-            gemini,
-            cursor,
-            amp,
-            droid,
-            openclaw,
-            hermes,
-            pi,
-            kimi,
-            qwen,
-            roocode,
-            kilocode,
-            kilo,
-            mux,
-            crush,
-            synthetic,
-            today,
-            week,
-            month,
-            since,
-            until,
-            year,
-        }) => {
+        Some(Commands::Tui { clients, date }) => {
             ensure_home_supported_for_tui(&cli.home)?;
-            let clients = build_client_filter(ClientFlags {
-                opencode,
-                claude,
-                codex,
-                copilot,
-                gemini,
-                cursor,
-                amp,
-                droid,
-                openclaw,
-                hermes,
-                pi,
-                kimi,
-                qwen,
-                roocode,
-                kilocode,
-                kilo,
-                mux,
-                crush,
-                synthetic,
-            });
-            let (since, until) = build_date_filter(today, week, month, since, until);
-            let year = normalize_year_filter(today, week, month, year);
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let year = normalize_year_filter(today, week, month, date.year);
+            let clients = build_client_filter(clients);
             tui::run(
                 &cli.theme,
                 cli.refresh,
@@ -1041,57 +452,17 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::Submit {
-            opencode,
-            claude,
-            codex,
-            copilot,
-            gemini,
-            cursor,
-            amp,
-            droid,
-            openclaw,
-            hermes,
-            pi,
-            kimi,
-            qwen,
-            roocode,
-            kilocode,
-            kilo,
-            mux,
-            crush,
-            synthetic,
-            today,
-            week,
-            month,
-            since,
-            until,
-            year,
+            clients,
+            date,
             dry_run,
         }) => {
             reject_unsupported_home_override(&cli.home, "submit")?;
-            let clients = build_client_filter(ClientFlags {
-                opencode,
-                claude,
-                codex,
-                copilot,
-                gemini,
-                cursor,
-                amp,
-                droid,
-                openclaw,
-                hermes,
-                pi,
-                kimi,
-                qwen,
-                roocode,
-                kilocode,
-                kilo,
-                mux,
-                crush,
-                synthetic,
-            });
-            let (since, until) = build_date_filter(today, week, month, since, until);
-            let year = normalize_year_filter(today, week, month, year);
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let year = normalize_year_filter(today, week, month, date.year);
+            let clients = build_client_filter(clients);
             run_submit_command(clients, since, until, year, dry_run)
         }
         Some(Commands::Headless {
@@ -1107,25 +478,7 @@ fn main() -> Result<()> {
         Some(Commands::Wrapped {
             output,
             year,
-            opencode,
-            claude,
-            codex,
-            copilot,
-            gemini,
-            cursor,
-            amp,
-            droid,
-            openclaw,
-            hermes,
-            pi,
-            kimi,
-            qwen,
-            roocode,
-            kilocode,
-            kilo,
-            mux,
-            crush,
-            synthetic,
+            client_flags,
             short,
             agents,
             clients,
@@ -1133,27 +486,7 @@ fn main() -> Result<()> {
             no_spinner: _,
         }) => {
             reject_unsupported_home_override(&cli.home, "wrapped")?;
-            let client_filter = build_client_filter(ClientFlags {
-                opencode,
-                claude,
-                codex,
-                copilot,
-                gemini,
-                cursor,
-                amp,
-                droid,
-                openclaw,
-                hermes,
-                pi,
-                kimi,
-                qwen,
-                roocode,
-                kilocode,
-                kilo,
-                mux,
-                crush,
-                synthetic,
-            });
+            let client_filter = build_client_filter(client_flags);
             run_wrapped_command(
                 output,
                 year,
@@ -1173,30 +506,13 @@ fn main() -> Result<()> {
             run_delete_data_command()
         }
         None => {
-            let clients = build_client_filter(ClientFlags {
-                opencode: cli.opencode,
-                claude: cli.claude,
-                codex: cli.codex,
-                copilot: cli.copilot,
-                gemini: cli.gemini,
-                cursor: cli.cursor,
-                amp: cli.amp,
-                droid: cli.droid,
-                openclaw: cli.openclaw,
-                hermes: cli.hermes,
-                pi: cli.pi,
-                kimi: cli.kimi,
-                qwen: cli.qwen,
-                roocode: cli.roocode,
-                kilocode: cli.kilocode,
-                kilo: cli.kilo,
-                mux: cli.mux,
-                crush: cli.crush,
-                synthetic: cli.synthetic,
-            });
+            let today = cli.date.today;
+            let week = cli.date.week;
+            let month = cli.date.month;
+            let clients = build_client_filter(cli.clients);
             let (since, until) =
-                build_date_filter(cli.today, cli.week, cli.month, cli.since, cli.until);
-            let year = normalize_year_filter(cli.today, cli.week, cli.month, cli.year);
+                build_date_filter(today, week, month, cli.date.since, cli.date.until);
+            let year = normalize_year_filter(today, week, month, cli.date.year);
             let group_by: tokscale_core::GroupBy = cli.group_by.parse().unwrap_or_else(|e| {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -1212,9 +528,9 @@ fn main() -> Result<()> {
                     year,
                     cli.benchmark,
                     cli.no_spinner || cli.json,
-                    cli.today,
-                    cli.week,
-                    cli.month,
+                    today,
+                    week,
+                    month,
                     group_by,
                 )
             } else if cli.light || !can_use_tui {
@@ -1227,9 +543,9 @@ fn main() -> Result<()> {
                     year,
                     cli.benchmark,
                     cli.no_spinner || !can_use_tui,
-                    cli.today,
-                    cli.week,
-                    cli.month,
+                    today,
+                    week,
+                    month,
                     group_by,
                 )
             } else {
@@ -1249,26 +565,62 @@ fn main() -> Result<()> {
     }
 }
 
-struct ClientFlags {
-    opencode: bool,
-    claude: bool,
-    codex: bool,
-    copilot: bool,
-    gemini: bool,
-    cursor: bool,
-    amp: bool,
-    droid: bool,
-    openclaw: bool,
-    hermes: bool,
-    pi: bool,
-    kimi: bool,
-    qwen: bool,
-    roocode: bool,
-    kilocode: bool,
-    kilo: bool,
-    mux: bool,
-    crush: bool,
-    synthetic: bool,
+#[derive(Args, Clone, Debug, Default)]
+pub struct ClientFlags {
+    #[arg(long, help = "Show only OpenCode usage")]
+    pub opencode: bool,
+    #[arg(long, help = "Show only Claude Code usage")]
+    pub claude: bool,
+    #[arg(long, help = "Show only Codex CLI usage")]
+    pub codex: bool,
+    #[arg(long, help = "Show only Copilot CLI usage")]
+    pub copilot: bool,
+    #[arg(long, help = "Show only Gemini CLI usage")]
+    pub gemini: bool,
+    #[arg(long, help = "Show only Cursor IDE usage")]
+    pub cursor: bool,
+    #[arg(long, help = "Show only Amp usage")]
+    pub amp: bool,
+    #[arg(long, help = "Show only Droid usage")]
+    pub droid: bool,
+    #[arg(long, help = "Show only OpenClaw usage")]
+    pub openclaw: bool,
+    #[arg(long, help = "Show only Hermes Agent usage")]
+    pub hermes: bool,
+    #[arg(long, help = "Show only Pi usage")]
+    pub pi: bool,
+    #[arg(long, help = "Show only Kimi CLI usage")]
+    pub kimi: bool,
+    #[arg(long, help = "Show only Qwen CLI usage")]
+    pub qwen: bool,
+    #[arg(long, help = "Show only Roo Code usage")]
+    pub roocode: bool,
+    #[arg(long, help = "Show only KiloCode usage")]
+    pub kilocode: bool,
+    #[arg(long, help = "Show only Kilo CLI usage")]
+    pub kilo: bool,
+    #[arg(long, help = "Show only Mux usage")]
+    pub mux: bool,
+    #[arg(long, help = "Show only Crush usage")]
+    pub crush: bool,
+    #[arg(long, help = "Show only Synthetic usage")]
+    pub synthetic: bool,
+}
+
+#[derive(Args, Clone, Debug, Default)]
+pub struct DateRangeFlags {
+    #[arg(long, help = "Show only today's usage")]
+    pub today: bool,
+    #[arg(long, help = "Show last 7 days")]
+    pub week: bool,
+    #[arg(long, help = "Show current month")]
+    pub month: bool,
+    #[arg(long, help = "Start date (YYYY-MM-DD)")]
+    pub since: Option<String>,
+    #[arg(long, help = "End date (YYYY-MM-DD)")]
+    pub until: Option<String>,
+    #[arg(long, help = "Filter by year (YYYY)")]
+    pub year: Option<String>,
 }
 
 fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
