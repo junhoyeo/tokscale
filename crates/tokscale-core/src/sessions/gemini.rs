@@ -5,6 +5,7 @@
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
+    read_file_or_none,
 };
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
@@ -95,9 +96,8 @@ pub fn parse_gemini_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     }
 
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    let Some(data) = read_file_or_none(path) else {
+        return Vec::new();
     };
 
     let mut bytes = data.clone();

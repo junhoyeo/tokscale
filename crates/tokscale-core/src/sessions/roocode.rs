@@ -4,7 +4,7 @@
 //! - tasks/<taskId>/ui_messages.json
 //! - tasks/<taskId>/api_conversation_history.json
 
-use super::utils::{extract_i64, parse_timestamp_str};
+use super::utils::{extract_i64, parse_timestamp_str, read_file_or_none};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -25,9 +25,8 @@ pub fn parse_roocode_file(path: &Path) -> Vec<UnifiedMessage> {
 }
 
 pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessage> {
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    let Some(data) = read_file_or_none(path) else {
+        return Vec::new();
     };
 
     let mut bytes = data;

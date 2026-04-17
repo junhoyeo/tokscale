@@ -3,6 +3,7 @@
 //! Parses OpenClaw transcript JSONL files from agent directories.
 //! Supports legacy sessions.json index parsing for compatibility.
 
+use super::utils::read_file_or_none;
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -73,9 +74,8 @@ struct OpenClawCost {
 }
 
 pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
-    let data = match std::fs::read(index_path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    let Some(data) = read_file_or_none(index_path) else {
+        return Vec::new();
     };
 
     let mut bytes = data;

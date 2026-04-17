@@ -4,8 +4,10 @@
 //! - SQLite database (OpenCode 1.2+): ~/.local/share/opencode/opencode.db
 //! - Legacy JSON files: ~/.local/share/opencode/storage/message/
 
+use super::utils::{open_readonly_sqlite, read_file_or_none};
 use super::{normalize_opencode_agent_name, UnifiedMessage};
 use crate::TokenBreakdown;
+#[cfg(test)]
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -52,7 +54,7 @@ pub struct OpenCodeTime {
 }
 
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
-    let data = std::fs::read(path).ok()?;
+    let data = read_file_or_none(path)?;
     let mut bytes = data;
 
     let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).ok()?;
@@ -96,12 +98,8 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
 }
 
 pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+    let Some(conn) = open_readonly_sqlite(db_path) else {
+        return Vec::new();
     };
 
     let query = r#"
