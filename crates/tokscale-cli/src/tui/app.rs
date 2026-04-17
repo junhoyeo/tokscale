@@ -14,7 +14,7 @@ use super::data::{AgentUsage, DailyUsage, DataLoader, HourlyUsage, ModelUsage, U
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
-use super::ui::widgets::get_model_color;
+use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
 
 /// Configuration for TUI initialization
 pub struct TuiConfig {
@@ -289,9 +289,24 @@ impl App {
         self.model_shade_map = super::colors::build_model_shade_map(&self.data.models);
     }
 
-    pub fn model_color(&self, model: &str) -> Color {
+    pub fn model_color_for(&self, provider: &str, model: &str) -> Color {
+        let provider = if provider.is_empty() || provider.contains(", ") {
+            get_provider_from_model(model)
+        } else {
+            provider
+        };
+        let lookup_key = super::colors::model_shade_key(provider, model);
         self.model_shade_map
-            .get(model)
+            .get(&lookup_key)
+            .copied()
+            .unwrap_or_else(|| get_provider_shade(provider, 0))
+    }
+
+    pub fn model_color(&self, model: &str) -> Color {
+        let provider = get_provider_from_model(model);
+        let lookup_key = super::colors::model_shade_key(provider, model);
+        self.model_shade_map
+            .get(&lookup_key)
             .copied()
             .unwrap_or_else(|| get_model_color(model))
     }
@@ -2009,6 +2024,10 @@ mod tests {
         }
     }
 
+    fn shade_key(provider: &str, model: &str) -> String {
+        super::super::colors::model_shade_key(provider, model)
+    }
+
     #[test]
     fn test_shade_map_assigns_rank_0_to_highest_cost() {
         let mut app = make_app();
@@ -2019,15 +2038,19 @@ mod tests {
         ];
         app.build_model_shade_map();
 
-        let opus = app.model_shade_map.get("claude-opus-4-5").copied().unwrap();
+        let opus = app
+            .model_shade_map
+            .get(&shade_key("anthropic", "claude-opus-4-5"))
+            .copied()
+            .unwrap();
         let sonnet = app
             .model_shade_map
-            .get("claude-sonnet-4-5")
+            .get(&shade_key("anthropic", "claude-sonnet-4-5"))
             .copied()
             .unwrap();
         let haiku = app
             .model_shade_map
-            .get("claude-haiku-4-5")
+            .get(&shade_key("anthropic", "claude-haiku-4-5"))
             .copied()
             .unwrap();
 
@@ -2054,11 +2077,15 @@ mod tests {
         // rank 0 (aggregate cost 60 > haiku cost 5).
         assert_eq!(app.model_shade_map.len(), 2);
         assert_eq!(
-            app.model_shade_map.get("claude-sonnet-4-5").copied(),
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-sonnet-4-5"))
+                .copied(),
             Some(get_provider_shade("anthropic", 0))
         );
         assert_eq!(
-            app.model_shade_map.get("claude-haiku-4-5").copied(),
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-haiku-4-5"))
+                .copied(),
             Some(get_provider_shade("anthropic", 1))
         );
     }
@@ -2068,9 +2095,9 @@ mod tests {
         // All-zero costs (fresh data) must produce a stable shade assignment
         // across refreshes so the chart doesn't flicker.
         let ranks = |app: &App| {
-            let a = app.model_shade_map.get("claude-alpha").copied();
-            let b = app.model_shade_map.get("claude-beta").copied();
-            let c = app.model_shade_map.get("claude-gamma").copied();
+            let a = app.model_shade_map.get(&shade_key("anthropic", "claude-alpha")).copied();
+            let b = app.model_shade_map.get(&shade_key("anthropic", "claude-beta")).copied();
+            let c = app.model_shade_map.get(&shade_key("anthropic", "claude-gamma")).copied();
             (a, b, c)
         };
 
@@ -2093,7 +2120,9 @@ mod tests {
         assert_eq!(ranks(&app1), ranks(&app2));
         // alpha sorts first by name so it gets rank 0 on ties.
         assert_eq!(
-            app1.model_shade_map.get("claude-alpha").copied(),
+            app1.model_shade_map
+                .get(&shade_key("anthropic", "claude-alpha"))
+                .copied(),
             Some(get_provider_shade("anthropic", 0))
         );
     }
@@ -2112,7 +2141,9 @@ mod tests {
         assert_eq!(app.model_shade_map.len(), 2);
         // Normal model outranks NaN (which is coerced to 0).
         assert_eq!(
-            app.model_shade_map.get("claude-normal").copied(),
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-normal"))
+                .copied(),
             Some(get_provider_shade("anthropic", 0))
         );
     }
@@ -2146,11 +2177,15 @@ mod tests {
 
         // Each provider ranks independently — both get rank-0 shades.
         assert_eq!(
-            app.model_shade_map.get("claude-opus-4-5").copied(),
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-opus-4-5"))
+                .copied(),
             Some(get_provider_shade("anthropic", 0))
         );
         assert_eq!(
-            app.model_shade_map.get("gpt-5").copied(),
+            app.model_shade_map
+                .get(&shade_key("openai", "gpt-5"))
+                .copied(),
             Some(get_provider_shade("openai", 0))
         );
     }
@@ -2160,7 +2195,9 @@ mod tests {
         let mut app = make_app();
         app.data.models = vec![model_usage("claude-opus-4-5", 10.0, None)];
         app.build_model_shade_map();
-        assert!(app.model_shade_map.contains_key("claude-opus-4-5"));
+        assert!(app
+            .model_shade_map
+            .contains_key(&shade_key("anthropic", "claude-opus-4-5")));
 
         let fresh = UsageData {
             models: vec![model_usage("claude-sonnet-4-5", 5.0, None)],
@@ -2168,7 +2205,52 @@ mod tests {
         };
         app.update_data(fresh);
 
-        assert!(!app.model_shade_map.contains_key("claude-opus-4-5"));
-        assert!(app.model_shade_map.contains_key("claude-sonnet-4-5"));
+        assert!(!app
+            .model_shade_map
+            .contains_key(&shade_key("anthropic", "claude-opus-4-5")));
+        assert!(app
+            .model_shade_map
+            .contains_key(&shade_key("anthropic", "claude-sonnet-4-5")));
+    }
+
+    #[test]
+    fn test_same_model_name_keeps_distinct_provider_colors() {
+        let mut app = make_app();
+        app.data.models = vec![
+            ModelUsage {
+                model: "sonnet-shared".to_string(),
+                provider: "anthropic".to_string(),
+                client: "claude".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 10.0,
+                session_count: 1,
+            },
+            ModelUsage {
+                model: "sonnet-shared".to_string(),
+                provider: "openai".to_string(),
+                client: "codex".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 5.0,
+                session_count: 1,
+            },
+        ];
+        app.build_model_shade_map();
+
+        assert_eq!(
+            app.model_color_for("anthropic", "sonnet-shared"),
+            get_provider_shade("anthropic", 0)
+        );
+        assert_eq!(
+            app.model_color_for("openai", "sonnet-shared"),
+            get_provider_shade("openai", 0)
+        );
+        assert_ne!(
+            app.model_color_for("anthropic", "sonnet-shared"),
+            app.model_color_for("openai", "sonnet-shared")
+        );
     }
 }
