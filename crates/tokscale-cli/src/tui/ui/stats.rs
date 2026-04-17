@@ -260,19 +260,15 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         })
         .unwrap_or(365);
 
-    let favorite_model = app
-        .data
-        .models
-        .iter()
-        .max_by(|a, b| {
-            a.cost
-                .partial_cmp(&b.cost)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|m| m.model.as_str())
-        .unwrap_or("N/A");
-
-    let model_color = app.model_color(favorite_model);
+    let favorite_model = app.data.models.iter().max_by(|a, b| {
+        a.cost
+            .partial_cmp(&b.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let favorite_model_name = favorite_model.map(|m| m.model.as_str()).unwrap_or("N/A");
+    let model_color = favorite_model
+        .map(|m| app.model_color_for(&m.provider, &m.model))
+        .unwrap_or_else(|| app.model_color("N/A"));
     let sessions: u32 = app.data.models.iter().map(|m| m.session_count).sum();
 
     let col1_width = if is_narrow { 36u16 } else { 60u16 };
@@ -290,7 +286,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(row1_label, Style::default().fg(app.theme.muted)),
         Span::raw(" "),
         Span::styled(
-            truncate_model_name(favorite_model, if is_narrow { 15 } else { 30 }),
+            truncate_model_name(favorite_model_name, if is_narrow { 15 } else { 30 }),
             Style::default().fg(model_color),
         ),
     ]);
@@ -550,7 +546,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]));
 
                 for model_info in models {
-                    let model_color = app.model_color(&model_info.color_key);
+                    let model_color = app.model_color_for(&model_info.provider, &model_info.color_key);
                     lines.push(Line::from(vec![
                         Span::raw("  "),
                         Span::styled("●", Style::default().fg(model_color)),

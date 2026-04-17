@@ -10,6 +10,7 @@ use tokscale_core::GroupBy;
 
 struct ModelRowData {
     model: String,
+    provider: String,
     workspace_label: Option<String>,
     tokens_input: u64,
     tokens_output: u64,
@@ -97,10 +98,10 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                                     .or_insert_with(|| ModelSegment {
                                         model_id: info.display_name.clone(),
                                         tokens: 0,
-                                        color: app.model_color(overview_color_key(
-                                            &group_by,
-                                            &info.color_key,
-                                        )),
+                                        color: app.model_color_for(
+                                            &info.provider,
+                                            overview_color_key(&group_by, &info.color_key),
+                                        ),
                                     });
                             entry.tokens = entry.tokens.saturating_add(info.tokens.total());
                         }
@@ -129,10 +130,10 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                     let models: Vec<ModelSegment> = h
                         .models
                         .iter()
-                        .map(|(name, info)| ModelSegment {
-                            model_id: name.clone(),
+                        .map(|(_, info)| ModelSegment {
+                            model_id: info.display_name.clone(),
                             tokens: info.tokens.total(),
-                            color: app.model_color(name),
+                            color: app.model_color_for(&info.provider, &info.color_key),
                         })
                         .collect();
 
@@ -162,7 +163,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         .map(|m| {
             (
                 overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
-                app.model_color(&m.model),
+                app.model_color_for(&m.provider, &m.model),
             )
         })
         .collect();
@@ -211,6 +212,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         .iter()
         .map(|m| ModelRowData {
             model: m.model.clone(),
+            provider: m.provider.clone(),
             workspace_label: m.workspace_label.clone(),
             tokens_input: m.tokens.input,
             tokens_output: m.tokens.output,
@@ -292,7 +294,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             Style::default()
         };
 
-        let model_color = app.model_color(&model.model);
+        let model_color = app.model_color_for(&model.provider, &model.model);
         let display_name =
             overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
         let name = truncate_string(&display_name, max_name_width);

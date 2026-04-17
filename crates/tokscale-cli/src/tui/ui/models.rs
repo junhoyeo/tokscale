@@ -141,7 +141,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let model_color = app.model_color(&model.model);
+            let model_color = app.model_color_for(&model.provider, &model.model);
             let display_name = model_display_name(model, &group_by);
 
             let cells: Vec<Cell> = if is_very_narrow {
