@@ -102,6 +102,9 @@ pub struct DailyUsage {
 
 #[derive(Debug, Clone)]
 pub struct HourlyModelInfo {
+    pub provider: String,
+    pub display_name: String,
+    pub color_key: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
 }
@@ -206,6 +209,27 @@ fn daily_source_model_display_name(
         GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
         GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+    }
+}
+
+fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
+    match group_by {
+        GroupBy::ClientProviderModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+    }
+}
+
+fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
+    match group_by {
+        GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+    }
+}
+
+fn hourly_model_display_name(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
+    match group_by {
+        GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
     }
 }
 
@@ -563,7 +587,7 @@ impl DataLoader {
                             &msg.provider_id,
                             &normalized_model,
                         ),
-                        color_key: normalized_model.clone(),
+                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                         messages: 0,
@@ -639,10 +663,19 @@ impl DataLoader {
                 }
                 hourly_entry.clients.insert(msg.client.clone());
 
+                let hourly_model_key =
+                    hourly_model_key(group_by, &msg.provider_id, &normalized_model);
                 let h_model = hourly_entry
                     .models
-                    .entry(normalized_model.clone())
+                    .entry(hourly_model_key)
                     .or_insert_with(|| HourlyModelInfo {
+                        provider: msg.provider_id.clone(),
+                        display_name: hourly_model_display_name(
+                            group_by,
+                            &msg.provider_id,
+                            &normalized_model,
+                        ),
+                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                     });

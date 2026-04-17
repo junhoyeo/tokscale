@@ -143,6 +143,12 @@ struct CachedDailyUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedHourlyModelInfo {
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    color_key: String,
     tokens: CachedTokenBreakdown,
     cost: f64,
 }
@@ -329,6 +335,9 @@ impl From<CachedDailySourceInfo> for DailySourceInfo {
 impl From<&HourlyModelInfo> for CachedHourlyModelInfo {
     fn from(h: &HourlyModelInfo) -> Self {
         Self {
+            provider: h.provider.clone(),
+            display_name: h.display_name.clone(),
+            color_key: h.color_key.clone(),
             tokens: (&h.tokens).into(),
             cost: h.cost,
         }
@@ -337,7 +346,24 @@ impl From<&HourlyModelInfo> for CachedHourlyModelInfo {
 
 impl From<CachedHourlyModelInfo> for HourlyModelInfo {
     fn from(h: CachedHourlyModelInfo) -> Self {
+        let display_name = if h.display_name.is_empty() {
+            h.color_key.clone()
+        } else {
+            h.display_name
+        };
+        let color_key = if h.color_key.is_empty() {
+            display_name
+                .rsplit_once(" / ")
+                .map(|(_, base_model)| base_model.to_string())
+                .unwrap_or_else(|| display_name.clone())
+        } else {
+            h.color_key
+        };
+
         Self {
+            provider: h.provider,
+            display_name,
+            color_key,
             tokens: h.tokens.into(),
             cost: h.cost,
         }
