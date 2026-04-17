@@ -1235,10 +1235,7 @@ mod tests {
                 assert_eq!(hourly_model.display_name, "claude-sonnet-4-5");
                 assert_eq!(hourly_model.color_key, "claude-sonnet-4-5");
             }
-            other => panic!(
-                "expected cache data, got {:?}",
-                other_variant_name(&other)
-            ),
+            other => panic!("expected cache data, got {:?}", other_variant_name(&other)),
         }
 
         match previous_home {
