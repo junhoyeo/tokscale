@@ -37,6 +37,67 @@ export interface DayTotals {
   reasoningTokens: number;
 }
 
+export interface ReplayWindow {
+  start: string;
+  end: string;
+}
+
+export interface ExistingReplayDay {
+  id: string;
+  date: string;
+  timestampMs: number | null;
+  sourceBreakdown: Record<string, ClientBreakdownData> | null | undefined;
+}
+
+export interface IncomingReplayDay {
+  date: string;
+  timestampMs: number | null | undefined;
+  sourceBreakdown: Record<string, ClientBreakdownData>;
+}
+
+export interface ReplayInsertDay {
+  submissionId: string;
+  date: string;
+  tokens: number;
+  cost: string;
+  inputTokens: number;
+  outputTokens: number;
+  timestampMs: number | null;
+  sourceBreakdown: Record<string, ClientBreakdownData>;
+  modelBreakdown: Record<string, number>;
+}
+
+export interface ReplayUpdateDay {
+  id: string;
+  date: string;
+  tokens: number;
+  cost: string;
+  inputTokens: number;
+  outputTokens: number;
+  timestampMs: number | null;
+  sourceBreakdown: Record<string, ClientBreakdownData>;
+  modelBreakdown: Record<string, number>;
+}
+
+export interface ReplayDeleteDay {
+  id: string;
+  date: string;
+}
+
+export interface PlannedReplayMutations {
+  inserts: ReplayInsertDay[];
+  updates: ReplayUpdateDay[];
+  deletes: ReplayDeleteDay[];
+}
+
+export interface PlanSubmittedReplayArgs {
+  existingDays: ExistingReplayDay[];
+  incomingDays: IncomingReplayDay[];
+  submittedClients: Set<string>;
+  replayWindow: ReplayWindow;
+  submissionId: string;
+}
+
 export function recalculateDayTotals(
   clientBreakdown: Record<string, ClientBreakdownData>
 ): DayTotals {
@@ -85,6 +146,101 @@ export function mergeClientBreakdowns(
   }
 
   return merged;
+}
+
+function isDateWithinReplayWindow(date: string, replayWindow: ReplayWindow): boolean {
+  return date >= replayWindow.start && date <= replayWindow.end;
+}
+
+export function planSubmittedReplayMutations({
+  existingDays,
+  incomingDays,
+  submittedClients,
+  replayWindow,
+  submissionId,
+}: PlanSubmittedReplayArgs): PlannedReplayMutations {
+  const existingByDate = new Map(existingDays.map((day) => [day.date, day]));
+  const incomingByDate = new Map(incomingDays.map((day) => [day.date, day]));
+  const replayDates = new Set(incomingDays.map((day) => day.date));
+
+  for (const existingDay of existingDays) {
+    if (isDateWithinReplayWindow(existingDay.date, replayWindow)) {
+      replayDates.add(existingDay.date);
+    }
+  }
+
+  const sortedReplayDates = Array.from(replayDates).sort((left, right) =>
+    left.localeCompare(right)
+  );
+
+  const inserts: ReplayInsertDay[] = [];
+  const updates: ReplayUpdateDay[] = [];
+  const deletes: ReplayDeleteDay[] = [];
+
+  for (const replayDate of sortedReplayDates) {
+    const existingDay = existingByDate.get(replayDate);
+    const incomingDay = incomingByDate.get(replayDate);
+
+    const mergedClientBreakdown = existingDay
+      ? mergeClientBreakdowns(
+          existingDay.sourceBreakdown,
+          incomingDay?.sourceBreakdown ?? {},
+          submittedClients
+        )
+      : incomingDay?.sourceBreakdown ?? {};
+
+    if (Object.keys(mergedClientBreakdown).length === 0) {
+      if (existingDay) {
+        deletes.push({
+          id: existingDay.id,
+          date: existingDay.date,
+        });
+      }
+      continue;
+    }
+
+    const dayTotals = recalculateDayTotals(mergedClientBreakdown);
+    const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);
+
+    if (existingDay) {
+      updates.push({
+        id: existingDay.id,
+        date: existingDay.date,
+        tokens: dayTotals.tokens,
+        cost: dayTotals.cost.toFixed(4),
+        inputTokens: dayTotals.inputTokens,
+        outputTokens: dayTotals.outputTokens,
+        timestampMs: incomingDay
+          ? mergeTimestampMs(existingDay.timestampMs, incomingDay.timestampMs ?? null)
+          : existingDay.timestampMs ?? null,
+        sourceBreakdown: mergedClientBreakdown,
+        modelBreakdown,
+      });
+      continue;
+    }
+
+    if (!incomingDay) {
+      continue;
+    }
+
+    inserts.push({
+      submissionId,
+      date: incomingDay.date,
+      tokens: dayTotals.tokens,
+      cost: dayTotals.cost.toFixed(4),
+      inputTokens: dayTotals.inputTokens,
+      outputTokens: dayTotals.outputTokens,
+      timestampMs: incomingDay.timestampMs ?? null,
+      sourceBreakdown: mergedClientBreakdown,
+      modelBreakdown,
+    });
+  }
+
+  return {
+    inserts,
+    updates,
+    deletes,
+  };
 }
 
 export function buildModelBreakdown(

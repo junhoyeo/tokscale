@@ -7,7 +7,7 @@ import {
   dailyBreakdown,
   submissionReviews,
 } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
@@ -20,12 +20,9 @@ import {
   type SubmissionTrustState,
 } from "../../../lib/validation/submissionTrust";
 import {
-  mergeClientBreakdowns,
-  recalculateDayTotals,
-  buildModelBreakdown,
   clientContributionToBreakdownData,
-  mergeTimestampMs,
   type ClientBreakdownData,
+  planSubmittedReplayMutations,
 } from "@/lib/db/helpers";
 
 function normalizeSubmissionData(data: unknown): void {
@@ -305,37 +302,10 @@ export async function POST(request: Request) {
         .where(eq(dailyBreakdown.submissionId, submissionId))
         .for('update');
 
-      const existingDaysMap = new Map(
-        existingDays.map((d) => [d.date, d])
-      );
-
       // ------------------------------------------
-      // STEP 3c: Compute merge results in memory, then batch write
+      // STEP 3c: Compute replay results in memory, then batch write
       // ------------------------------------------
-      const toInsert: Array<{
-        submissionId: string;
-        date: string;
-        tokens: number;
-        cost: string;
-        inputTokens: number;
-        outputTokens: number;
-        timestampMs: number | null;
-        sourceBreakdown: Record<string, ClientBreakdownData>;
-        modelBreakdown: Record<string, number>;
-      }> = [];
-
-      const toUpdate: Array<{
-        id: string;
-        tokens: number;
-        cost: string;
-        inputTokens: number;
-        outputTokens: number;
-        timestampMs: number | null;
-        sourceBreakdown: Record<string, ClientBreakdownData>;
-        modelBreakdown: Record<string, number>;
-      }> = [];
-
-      for (const incomingDay of data.contributions) {
+      const incomingDays = data.contributions.map((incomingDay) => {
         const incomingClientBreakdown: Record<string, ClientBreakdownData> = {};
         for (const client_contrib of incomingDay.clients) {
           const modelData = clientContributionToBreakdownData(client_contrib);
@@ -370,54 +340,35 @@ export async function POST(request: Request) {
           }
         }
 
-        const existingDay = existingDaysMap.get(incomingDay.date);
+        return {
+          date: incomingDay.date,
+          timestampMs: incomingDay.timestampMs ?? null,
+          sourceBreakdown: incomingClientBreakdown,
+        };
+      });
 
-        if (existingDay) {
-           const existingClientBreakdown = (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>;
-           const mergedClientBreakdown = mergeClientBreakdowns(
-             existingClientBreakdown,
-             incomingClientBreakdown,
-             submittedClients
-           );
-          const dayTotals = recalculateDayTotals(mergedClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);
-
-          toUpdate.push({
-            id: existingDay.id,
-            tokens: dayTotals.tokens,
-            cost: dayTotals.cost.toFixed(4),
-            inputTokens: dayTotals.inputTokens,
-            outputTokens: dayTotals.outputTokens,
-            timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestampMs ?? null),
-            sourceBreakdown: mergedClientBreakdown,
-            modelBreakdown,
-          });
-        } else {
-          const dayTotals = recalculateDayTotals(incomingClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingClientBreakdown);
-
-          toInsert.push({
-            submissionId,
-            date: incomingDay.date,
-            tokens: dayTotals.tokens,
-            cost: dayTotals.cost.toFixed(4),
-            inputTokens: dayTotals.inputTokens,
-            outputTokens: dayTotals.outputTokens,
-            timestampMs: incomingDay.timestampMs ?? null,
-            sourceBreakdown: incomingClientBreakdown,
-            modelBreakdown,
-          });
-        }
-      }
+      const replayMutations = planSubmittedReplayMutations({
+        existingDays: existingDays.map((existingDay) => ({
+          id: existingDay.id,
+          date: existingDay.date,
+          timestampMs: existingDay.timestampMs,
+          sourceBreakdown:
+            (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>,
+        })),
+        incomingDays,
+        submittedClients,
+        replayWindow: data.meta.dateRange,
+        submissionId,
+      });
 
       // Batch INSERT new days
-      if (toInsert.length > 0) {
-        await tx.insert(dailyBreakdown).values(toInsert);
+      if (replayMutations.inserts.length > 0) {
+        await tx.insert(dailyBreakdown).values(replayMutations.inserts);
       }
 
       // Batch UPDATE existing days via raw SQL VALUES list
-      if (toUpdate.length > 0) {
-        const valuesClauses = toUpdate.map(
+      if (replayMutations.updates.length > 0) {
+        const valuesClauses = replayMutations.updates.map(
           (row) =>
             sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb, ${JSON.stringify(row.modelBreakdown)}::jsonb)`
         );
@@ -437,6 +388,17 @@ export async function POST(request: Request) {
             AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, source_breakdown, model_breakdown)
           WHERE d.id = batch.id
         `);
+      }
+
+      if (replayMutations.deletes.length > 0) {
+        await tx
+          .delete(dailyBreakdown)
+          .where(
+            inArray(
+              dailyBreakdown.id,
+              replayMutations.deletes.map((day) => day.id)
+            )
+          );
       }
 
       // ------------------------------------------
