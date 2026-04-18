@@ -14,6 +14,7 @@ import {
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import { hashToken } from "@/lib/auth/utils";
 import {
   SUBMISSION_TRUST_STATE,
   type SubmissionTrustState,
@@ -128,6 +129,7 @@ export async function POST(request: Request) {
     const token = authHeader.slice(7);
     const authResult = await authenticatePersonalToken(token, {
       touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
     });
 
     if (authResult.status === "invalid") {
@@ -206,9 +208,19 @@ export async function POST(request: Request) {
     // STEP 3: DATABASE OPERATIONS IN TRANSACTION
     // ========================================
     const result = await db.transaction(async (tx) => {
+      const tokenWriteUpdates: {
+        lastUsedAt: Date;
+        token?: string;
+      } = {
+        lastUsedAt: new Date(),
+      };
+      if (tokenRecord.needsLegacyTokenHashUpgrade) {
+        tokenWriteUpdates.token = hashToken(token);
+      }
+
       await tx
         .update(apiTokens)
-        .set({ lastUsedAt: new Date() })
+        .set(tokenWriteUpdates)
         .where(eq(apiTokens.id, tokenRecord.tokenId));
 
       if (trustState === SUBMISSION_TRUST_STATE.REVIEW_REQUIRED) {

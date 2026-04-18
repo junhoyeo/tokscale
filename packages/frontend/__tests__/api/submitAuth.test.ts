@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
   const validateSubmission = vi.fn();
   const generateSubmissionHash = vi.fn(() => "submission-hash");
+  const hashToken = vi.fn((token: string) => `hashed_${token}`);
   const revalidateTag = vi.fn();
 
   const db = {
@@ -14,12 +15,14 @@ const mockState = vi.hoisted(() => {
     authenticatePersonalToken,
     validateSubmission,
     generateSubmissionHash,
+    hashToken,
     revalidateTag,
     db,
     reset() {
       authenticatePersonalToken.mockReset();
       validateSubmission.mockReset();
       generateSubmissionHash.mockClear();
+      hashToken.mockClear();
       revalidateTag.mockClear();
       db.transaction.mockReset();
     },
@@ -55,6 +58,10 @@ vi.mock("@/lib/db", () => ({
 vi.mock("@/lib/validation/submission", () => ({
   validateSubmission: mockState.validateSubmission,
   generateSubmissionHash: mockState.generateSubmissionHash,
+}));
+
+vi.mock("@/lib/auth/utils", () => ({
+  hashToken: mockState.hashToken,
 }));
 
 vi.mock("@/lib/db/helpers", () => ({
@@ -111,6 +118,7 @@ describe("POST /api/submit auth path", () => {
     expect(response.status).toBe(401);
     expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_invalid", {
       touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
     });
     expect(await response.json()).toEqual({ error: "Invalid API token" });
   });
@@ -131,6 +139,7 @@ describe("POST /api/submit auth path", () => {
     expect(response.status).toBe(401);
     expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_expired", {
       touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
     });
     expect(await response.json()).toEqual({ error: "API token has expired" });
     expect(mockState.db.transaction).not.toHaveBeenCalled();
@@ -160,6 +169,10 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
+    });
     expect(mockState.validateSubmission).not.toHaveBeenCalled();
     expect(mockState.db.transaction).not.toHaveBeenCalled();
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
@@ -197,6 +210,7 @@ describe("POST /api/submit auth path", () => {
     expect(response.status).toBe(400);
     expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
       touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
     });
     expect(mockState.validateSubmission).toHaveBeenCalledTimes(1);
     expect(mockState.db.transaction).not.toHaveBeenCalled();
@@ -255,6 +269,10 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
+    });
     expect(mockState.db.transaction).not.toHaveBeenCalled();
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
     expect(await response.json()).toEqual({ error: "No contribution data to submit" });
@@ -323,6 +341,10 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
+    });
     expect(mockState.db.transaction).not.toHaveBeenCalled();
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
     expect(await response.json()).toEqual({

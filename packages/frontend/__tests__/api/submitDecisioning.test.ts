@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
   const validateSubmission = vi.fn();
   const generateSubmissionHash = vi.fn(() => "submission-hash");
+  const hashToken = vi.fn((token: string) => `hashed_${token}`);
   const revalidateTag = vi.fn();
 
   const db = {
@@ -14,12 +15,14 @@ const mockState = vi.hoisted(() => {
     authenticatePersonalToken,
     validateSubmission,
     generateSubmissionHash,
+    hashToken,
     revalidateTag,
     db,
     reset() {
       authenticatePersonalToken.mockReset();
       validateSubmission.mockReset();
       generateSubmissionHash.mockClear();
+      hashToken.mockClear();
       revalidateTag.mockClear();
       db.transaction.mockReset();
     },
@@ -56,6 +59,10 @@ vi.mock("@/lib/db", () => ({
 vi.mock("@/lib/validation/submission", () => ({
   validateSubmission: mockState.validateSubmission,
   generateSubmissionHash: mockState.generateSubmissionHash,
+}));
+
+vi.mock("@/lib/auth/utils", () => ({
+  hashToken: mockState.hashToken,
 }));
 
 vi.mock("@/lib/db/helpers", () => ({
@@ -204,6 +211,10 @@ describe("POST /api/submit trust decisioning", () => {
       competitiveWriteApplied: true,
       warnings: ["Cost total minor mismatch: summary=1.50, calculated=1.50"],
     });
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
+    });
     expect(mockState.revalidateTag).toHaveBeenCalledTimes(4);
   });
 
@@ -241,6 +252,84 @@ describe("POST /api/submit trust decisioning", () => {
     });
     expect(mockState.db.transaction).not.toHaveBeenCalled();
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
+  });
+
+  it("defers legacy token rehashes until an accepted write transaction runs", async () => {
+    const oldDate = "2024-12-01";
+    const payload = {
+      ...createSubmissionPayload(oldDate),
+      contributions: [
+        {
+          ...createSubmissionPayload(oldDate).contributions[0],
+          timestampMs: undefined,
+        },
+      ],
+    };
+    const txUpdateSet = vi.fn();
+    const txInsertValues = vi.fn();
+
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      ...createValidAuthRecord(),
+      needsLegacyTokenHashUpgrade: true,
+    });
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      errors: [],
+      warnings: [
+        "Day 2024-12-01 is older than 30 days and has no timestampMs audit metadata",
+      ],
+      trustState: "review_required",
+      reasonCodes: ["historical_day_missing_timestamp"],
+      rejectionReasonCodes: [],
+      data: payload,
+    });
+    mockState.db.transaction.mockImplementation(async (callback) =>
+      callback({
+        update: vi.fn(() => ({
+          set: txUpdateSet.mockImplementation((value) => ({
+            where: vi.fn(async () => value),
+          })),
+        })),
+        insert: vi.fn(() => ({
+          values: txInsertValues.mockImplementation(() => ({
+            returning: vi.fn(async () => [{ id: "review-legacy" }]),
+          })),
+        })),
+      })
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
+    });
+    expect(txUpdateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastUsedAt: expect.any(Date),
+        token: "hashed_tt_valid",
+      })
+    );
+    expect(txInsertValues).toHaveBeenCalledTimes(1);
+    expect(mockState.hashToken).toHaveBeenCalledWith("tt_valid");
+    expect(await response.json()).toEqual(
+      expect.objectContaining({
+        success: true,
+        trustState: "review_required",
+        reviewId: "review-legacy",
+        competitiveWriteApplied: false,
+      })
+    );
   });
 
   it("accepts suspicious history into the review path with explicit non-trusted decisioning", async () => {
@@ -310,6 +399,10 @@ describe("POST /api/submit trust decisioning", () => {
       warnings: [
         "Day 2024-12-01 is older than 30 days and has no timestampMs audit metadata",
       ],
+    });
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
     });
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
   });

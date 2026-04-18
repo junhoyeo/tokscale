@@ -393,6 +393,35 @@ describe("personal token service", () => {
     expect(mockState.updateValues[0]).toHaveProperty("lastUsedAt");
   });
 
+  it("upgrades legacy plaintext tokens by default when authentication succeeds", async () => {
+    mockState.pushSelectResult([
+      {
+        tokenId: "token-legacy",
+        tokenValue: "tt_test_token",
+        userId: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        isAdmin: false,
+        expiresAt: null,
+      },
+    ]);
+    mockState.pushUpdateResult();
+
+    const result = await authenticatePersonalToken("tt_test_token");
+
+    expect(result).toMatchObject({
+      status: "valid",
+      tokenId: "token-legacy",
+      needsLegacyTokenHashUpgrade: false,
+    });
+    expect(mockState.db.update).toHaveBeenCalledTimes(1);
+    expect(mockState.updateValues[0]).toMatchObject({
+      token: "hashed_tt_test_token",
+    });
+    expect(mockState.updateValues[0]).toHaveProperty("lastUsedAt");
+  });
+
   it("can skip touching lastUsedAt when the caller opts out", async () => {
     mockState.pushSelectResult([
       {
@@ -414,6 +443,33 @@ describe("personal token service", () => {
     expect(result).toMatchObject({
       status: "valid",
       tokenId: "token-1",
+    });
+    expect(mockState.db.update).not.toHaveBeenCalled();
+  });
+
+  it("can authenticate legacy plaintext tokens without mutating them before the caller accepts a write", async () => {
+    mockState.pushSelectResult([
+      {
+        tokenId: "token-legacy",
+        tokenValue: "tt_test_token",
+        userId: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        isAdmin: false,
+        expiresAt: null,
+      },
+    ]);
+
+    const result = await authenticatePersonalToken("tt_test_token", {
+      touchLastUsedAt: false,
+      upgradeLegacyTokenHash: false,
+    });
+
+    expect(result).toMatchObject({
+      status: "valid",
+      tokenId: "token-legacy",
+      needsLegacyTokenHashUpgrade: true,
     });
     expect(mockState.db.update).not.toHaveBeenCalled();
   });

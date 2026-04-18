@@ -30,6 +30,7 @@ export interface AuthenticatedPersonalToken {
   avatarUrl: string | null;
   isAdmin: boolean;
   expiresAt: Date | null;
+  needsLegacyTokenHashUpgrade: boolean;
 }
 
 export type PersonalTokenAuthResult =
@@ -39,6 +40,7 @@ export type PersonalTokenAuthResult =
 
 export interface AuthenticatePersonalTokenOptions {
   touchLastUsedAt?: boolean;
+  upgradeLegacyTokenHash?: boolean;
 }
 
 const TOKEN_NAME_LOCK_NAMESPACE = "personal_token_names";
@@ -202,7 +204,9 @@ export async function authenticatePersonalToken(
   if (options.touchLastUsedAt !== false) {
     updates.lastUsedAt = new Date();
   }
-  if (isLegacyPlaintext) {
+  const shouldUpgradeLegacyTokenHash =
+    isLegacyPlaintext && options.upgradeLegacyTokenHash !== false;
+  if (shouldUpgradeLegacyTokenHash) {
     updates.token = tokenHashed;
   }
   if (Object.keys(updates).length > 0) {
@@ -221,5 +225,7 @@ export async function authenticatePersonalToken(
     avatarUrl: record.avatarUrl,
     isAdmin: record.isAdmin,
     expiresAt: record.expiresAt,
+    needsLegacyTokenHashUpgrade:
+      isLegacyPlaintext && !shouldUpgradeLegacyTokenHash,
   };
 }
