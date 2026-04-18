@@ -128,6 +128,7 @@ describe("submit trust decisioning", () => {
       errors: [],
       warnings: [],
     });
+
   });
 
   it("rejects duplicate dates during strict validation", () => {

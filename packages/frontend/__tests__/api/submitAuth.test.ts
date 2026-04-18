@@ -20,6 +20,7 @@ const mockState = vi.hoisted(() => {
   }));
   const clientContributionToBreakdownData = vi.fn();
   const mergeTimestampMs = vi.fn();
+  const revalidatePath = vi.fn();
 
   const db = {
     transaction: vi.fn(),
@@ -39,6 +40,7 @@ const mockState = vi.hoisted(() => {
     deriveClientBreakdownProvenance,
     clientContributionToBreakdownData,
     mergeTimestampMs,
+    revalidatePath,
     db,
     reset() {
       authenticatePersonalToken.mockReset();
@@ -62,6 +64,7 @@ const mockState = vi.hoisted(() => {
       deriveClientBreakdownProvenance.mockClear();
       clientContributionToBreakdownData.mockReset();
       mergeTimestampMs.mockReset();
+      revalidatePath.mockClear();
       db.transaction.mockReset();
     },
   };
@@ -69,6 +72,7 @@ const mockState = vi.hoisted(() => {
 
 vi.mock("next/cache", () => ({
   revalidateTag: mockState.revalidateTag,
+  revalidatePath: mockState.revalidatePath,
 }));
 
 vi.mock("@/lib/auth/personalTokens", () => ({
@@ -635,6 +639,9 @@ describe("POST /api/submit auth path", () => {
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "user:alice", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user-rank", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(4, "user-rank:alice", "max");
+    expect(mockState.revalidatePath).toHaveBeenCalledTimes(2);
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(1, "/");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/leaderboard");
     expect(mockState.revalidateUserGroupLeaderboards).toHaveBeenCalledWith("user-1");
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
   });
@@ -1802,6 +1809,7 @@ describe("POST /api/submit auth path", () => {
     });
     expect(mockState.db.transaction).not.toHaveBeenCalled();
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(mockState.revalidatePath).not.toHaveBeenCalled();
     expect(mockState.revalidateUserGroupLeaderboards).not.toHaveBeenCalled();
     expect(mockState.revalidateUsernamePaths).not.toHaveBeenCalled();
   });
@@ -2015,6 +2023,7 @@ describe("POST /api/submit auth path", () => {
       false,
     ]);
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(mockState.revalidatePath).not.toHaveBeenCalled();
     expect(mockState.revalidateUserGroupLeaderboards).not.toHaveBeenCalled();
     expect(mockState.revalidateUsernamePaths).not.toHaveBeenCalled();
   });
@@ -2273,5 +2282,8 @@ describe("POST /api/submit auth path", () => {
       })
     );
     expect(mockState.revalidateTag).toHaveBeenCalled();
+    expect(mockState.revalidatePath).toHaveBeenCalledTimes(2);
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(1, "/");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/leaderboard");
   });
 });

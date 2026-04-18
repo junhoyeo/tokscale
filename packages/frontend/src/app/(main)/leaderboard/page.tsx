@@ -67,23 +67,10 @@ export default function LeaderboardPage({ searchParams }: PageProps) {
   );
 }
 
-async function LeaderboardWithPreferences({
-  searchParams: searchParamsPromise,
-}: {
-  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
-}) {
-  const [cookieStore, searchParams] = await Promise.all([cookies(), searchParamsPromise]);
-  const view = resolveView(searchParams.view);
-
-  if (view === "groups") {
-    return (
-      <>
-        <ViewSelector current="groups" searchParams={searchParams} />
-        <GroupsView />
-      </>
-    );
-  }
-
+export async function loadLeaderboardPageData(
+  searchParams: { [key: string]: string | string[] | undefined } = {}
+) {
+  const cookieStore = await cookies();
   const sortByCookie = cookieStore.get(SORT_BY_COOKIE_NAME)?.value;
   const periodParam = typeof searchParams.period === "string" ? searchParams.period : null;
   const pageParam =
@@ -136,13 +123,41 @@ async function LeaderboardWithPreferences({
       })
     : null;
 
+  return {
+    initialData,
+    initialSortBy: sortBy,
+    initialUserRank,
+    session,
+  };
+}
+
+async function LeaderboardWithPreferences({
+  searchParams: searchParamsPromise,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
+  const searchParams = await searchParamsPromise;
+  const view = resolveView(searchParams.view);
+
+  if (view === "groups") {
+    return (
+      <>
+        <ViewSelector current="groups" searchParams={searchParams} />
+        <GroupsView />
+      </>
+    );
+  }
+
+  const { initialData, initialSortBy, initialUserRank, session } =
+    await loadLeaderboardPageData(searchParams);
+
   return (
     <>
       <ViewSelector current="users" searchParams={searchParams} />
       <LeaderboardClient
         initialData={initialData}
         currentUser={session}
-        initialSortBy={sortBy}
+        initialSortBy={initialSortBy}
         initialUserRank={initialUserRank}
       />
     </>

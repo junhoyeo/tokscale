@@ -32,6 +32,7 @@ import {
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
+import { revalidateLeaderboardPublicSurfacePaths } from "../../../lib/leaderboard/publicSurfaceRevalidation";
 
 const LEGACY_SUBMIT_DEVICE_KEY = LEGACY_DEVICE_KEY;
 const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
@@ -847,6 +848,7 @@ export async function POST(request: Request) {
         revalidateTag(`user:${usernameCacheKey}`, "max");
         revalidateTag("user-rank", "max");
         revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+        revalidateLeaderboardPublicSurfacePaths();
       } catch (e) {
         console.error("Public cache invalidation failed:", e);
       }
