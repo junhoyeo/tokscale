@@ -259,19 +259,22 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   // 3c. Day token breakdown should sum to totals
   for (const day of submission.contributions) {
-    // Check clients sum to day totals
-    if (day.clients.length > 0) {
-      const clientsTokenSum = day.clients.reduce((sum, c) => {
-        const t = c.tokens;
-        return sum + t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning;
-      }, 0);
+    if (day.clients.length === 0) {
+      errors.push(`Contribution day ${day.date} has no client data`);
+      continue;
+    }
 
-      // Allow some tolerance
-      if (Math.abs(clientsTokenSum - day.totals.tokens) > day.totals.tokens * 0.05 && day.totals.tokens > 100) {
-        warnings.push(
-          `Day ${day.date}: client tokens (${clientsTokenSum}) don't match total (${day.totals.tokens})`
-        );
-      }
+    // Check clients sum to day totals
+    const clientsTokenSum = day.clients.reduce((sum, c) => {
+      const t = c.tokens;
+      return sum + t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning;
+    }, 0);
+
+    // Allow some tolerance
+    if (Math.abs(clientsTokenSum - day.totals.tokens) > day.totals.tokens * 0.05 && day.totals.tokens > 100) {
+      warnings.push(
+        `Day ${day.date}: client tokens (${clientsTokenSum}) don't match total (${day.totals.tokens})`
+      );
     }
   }
 

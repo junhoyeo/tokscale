@@ -3,7 +3,7 @@ import {
   renderProfileEmbedErrorSvg,
   renderProfileEmbedSvg,
 } from "../../src/lib/embed/renderProfileEmbedSvg";
-import type { UserEmbedStats } from "../../src/lib/embed/getUserEmbedStats";
+import type { EmbedContributionDay, UserEmbedStats } from "../../src/lib/embed/getUserEmbedStats";
 
 const mockStats: UserEmbedStats = {
   user: {
@@ -199,10 +199,10 @@ describe("renderProfileEmbedSvg", () => {
 });
 
 describe("renderProfileEmbedSvg with contributions graph", () => {
-  const mockContributions = [
-    { date: "2026-01-15", intensity: 0 as const },
-    { date: "2026-02-10", intensity: 2 as const },
-    { date: "2026-02-20", intensity: 4 as const },
+  const mockContributions: EmbedContributionDay[] = [
+    { date: "2026-01-15", intensity: 0, totalTokens: 0, totalCost: 0 },
+    { date: "2026-02-10", intensity: 2, totalTokens: 250, totalCost: 2.5 },
+    { date: "2026-02-20", intensity: 4, totalTokens: 1000, totalCost: 10 },
   ];
 
   it("extends card height when contributions provided", () => {

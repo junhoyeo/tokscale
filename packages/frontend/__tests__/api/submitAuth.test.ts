@@ -73,6 +73,22 @@ beforeEach(() => {
 });
 
 describe("POST /api/submit auth path", () => {
+  it("rejects missing bearer auth before any downstream work", async () => {
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        body: JSON.stringify({}),
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(mockState.authenticatePersonalToken).not.toHaveBeenCalled();
+    expect(mockState.validateSubmission).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ error: "Missing or invalid Authorization header" });
+  });
+
   it("rejects invalid API tokens through the shared auth service", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({ status: "invalid" });
 
@@ -114,6 +130,36 @@ describe("POST /api/submit auth path", () => {
     expect(mockState.db.transaction).not.toHaveBeenCalled();
   });
 
+  it("rejects malformed JSON before validation or persistence", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+      expiresAt: null,
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: "{",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockState.validateSubmission).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ error: "Invalid JSON body" });
+  });
+
   it("accepts a valid token and continues into submission validation", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",
@@ -151,6 +197,130 @@ describe("POST /api/submit auth path", () => {
     expect(await response.json()).toEqual({
       error: "Validation failed",
       details: ["bad payload"],
+    });
+  });
+
+  it("rejects empty validated submissions before entering the transaction", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+      expiresAt: null,
+    });
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      errors: [],
+      warnings: [],
+      data: {
+        meta: {
+          generatedAt: new Date().toISOString(),
+          version: "1.0.0",
+          dateRange: { start: "2024-12-01", end: "2024-12-01" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: 0,
+          totalDays: 0,
+          activeDays: 0,
+          averagePerDay: 0,
+          maxCostInSingleDay: 0,
+          clients: [],
+          models: [],
+        },
+        years: [],
+        contributions: [],
+      },
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ error: "No contribution data to submit" });
+  });
+
+  it("keeps mixed invalid batches out of the transaction path", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+      expiresAt: null,
+    });
+    mockState.validateSubmission.mockReturnValue({
+      valid: false,
+      data: null,
+      errors: ["Future date found in contributions: 2099-01-01"],
+      warnings: [],
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          meta: {
+            generatedAt: new Date().toISOString(),
+            version: "1.0.0",
+            dateRange: { start: "2024-12-01", end: "2099-01-01" },
+          },
+          summary: {
+            totalTokens: 200,
+            totalCost: 2,
+            totalDays: 2,
+            activeDays: 2,
+            averagePerDay: 1,
+            maxCostInSingleDay: 1,
+            clients: ["claude"],
+            models: ["claude-sonnet-4"],
+          },
+          years: [],
+          contributions: [
+            {
+              date: "2024-12-01",
+              totals: { tokens: 100, cost: 1, messages: 1 },
+              intensity: 1,
+              tokenBreakdown: { input: 50, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+              clients: [],
+            },
+            {
+              date: "2099-01-01",
+              totals: { tokens: 100, cost: 1, messages: 1 },
+              intensity: 1,
+              tokenBreakdown: { input: 50, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+              clients: [],
+            },
+          ],
+        }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({
+      error: "Validation failed",
+      details: ["Future date found in contributions: 2099-01-01"],
     });
   });
 });

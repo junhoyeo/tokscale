@@ -310,6 +310,26 @@ describe('POST /api/submit - Client-Level Merge', () => {
       // API should return 400 for this
     });
 
+    it('rejects placeholder days with no client contributions', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 0, totalCost: 0, totalDays: 1, activeDays: 0, averagePerDay: 0, maxCostInSingleDay: 0, clients: [], models: [] },
+        years: [],
+        contributions: [{
+          date: '2024-12-01',
+          totals: { tokens: 0, cost: 0, messages: 0 },
+          intensity: 0 as const,
+          tokenBreakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('Contribution day 2024-12-01 has no client data');
+    });
+
     it('should handle day with no data for submitted client', () => {
       // User submits --claude but a day only has opencode data
       const dayWithOnlyOpencode = {
@@ -366,6 +386,127 @@ describe('POST /api/submit - Client-Level Merge', () => {
       }
 
       expect(submittedClients.has('pi')).toBe(true);
+    });
+
+    it('hard-rejects duplicate dates before persistence', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 300, totalCost: 3, totalDays: 2, activeDays: 2, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4'] },
+        years: [],
+        contributions: [
+          {
+            date: '2024-12-01',
+            totals: { tokens: 150, cost: 1.5, messages: 1 },
+            intensity: 1 as const,
+            tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+            clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+          },
+          {
+            date: '2024-12-01',
+            totals: { tokens: 150, cost: 1.5, messages: 1 },
+            intensity: 1 as const,
+            tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+            clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('Duplicate date found: 2024-12-01');
+    });
+
+    it('hard-rejects unsupported clients', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4'] },
+        years: [],
+        contributions: [{
+          date: '2024-12-01',
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'not-a-client', modelId: 'claude-sonnet-4', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((error) => error.includes('Invalid enum value'))).toBe(true);
+    });
+
+    it('hard-rejects negative counters in nested token breakdowns', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4'] },
+        years: [],
+        contributions: [{
+          date: '2024-12-01',
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4', tokens: { input: 100, output: -50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((error) => error.includes('Number must be greater than or equal to 0'))).toBe(true);
+    });
+
+    it('hard-rejects future-dated history beyond the tolerance window', () => {
+      const futureDate = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: futureDate, end: futureDate } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4'] },
+        years: [],
+        contributions: [{
+          date: futureDate,
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain(`Date range extends into the future: ${futureDate}`);
+      expect(result.errors).toContain(`Future date found in contributions: ${futureDate}`);
+    });
+
+    it('rejects mixed batches when any contribution day is invalid', () => {
+      const futureDate = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: futureDate } },
+        summary: { totalTokens: 300, totalCost: 3, totalDays: 2, activeDays: 2, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4'] },
+        years: [],
+        contributions: [
+          {
+            date: '2024-12-01',
+            totals: { tokens: 150, cost: 1.5, messages: 1 },
+            intensity: 1 as const,
+            tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+            clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+          },
+          {
+            date: futureDate,
+            totals: { tokens: 150, cost: 1.5, messages: 1 },
+            intensity: 1 as const,
+            tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+            clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain(`Future date found in contributions: ${futureDate}`);
     });
 
 
