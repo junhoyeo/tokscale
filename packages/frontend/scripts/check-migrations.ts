@@ -155,6 +155,10 @@ try {
       AND (
         (table_name = 'submissions' AND column_name IN ('reasoning_tokens', 'schema_version', 'submit_count'))
         OR (table_name = 'daily_breakdown' AND column_name IN ('submitted_device_id', 'active_time_ms'))
+        OR (
+          table_name = 'submission_reviews'
+          AND column_name IN ('reviewed_at', 'reviewed_by_username', 'review_note')
+        )
       )
   `;
   const columns = new Map(
@@ -175,6 +179,14 @@ try {
       "submissions.reasoning_tokens",
       "submissions.schema_version",
       "daily_breakdown.active_time_ms",
+    ].every((columnName) => columns.has(columnName))
+  );
+  expect(
+    "submission review audit columns are present",
+    [
+      "submission_reviews.reviewed_at",
+      "submission_reviews.reviewed_by_username",
+      "submission_reviews.review_note",
     ].every((columnName) => columns.has(columnName))
   );
 

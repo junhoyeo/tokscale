@@ -260,6 +260,9 @@ export const submissionReviews = pgTable(
     modelsUsed: text("models_used").array().notNull(),
     cliVersion: varchar("cli_version", { length: 20 }),
     schemaVersion: integer("schema_version").notNull().default(0),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewedByUsername: varchar("reviewed_by_username", { length: 39 }),
+    reviewNote: text("review_note"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
