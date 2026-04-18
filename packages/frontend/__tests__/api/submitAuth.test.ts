@@ -639,9 +639,10 @@ describe("POST /api/submit auth path", () => {
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "user:alice", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user-rank", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(4, "user-rank:alice", "max");
-    expect(mockState.revalidatePath).toHaveBeenCalledTimes(2);
+    expect(mockState.revalidatePath).toHaveBeenCalledTimes(3);
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(1, "/");
-    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/leaderboard");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/api/leaderboard");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(3, "/leaderboard");
     expect(mockState.revalidateUserGroupLeaderboards).toHaveBeenCalledWith("user-1");
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
   });
@@ -2282,8 +2283,9 @@ describe("POST /api/submit auth path", () => {
       })
     );
     expect(mockState.revalidateTag).toHaveBeenCalled();
-    expect(mockState.revalidatePath).toHaveBeenCalledTimes(2);
+    expect(mockState.revalidatePath).toHaveBeenCalledTimes(3);
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(1, "/");
-    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/leaderboard");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/api/leaderboard");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(3, "/leaderboard");
   });
 });
