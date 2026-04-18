@@ -253,6 +253,7 @@ describe("submission review routes", () => {
       kind: "updated",
       artifact: trustedArtifact,
       competitiveWriteApplied: true,
+      affectedCompetitiveUsernames: ["alice", "bob"],
     });
 
     const response = await detailRoutePatch(
@@ -285,7 +286,7 @@ describe("submission review routes", () => {
     });
     expect(
       mockState.revalidateSubmissionPublicCaches
-    ).toHaveBeenCalledExactlyOnceWith("user-1", "alice");
+    ).toHaveBeenCalledExactlyOnceWith("user-1", "alice", ["alice", "bob"]);
   });
 
   it("rejects suspicious history through the adjudication route without competitive cache refreshes", async () => {
@@ -296,6 +297,7 @@ describe("submission review routes", () => {
       kind: "updated",
       artifact: rejectedArtifact,
       competitiveWriteApplied: false,
+      affectedCompetitiveUsernames: [],
     });
 
     const response = await detailRoutePatch(

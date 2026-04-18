@@ -159,7 +159,8 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       try {
         await revalidateSubmissionPublicCaches(
           result.artifact.user.id,
-          result.artifact.user.username
+          result.artifact.user.username,
+          result.affectedCompetitiveUsernames
         );
       } catch (cacheError) {
         console.error(

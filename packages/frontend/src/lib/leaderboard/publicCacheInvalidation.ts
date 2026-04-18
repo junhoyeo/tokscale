@@ -8,15 +8,29 @@ import { revalidateLeaderboardPublicSurfacePaths } from "./publicSurfaceRevalida
 
 export async function revalidateSubmissionPublicCaches(
   userId: string,
-  username: string
+  username: string,
+  affectedUsernames: readonly string[] = []
 ): Promise<void> {
-  const usernameCacheKey = normalizeUsernameCacheKey(username);
+  const affectedUsernamesByCacheKey = new Map<string, string>();
+  for (const affectedUsername of [username, ...affectedUsernames]) {
+    const cacheKey = normalizeUsernameCacheKey(affectedUsername);
+    if (!affectedUsernamesByCacheKey.has(cacheKey)) {
+      affectedUsernamesByCacheKey.set(cacheKey, affectedUsername);
+    }
+  }
 
   revalidateTag("leaderboard", "max");
-  revalidateTag(`user:${usernameCacheKey}`, "max");
   revalidateTag("user-rank", "max");
-  revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+
+  for (const [cacheKey, affectedUsername] of affectedUsernamesByCacheKey) {
+    revalidateTag(`user:${cacheKey}`, "max");
+    revalidateTag(`user-rank:${cacheKey}`, "max");
+    revalidateTag(`embed-user:${cacheKey}`, "max");
+    revalidateTag(`embed-user:${cacheKey}:tokens`, "max");
+    revalidateTag(`embed-user:${cacheKey}:cost`, "max");
+    revalidateUsernamePaths(affectedUsername);
+  }
+
   revalidateLeaderboardPublicSurfacePaths();
-  revalidateUsernamePaths(username);
   await revalidateUserGroupLeaderboards(userId);
 }

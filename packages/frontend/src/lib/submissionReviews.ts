@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db, submissionReviews, users } from "./db";
 import {
   applyTrustedSubmission,
@@ -9,6 +9,11 @@ import {
   type SubmissionTrustState,
 } from "./validation/submissionTrust";
 import { validateSubmission } from "./validation/submission";
+import {
+  getAffectedCompetitiveUsernames,
+  type CompetitiveRankEntry,
+  type CompetitiveRankSnapshot,
+} from "./leaderboard/competitiveRankChanges";
 
 export const REVIEW_ARTIFACT_RESULT_KIND = {
   UPDATED: "updated",
@@ -243,6 +248,7 @@ export type SubmissionReviewAdjudicationResult =
       kind: typeof REVIEW_ARTIFACT_RESULT_KIND.UPDATED;
       artifact: SubmissionReviewArtifactDetail;
       competitiveWriteApplied: boolean;
+      affectedCompetitiveUsernames: string[];
     }
   | {
       kind: typeof REVIEW_ARTIFACT_RESULT_KIND.NOT_FOUND;
@@ -251,6 +257,54 @@ export type SubmissionReviewAdjudicationResult =
       kind: typeof REVIEW_ARTIFACT_RESULT_KIND.CONFLICT;
       currentTrustState: SubmissionTrustState;
     };
+
+type SqlExecutor = Pick<typeof db, "execute">;
+
+async function fetchCompetitiveRankedUsers(
+  executor: SqlExecutor,
+  sortBy: "tokens" | "cost"
+): Promise<CompetitiveRankEntry[]> {
+  const rows = await executor.execute<{
+    username: string;
+    rank: number | string;
+  }>(sql`
+    WITH totals AS (
+      SELECT
+        users.username AS username,
+        SUM(submissions.total_tokens) AS total_tokens,
+        SUM(CAST(submissions.total_cost AS DECIMAL(18,4))) AS total_cost
+      FROM submissions
+      INNER JOIN users ON users.id = submissions.user_id
+      GROUP BY users.id, users.username
+    )
+    SELECT
+      username,
+      RANK() OVER (
+        ORDER BY ${
+          sortBy === "cost" ? sql`total_cost` : sql`total_tokens`
+        } DESC
+      ) AS rank
+    FROM totals
+  `);
+
+  return (
+    rows as unknown as { username: string; rank: number | string }[]
+  ).map(({ username, rank }) => ({
+    username,
+    rank: Number(rank),
+  }));
+}
+
+async function fetchCompetitiveRankSnapshot(
+  executor: SqlExecutor
+): Promise<CompetitiveRankSnapshot> {
+  const [tokens, cost] = await Promise.all([
+    fetchCompetitiveRankedUsers(executor, "tokens"),
+    fetchCompetitiveRankedUsers(executor, "cost"),
+  ]);
+
+  return { tokens, cost };
+}
 
 export async function adjudicateSubmissionReview({
   reviewId,
@@ -287,6 +341,8 @@ export async function adjudicateSubmissionReview({
       };
     }
 
+    let affectedCompetitiveUsernames: string[] = [];
+
     if (trustState === SUBMISSION_TRUST_STATE.TRUSTED) {
       const validation = validateSubmission(currentReview.payload);
       if (!validation.valid || !validation.data) {
@@ -299,12 +355,17 @@ export async function adjudicateSubmissionReview({
             (server): server is string => typeof server === "string"
           )
         : null;
-
+      const beforeSnapshot = await fetchCompetitiveRankSnapshot(tx);
       await applyTrustedSubmission(tx, {
         userId: currentReview.userId,
         data: validation.data,
         mcpServers,
       });
+      const afterSnapshot = await fetchCompetitiveRankSnapshot(tx);
+      affectedCompetitiveUsernames = getAffectedCompetitiveUsernames(
+        beforeSnapshot,
+        afterSnapshot
+      );
     }
 
     const adjudicatedAt = new Date();
@@ -351,6 +412,7 @@ export async function adjudicateSubmissionReview({
       kind: REVIEW_ARTIFACT_RESULT_KIND.UPDATED,
       artifact: mapSubmissionReviewArtifact(hydratedReview),
       competitiveWriteApplied: trustState === SUBMISSION_TRUST_STATE.TRUSTED,
+      affectedCompetitiveUsernames,
     };
   });
 }
