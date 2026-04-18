@@ -152,6 +152,34 @@ function isDateWithinReplayWindow(date: string, replayWindow: ReplayWindow): boo
   return date >= replayWindow.start && date <= replayWindow.end;
 }
 
+function hasOutOfScopeReplaySurvivors(
+  mergedClientBreakdown: Record<string, ClientBreakdownData>,
+  submittedClients: Set<string>
+): boolean {
+  return Object.keys(mergedClientBreakdown).some(
+    (clientName) => !submittedClients.has(clientName)
+  );
+}
+
+export function resolveReplayTimestampMs(
+  existingTimestampMs: number | null | undefined,
+  incomingTimestampMs: number | null | undefined,
+  mergedClientBreakdown: Record<string, ClientBreakdownData>,
+  submittedClients: Set<string>
+): number | null {
+  if (
+    !hasOutOfScopeReplaySurvivors(mergedClientBreakdown, submittedClients)
+  ) {
+    return incomingTimestampMs ?? null;
+  }
+
+  if (incomingTimestampMs == null || existingTimestampMs == null) {
+    return null;
+  }
+
+  return incomingTimestampMs <= existingTimestampMs ? incomingTimestampMs : null;
+}
+
 export function planSubmittedReplayMutations({
   existingDays,
   incomingDays,
@@ -210,9 +238,12 @@ export function planSubmittedReplayMutations({
         cost: dayTotals.cost.toFixed(4),
         inputTokens: dayTotals.inputTokens,
         outputTokens: dayTotals.outputTokens,
-        timestampMs: incomingDay
-          ? mergeTimestampMs(existingDay.timestampMs, incomingDay.timestampMs ?? null)
-          : existingDay.timestampMs ?? null,
+        timestampMs: resolveReplayTimestampMs(
+          existingDay.timestampMs,
+          incomingDay?.timestampMs ?? null,
+          mergedClientBreakdown,
+          submittedClients
+        ),
         sourceBreakdown: mergedClientBreakdown,
         modelBreakdown,
       });

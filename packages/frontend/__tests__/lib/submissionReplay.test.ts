@@ -71,7 +71,7 @@ function createIncomingDay(
 }
 
 describe("planSubmittedReplayMutations", () => {
-  it("replaces overlapping in-scope history without stacking and preserves out-of-scope clients", () => {
+  it("clears stale earliest timestamps when a later in-scope replay replaces the prior earliest contributor", () => {
     const result = planSubmittedReplayMutations({
       existingDays: [
         createExistingDay(
@@ -104,13 +104,47 @@ describe("planSubmittedReplayMutations", () => {
       date: "2024-12-02",
       tokens: 70,
       cost: "0.7000",
-      timestampMs: Date.parse("2024-12-02T09:00:00.000Z"),
+      timestampMs: null,
     });
     expect(result.updates[0].sourceBreakdown).toEqual(
       mergeBreakdowns(
         createClientBreakdown("claude", 30, 0.3),
         createClientBreakdown("cursor", 40, 0.4)
       )
+    );
+  });
+
+  it("clears stale earliest timestamps when removing the in-scope client that originally supplied them", () => {
+    const result = planSubmittedReplayMutations({
+      existingDays: [
+        createExistingDay(
+          "day-1",
+          "2024-12-02",
+          mergeBreakdowns(
+            createClientBreakdown("claude", 100, 1),
+            createClientBreakdown("cursor", 40, 0.4)
+          ),
+          Date.parse("2024-12-02T09:00:00.000Z")
+        ),
+      ],
+      incomingDays: [],
+      submittedClients: new Set(["claude"]),
+      replayWindow: { start: "2024-12-02", end: "2024-12-02" },
+      submissionId: "submission-1",
+    });
+
+    expect(result.inserts).toEqual([]);
+    expect(result.deletes).toEqual([]);
+    expect(result.updates).toHaveLength(1);
+    expect(result.updates[0]).toMatchObject({
+      id: "day-1",
+      date: "2024-12-02",
+      tokens: 40,
+      cost: "0.4000",
+      timestampMs: null,
+    });
+    expect(result.updates[0].sourceBreakdown).toEqual(
+      createClientBreakdown("cursor", 40, 0.4)
     );
   });
 
@@ -202,6 +236,49 @@ describe("planSubmittedReplayMutations", () => {
     );
     expect(result.updates.some((update) => update.date === "2024-12-03")).toBe(false);
     expect(result.deletes.some((deleted) => deleted.date === "2024-12-03")).toBe(false);
+  });
+
+  it("recomputes the day timestamp when the surviving replay can still prove the earliest value", () => {
+    const result = planSubmittedReplayMutations({
+      existingDays: [
+        createExistingDay(
+          "day-1",
+          "2024-12-02",
+          mergeBreakdowns(
+            createClientBreakdown("claude", 100, 1),
+            createClientBreakdown("cursor", 40, 0.4)
+          ),
+          Date.parse("2024-12-02T09:00:00.000Z")
+        ),
+      ],
+      incomingDays: [
+        createIncomingDay(
+          "2024-12-02",
+          createClientBreakdown("claude", 30, 0.3),
+          Date.parse("2024-12-02T08:00:00.000Z")
+        ),
+      ],
+      submittedClients: new Set(["claude"]),
+      replayWindow: { start: "2024-12-02", end: "2024-12-02" },
+      submissionId: "submission-1",
+    });
+
+    expect(result.inserts).toEqual([]);
+    expect(result.deletes).toEqual([]);
+    expect(result.updates).toHaveLength(1);
+    expect(result.updates[0]).toMatchObject({
+      id: "day-1",
+      date: "2024-12-02",
+      tokens: 70,
+      cost: "0.7000",
+      timestampMs: Date.parse("2024-12-02T08:00:00.000Z"),
+    });
+    expect(result.updates[0].sourceBreakdown).toEqual(
+      mergeBreakdowns(
+        createClientBreakdown("claude", 30, 0.3),
+        createClientBreakdown("cursor", 40, 0.4)
+      )
+    );
   });
 
   it("keeps replay totals idempotent when the same logical history is submitted again", () => {
