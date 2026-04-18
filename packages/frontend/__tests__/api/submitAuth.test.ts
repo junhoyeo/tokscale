@@ -36,9 +36,15 @@ vi.mock("@/lib/auth/personalTokens", () => ({
 
 vi.mock("@/lib/db", () => ({
   db: mockState.db,
+  apiTokens: {
+    id: "apiTokens.id",
+  },
   submissions: {
     id: "submissions.id",
     userId: "submissions.userId",
+  },
+  submissionReviews: {
+    id: "submissionReviews.id",
   },
   dailyBreakdown: {
     id: "dailyBreakdown.id",
@@ -197,6 +203,7 @@ describe("POST /api/submit auth path", () => {
     expect(await response.json()).toEqual({
       error: "Validation failed",
       details: ["bad payload"],
+      trustState: "rejected",
     });
   });
 
@@ -321,6 +328,7 @@ describe("POST /api/submit auth path", () => {
     expect(await response.json()).toEqual({
       error: "Validation failed",
       details: ["Future date found in contributions: 2099-01-01"],
+      trustState: "rejected",
     });
   });
 });

@@ -13,7 +13,7 @@ import {
   index,
   unique,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // ============================================================================
 // USERS
@@ -45,6 +45,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   sessions: many(sessions),
   apiTokens: many(apiTokens),
   submissions: many(submissions),
+  submissionReviews: many(submissionReviews),
 }));
 
 // ============================================================================
@@ -201,6 +202,60 @@ export const submissionsRelations = relations(submissions, ({ one, many }) => ({
 }));
 
 // ============================================================================
+// SUBMISSION REVIEWS
+// ============================================================================
+export const submissionReviews = pgTable(
+  "submission_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+
+    submissionHash: varchar("submission_hash", { length: 64 }),
+    trustState: varchar("trust_state", { length: 20 })
+      .notNull()
+      .default("review_required"),
+    reasonCodes: text("reason_codes")
+      .array()
+      .notNull()
+      .default(sql`ARRAY[]::text[]`),
+    payload: jsonb("payload")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+
+    totalTokens: bigint("total_tokens", { mode: "number" }).notNull(),
+    totalCost: decimal("total_cost", { precision: 12, scale: 4 }).notNull(),
+    activeDays: integer("active_days").notNull(),
+    dateStart: date("date_start").notNull(),
+    dateEnd: date("date_end").notNull(),
+    sourcesUsed: text("sources_used").array().notNull(),
+    modelsUsed: text("models_used").array().notNull(),
+    cliVersion: varchar("cli_version", { length: 20 }),
+    schemaVersion: integer("schema_version").notNull().default(0),
+
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_submission_reviews_user_id").on(table.userId),
+    index("idx_submission_reviews_trust_state").on(table.trustState),
+    index("idx_submission_reviews_created_at").on(table.createdAt),
+  ]
+);
+
+export const submissionReviewsRelations = relations(submissionReviews, ({ one }) => ({
+  user: one(users, {
+    fields: [submissionReviews.userId],
+    references: [users.id],
+  }),
+}));
+
+// ============================================================================
 // DAILY BREAKDOWN
 // ============================================================================
 export const dailyBreakdown = pgTable(
@@ -280,5 +335,7 @@ export type DeviceCode = typeof deviceCodes.$inferSelect;
 export type NewDeviceCode = typeof deviceCodes.$inferInsert;
 export type Submission = typeof submissions.$inferSelect;
 export type NewSubmission = typeof submissions.$inferInsert;
+export type SubmissionReview = typeof submissionReviews.$inferSelect;
+export type NewSubmissionReview = typeof submissionReviews.$inferInsert;
 export type DailyBreakdown = typeof dailyBreakdown.$inferSelect;
 export type NewDailyBreakdown = typeof dailyBreakdown.$inferInsert;

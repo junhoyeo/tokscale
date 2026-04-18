@@ -92,6 +92,8 @@ function createMockSubmissionData(overrides: Partial<{
 }
 
 describe('POST /api/submit - Client-Level Merge', () => {
+  const getUtcDateString = (date: Date) => date.toISOString().slice(0, 10);
+
   describe('First Submission (Create Mode)', () => {
     it('should create new submission with all clients', () => {
       const data = createMockSubmissionData({ clients: ['claude', 'cursor'] });
@@ -510,6 +512,110 @@ describe('POST /api/submit - Client-Level Merge', () => {
     });
 
 
+  });
+
+  describe('Trust decisioning', () => {
+    it('hard-rejects impossible model timelines before persistence', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4-20250514'] },
+        years: [],
+        contributions: [{
+          date: '2024-12-01',
+          timestampMs: Date.parse('2024-12-01T10:00:00.000Z'),
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4-20250514', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.trustState).toBe('rejected');
+      expect(result.rejectionReasonCodes).toContain('model_predates_public_availability');
+      expect(result.errors).toContain(
+        'Model claude-sonnet-4-20250514 cannot be submitted for 2024-12-01 before 2025-05-14'
+      );
+    });
+
+    it('hard-rejects timestamps that do not align with the claimed UTC day bucket', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4-20250514'] },
+        years: [],
+        contributions: [{
+          date: '2024-12-01',
+          timestampMs: Date.parse('2024-12-02T00:05:00.000Z'),
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4-20250514', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.trustState).toBe('rejected');
+      expect(result.rejectionReasonCodes).toContain('timestamp_day_mismatch');
+      expect(result.errors).toContain(
+        `Day 2024-12-01 has timestamp ${Date.parse('2024-12-02T00:05:00.000Z')} outside its claimed UTC bucket`
+      );
+    });
+
+    it('accepts aligned timestamp metadata as trusted history', () => {
+      const now = new Date();
+      const date = getUtcDateString(now);
+      const payload = {
+        meta: { generatedAt: now.toISOString(), version: '1.0.0', dateRange: { start: date, end: date } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4-20250514'] },
+        years: [],
+        contributions: [{
+          date,
+          timestampMs: Date.parse(`${date}T12:00:00.000Z`),
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4-20250514', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.trustState).toBe('trusted');
+      expect(result.reasonCodes).toEqual([]);
+      expect(result.rejectionReasonCodes).toEqual([]);
+    });
+
+    it('routes historical untimestamped history into the review-required path', () => {
+      const historicalDate = new Date();
+      historicalDate.setUTCDate(historicalDate.getUTCDate() - 90);
+      const date = getUtcDateString(historicalDate);
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: date, end: date } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['claude-sonnet-4-20250514'] },
+        years: [],
+        contributions: [{
+          date,
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'claude' as const, modelId: 'claude-sonnet-4-20250514', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.trustState).toBe('review_required');
+      expect(result.reasonCodes).toContain('historical_day_missing_timestamp');
+      expect(result.warnings).toContain(
+        `Day ${date} is older than 30 days and has no timestampMs audit metadata`
+      );
+    });
   });
 
   describe('Multi-Model Per Client', () => {

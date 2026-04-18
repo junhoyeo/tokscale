@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
-import { db, apiTokens, submissions, dailyBreakdown } from "@/lib/db";
+import {
+  db,
+  apiTokens,
+  submissions,
+  dailyBreakdown,
+  submissionReviews,
+} from "@/lib/db";
 import { eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
@@ -8,6 +14,10 @@ import {
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import {
+  SUBMISSION_TRUST_STATE,
+  type SubmissionTrustState,
+} from "../../../lib/validation/submissionTrust";
 import {
   mergeClientBreakdowns,
   recalculateDayTotals,
@@ -43,6 +53,49 @@ function normalizeSubmissionData(data: unknown): void {
       }
     }
   }
+}
+
+interface SubmissionResponseMetrics {
+  totalTokens: number;
+  totalCost: number;
+  dateRange: {
+    start: string;
+    end: string;
+  };
+  activeDays: number;
+  clients: string[];
+}
+
+function buildSubmittedMetrics(
+  data: SubmissionData,
+  submittedClients: Set<string>
+): SubmissionResponseMetrics {
+  const totalTokens = data.contributions.reduce(
+    (sum, contribution) => sum + contribution.totals.tokens,
+    0
+  );
+  const totalCost = data.contributions.reduce(
+    (sum, contribution) => sum + contribution.totals.cost,
+    0
+  );
+  const activeDays = data.contributions.filter(
+    (contribution) => contribution.totals.tokens > 0
+  ).length;
+
+  return {
+    totalTokens,
+    totalCost,
+    dateRange: {
+      start: data.meta.dateRange.start,
+      end: data.meta.dateRange.end,
+    },
+    activeDays,
+    clients: Array.from(submittedClients).sort(),
+  };
+}
+
+function shouldRevalidatePublicCaches(trustState: SubmissionTrustState): boolean {
+  return trustState === SUBMISSION_TRUST_STATE.TRUSTED;
 }
 
 /**
@@ -100,15 +153,28 @@ export async function POST(request: Request) {
     normalizeSubmissionData(rawData);
 
     const validation = validateSubmission(rawData);
+    const validationWarnings = validation.warnings ?? [];
+    const validationReasonCodes = validation.reasonCodes ?? [];
+    const validationRejectionReasonCodes =
+      validation.rejectionReasonCodes ?? [];
 
     if (!validation.valid || !validation.data) {
       return NextResponse.json(
-        { error: "Validation failed", details: validation.errors },
+        {
+          error: "Validation failed",
+          details: validation.errors,
+          trustState: SUBMISSION_TRUST_STATE.REJECTED,
+          errorCodes:
+            validationRejectionReasonCodes.length > 0
+              ? validationRejectionReasonCodes
+              : undefined,
+        },
         { status: 400 }
       );
     }
 
     const data = validation.data;
+    const trustState = validation.trustState;
 
     if (data.contributions.length === 0) {
       return NextResponse.json(
@@ -133,6 +199,8 @@ export async function POST(request: Request) {
         clients: Array.from(submittedClients).sort(),
       },
     };
+    const submittedMetrics = buildSubmittedMetrics(data, submittedClients);
+    const schemaVersion = data.contributions.some((c) => c.timestampMs != null) ? 1 : 0;
 
     // ========================================
     // STEP 3: DATABASE OPERATIONS IN TRANSACTION
@@ -142,6 +210,34 @@ export async function POST(request: Request) {
         .update(apiTokens)
         .set({ lastUsedAt: new Date() })
         .where(eq(apiTokens.id, tokenRecord.tokenId));
+
+      if (trustState === SUBMISSION_TRUST_STATE.REVIEW_REQUIRED) {
+        const [review] = await tx
+          .insert(submissionReviews)
+          .values({
+            userId: tokenRecord.userId,
+            submissionHash: generateSubmissionHash(hashData),
+            trustState,
+            reasonCodes: validationReasonCodes,
+            payload: data as unknown as Record<string, unknown>,
+            totalTokens: submittedMetrics.totalTokens,
+            totalCost: submittedMetrics.totalCost.toFixed(4),
+            activeDays: submittedMetrics.activeDays,
+            dateStart: submittedMetrics.dateRange.start,
+            dateEnd: submittedMetrics.dateRange.end,
+            sourcesUsed: submittedMetrics.clients,
+            modelsUsed: data.summary.models,
+            cliVersion: data.meta.version,
+            schemaVersion,
+          })
+          .returning({ id: submissionReviews.id });
+
+        return {
+          trustState,
+          reviewId: review.id,
+          metrics: submittedMetrics,
+        };
+      }
 
       // ------------------------------------------
       // STEP 3a: Get or create user's submission
@@ -401,43 +497,57 @@ export async function POST(request: Request) {
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
-          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c) => c.timestampMs != null) ? 1 : 0})`,
+          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${schemaVersion})`,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
 
       return {
+        trustState,
         submissionId,
         isNewSubmission,
         metrics: {
-          totalTokens: aggregates.totalTokens,
+          totalTokens: Number(aggregates.totalTokens ?? 0),
           totalCost: parseFloat(aggregates.totalCost),
           dateRange: {
             start: aggregates.dateStart,
             end: aggregates.dateEnd,
           },
-          activeDays: aggregates.activeDays,
+          activeDays: Number(aggregates.activeDays ?? 0),
           clients: Array.from(allClients),
         },
       };
     });
 
-    try {
-      revalidateTag("leaderboard", "max");
-      revalidateTag(`user:${tokenRecord.username}`, "max");
-      revalidateTag("user-rank", "max");
-      revalidateTag(`user-rank:${tokenRecord.username}`, "max");
-    } catch (e) {
-      console.error("Cache invalidation failed:", e);
+    if (shouldRevalidatePublicCaches(result.trustState)) {
+      try {
+        revalidateTag("leaderboard", "max");
+        revalidateTag(`user:${tokenRecord.username}`, "max");
+        revalidateTag("user-rank", "max");
+        revalidateTag(`user-rank:${tokenRecord.username}`, "max");
+      } catch (e) {
+        console.error("Cache invalidation failed:", e);
+      }
     }
 
     return NextResponse.json({
       success: true,
-      submissionId: result.submissionId,
       username: tokenRecord.username,
       metrics: result.metrics,
-      mode: result.isNewSubmission ? "create" : "merge",
-      warnings: validation.warnings.length > 0 ? validation.warnings : undefined,
+      trustState: result.trustState,
+      submissionId: "submissionId" in result ? result.submissionId : undefined,
+      reviewId: "reviewId" in result ? result.reviewId : undefined,
+      mode:
+        result.trustState === SUBMISSION_TRUST_STATE.REVIEW_REQUIRED
+          ? "review"
+          : result.isNewSubmission
+          ? "create"
+          : "merge",
+      reasonCodes:
+        validationReasonCodes.length > 0 ? validationReasonCodes : undefined,
+      competitiveWriteApplied:
+        result.trustState === SUBMISSION_TRUST_STATE.TRUSTED,
+      warnings: validationWarnings.length > 0 ? validationWarnings : undefined,
     });
   } catch (error) {
     console.error("Submit error:", error);

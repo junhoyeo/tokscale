@@ -6,6 +6,12 @@
  */
 
 import { z } from "zod";
+import {
+  assessSubmissionTrust,
+  SUBMISSION_TRUST_STATE,
+  type SubmissionReasonCode,
+  type SubmissionTrustState,
+} from "./submissionTrust";
 
 // ============================================================================
 // SCHEMAS
@@ -173,6 +179,9 @@ export interface ValidationResult {
   valid: boolean;
   errors: string[];
   warnings: string[];
+  trustState: SubmissionTrustState;
+  reasonCodes: SubmissionReasonCode[];
+  rejectionReasonCodes: SubmissionReasonCode[];
   data?: SubmissionData;
 }
 
@@ -192,6 +201,9 @@ export function validateSubmission(data: unknown): ValidationResult {
         (e: z.ZodIssue) => `${e.path.join(".")}: ${e.message}`
       ),
       warnings: [],
+      trustState: SUBMISSION_TRUST_STATE.REJECTED,
+      reasonCodes: [],
+      rejectionReasonCodes: [],
     };
   }
 
@@ -323,11 +335,21 @@ export function validateSubmission(data: unknown): ValidationResult {
     }
   }
 
+  const trustAssessment = assessSubmissionTrust(submission);
+  errors.push(...trustAssessment.errors);
+  warnings.push(...trustAssessment.warnings);
+  const valid = errors.length === 0;
+
   return {
-    valid: errors.length === 0,
+    valid,
     errors,
     warnings,
-    data: errors.length === 0 ? submission : undefined,
+    trustState: valid
+      ? trustAssessment.trustState
+      : SUBMISSION_TRUST_STATE.REJECTED,
+    reasonCodes: valid ? trustAssessment.reasonCodes : [],
+    rejectionReasonCodes: valid ? [] : trustAssessment.rejectionReasonCodes,
+    data: valid ? submission : undefined,
   };
 }
 
