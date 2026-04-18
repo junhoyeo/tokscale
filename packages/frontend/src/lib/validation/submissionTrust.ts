@@ -42,15 +42,27 @@ function getRetroactiveThresholdDate(now: Date): string {
 }
 
 function extractDatedModelAvailability(modelId: string): string | null {
-  const match = modelId.match(/(?:^|[-_])(20\d{2})(\d{2})(\d{2})(?:$|[-_])/);
+  const match =
+    modelId.match(/(?:^|[-_])(20\d{2})(\d{2})(\d{2})(?:$|[-_])/) ??
+    modelId.match(/(?:^|[-_])(20\d{2})[-_](\d{2})[-_](\d{2})(?:$|[-_])/);
   if (!match) {
     return null;
   }
 
   const [, year, month, day] = match;
+  const parsedYear = Number(year);
   const parsedMonth = Number(month);
   const parsedDay = Number(day);
   if (parsedMonth < 1 || parsedMonth > 12 || parsedDay < 1 || parsedDay > 31) {
+    return null;
+  }
+
+  const parsedDate = new Date(Date.UTC(parsedYear, parsedMonth - 1, parsedDay));
+  if (
+    parsedDate.getUTCFullYear() !== parsedYear ||
+    parsedDate.getUTCMonth() + 1 !== parsedMonth ||
+    parsedDate.getUTCDate() !== parsedDay
+  ) {
     return null;
   }
 

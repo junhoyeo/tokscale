@@ -540,6 +540,60 @@ describe('POST /api/submit - Client-Level Merge', () => {
       );
     });
 
+    it.each([
+      ['gpt-4o-2024-08-06', '2024-08-05', '2024-08-06'],
+      ['gpt-4.1-2025-04-14', '2025-04-13', '2025-04-14'],
+    ])(
+      'hard-rejects separator-based dated snapshots for %s before %s',
+      (modelId, submittedDate, availabilityDate) => {
+        const payload = {
+          meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: submittedDate, end: submittedDate } },
+          summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: [modelId] },
+          years: [],
+          contributions: [{
+            date: submittedDate,
+            timestampMs: Date.parse(`${submittedDate}T10:00:00.000Z`),
+            totals: { tokens: 150, cost: 1.5, messages: 1 },
+            intensity: 1 as const,
+            tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+            clients: [{ client: 'claude' as const, modelId, tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+          }],
+        };
+
+        const result = validateSubmission(payload);
+
+        expect(result.valid).toBe(false);
+        expect(result.trustState).toBe('rejected');
+        expect(result.rejectionReasonCodes).toContain('model_predates_public_availability');
+        expect(result.errors).toContain(
+          `Model ${modelId} cannot be submitted for ${submittedDate} before ${availabilityDate}`
+        );
+      }
+    );
+
+    it('keeps undated model identifiers on the normal trusted path', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-01-01', end: '2024-01-01' } },
+        summary: { totalTokens: 150, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['claude' as const], models: ['gpt-4o'] },
+        years: [],
+        contributions: [{
+          date: '2024-01-01',
+          timestampMs: Date.parse('2024-01-01T10:00:00.000Z'),
+          totals: { tokens: 150, cost: 1.5, messages: 1 },
+          intensity: 1 as const,
+          tokenBreakdown: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'claude' as const, modelId: 'gpt-4o', tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 1 }],
+        }],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.trustState).toBe('trusted');
+      expect(result.reasonCodes).toEqual([]);
+      expect(result.rejectionReasonCodes).toEqual([]);
+    });
+
     it('hard-rejects timestamps that do not align with the claimed UTC day bucket', () => {
       const payload = {
         meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
