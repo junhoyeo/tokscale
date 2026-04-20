@@ -217,6 +217,11 @@ enum Commands {
     },
     #[command(about = "Delete all submitted usage data from the server")]
     DeleteSubmittedData,
+    #[command(
+        about = "Warm TUI cache in background (internal)",
+        hide = true
+    )]
+    WarmTuiCache,
 }
 
 #[derive(Subcommand)]
@@ -505,6 +510,7 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
             run_delete_data_command()
         }
+        Some(Commands::WarmTuiCache) => run_warm_tui_cache(),
         None => {
             let today = cli.date.today;
             let week = cli.date.week;
@@ -3300,7 +3306,7 @@ fn run_submit_command(
     use colored::Colorize;
     use std::io::IsTerminal;
     use tokio::runtime::Runtime;
-    use tokscale_core::{generate_graph, ClientId, GroupBy, ReportOptions};
+    use tokscale_core::{generate_graph, GroupBy, ReportOptions};
 
     let credentials = match auth::load_credentials() {
         Some(creds) => creds,
@@ -3532,20 +3538,49 @@ fn run_submit_command(
     }
 
     // Warm the TUI cache so the next `tokscale` launch is instant.
-    // We load with all clients and no date filters (default TUI view)
-    // to maximize cache hit rate.
-    {
-        use crate::tui::{save_cached_data, DataLoader};
-        use std::collections::HashSet;
+    // Detached subprocess so submit returns to the shell immediately on large
+    // datasets — a full re-scan would otherwise block for tens of seconds.
+    spawn_warm_tui_cache_detached();
 
-        let all_clients: Vec<ClientId> = ClientId::iter().collect();
-        let enabled_set: HashSet<ClientId> = all_clients.iter().copied().collect();
-        let loader = DataLoader::with_filters(None, None, None, None);
-        if let Ok(data) = loader.load(&all_clients, &GroupBy::default(), false) {
-            save_cached_data(&data, &enabled_set, false, &GroupBy::default());
-        }
+    Ok(())
+}
+
+fn spawn_warm_tui_cache_detached() {
+    use std::process::{Command, Stdio};
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let mut cmd = Command::new(exe);
+    cmd.arg("warm-tui-cache")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // New process group so the child is not killed by Ctrl-C in the
+        // parent's shell and survives after submit exits.
+        cmd.process_group(0);
     }
 
+    let _ = cmd.spawn();
+}
+
+fn run_warm_tui_cache() -> Result<()> {
+    use crate::tui::{save_cached_data, DataLoader};
+    use std::collections::HashSet;
+    use tokscale_core::{ClientId, GroupBy};
+
+    let all_clients: Vec<ClientId> = ClientId::iter().collect();
+    let enabled_set: HashSet<ClientId> = all_clients.iter().copied().collect();
+    let loader = DataLoader::with_filters(None, None, None, None);
+    if let Ok(data) = loader.load(&all_clients, &GroupBy::default(), false) {
+        save_cached_data(&data, &enabled_set, false, &GroupBy::default());
+    }
     Ok(())
 }
 
