@@ -217,10 +217,7 @@ enum Commands {
     },
     #[command(about = "Delete all submitted usage data from the server")]
     DeleteSubmittedData,
-    #[command(
-        about = "Warm TUI cache in background (internal)",
-        hide = true
-    )]
+    #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
 }
 
