@@ -608,6 +608,7 @@ pub enum ClientFilter {
     Hermes,
     Copilot,
     Goose,
+    Codebuff,
     Synthetic,
 }
 
@@ -636,6 +637,7 @@ impl ClientFilter {
             Self::Hermes => "hermes",
             Self::Copilot => "copilot",
             Self::Goose => "goose",
+            Self::Codebuff => "codebuff",
             Self::Synthetic => "synthetic",
         }
     }
@@ -667,6 +669,7 @@ impl ClientFilter {
             Self::Hermes => Some(ClientId::Hermes),
             Self::Copilot => Some(ClientId::Copilot),
             Self::Goose => Some(ClientId::Goose),
+            Self::Codebuff => Some(ClientId::Codebuff),
             Self::Synthetic => None,
         }
     }
@@ -695,6 +698,7 @@ impl ClientFilter {
             ClientId::Hermes => Self::Hermes,
             ClientId::Copilot => Self::Copilot,
             ClientId::Goose => Self::Goose,
+            ClientId::Codebuff => Self::Codebuff,
         }
     }
 
@@ -760,6 +764,8 @@ pub struct ClientFlags {
     pub cursor: bool,
     #[arg(long, hide = true)]
     pub amp: bool,
+    #[arg(long, hide = true)]
+    pub codebuff: bool,
     #[arg(long, hide = true)]
     pub droid: bool,
     #[arg(long, hide = true)]
@@ -838,13 +844,14 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 20] = [
+    let legacy: [(bool, ClientFilter); 21] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
         (flags.cursor, ClientFilter::Cursor),
         (flags.gemini, ClientFilter::Gemini),
         (flags.amp, ClientFilter::Amp),
+        (flags.codebuff, ClientFilter::Codebuff),
         (flags.droid, ClientFilter::Droid),
         (flags.openclaw, ClientFilter::Openclaw),
         (flags.pi, ClientFilter::Pi),
@@ -2570,6 +2577,7 @@ fn capitalize_client(client: &str) -> String {
         "cursor" => "Cursor".to_string(),
         "gemini" => "Gemini".to_string(),
         "amp" => "Amp".to_string(),
+        "codebuff" => "Codebuff".to_string(),
         "droid" => "Droid".to_string(),
         "crush" => "Crush".to_string(),
         "openclaw" => "openclaw".to_string(),
@@ -4228,6 +4236,7 @@ mod tests {
             gemini: true,
             cursor: true,
             amp: true,
+            codebuff: true,
             droid: true,
             openclaw: true,
             hermes: true,
@@ -4257,6 +4266,7 @@ mod tests {
             "gemini",
             "cursor",
             "amp",
+            "codebuff",
             "droid",
             "openclaw",
             "hermes",
@@ -4868,6 +4878,11 @@ mod tests {
     #[test]
     fn test_capitalize_client_hermes() {
         assert_eq!(capitalize_client("hermes"), "Hermes Agent");
+    }
+
+    #[test]
+    fn test_capitalize_client_codebuff() {
+        assert_eq!(capitalize_client("codebuff"), "Codebuff");
     }
 
     #[test]

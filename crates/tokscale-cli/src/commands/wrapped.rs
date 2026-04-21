@@ -1358,6 +1358,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "gemini" => Some("Gemini CLI"),
         s if s == ClientId::Cursor.as_str() => Some("Cursor IDE"),
         "amp" => Some("Amp"),
+        "codebuff" => Some("Codebuff"),
         "droid" => Some("Droid"),
         "openclaw" => Some("OpenClaw"),
         "hermes" => Some("Hermes Agent"),
@@ -1386,6 +1387,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Gemini CLI" => Some("https://tokscale.ai/assets/logos/gemini.png"),
         "Cursor IDE" => Some("https://tokscale.ai/assets/logos/cursor.jpg"),
         "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
+        "Codebuff" => Some("https://tokscale.ai/assets/logos/codebuff.png"),
         "Droid" => Some("https://tokscale.ai/assets/logos/droid.png"),
         "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
         "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
@@ -1741,6 +1743,7 @@ fn default_clients() -> Vec<String> {
         "gemini".to_string(),
         ClientId::Cursor.as_str().to_string(),
         "amp".to_string(),
+        "codebuff".to_string(),
         "droid".to_string(),
         "openclaw".to_string(),
         "hermes".to_string(),
@@ -2209,6 +2212,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_codebuff() {
+        assert_eq!(client_display_name("codebuff"), Some("Codebuff"));
+    }
+
+    #[test]
     fn test_client_display_name_pi() {
         assert_eq!(client_display_name("pi"), Some("Pi"));
     }
@@ -2234,6 +2242,12 @@ mod tests {
     fn test_default_clients_includes_hermes() {
         let clients = default_clients();
         assert!(clients.iter().any(|client| client == "hermes"));
+    }
+
+    #[test]
+    fn test_default_clients_includes_codebuff() {
+        let clients = default_clients();
+        assert!(clients.iter().any(|client| client == "codebuff"));
     }
 
     #[test]
@@ -2323,6 +2337,14 @@ mod tests {
         assert_eq!(
             client_logo_url("Hermes Agent"),
             Some("https://tokscale.ai/assets/logos/hermes.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_codebuff() {
+        assert_eq!(
+            client_logo_url("Codebuff"),
+            Some("https://tokscale.ai/assets/logos/codebuff.png")
         );
     }
 

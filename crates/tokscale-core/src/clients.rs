@@ -310,6 +310,18 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Codebuff = 19 => {
+        id: "codebuff",
+        root: PathRoot::EnvVar {
+            var: "CODEBUFF_DATA_DIR",
+            fallback_relative: ".config/manicode",
+        },
+        relative: "projects",
+        pattern: "chat-messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -362,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 19);
+        assert_eq!(ClientId::COUNT, 20);
     }
 
     #[test]
@@ -534,5 +546,17 @@ mod tests {
             }
         );
         assert_eq!(ClientId::Hermes.data().relative_path, "state.db");
+    }
+
+    #[test]
+    fn test_codebuff_root_uses_codebuff_data_dir_env_var() {
+        assert_eq!(
+            ClientId::Codebuff.data().root,
+            PathRoot::EnvVar {
+                var: "CODEBUFF_DATA_DIR",
+                fallback_relative: ".config/manicode",
+            }
+        );
+        assert_eq!(ClientId::Codebuff.data().pattern, "chat-messages.json");
     }
 }

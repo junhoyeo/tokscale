@@ -229,17 +229,18 @@ pub fn get_client_color(client: &str) -> Color {
         return color;
     }
     match client.to_lowercase().as_str() {
-        "opencode" => Color::Rgb(34, 197, 94), // #22c55e
-        "claude" => Color::Rgb(218, 119, 86),  // #DA7756 Claude brand coral
-        "codex" => Color::Rgb(59, 130, 246),   // #3b82f6
-        "cursor" => Color::Rgb(168, 85, 247),  // #a855f7
-        "gemini" => Color::Rgb(6, 182, 212),   // #06b6d4
-        "amp" => Color::Rgb(236, 72, 153),     // #EC4899
-        "droid" => Color::Rgb(16, 185, 129),   // #10b981
-        "openclaw" => Color::Rgb(239, 68, 68), // #ef4444
-        "hermes" => Color::Rgb(255, 215, 0),   // #ffd700
-        "goose" => Color::Rgb(100, 180, 220),  // #64b4dc
-        _ => Color::Rgb(136, 136, 136),        // #888888
+        "opencode" => Color::Rgb(34, 197, 94),  // #22c55e
+        "claude" => Color::Rgb(218, 119, 86),   // #DA7756 Claude brand coral
+        "codex" => Color::Rgb(59, 130, 246),    // #3b82f6
+        "cursor" => Color::Rgb(168, 85, 247),   // #a855f7
+        "gemini" => Color::Rgb(6, 182, 212),    // #06b6d4
+        "amp" => Color::Rgb(236, 72, 153),      // #EC4899
+        "droid" => Color::Rgb(16, 185, 129),    // #10b981
+        "openclaw" => Color::Rgb(239, 68, 68),  // #ef4444
+        "hermes" => Color::Rgb(255, 215, 0),    // #ffd700
+        "goose" => Color::Rgb(100, 180, 220),   // #64b4dc
+        "codebuff" => Color::Rgb(124, 58, 237), // #7C3AED Codebuff brand purple
+        _ => Color::Rgb(136, 136, 136),         // #888888
     }
 }
 

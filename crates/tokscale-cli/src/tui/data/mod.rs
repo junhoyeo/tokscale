@@ -1150,6 +1150,7 @@ mod tests {
         assert_eq!(clients[15], ClientId::Crush);
         assert_eq!(clients[16], ClientId::Hermes);
         assert_eq!(clients[17], ClientId::Copilot);
+        assert_eq!(clients[18], ClientId::Codebuff);
     }
 
     #[test]
@@ -1211,6 +1212,10 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Hermes),
             "Hermes Agent"
         );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Codebuff),
+            "Codebuff"
+        );
     }
 
     #[test]
@@ -1233,6 +1238,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), 'l');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), 'h');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hermes), 'e');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codebuff), 'b');
     }
 
     #[test]
@@ -1299,6 +1305,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('e'),
             Some(ClientId::Hermes)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('b'),
+            Some(ClientId::Codebuff)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('a'), None);
     }

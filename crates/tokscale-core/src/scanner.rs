@@ -227,6 +227,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
+                "chat-messages.json" => file_name == "chat-messages.json",
                 _ => false,
             }
         })
@@ -575,6 +576,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Hermes
                 | ClientId::Goose
                 | ClientId::Crush
+                | ClientId::Codebuff
         ) {
             continue;
         }
@@ -851,6 +853,37 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::Crush) {
         result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
+    }
+
+    if enabled.contains(&ClientId::Codebuff) {
+        // Codebuff persists per-channel chat history under
+        // ~/.config/<channel>/projects/<project>/chats/<chatId>/chat-messages.json.
+        // When CODEBUFF_DATA_DIR is set (via PathRoot::EnvVar), scan only that root;
+        // otherwise walk the three known channel roots:
+        //   - ~/.config/manicode (primary / legacy name — Codebuff was "Manicode")
+        //   - ~/.config/manicode-dev
+        //   - ~/.config/manicode-staging
+        let env_override = if use_env_roots {
+            std::env::var("CODEBUFF_DATA_DIR").ok()
+        } else {
+            None
+        };
+
+        let mut codebuff_roots: Vec<String> = Vec::new();
+        if let Some(root) = env_override {
+            if !root.trim().is_empty() {
+                codebuff_roots.push(format!("{}/projects", root.trim_end_matches('/')));
+            }
+        } else {
+            let config_dir = format!("{}/.config", home_dir);
+            for channel in ["manicode", "manicode-dev", "manicode-staging"] {
+                codebuff_roots.push(format!("{}/{}/projects", config_dir, channel));
+            }
+        }
+
+        for root in codebuff_roots {
+            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Codebuff, root);
+        }
     }
 
     // Execute scans in parallel

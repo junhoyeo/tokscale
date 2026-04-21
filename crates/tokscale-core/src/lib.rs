@@ -818,6 +818,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Codebuff)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::codebuff::parse_codebuff_file(path)
+            })
+        })
+        .collect();
+    for outcome in codebuff_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let droid_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Droid)
         .par_iter()
@@ -1716,6 +1732,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let amp_count = amp_msgs.len() as i32;
     counts.set(ClientId::Amp, amp_count);
     messages.extend(amp_msgs);
+
+    let codebuff_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Codebuff)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::codebuff::parse_codebuff_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let codebuff_count = codebuff_msgs.len() as i32;
+    counts.set(ClientId::Codebuff, codebuff_count);
+    messages.extend(codebuff_msgs);
 
     let droid_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Droid)

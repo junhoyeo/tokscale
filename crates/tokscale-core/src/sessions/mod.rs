@@ -4,6 +4,7 @@
 
 pub mod amp;
 pub mod claudecode;
+pub mod codebuff;
 pub mod codex;
 pub mod copilot;
 pub mod crush;
