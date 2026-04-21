@@ -1474,22 +1474,11 @@ fn apply_pricing_if_available(
         return;
     };
 
-    let calculated_cost = if message.client.eq_ignore_ascii_case("gemini") {
-        let usage = TokenBreakdown {
-            input: message.tokens.input,
-            output: message.tokens.output + message.tokens.reasoning,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        };
-        pricing.calculate_cost_with_provider(&message.model_id, Some(&message.provider_id), &usage)
-    } else {
-        pricing.calculate_cost_with_provider(
-            &message.model_id,
-            Some(&message.provider_id),
-            &message.tokens,
-        )
-    };
+    let calculated_cost = pricing.calculate_cost_with_provider(
+        &message.model_id,
+        Some(&message.provider_id),
+        &message.tokens,
+    );
 
     if calculated_cost > 0.0 {
         message.cost = calculated_cost;
@@ -3213,6 +3202,41 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.034);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_uses_cache_read_pricing_for_gemini() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gemini-2.5-pro".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                cache_read_input_token_cost: Some(0.0001),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "gemini",
+            "gemini-2.5-pro",
+            "google",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 7,
+                cache_write: 0,
+                reasoning: 3,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.0267);
     }
 
     #[test]

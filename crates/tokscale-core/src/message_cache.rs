@@ -1,7 +1,6 @@
 use crate::sessions::codex::CodexParseState;
 use crate::UnifiedMessage;
 use bincode::Options;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -11,7 +10,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_SCHEMA_VERSION: u32 = 5;
+const CACHE_SCHEMA_VERSION: u32 = 6;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -282,7 +281,7 @@ impl SourceMessageCache {
             Ok(file) => file,
             Err(_) => return Self::default(),
         };
-        if lock_file.lock_shared().is_err() {
+        if fs2::FileExt::lock_shared(&lock_file).is_err() {
             return Self::default();
         }
 
@@ -365,7 +364,7 @@ impl SourceMessageCache {
             Ok(file) => file,
             Err(_) => return,
         };
-        if lock_file.lock_exclusive().is_err() {
+        if fs2::FileExt::lock_exclusive(&lock_file).is_err() {
             return;
         }
 
