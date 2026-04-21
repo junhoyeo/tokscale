@@ -8,6 +8,7 @@ use super::{normalize_opencode_agent_name, UnifiedMessage};
 use crate::TokenBreakdown;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// OpenCode message structure (from JSON files and SQLite data column)
@@ -49,6 +50,21 @@ pub struct OpenCodeCache {
 pub struct OpenCodeTime {
     pub created: f64, // Unix timestamp in milliseconds (as float)
     pub completed: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OpenCodeSqliteFingerprint {
+    created_bits: u64,
+    completed_bits: Option<u64>,
+    model_id: String,
+    provider_id: String,
+    input: i64,
+    output: i64,
+    reasoning: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cost_bits: u64,
+    agent: Option<String>,
 }
 
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
@@ -126,10 +142,12 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
-    let mut messages = Vec::new();
+    let mut messages: Vec<UnifiedMessage> = Vec::new();
+    let mut fingerprint_indices: HashMap<OpenCodeSqliteFingerprint, usize> = HashMap::new();
+    let mut dedup_key_has_embedded_message_id: Vec<bool> = Vec::new();
 
     for row_result in rows {
-        let (id, session_id, data_json) = match row_result {
+        let (row_id, session_id, data_json) = match row_result {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -144,6 +162,8 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
+        let message_id = msg.id.clone();
+
         let tokens = match msg.tokens {
             Some(t) => t,
             None => continue,
@@ -154,26 +174,58 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             None => continue,
         };
 
+        let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
         let agent_or_mode = msg.mode.or(msg.agent);
         let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
+        let input = tokens.input.max(0);
+        let output = tokens.output.max(0);
+        let reasoning = tokens.reasoning.unwrap_or(0).max(0);
+        let cache_read = tokens.cache.read.max(0);
+        let cache_write = tokens.cache.write.max(0);
+        let cost = msg.cost.unwrap_or(0.0).max(0.0);
+        let dedup_key = message_id.clone().unwrap_or(row_id);
+        let fingerprint = OpenCodeSqliteFingerprint {
+            created_bits: msg.time.created.to_bits(),
+            completed_bits: msg.time.completed.map(f64::to_bits),
+            model_id: model_id.clone(),
+            provider_id: provider_id.clone(),
+            input,
+            output,
+            reasoning,
+            cache_read,
+            cache_write,
+            cost_bits: cost.to_bits(),
+            agent: agent.clone(),
+        };
 
         let mut unified = UnifiedMessage::new_with_agent(
             "opencode",
             model_id,
-            msg.provider_id.unwrap_or_else(|| "unknown".to_string()),
+            provider_id,
             session_id,
             msg.time.created as i64,
             TokenBreakdown {
-                input: tokens.input.max(0),
-                output: tokens.output.max(0),
-                cache_read: tokens.cache.read.max(0),
-                cache_write: tokens.cache.write.max(0),
-                reasoning: tokens.reasoning.unwrap_or(0).max(0),
+                input,
+                output,
+                cache_read,
+                cache_write,
+                reasoning,
             },
-            msg.cost.unwrap_or(0.0).max(0.0),
+            cost,
             agent,
         );
-        unified.dedup_key = Some(id);
+        unified.dedup_key = Some(dedup_key);
+
+        if let Some(index) = fingerprint_indices.get(&fingerprint).copied() {
+            if message_id.is_some() && !dedup_key_has_embedded_message_id[index] {
+                dedup_key_has_embedded_message_id[index] = true;
+                messages[index].dedup_key = unified.dedup_key;
+            }
+            continue;
+        }
+
+        dedup_key_has_embedded_message_id.push(message_id.is_some());
+        fingerprint_indices.insert(fingerprint, messages.len());
         messages.push(unified);
     }
 
@@ -278,6 +330,19 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn create_opencode_sqlite_db(db_path: &Path) -> Connection {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
 
     #[test]
     fn test_parse_opencode_structure() {
@@ -470,22 +535,13 @@ mod tests {
         assert!(result.is_none(), "User messages should be skipped");
     }
 
-    /// SQLite dedup_key uses m.id from the database row
+    /// SQLite dedup_key falls back to the database row id when the message has no embedded id.
     #[test]
-    fn test_sqlite_dedup_key_from_row_id() {
+    fn test_sqlite_dedup_key_falls_back_to_row_id() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test_opencode.db");
 
-        // Create a minimal SQLite DB matching OpenCode's schema
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE message (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                data TEXT NOT NULL
-            );",
-        )
-        .unwrap();
+        let conn = create_opencode_sqlite_db(&db_path);
 
         let data_json = r#"{
             "role": "assistant",
@@ -513,10 +569,43 @@ mod tests {
         assert_eq!(
             messages[0].dedup_key,
             Some("msg_sqlite_001".to_string()),
-            "SQLite dedup_key should come from m.id column"
+            "SQLite dedup_key should fall back to the row id when no embedded id exists"
         );
         assert_eq!(messages[0].model_id, "claude-sonnet-4");
         assert_eq!(messages[0].tokens.input, 1000);
+    }
+
+    /// SQLite prefers the embedded message id when present so JSON/SQLite overlap keeps deduplicating.
+    #[test]
+    fn test_sqlite_dedup_key_prefers_embedded_message_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_opencode.db");
+
+        let conn = create_opencode_sqlite_db(&db_path);
+
+        let valid = r#"{
+            "id": "embedded_msg_001",
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 100, "output": 50, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["row_msg_001", "ses_001", valid],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("embedded_msg_001".to_string()),
+            "SQLite dedup_key should prefer the embedded message id for cross-source overlap"
+        );
     }
 
     /// SQLite skips rows without tokens or with non-assistant role
@@ -525,17 +614,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test_opencode.db");
 
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE message (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                data TEXT NOT NULL
-            );",
-        )
-        .unwrap();
+        let conn = create_opencode_sqlite_db(&db_path);
 
-        // Valid assistant message
         let valid = r#"{
             "role": "assistant",
             "modelID": "claude-sonnet-4",
@@ -544,14 +624,12 @@ mod tests {
             "time": { "created": 1700000000000.0 }
         }"#;
 
-        // User message (should be filtered by SQL WHERE clause)
         let user_msg = r#"{
             "role": "user",
             "modelID": "claude-sonnet-4",
             "time": { "created": 1700000000000.0 }
         }"#;
 
-        // Assistant without tokens (should be filtered by SQL WHERE clause)
         let no_tokens = r#"{
             "role": "assistant",
             "modelID": "claude-sonnet-4",
@@ -584,6 +662,127 @@ mod tests {
         assert_eq!(messages[0].dedup_key, Some("msg_valid".to_string()));
     }
 
+    /// Forked SQLite sessions should not count copied history more than once.
+    #[test]
+    fn test_sqlite_deduplicates_forked_history_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_opencode.db");
+        let conn = create_opencode_sqlite_db(&db_path);
+
+        let root_msg = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.05,
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 25,
+                "cache": { "read": 200, "write": 50 }
+            },
+            "time": { "created": 1700000000000.0, "completed": 1700000000500.0 },
+            "mode": "build"
+        }"#;
+
+        let new_msg = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.08,
+            "tokens": {
+                "input": 1300,
+                "output": 650,
+                "reasoning": 40,
+                "cache": { "read": 100, "write": 0 }
+            },
+            "time": { "created": 1700000001000.0, "completed": 1700000001500.0 },
+            "mode": "build"
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["root_row", "root_session", root_msg],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["fork_copy_row", "fork_session", root_msg],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["fork_new_row", "fork_session", new_msg],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            2,
+            "Forked copies of the same assistant history should collapse inside SQLite parsing"
+        );
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[1].tokens.input, 1300);
+    }
+
+    /// Same-timestamp messages with different payloads should remain distinct.
+    #[test]
+    fn test_sqlite_same_timestamp_distinct_payloads_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_opencode.db");
+        let conn = create_opencode_sqlite_db(&db_path);
+
+        let first = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.05,
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0, "completed": 1700000000100.0 },
+            "mode": "build"
+        }"#;
+
+        let second = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.05,
+            "tokens": {
+                "input": 1500,
+                "output": 750,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0, "completed": 1700000000100.0 },
+            "mode": "build"
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["row_one", "session_one", first],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["row_two", "session_two", second],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            2,
+            "Distinct assistant calls should survive even when they share the same creation timestamp"
+        );
+    }
+
     /// Cross-source dedup: matching IDs between SQLite and JSON should deduplicate
     #[test]
     fn test_cross_source_dedup_by_message_id() {
@@ -603,23 +802,30 @@ mod tests {
         )
         .unwrap();
 
-        let data_json = r#"{
+        let shared_data_json = r#"{
             "role": "assistant",
             "modelID": "claude-sonnet-4",
             "providerID": "anthropic",
             "tokens": { "input": 500, "output": 200, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
             "time": { "created": 1700000000000.0 }
         }"#;
+        let sqlite_only_data_json = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 700, "output": 250, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000001000.0 }
+        }"#;
 
         // Insert two messages into SQLite
         conn.execute(
             "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["msg_shared_001", "ses_001", data_json],
+            rusqlite::params!["msg_shared_001", "ses_001", shared_data_json],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["msg_sqlite_only", "ses_001", data_json],
+            rusqlite::params!["msg_sqlite_only", "ses_001", sqlite_only_data_json],
         )
         .unwrap();
         drop(conn);
