@@ -42,7 +42,7 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
     let (channel, project_basename, chat_id) = derive_context_from_path(path);
     let session_id = format!("{}/{}/{}", channel, project_basename, chat_id);
 
-    let chat_id_ts = parse_timestamp_str(&chat_id.replace('-', ":")).unwrap_or(0);
+    let chat_id_ts = parse_chat_id_to_millis(&chat_id).unwrap_or(0);
     let file_mtime_ms = file_modified_timestamp_ms(path);
 
     let mut results = Vec::new();
@@ -90,6 +90,26 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 
     results
+}
+
+/// Convert a filesystem-safe `chatId` back to epoch milliseconds.
+///
+/// Codebuff's `chatId` is the chat's ISO-8601 timestamp with the three `:`
+/// separators in the time portion (`HH:MM:SS`) replaced by `-` for cross-
+/// platform filesystem safety (e.g. `2025-12-14T10-00-00.000Z`). Only the
+/// separators *after* the `T` need to be flipped back to `:`; the date
+/// portion retains its normal `-` separators. A naive global
+/// `chat_id.replace('-', ":")` corrupts the date to `2025:12:14T...` and
+/// makes RFC3339 parsing fail silently.
+fn parse_chat_id_to_millis(chat_id: &str) -> Option<i64> {
+    let t_index = chat_id.find('T')?;
+    let (date, time_with_separator) = chat_id.split_at(t_index);
+    // `time_with_separator` starts with 'T'; rebuild "<date>T<HH:MM:SS...>".
+    let rebuilt = format!("{}{}", date, time_with_separator.replacen('-', ":", 2));
+    // We only touch the two time separators (`HH:MM` and `MM:SS`); any
+    // leftover `-` afterwards belongs to the millisecond/timezone portion
+    // (e.g. `2025-12-14T10:00:00.000+00:00`) and must stay intact.
+    parse_timestamp_str(&rebuilt)
 }
 
 /// Walks up a `chat-messages.json` file path and returns
@@ -456,6 +476,25 @@ mod tests {
         assert!(is_assistant_role(&ai));
         assert!(is_assistant_role(&assistant));
         assert!(!is_assistant_role(&user));
+    }
+
+    #[test]
+    fn test_parse_chat_id_to_millis_restores_time_separators_without_touching_date() {
+        // 2025-12-14T10:00:00.000Z == 1 765 706 400 000 ms
+        let expected = 1_765_706_400_000_i64;
+        let parsed = parse_chat_id_to_millis("2025-12-14T10-00-00.000Z").unwrap();
+        assert_eq!(parsed, expected);
+
+        // A global `-`→`:` replace would corrupt this to "2025:12:14T..." and
+        // return None. Guarding against that regression here.
+        let broken = "2025-12-14T10-00-00.000Z".replace('-', ":");
+        assert!(parse_timestamp_str(&broken).is_none());
+    }
+
+    #[test]
+    fn test_parse_chat_id_to_millis_returns_none_for_garbage() {
+        assert!(parse_chat_id_to_millis("not-a-chat-id").is_none());
+        assert!(parse_chat_id_to_millis("").is_none());
     }
 
     #[test]

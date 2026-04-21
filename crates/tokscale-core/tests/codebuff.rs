@@ -148,3 +148,31 @@ fn test_parse_codebuff_returns_empty_for_missing_or_non_array_file() {
     let missing = dir.path().join("nope.json");
     assert!(parse_codebuff_file(&missing).is_empty());
 }
+
+#[test]
+fn test_parse_codebuff_uses_chat_id_for_timestamp_when_message_has_none() {
+    // Regression: before fixing the chat-id parser, a global `-`→`:` replace
+    // corrupted the date portion and every message in a chat missing a
+    // per-message timestamp silently fell back to the file mtime.
+    let dir = TempDir::new().unwrap();
+    let path = write_chat(
+        &dir,
+        "manicode",
+        "proj",
+        "2025-12-14T10-00-00.000Z",
+        r#"[
+            {
+                "variant": "ai",
+                "metadata": {
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": { "inputTokens": 10, "outputTokens": 5 }
+                }
+            }
+        ]"#,
+    );
+
+    let msgs = parse_codebuff_file(&path);
+    assert_eq!(msgs.len(), 1);
+    // 2025-12-14T10:00:00.000Z → epoch ms
+    assert_eq!(msgs[0].timestamp, 1_765_706_400_000_i64);
+}

@@ -1387,7 +1387,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Gemini CLI" => Some("https://tokscale.ai/assets/logos/gemini.png"),
         "Cursor IDE" => Some("https://tokscale.ai/assets/logos/cursor.jpg"),
         "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
-        "Codebuff" => Some("https://tokscale.ai/assets/logos/codebuff.png"),
+        "Codebuff" => Some("https://avatars.githubusercontent.com/u/189203002?s=200&v=4"),
         "Droid" => Some("https://tokscale.ai/assets/logos/droid.png"),
         "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
         "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
@@ -2344,7 +2344,7 @@ mod tests {
     fn test_client_logo_url_codebuff() {
         assert_eq!(
             client_logo_url("Codebuff"),
-            Some("https://tokscale.ai/assets/logos/codebuff.png")
+            Some("https://avatars.githubusercontent.com/u/189203002?s=200&v=4")
         );
     }
 

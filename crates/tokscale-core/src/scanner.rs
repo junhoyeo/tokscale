@@ -858,22 +858,25 @@ fn scan_all_clients_with_env_strategy_inner(
     if enabled.contains(&ClientId::Codebuff) {
         // Codebuff persists per-channel chat history under
         // ~/.config/<channel>/projects/<project>/chats/<chatId>/chat-messages.json.
-        // When CODEBUFF_DATA_DIR is set (via PathRoot::EnvVar), scan only that root;
-        // otherwise walk the three known channel roots:
+        // When CODEBUFF_DATA_DIR is set to a non-empty value (via
+        // PathRoot::EnvVar), scan only that root; otherwise — including when
+        // the env var is unset *or* set to an empty/whitespace string — walk
+        // the three known channel roots:
         //   - ~/.config/manicode (primary / legacy name — Codebuff was "Manicode")
         //   - ~/.config/manicode-dev
         //   - ~/.config/manicode-staging
-        let env_override = if use_env_roots {
-            std::env::var("CODEBUFF_DATA_DIR").ok()
+        let trimmed_override = if use_env_roots {
+            std::env::var("CODEBUFF_DATA_DIR")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
         } else {
             None
         };
 
         let mut codebuff_roots: Vec<String> = Vec::new();
-        if let Some(root) = env_override {
-            if !root.trim().is_empty() {
-                codebuff_roots.push(format!("{}/projects", root.trim_end_matches('/')));
-            }
+        if let Some(root) = trimmed_override {
+            codebuff_roots.push(format!("{}/projects", root.trim_end_matches('/')));
         } else {
             let config_dir = format!("{}/.config", home_dir);
             for channel in ["manicode", "manicode-dev", "manicode-staging"] {
@@ -2329,6 +2332,93 @@ mod tests {
         assert_eq!(result.get(ClientId::Claude).len(), 2);
 
         restore_env("TOKSCALE_EXTRA_DIRS", previous);
+    }
+
+    fn setup_mock_codebuff_chat(base: &Path, channel: &str, chat_id: &str) -> PathBuf {
+        let chat_dir = base
+            .join(".config")
+            .join(channel)
+            .join("projects")
+            .join("sandbox")
+            .join("chats")
+            .join(chat_id);
+        fs::create_dir_all(&chat_dir).unwrap();
+        let file_path = chat_dir.join("chat-messages.json");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "[]").unwrap();
+        file_path
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_codebuff_walks_all_three_channels_by_default() {
+        let previous = std::env::var("CODEBUFF_DATA_DIR").ok();
+        unsafe { std::env::remove_var("CODEBUFF_DATA_DIR") };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+        setup_mock_codebuff_chat(home, "manicode-dev", "2025-12-14T11-00-00.000Z");
+        setup_mock_codebuff_chat(home, "manicode-staging", "2025-12-14T12-00-00.000Z");
+
+        let result =
+            scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 3);
+
+        restore_env("CODEBUFF_DATA_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_codebuff_empty_env_var_falls_back_to_default_channels() {
+        let previous = std::env::var("CODEBUFF_DATA_DIR").ok();
+        // Regression: a whitespace-only override used to produce zero scan
+        // roots because the `Some(_)` branch was taken and then skipped.
+        unsafe { std::env::set_var("CODEBUFF_DATA_DIR", "   ") };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+        setup_mock_codebuff_chat(home, "manicode-dev", "2025-12-14T11-00-00.000Z");
+
+        let result =
+            scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 2);
+
+        restore_env("CODEBUFF_DATA_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_codebuff_honours_explicit_env_override() {
+        let previous = std::env::var("CODEBUFF_DATA_DIR").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // Default-channel data that should NOT be picked up when the env is set.
+        setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
+        // Override target (lives OUTSIDE ~/.config to prove the override wins).
+        let override_root = dir.path().join("custom-codebuff");
+        let override_chat_dir = override_root
+            .join("projects")
+            .join("sandbox")
+            .join("chats")
+            .join("2025-12-14T11-00-00.000Z");
+        fs::create_dir_all(&override_chat_dir).unwrap();
+        File::create(override_chat_dir.join("chat-messages.json")).unwrap();
+
+        unsafe {
+            std::env::set_var("CODEBUFF_DATA_DIR", override_root.to_string_lossy().as_ref())
+        };
+
+        let result =
+            scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        assert_eq!(result.get(ClientId::Codebuff).len(), 1);
+        assert!(result.get(ClientId::Codebuff)[0]
+            .to_string_lossy()
+            .contains("custom-codebuff"));
+
+        restore_env("CODEBUFF_DATA_DIR", previous);
     }
 
     #[test]
