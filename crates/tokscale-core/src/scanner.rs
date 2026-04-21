@@ -3,14 +3,49 @@
 //! Uses walkdir with rayon for parallel directory traversal.
 
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::clients::ClientId;
 use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// User-controlled scanner settings loaded from a config file.
+///
+/// This is the persistent, declarative counterpart to environment variables
+/// like `TOKSCALE_EXTRA_DIRS` — it lives on the `scanner` key inside
+/// `~/.config/tokscale/settings.json` and is threaded down into
+/// [`scan_all_clients_with_scanner_settings`].
+///
+/// `#[serde(default)]` at both the struct and field level guarantees that
+/// older settings.json files (which have no `scanner` key at all, or an
+/// empty `{}`) deserialize cleanly without errors.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScannerSettings {
+    /// Absolute paths to additional OpenCode SQLite databases to scan.
+    ///
+    /// Use this when the opencode binary was launched with `OPENCODE_DB`
+    /// pointing at a location outside the default `~/.local/share/opencode`
+    /// data directory, so tokscale's auto-discovery can't find it.
+    ///
+    /// Paths are merged into the auto-discovered
+    /// [`ScanResult::opencode_dbs`] list; duplicates (by canonical path)
+    /// are removed and non-existent entries are silently skipped so stale
+    /// config does not break the scan. WAL/SHM sidecar files are rejected
+    /// with the same [`is_opencode_db_filename`] check used for
+    /// auto-discovery.
+    #[serde(default)]
+    pub opencode_db_paths: Vec<PathBuf>,
+    /// Additional per-client scan roots loaded from settings.json.
+    ///
+    /// Keys use public client ids like `codex`, `gemini`, and `openclaw`
+    /// so the JSON stays stable and human-editable.
+    #[serde(default)]
+    pub extra_scan_paths: BTreeMap<String, Vec<PathBuf>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrushDbSource {
@@ -23,9 +58,17 @@ pub struct CrushDbSource {
 #[derive(Debug)]
 pub struct ScanResult {
     pub files: [Vec<PathBuf>; ClientId::COUNT],
-    pub opencode_db: Option<PathBuf>,
+    /// All OpenCode SQLite databases discovered under the data dir.
+    ///
+    /// Includes the default `opencode.db` (used by `latest`/`beta` channels
+    /// and anyone with `OPENCODE_DISABLE_CHANNEL_DB=1`) as well as any
+    /// channel-suffixed variants such as `opencode-stable.db`,
+    /// `opencode-nightly.db`, etc. See upstream logic in opencode's
+    /// `packages/opencode/src/storage/db.ts` (`getChannelPath`).
+    pub opencode_dbs: Vec<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
+    pub hermes_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
@@ -35,9 +78,10 @@ impl Default for ScanResult {
     fn default() -> Self {
         Self {
             files: std::array::from_fn(|_| Vec::new()),
-            opencode_db: None,
+            opencode_dbs: Vec::new(),
             synthetic_db: None,
             kilo_db: None,
+            hermes_db: None,
             crush_dbs: Vec::new(),
             opencode_json_dir: None,
         }
@@ -96,6 +140,24 @@ pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> 
 
 pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
     headless_roots_with_env_strategy(home_dir, true)
+}
+
+pub fn copilot_exporter_path_with_env_strategy(use_env_roots: bool) -> Option<PathBuf> {
+    if !use_env_roots {
+        return None;
+    }
+
+    let path = std::env::var("COPILOT_OTEL_FILE_EXPORTER_PATH").ok()?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+pub fn copilot_exporter_path() -> Option<PathBuf> {
+    copilot_exporter_path_with_env_strategy(true)
 }
 
 /// Scan a single directory for session files
@@ -206,6 +268,30 @@ pub fn parse_extra_dirs(value: &str, enabled: &HashSet<ClientId>) -> Vec<(Client
         .collect()
 }
 
+pub fn extra_scan_paths_for(
+    settings: &ScannerSettings,
+    enabled: &HashSet<ClientId>,
+) -> Vec<(ClientId, PathBuf)> {
+    settings
+        .extra_scan_paths
+        .iter()
+        .filter_map(|(client_str, paths)| {
+            let client_id = ClientId::from_str(client_str)?;
+            if !enabled.contains(&client_id) || !supports_extra_dir_scanning(client_id) {
+                return None;
+            }
+            Some(
+                paths
+                    .iter()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .cloned()
+                    .map(move |path| (client_id, path)),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct CrushProjectList {
     #[serde(default)]
@@ -216,6 +302,76 @@ struct CrushProjectList {
 struct CrushProject {
     path: String,
     data_dir: String,
+}
+
+/// Discover every OpenCode SQLite database under the opencode data dir.
+///
+/// Matches:
+/// - `opencode.db` (default, used by `latest`/`beta` channels or when
+///   `OPENCODE_DISABLE_CHANNEL_DB=1` is set)
+/// - `opencode-<channel>.db` where `<channel>` is the sanitized channel name
+///   opencode bakes into the build (e.g. `stable`, `nightly`). Upstream
+///   sanitizes channels with `/[^a-zA-Z0-9._-]/g -> "-"`, so the suffix we
+///   accept here mirrors that character class exactly.
+///
+/// Ignores WAL/SHM sidecar files (`opencode.db-wal`, `opencode.db-shm`, etc.)
+/// and anything that does not end in `.db`.
+///
+/// Returns a sorted, deterministic list for stable downstream behavior.
+pub(crate) fn discover_opencode_dbs(data_dir: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut dbs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() {
+                // Could be a symlink — accept it if it resolves to a file.
+                if !entry.path().is_file() {
+                    return None;
+                }
+            }
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if !is_opencode_db_filename(name) {
+                return None;
+            }
+            Some(path)
+        })
+        .collect();
+
+    dbs.sort_unstable();
+    dbs
+}
+
+/// Returns true if `name` matches the opencode db naming rule:
+/// `opencode.db` or `opencode-<channel>.db` with `<channel>` drawn from the
+/// same `[a-zA-Z0-9._-]` character class that opencode's `getChannelPath`
+/// normalizes to. Sidecar files (`.db-wal`, `.db-shm`, `.db-journal`) are
+/// rejected because they do not end in `.db`.
+fn is_opencode_db_filename(name: &str) -> bool {
+    // Strip the trailing `.db` — reject anything else so WAL/SHM sidecars
+    // (e.g. `opencode.db-wal`) are ignored.
+    let stem = match name.strip_suffix(".db") {
+        Some(stem) => stem,
+        None => return false,
+    };
+    if stem == "opencode" {
+        return true;
+    }
+    let channel = match stem.strip_prefix("opencode-") {
+        Some(channel) => channel,
+        None => return false,
+    };
+    if channel.is_empty() {
+        return false;
+    }
+    channel
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 fn crush_db_path(data_dir: &Path) -> Option<PathBuf> {
@@ -273,10 +429,96 @@ fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource>
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
-    // rather than consuming scanned file lists, KiloCode uses dedicated local
+    // Kilo CLI and Hermes use SQLite database paths, Roo/KiloCode require local + remote
     // and server task roots, and Crush discovers SQLite DBs via the project
     // registry rather than scanned file paths.
-    !matches!(client_id, ClientId::Kilo | ClientId::Crush)
+    !matches!(
+        client_id,
+        ClientId::Kilo | ClientId::Crush | ClientId::Hermes
+    )
+}
+
+fn push_unique_scan_task(
+    tasks: &mut Vec<(ClientId, String, &'static str)>,
+    seen: &mut HashSet<(ClientId, PathBuf)>,
+    client_id: ClientId,
+    raw_path: impl Into<PathBuf>,
+) {
+    let raw_path = raw_path.into();
+    if raw_path.as_os_str().is_empty() {
+        return;
+    }
+
+    let key = std::fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
+    if seen.insert((client_id, key)) {
+        let pattern = client_id.data().pattern;
+        tasks.push((client_id, raw_path.to_string_lossy().to_string(), pattern));
+    }
+}
+
+/// Merge user-configured OpenCode db paths from [`ScannerSettings`] into the
+/// auto-discovered list, in-place.
+///
+/// Rules:
+/// - Non-existent paths are silently skipped so stale config never aborts a
+///   scan (the config outlives any single opencode install).
+/// - WAL/SHM/journal sidecars are rejected via [`is_opencode_db_filename`].
+/// - Duplicates are removed by canonicalized path comparison, so a user who
+///   explicitly lists an auto-discovered db in their config does not cause
+///   it to be parsed twice.
+///
+/// Kept as a separate helper so the unit tests can exercise the merge
+/// semantics without spinning up a full `scan_all_clients` run.
+pub(crate) fn merge_user_opencode_db_paths(discovered: &mut Vec<PathBuf>, extra_paths: &[PathBuf]) {
+    if extra_paths.is_empty() {
+        return;
+    }
+
+    // Build a canonical-path set of what we already have so we can dedup
+    // against auto-discovered entries. Fall back to the raw path if
+    // canonicalize fails (e.g. on a filesystem that doesn't support it),
+    // which preserves the pre-canonicalization behavior without silently
+    // dropping entries.
+    let mut seen: HashSet<PathBuf> = discovered
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+
+    for raw in extra_paths {
+        if !raw.is_file() {
+            // Stale config or wrong path — silently skip.
+            continue;
+        }
+        let Some(name) = raw.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_opencode_db_filename(name) {
+            // Reject sidecars (`.db-wal`, `.db-shm`) and anything that does
+            // not match the upstream channel-db naming rule.
+            continue;
+        }
+        let canonical = std::fs::canonicalize(raw).unwrap_or_else(|_| raw.clone());
+        if seen.insert(canonical) {
+            discovered.push(raw.clone());
+        }
+    }
+}
+
+/// Scan all session client directories in parallel, with user-controlled
+/// [`ScannerSettings`] merged in.
+///
+/// This is the preferred entry point when you have loaded persistent
+/// settings (e.g. from `~/.config/tokscale/settings.json`). Thin wrappers
+/// [`scan_all_clients_with_env_strategy`] and [`scan_all_clients`] call
+/// into this with `ScannerSettings::default()` for callers that don't care
+/// about the persistent config.
+pub fn scan_all_clients_with_scanner_settings(
+    home_dir: &str,
+    clients: &[String],
+    use_env_roots: bool,
+    scanner_settings: &ScannerSettings,
+) -> ScanResult {
+    scan_all_clients_with_env_strategy_inner(home_dir, clients, use_env_roots, scanner_settings)
 }
 
 /// Scan all session client directories in parallel
@@ -284,6 +526,20 @@ pub fn scan_all_clients_with_env_strategy(
     home_dir: &str,
     clients: &[String],
     use_env_roots: bool,
+) -> ScanResult {
+    scan_all_clients_with_scanner_settings(
+        home_dir,
+        clients,
+        use_env_roots,
+        &ScannerSettings::default(),
+    )
+}
+
+fn scan_all_clients_with_env_strategy_inner(
+    home_dir: &str,
+    clients: &[String],
+    use_env_roots: bool,
+    scanner_settings: &ScannerSettings,
 ) -> ScanResult {
     let mut result = ScanResult::default();
 
@@ -303,6 +559,7 @@ pub fn scan_all_clients_with_env_strategy(
 
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
+    let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
 
     for client_id in &enabled {
         if matches!(
@@ -313,6 +570,7 @@ pub fn scan_all_clients_with_env_strategy(
                 | ClientId::RooCode
                 | ClientId::KiloCode
                 | ClientId::Kilo
+                | ClientId::Hermes
                 | ClientId::Crush
         ) {
             continue;
@@ -320,7 +578,11 @@ pub fn scan_all_clients_with_env_strategy(
 
         let def = client_id.data();
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((*client_id, path, def.pattern));
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
+    }
+
+    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
     // Extra scan directories are part of the caller's environment, so they are
@@ -328,8 +590,7 @@ pub fn scan_all_clients_with_env_strategy(
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
         for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
-            let pattern = client_id.data().pattern;
-            tasks.push((client_id, path, pattern));
+            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
     }
 
@@ -340,22 +601,42 @@ pub fn scan_all_clients_with_env_strategy(
             format!("{}/.local/share", home_dir)
         };
 
-        // OpenCode 1.2+: SQLite database at ~/.local/share/opencode/opencode.db
-        let opencode_db_path = PathBuf::from(format!("{}/opencode/opencode.db", xdg_data));
-        if opencode_db_path.exists() {
-            result.opencode_db = Some(opencode_db_path);
-        }
+        // OpenCode 1.2+: SQLite database(s) at ~/.local/share/opencode/opencode*.db
+        //
+        // opencode picks its db filename at build time based on the release
+        // channel: `latest`/`beta` use `opencode.db`, other channels use
+        // `opencode-<channel>.db` (e.g. `opencode-stable.db`). A single user
+        // can run multiple channels side by side, so we pick up every match
+        // under the data dir. See `getChannelPath` in
+        // opencode/packages/opencode/src/storage/db.ts for the source of
+        // the naming rule.
+        let opencode_data_dir = PathBuf::from(format!("{}/opencode", xdg_data));
+        result.opencode_dbs = discover_opencode_dbs(&opencode_data_dir);
+
+        // Merge user-configured `scanner.opencodeDbPaths` here, INSIDE the
+        // `enabled.contains(&ClientId::OpenCode)` guard, so a request like
+        // `tokscale --claude` does not pull in OpenCode dbs the user pinned
+        // for unrelated reasons. Inflated OpenCode `counts` and wasted
+        // SQLite parsing work otherwise sneak past the message-level
+        // client filter that runs much later in the pipeline.
+        merge_user_opencode_db_paths(
+            &mut result.opencode_dbs,
+            &scanner_settings.opencode_db_paths,
+        );
+        result.opencode_dbs.sort_unstable();
+        result.opencode_dbs.dedup();
 
         // OpenCode legacy: JSON files at ~/.local/share/opencode/storage/message/*/*.json
         let opencode_path = ClientId::OpenCode
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         result.opencode_json_dir = Some(PathBuf::from(&opencode_path));
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenCode,
             opencode_path,
-            ClientId::OpenCode.data().pattern,
-        ));
+        );
     }
 
     if enabled.contains(&ClientId::Codex) {
@@ -368,21 +649,30 @@ pub fn scan_all_clients_with_env_strategy(
         let codex_path = ClientId::Codex
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((ClientId::Codex, codex_path, ClientId::Codex.data().pattern));
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Codex,
+            codex_path,
+        );
 
         // Codex archived sessions: ~/.codex/archived_sessions/**/*.jsonl
         let codex_archived_path = format!("{}/archived_sessions", codex_home);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::Codex,
             codex_archived_path,
-            ClientId::Codex.data().pattern,
-        ));
+        );
 
         // Codex headless: <headless_root>/codex/*.jsonl
         for root in &headless_roots {
-            let codex_headless_path = root.join("codex");
-            let path = codex_headless_path.to_string_lossy().to_string();
-            tasks.push((ClientId::Codex, path, ClientId::Codex.data().pattern));
+            push_unique_scan_task(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Codex,
+                root.join("codex"),
+            );
         }
     }
 
@@ -391,33 +681,43 @@ pub fn scan_all_clients_with_env_strategy(
         let openclaw_path = ClientId::OpenClaw
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             openclaw_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
 
         // Legacy paths (Clawd -> Moltbot -> OpenClaw rebrand history)
         let clawdbot_path = format!("{}/.clawdbot/agents", home_dir);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             clawdbot_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
 
         let moltbot_path = format!("{}/.moltbot/agents", home_dir);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             moltbot_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
 
         let moldbot_path = format!("{}/.moldbot/agents", home_dir);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::OpenClaw,
             moldbot_path,
-            ClientId::OpenClaw.data().pattern,
-        ));
+        );
+    }
+
+    // Oh My Pi fork (https://github.com/can1357/oh-my-pi) — same JSONL format, different root
+    if enabled.contains(&ClientId::Pi) {
+        let omp_path = format!("{}/.omp/agent/sessions", home_dir);
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Pi, omp_path);
     }
 
     if include_synthetic {
@@ -436,42 +736,46 @@ pub fn scan_all_clients_with_env_strategy(
         let local_path = ClientId::RooCode
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::RooCode,
             local_path,
-            ClientId::RooCode.data().pattern,
-        ));
+        );
 
         let server_path = format!(
             "{}/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
             home_dir
         );
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::RooCode,
             server_path,
-            ClientId::RooCode.data().pattern,
-        ));
+        );
     }
 
     if enabled.contains(&ClientId::KiloCode) {
         let local_path = ClientId::KiloCode
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::KiloCode,
             local_path,
-            ClientId::KiloCode.data().pattern,
-        ));
+        );
 
         let server_path = format!(
             "{}/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks",
             home_dir
         );
-        tasks.push((
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
             ClientId::KiloCode,
             server_path,
-            ClientId::KiloCode.data().pattern,
-        ));
+        );
     }
 
     if enabled.contains(&ClientId::Kilo) {
@@ -480,6 +784,15 @@ pub fn scan_all_clients_with_env_strategy(
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&kilo_db_path).exists() {
             result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        }
+    }
+
+    if enabled.contains(&ClientId::Hermes) {
+        let hermes_db_path = ClientId::Hermes
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        if std::path::Path::new(&hermes_db_path).exists() {
+            result.hermes_db = Some(PathBuf::from(hermes_db_path));
         }
     }
 
@@ -502,6 +815,16 @@ pub fn scan_all_clients_with_env_strategy(
         for file in files {
             if seen.insert(file.clone()) {
                 result.get_mut(client_id).push(file);
+            }
+        }
+    }
+
+    if enabled.contains(&ClientId::Copilot) {
+        if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
+            if path.is_file() && seen.insert(path.clone()) {
+                let copilot_files = result.get_mut(ClientId::Copilot);
+                copilot_files.push(path);
+                copilot_files.sort_unstable();
             }
         }
     }
@@ -530,6 +853,14 @@ mod tests {
 
     fn restore_current_dir(previous: &Path) {
         std::env::set_current_dir(previous).unwrap();
+    }
+
+    fn setup_mock_copilot_dir(home: &Path) {
+        let sessions_dir = home.join(".copilot/otel");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let file_path = sessions_dir.join("copilot.jsonl");
+        let mut file = File::create(file_path).unwrap();
+        writeln!(file, "{{\"type\":\"span\",\"name\":\"chat gpt-5.4-mini\"}}").unwrap();
     }
 
     #[test]
@@ -783,6 +1114,14 @@ mod tests {
         file.write_all(b"{}").unwrap();
     }
 
+    fn setup_mock_omp_dir(base: &std::path::Path) {
+        let omp_path = base.join(".omp/agent/sessions/--omp-test--");
+        fs::create_dir_all(&omp_path).unwrap();
+        let mut file =
+            File::create(omp_path.join("2026-04-06T03-04-28Z_omp_ses_001.jsonl")).unwrap();
+        file.write_all(b"{}").unwrap();
+    }
+
     fn setup_mock_kimi_dir(base: &std::path::Path) {
         let kimi_session = base.join(".kimi/sessions/group1/session-uuid-1");
         fs::create_dir_all(&kimi_session).unwrap();
@@ -940,6 +1279,435 @@ mod tests {
     }
 
     #[test]
+    fn test_is_opencode_db_filename_accepts_default_and_channel_variants() {
+        // Default channel (`latest`/`beta`) and explicit-disable use this name.
+        assert!(is_opencode_db_filename("opencode.db"));
+        // Channel-suffixed dbs, drawn from opencode's `[a-zA-Z0-9._-]`
+        // character class in getChannelPath.
+        assert!(is_opencode_db_filename("opencode-stable.db"));
+        assert!(is_opencode_db_filename("opencode-nightly.db"));
+        assert!(is_opencode_db_filename("opencode-canary.db"));
+        assert!(is_opencode_db_filename("opencode-local.db"));
+        assert!(is_opencode_db_filename("opencode-1.2.3.db"));
+        assert!(is_opencode_db_filename("opencode-pr_42.db"));
+    }
+
+    #[test]
+    fn test_is_opencode_db_filename_rejects_sidecars_and_unrelated_files() {
+        // WAL/SHM/journal sidecar files share the prefix — must be ignored
+        // so we don't try to "parse" them.
+        assert!(!is_opencode_db_filename("opencode.db-wal"));
+        assert!(!is_opencode_db_filename("opencode.db-shm"));
+        assert!(!is_opencode_db_filename("opencode.db-journal"));
+        assert!(!is_opencode_db_filename("opencode-stable.db-wal"));
+        // Unrelated / malformed names.
+        assert!(!is_opencode_db_filename("opencode"));
+        assert!(!is_opencode_db_filename("opencode-.db"));
+        assert!(!is_opencode_db_filename("opencode_stable.db"));
+        assert!(!is_opencode_db_filename("opencode-stable/beta.db"));
+        assert!(!is_opencode_db_filename("auth.json"));
+        assert!(!is_opencode_db_filename("other.db"));
+    }
+
+    #[test]
+    fn test_discover_opencode_dbs_finds_multiple_channels_and_skips_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().join("opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Real dbs for two channels running side by side — the case from
+        // junhoyeo/tokscale#387.
+        File::create(data_dir.join("opencode.db")).unwrap();
+        File::create(data_dir.join("opencode-stable.db")).unwrap();
+        // SQLite WAL/SHM sidecars that must not be treated as dbs.
+        File::create(data_dir.join("opencode.db-wal")).unwrap();
+        File::create(data_dir.join("opencode.db-shm")).unwrap();
+        File::create(data_dir.join("opencode-stable.db-wal")).unwrap();
+        // Unrelated files that live in the same dir.
+        File::create(data_dir.join("auth.json")).unwrap();
+
+        let found = discover_opencode_dbs(&data_dir);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["opencode-stable.db", "opencode.db"]);
+    }
+
+    #[test]
+    fn test_discover_opencode_dbs_returns_empty_for_missing_dir() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(discover_opencode_dbs(&missing).is_empty());
+    }
+
+    #[test]
+    fn test_merge_user_opencode_db_paths_picks_up_path_outside_xdg() {
+        // Simulate `OPENCODE_DB=/arbitrary/abs/path/custom.db` upstream:
+        // the file is a real opencode db but lives outside
+        // `~/.local/share/opencode`, so auto-discovery never sees it.
+        let dir = TempDir::new().unwrap();
+        let outside = dir.path().join("somewhere-else");
+        fs::create_dir_all(&outside).unwrap();
+        let user_db = outside.join("opencode.db");
+        File::create(&user_db).unwrap();
+
+        let mut discovered: Vec<PathBuf> = Vec::new();
+        merge_user_opencode_db_paths(&mut discovered, std::slice::from_ref(&user_db));
+
+        assert_eq!(discovered, vec![user_db]);
+    }
+
+    #[test]
+    fn test_merge_user_opencode_db_paths_skips_nonexistent_and_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("opencode-stable.db");
+        File::create(&real).unwrap();
+        let wal = dir.path().join("opencode-stable.db-wal");
+        File::create(&wal).unwrap();
+        let missing = dir.path().join("opencode-missing.db"); // never created
+
+        let mut discovered: Vec<PathBuf> = Vec::new();
+        merge_user_opencode_db_paths(
+            &mut discovered,
+            &[real.clone(), wal.clone(), missing.clone()],
+        );
+
+        // Nonexistent path: silently skipped so stale config can't break a scan.
+        // Sidecar path: rejected by is_opencode_db_filename.
+        assert_eq!(discovered, vec![real]);
+    }
+
+    #[test]
+    fn test_merge_user_opencode_db_paths_dedups_against_auto_discovered() {
+        let dir = TempDir::new().unwrap();
+        let shared = dir.path().join("opencode.db");
+        File::create(&shared).unwrap();
+
+        // User explicitly lists a path that auto-discovery also found —
+        // must not double-parse the same sqlite file.
+        let mut discovered: Vec<PathBuf> = vec![shared.clone()];
+        merge_user_opencode_db_paths(&mut discovered, std::slice::from_ref(&shared));
+
+        assert_eq!(discovered, vec![shared]);
+    }
+
+    #[test]
+    fn test_scanner_settings_deserialize_from_json_camel_case() {
+        // This is the contract the CLI's settings.json relies on: the
+        // field is `opencodeDbPaths`, and an empty object or missing key
+        // must round-trip to Default without erroring.
+        let json = r#"{
+            "opencodeDbPaths": ["/one/opencode.db", "/two/opencode-stable.db"]
+        }"#;
+        let parsed: ScannerSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.opencode_db_paths.len(), 2);
+        assert_eq!(
+            parsed.opencode_db_paths[0],
+            PathBuf::from("/one/opencode.db")
+        );
+        assert_eq!(
+            parsed.opencode_db_paths[1],
+            PathBuf::from("/two/opencode-stable.db")
+        );
+
+        let empty: ScannerSettings = serde_json::from_str("{}").unwrap();
+        assert!(empty.opencode_db_paths.is_empty());
+    }
+
+    #[test]
+    fn test_scanner_settings_deserialize_extra_scan_paths_camel_case() {
+        let json = r#"{
+            "extraScanPaths": {
+                "codex": [
+                    "/tmp/project-a/.codex/sessions",
+                    "/tmp/project-b/.codex/archived_sessions"
+                ],
+                "gemini": ["/tmp/imports/gemini/tmp"]
+            }
+        }"#;
+
+        let parsed: ScannerSettings = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(
+            serialized["extraScanPaths"]["codex"][0],
+            serde_json::json!("/tmp/project-a/.codex/sessions")
+        );
+        assert_eq!(
+            serialized["extraScanPaths"]["codex"][1],
+            serde_json::json!("/tmp/project-b/.codex/archived_sessions")
+        );
+        assert_eq!(
+            serialized["extraScanPaths"]["gemini"][0],
+            serde_json::json!("/tmp/imports/gemini/tmp")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_merges_user_path() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // Auto-discoverable channel db inside XDG data dir.
+        let data_dir = home.join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        File::create(data_dir.join("opencode-stable.db")).unwrap();
+
+        // User-configured db living outside XDG_DATA_HOME, the way an
+        // `OPENCODE_DB=/abs/path/opencode.db` user would have it.
+        let outside_dir = home.join("elsewhere");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let outside_db = outside_dir.join("opencode.db");
+        File::create(&outside_db).unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
+
+        let settings = ScannerSettings {
+            opencode_db_paths: vec![outside_db.clone()],
+            ..Default::default()
+        };
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["opencode".to_string()],
+            true,
+            &settings,
+        );
+
+        // Both paths must appear — the auto-discovered stable db and the
+        // user-configured outside-XDG db.
+        let names: Vec<String> = result
+            .opencode_dbs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "opencode-stable.db"),
+            "expected auto-discovered opencode-stable.db, got {names:?}"
+        );
+        assert!(
+            result.opencode_dbs.iter().any(|p| p == &outside_db),
+            "expected user-configured {} in {:?}",
+            outside_db.display(),
+            result.opencode_dbs
+        );
+
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_merges_settings_extra_paths() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_root = home.join(".codex/sessions");
+        fs::create_dir_all(&default_root).unwrap();
+        File::create(default_root.join("default.jsonl")).unwrap();
+
+        let extra_root = home.join("workspace/project-a/.codex/sessions");
+        fs::create_dir_all(&extra_root).unwrap();
+        File::create(extra_root.join("extra.jsonl")).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "codex": [extra_root]
+            }
+        }))
+        .unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["codex".to_string()],
+            true,
+            &settings,
+        );
+
+        assert_eq!(result.get(ClientId::Codex).len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_dedups_settings_and_env_extra_paths() {
+        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_root = home.join(".codex/sessions");
+        fs::create_dir_all(&default_root).unwrap();
+        File::create(default_root.join("default.jsonl")).unwrap();
+
+        let extra_root = home.join("workspace/project-a/.codex/sessions");
+        fs::create_dir_all(&extra_root).unwrap();
+        File::create(extra_root.join("extra.jsonl")).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("codex:{}", extra_root.join("..").join("sessions").display()),
+            )
+        };
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "codex": [extra_root]
+            }
+        }))
+        .unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["codex".to_string()],
+            true,
+            &settings,
+        );
+
+        assert_eq!(result.get(ClientId::Codex).len(), 2);
+        restore_env("TOKSCALE_EXTRA_DIRS", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_respects_opencode_client_filter() {
+        // Regression guard: previously the scanner unconditionally
+        // merged `scanner.opencodeDbPaths` after the inner scan, which
+        // bypassed the existing `enabled.contains(&ClientId::OpenCode)`
+        // guard. A request like `tokscale --claude` would still pull in
+        // user-pinned OpenCode dbs and inflate `parse_local_clients`
+        // counts plus waste SQLite parsing work.
+        //
+        // The fix moves the merge inside the OpenCode-enabled block, so
+        // this test exercises the four canonical filter shapes:
+        //   1. ["claude"]    → opencode_dbs must be empty
+        //   2. ["opencode"]  → both auto + user-configured dbs present
+        //   3. ["synthetic"] → both present (synthetic enables all)
+        //   4. []            → both present (empty filter = all clients)
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        // Auto-discoverable channel db inside XDG data dir.
+        let data_dir = home.join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        let auto_db = data_dir.join("opencode.db");
+        File::create(&auto_db).unwrap();
+
+        // User-configured db living outside XDG_DATA_HOME (mirrors the
+        // `OPENCODE_DB=/abs/path/opencode.db` use case).
+        let outside_dir = home.join("elsewhere");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let outside_db = outside_dir.join("opencode.db");
+        File::create(&outside_db).unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
+
+        let settings = ScannerSettings {
+            opencode_db_paths: vec![outside_db.clone()],
+            ..Default::default()
+        };
+
+        let scan = |clients: &[&str]| {
+            let owned: Vec<String> = clients.iter().map(|s| s.to_string()).collect();
+            scan_all_clients_with_scanner_settings(home.to_str().unwrap(), &owned, true, &settings)
+        };
+
+        // 1. clients=["claude"] — OpenCode disabled, dbs must stay empty.
+        let claude_only = scan(&["claude"]);
+        assert!(
+            claude_only.opencode_dbs.is_empty(),
+            "scanner.opencodeDbPaths must NOT leak into a Claude-only scan, \
+             got {:?}",
+            claude_only.opencode_dbs
+        );
+
+        // 2. clients=["opencode"] — both auto-discovered + user-configured.
+        let opencode_only = scan(&["opencode"]);
+        assert!(
+            opencode_only.opencode_dbs.iter().any(|p| p == &auto_db),
+            "expected auto-discovered {} in {:?}",
+            auto_db.display(),
+            opencode_only.opencode_dbs
+        );
+        assert!(
+            opencode_only.opencode_dbs.iter().any(|p| p == &outside_db),
+            "expected user-configured {} in {:?}",
+            outside_db.display(),
+            opencode_only.opencode_dbs
+        );
+
+        // 3. clients=["synthetic"] — synthetic enables all clients, so
+        //    both dbs must be present.
+        let synthetic_only = scan(&["synthetic"]);
+        assert!(
+            synthetic_only.opencode_dbs.iter().any(|p| p == &auto_db),
+            "synthetic-only filter must enable OpenCode auto-discovery, got {:?}",
+            synthetic_only.opencode_dbs
+        );
+        assert!(
+            synthetic_only.opencode_dbs.iter().any(|p| p == &outside_db),
+            "synthetic-only filter must merge user-configured paths, got {:?}",
+            synthetic_only.opencode_dbs
+        );
+
+        // 4. clients=[] — empty filter = all clients = both dbs present.
+        let all_clients = scan(&[]);
+        assert!(
+            all_clients.opencode_dbs.iter().any(|p| p == &auto_db),
+            "empty client filter must enable OpenCode auto-discovery, got {:?}",
+            all_clients.opencode_dbs
+        );
+        assert!(
+            all_clients.opencode_dbs.iter().any(|p| p == &outside_db),
+            "empty client filter must merge user-configured paths, got {:?}",
+            all_clients.opencode_dbs
+        );
+
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_opencode_picks_up_channel_suffixed_dbs() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let data_dir = home.join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        File::create(data_dir.join("opencode.db")).unwrap();
+        File::create(data_dir.join("opencode-stable.db")).unwrap();
+        File::create(data_dir.join("opencode-nightly.db")).unwrap();
+        // Sidecars that must be ignored.
+        File::create(data_dir.join("opencode.db-wal")).unwrap();
+        File::create(data_dir.join("opencode-stable.db-shm")).unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["opencode".to_string()]);
+
+        let names: Vec<String> = result
+            .opencode_dbs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "opencode-nightly.db".to_string(),
+                "opencode-stable.db".to_string(),
+                "opencode.db".to_string(),
+            ],
+            "expected all channel dbs, got {names:?}"
+        );
+
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
     fn test_scan_all_clients_pi() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -949,6 +1717,29 @@ mod tests {
         assert_eq!(result.get(ClientId::Pi).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_omp_scanned_as_pi() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_omp_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
+        assert_eq!(result.get(ClientId::Pi).len(), 1);
+        assert!(result.get(ClientId::Pi)[0].ends_with("2026-04-06T03-04-28Z_omp_ses_001.jsonl"));
+        assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_pi_from_both_paths() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_pi_dir(home);
+        setup_mock_omp_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
+        assert_eq!(result.get(ClientId::Pi).len(), 2);
     }
 
     #[test]
@@ -971,6 +1762,43 @@ mod tests {
         let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
         assert_eq!(result.get(ClientId::Gemini).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_copilot() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_copilot_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+        );
+
+        assert_eq!(result.get(ClientId::Copilot).len(), 1);
+        assert!(result.get(ClientId::Copilot)[0].ends_with("copilot.jsonl"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_copilot_includes_explicit_exporter_file() {
+        let previous = std::env::var("COPILOT_OTEL_FILE_EXPORTER_PATH").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let explicit_dir = home.join("otel-export");
+        fs::create_dir_all(&explicit_dir).unwrap();
+        let explicit_file = explicit_dir.join("copilot-explicit.jsonl");
+        File::create(&explicit_file).unwrap();
+
+        unsafe { std::env::set_var("COPILOT_OTEL_FILE_EXPORTER_PATH", &explicit_file) };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["copilot".to_string()]);
+
+        assert_eq!(result.get(ClientId::Copilot), &vec![explicit_file]);
+
+        restore_env("COPILOT_OTEL_FILE_EXPORTER_PATH", previous);
     }
 
     #[test]
@@ -1019,9 +1847,12 @@ mod tests {
         setup_mock_claude_dir(home);
         setup_mock_gemini_dir(home);
 
-        let result = scan_all_clients(
+        // use_env_roots=false to avoid interference from TOKSCALE_EXTRA_DIRS
+        // set by parallel tests
+        let result = scan_all_clients_with_env_strategy(
             home.to_str().unwrap(),
             &["claude".to_string(), "gemini".to_string()],
+            false,
         );
 
         assert_eq!(result.get(ClientId::Claude).len(), 1);

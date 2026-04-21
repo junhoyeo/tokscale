@@ -2,6 +2,7 @@
 //!
 //! Parses JSON files from ~/.factory/sessions/
 
+use super::utils::read_file_or_none;
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -134,9 +135,8 @@ fn extract_model_from_jsonl(jsonl_path: &Path) -> Option<String> {
 
 /// Parse a Droid settings.json file
 pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    let Some(data) = read_file_or_none(path) else {
+        return Vec::new();
     };
 
     let mut bytes = data;

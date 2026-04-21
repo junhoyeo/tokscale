@@ -1,9 +1,11 @@
 mod app;
 mod cache;
 pub mod client_ui;
+mod colors;
 pub mod config;
 pub mod data;
 mod event;
+mod export;
 pub mod settings;
 mod themes;
 mod ui;
@@ -31,7 +33,9 @@ use anyhow::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    },
 };
 use ratatui::prelude::*;
 use tokscale_core::ClientId;
@@ -99,8 +103,11 @@ pub fn run(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
+    let _ = execute!(stdout, SetTitle("Tokscale"));
+
     if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
         let _ = disable_raw_mode();
+        let _ = execute!(stdout, SetTitle(""));
         return Err(e.into());
     }
 
@@ -179,7 +186,12 @@ pub fn run(
 }
 
 fn restore_terminal_best_effort() {
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        SetTitle("")
+    );
     let _ = disable_raw_mode();
 }
 
@@ -188,7 +200,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        SetTitle("")
     );
     let _ = terminal.show_cursor();
 }
@@ -307,6 +320,7 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Kilo,
         ClientId::Mux,
         ClientId::Crush,
+        ClientId::Hermes,
     ];
 
     let data = loader.load(&all_clients, &tokscale_core::GroupBy::default(), false)?;

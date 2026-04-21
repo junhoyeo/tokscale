@@ -31,10 +31,12 @@ fn prime_pricing_cache(base: &Path) {
 ///   <tmp>/.local/share/opencode/storage/message/session1/msg_a.json  (2024-06-15, claude-sonnet-4-20250514, anthropic)
 ///   <tmp>/.local/share/opencode/storage/message/session1/msg_b.json  (2024-06-15, claude-sonnet-4-20250514, anthropic)
 ///   <tmp>/.local/share/opencode/storage/message/session2/msg_c.json  (2025-01-10, gpt-4o, openai)
-fn create_temp_fixture_dir() -> TempDir {
+fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
-    prime_pricing_cache(base);
+    if with_pricing_cache {
+        prime_pricing_cache(base);
+    }
 
     // Session 1: two messages on 2024-06-15 using claude-sonnet-4
     let session1 = base.join(".local/share/opencode/storage/message/session1");
@@ -99,6 +101,14 @@ fn create_temp_fixture_dir() -> TempDir {
     fs::write(session2.join("msg_c.json"), msg_c).unwrap();
 
     tmp
+}
+
+fn create_temp_fixture_dir() -> TempDir {
+    create_temp_fixture_dir_with_pricing_cache(true)
+}
+
+fn create_temp_fixture_dir_without_pricing_cache() -> TempDir {
+    create_temp_fixture_dir_with_pricing_cache(false)
 }
 
 /// Create an empty fixture dir with no session data.
@@ -246,6 +256,7 @@ fn create_conflicting_codex_fixture_dir() -> TempDir {
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
+        .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1");
@@ -255,9 +266,58 @@ fn cmd_with_home(tmp: &Path) -> Command {
 fn cmd_with_conflicting_env(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
+        .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"));
     cmd
+}
+
+fn offline_cmd_with_home(tmp: &Path) -> Command {
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    cmd.env("HOME", tmp)
+        .env("XDG_DATA_HOME", tmp.join(".local/share"))
+        .env("XDG_CACHE_HOME", tmp.join(".cache"))
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9");
+    cmd
+}
+
+fn write_pricing_cache(base: &Path, timestamp: u64) {
+    let litellm = format!(
+        r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001}},"claude-sonnet-4-20250514":{{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015}}}}}}"#,
+        timestamp
+    );
+    let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
+
+    for dir in [
+        base.join("Library/Caches/tokscale"),
+        base.join(".cache/tokscale"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("pricing-litellm.json"), &litellm).unwrap();
+        fs::write(dir.join("pricing-openrouter.json"), &openrouter).unwrap();
+    }
+}
+
+fn write_fake_credentials(base: &Path) {
+    let creds_dir = base.join(".config/tokscale");
+    fs::create_dir_all(&creds_dir).unwrap();
+    fs::write(
+        creds_dir.join("credentials.json"),
+        r#"{"token":"fake","username":"testuser","createdAt":"2024-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+}
+
+fn write_settings_json(base: &Path, body: &str) {
+    for dir in [
+        base.join(".config/tokscale"),
+        base.join("Library/Application Support/tokscale"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), body).unwrap();
+    }
 }
 
 // ── Existing tests ─────────────────────────────────────────────────────────
@@ -286,7 +346,10 @@ fn test_version_flag() {
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("tokscale"));
+        .stdout(predicate::str::contains(format!(
+            "tokscale {}",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 #[test]
@@ -845,6 +908,152 @@ fn test_models_json_output() {
 }
 
 #[test]
+fn test_models_json_offline_without_pricing_cache_still_succeeds() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalInput"].as_i64().unwrap(), 2400);
+    assert_eq!(json["totalOutput"].as_i64().unwrap(), 1000);
+    assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
+    assert_eq!(json["entries"].as_array().unwrap().len(), 2);
+    // Without pricing, embedded source costs are preserved (0.05 + 0.03 + 0.02)
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.10).abs() < 1e-9,
+        "unexpected totalCost without pricing: {total_cost}"
+    );
+}
+
+#[test]
+fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["month"].as_str().unwrap(), "2024-06");
+    assert_eq!(entries[1]["month"].as_str().unwrap(), "2025-01");
+    // Without pricing, embedded source costs are preserved
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.10).abs() < 1e-9,
+        "unexpected totalCost without pricing: {total_cost}"
+    );
+}
+
+#[test]
+fn test_graph_offline_without_pricing_cache_still_succeeds() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["graph", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["totalTokens"].as_i64().unwrap(), 3950);
+    assert_eq!(json["summary"]["activeDays"].as_i64().unwrap(), 2);
+    assert_eq!(json["contributions"].as_array().unwrap().len(), 2);
+    // Without pricing, embedded source costs are preserved
+    let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.10).abs() < 1e-9,
+        "unexpected totalCost without pricing: {total_cost}"
+    );
+}
+
+#[test]
+fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_pricing_cache(tmp.path(), 1);
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.0209).abs() < 1e-9,
+        "unexpected totalCost: {total_cost}"
+    );
+}
+
+#[test]
+fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_pricing_cache(tmp.path(), 1);
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.0209).abs() < 1e-9,
+        "unexpected totalCost: {total_cost}"
+    );
+}
+
+#[test]
+fn test_graph_offline_uses_stale_pricing_cache_when_available() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_pricing_cache(tmp.path(), 1);
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["graph", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.0209).abs() < 1e-9,
+        "unexpected totalCost: {total_cost}"
+    );
+}
+
+#[test]
 fn test_models_json_total_consistency() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
@@ -1249,6 +1458,67 @@ fn test_clients_json() {
     );
 }
 
+#[test]
+fn test_clients_json_includes_settings_extra_paths() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(
+        tmp.path(),
+        r#"{
+            "scanner": {
+                "extraScanPaths": {
+                    "codex": ["/tmp/project-a/.codex/sessions"]
+                }
+            }
+        }"#,
+    );
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let codex = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "codex")
+        .unwrap();
+
+    assert_eq!(
+        codex["extraPaths"][0]["path"],
+        serde_json::json!("/tmp/project-a/.codex/sessions")
+    );
+    assert_eq!(
+        codex["extraPaths"][0]["source"],
+        serde_json::json!("settings")
+    );
+}
+
+#[test]
+fn test_clients_command_includes_settings_extra_paths_text() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(
+        tmp.path(),
+        r#"{
+            "scanner": {
+                "extraScanPaths": {
+                    "codex": ["/tmp/project-a/.codex/sessions"]
+                }
+            }
+        }"#,
+    );
+
+    cmd_with_home(tmp.path())
+        .arg("clients")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "extra (settings): /tmp/project-a/.codex/sessions ✗",
+        ));
+}
+
 // ── Light mode tests ───────────────────────────────────────────────────────
 
 #[test]
@@ -1461,4 +1731,30 @@ fn test_root_with_group_by() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["groupBy"].as_str().unwrap(), "model");
+}
+
+#[test]
+fn test_submit_offline_without_pricing_cache_fails() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_fake_credentials(tmp.path());
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["submit", "--opencode", "--dry-run"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "submit should fail when pricing is unavailable; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    // Verify failure is from pricing fetch, not from auth or argument errors
+    assert!(
+        !stderr.contains("Not logged in"),
+        "submit failed due to auth, not pricing: {stderr}"
+    );
+    assert!(
+        stderr.contains("error") || stderr.contains("Error"),
+        "stderr should contain a pricing/network error: {stderr}"
+    );
 }

@@ -924,7 +924,6 @@ const LeaderboardRow = memo(function LeaderboardRow({
 export default function LeaderboardClient({ initialData, currentUser, initialSortBy, initialUserRank }: LeaderboardClientProps) {
   const router = useRouter();
   const [data, setData] = useState<LeaderboardData>(initialData);
-  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const [period, setPeriod] = useState<Period>(initialData.period);
@@ -933,16 +932,27 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   const [currentUserRankError, setCurrentUserRankError] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [retryToken, setRetryToken] = useState(0);
+  const [resolvedRequest, setResolvedRequest] = useState({
+    period: initialData.period,
+    page: initialData.pagination.page,
+    sortBy: initialSortBy,
+    search: "",
+    retryToken: 0,
+  });
 
   const { leaderboardSortBy, setLeaderboardSort, mounted } = useSettings();
-  
-  const effectiveSortBy = mounted ? leaderboardSortBy : initialSortBy;
 
-  const isFirstMount = useRef(true);
-  const prevPeriodRef = useRef<Period>(initialData.period);
-  const prevPageRef = useRef(initialData.pagination.page);
-  const prevSortByRef = useRef(initialSortBy);
-  const prevSearchRef = useRef("");
+  const effectiveSortBy = mounted ? leaderboardSortBy : initialSortBy;
+  const requestedPage = data.pagination.totalPages > 0
+    ? Math.min(page, data.pagination.totalPages)
+    : page;
+  const isLoading =
+    period !== resolvedRequest.period
+    || requestedPage !== resolvedRequest.page
+    || effectiveSortBy !== resolvedRequest.sortBy
+    || debouncedSearch !== resolvedRequest.search
+    || retryToken !== resolvedRequest.retryToken;
 
   const isFirstRankFetch = useRef(true);
 
@@ -962,8 +972,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   useEffect(() => {
     if (!currentUser) {
-      setCurrentUserRank(null);
-      setCurrentUserRankError(false);
       return;
     }
 
@@ -973,7 +981,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
     }
 
     const abortController = new AbortController();
-    setCurrentUserRankError(false);
 
     fetch(`/api/leaderboard/user/${currentUser.username}?period=${period}&sortBy=${effectiveSortBy}`, {
       signal: abortController.signal,
@@ -996,10 +1003,15 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
     return () => abortController.abort();
   }, [currentUser, period, effectiveSortBy]);
 
-  const fetchData = (targetPeriod: Period, targetPage: number, targetSortBy: 'tokens' | 'cost', signal?: AbortSignal) => {
-    setIsLoading(true);
-    setError(null);
-    const searchParam = debouncedSearch ? `&search=${encodeURIComponent(debouncedSearch)}` : '';
+  const fetchData = useCallback((
+    targetPeriod: Period,
+    targetPage: number,
+    targetSortBy: "tokens" | "cost",
+    targetSearch: string,
+    targetRetryToken: number,
+    signal?: AbortSignal,
+  ) => {
+    const searchParam = targetSearch ? `&search=${encodeURIComponent(targetSearch)}` : "";
     fetch(`/api/leaderboard?period=${targetPeriod}&page=${targetPage}&limit=50&sortBy=${targetSortBy}${searchParam}`, { signal })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1010,47 +1022,38 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           throw new Error("Invalid response format");
         }
         setData(result);
-        setIsLoading(false);
+        setError(null);
+        setResolvedRequest({
+          period: targetPeriod,
+          page: result.pagination.page,
+          sortBy: targetSortBy,
+          search: targetSearch,
+          retryToken: targetRetryToken,
+        });
       })
       .catch((err) => {
         if (err.name !== "AbortError") {
           setError(err.message || "Failed to load");
-          setIsLoading(false);
+          setResolvedRequest({
+            period: targetPeriod,
+            page: targetPage,
+            sortBy: targetSortBy,
+            search: targetSearch,
+            retryToken: targetRetryToken,
+          });
         }
       });
-  };
+  }, []);
 
   useEffect(() => {
-    if (isFirstMount.current) {
-      isFirstMount.current = false;
-      prevSortByRef.current = effectiveSortBy;
+    if (!isLoading) {
       return;
     }
-
-    const periodChanged = period !== prevPeriodRef.current;
-    const pageChanged = page !== prevPageRef.current;
-    const sortByChanged = effectiveSortBy !== prevSortByRef.current;
-    const searchChanged = debouncedSearch !== prevSearchRef.current;
-
-    if (!periodChanged && !pageChanged && !sortByChanged && !searchChanged) {
-      return;
-    }
-
-    prevPeriodRef.current = period;
-    prevPageRef.current = page;
-    prevSortByRef.current = effectiveSortBy;
-    prevSearchRef.current = debouncedSearch;
 
     const abortController = new AbortController();
-    fetchData(period, page, effectiveSortBy, abortController.signal);
+    fetchData(period, requestedPage, effectiveSortBy, debouncedSearch, retryToken, abortController.signal);
     return () => abortController.abort();
-  }, [period, page, effectiveSortBy, debouncedSearch]);
-
-  useEffect(() => {
-    if (data.pagination.totalPages > 0 && page > data.pagination.totalPages) {
-      setPage(data.pagination.totalPages);
-    }
-  }, [data.pagination.totalPages, page]);
+  }, [debouncedSearch, effectiveSortBy, fetchData, isLoading, period, requestedPage, retryToken]);
 
   const sortedUsers = data.users || [];
   const showSubmissionCount = period === "all";
@@ -1202,7 +1205,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           <EmptyState>
             <EmptyMessage>Failed to load leaderboard</EmptyMessage>
             <EmptyHint>{error}</EmptyHint>
-            <RetryButton onClick={() => fetchData(period, page, effectiveSortBy)}>
+            <RetryButton onClick={() => setRetryToken((prev) => prev + 1)}>
               Retry
             </RetryButton>
           </EmptyState>

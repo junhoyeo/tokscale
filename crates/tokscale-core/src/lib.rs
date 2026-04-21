@@ -170,7 +170,7 @@ impl std::fmt::Debug for ParsedMessages {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LocalParseOptions {
     pub home_dir: Option<String>,
     pub use_env_roots: bool,
@@ -178,6 +178,9 @@ pub struct LocalParseOptions {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+    /// Persistent scanner config loaded from `~/.config/tokscale/settings.json`.
+    /// Defaults to empty when callers don't care about user-configured paths.
+    pub scanner_settings: scanner::ScannerSettings,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -244,7 +247,7 @@ pub struct GraphResult {
     pub contributions: Vec<DailyContribution>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReportOptions {
     pub home_dir: Option<String>,
     pub use_env_roots: bool,
@@ -253,6 +256,9 @@ pub struct ReportOptions {
     pub until: Option<String>,
     pub year: Option<String>,
     pub group_by: GroupBy,
+    /// Persistent scanner config loaded from `~/.config/tokscale/settings.json`.
+    /// Defaults to empty when callers don't care about user-configured paths.
+    pub scanner_settings: scanner::ScannerSettings,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -306,6 +312,30 @@ pub struct MonthlyReport {
     pub processing_time_ms: u32,
 }
 
+/// Hourly usage entry for a single hour slot (e.g. "2026-03-23 14:00")
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HourlyUsage {
+    pub hour: String,
+    pub clients: Vec<String>,
+    pub models: Vec<String>,
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub message_count: i32,
+    /// Number of user interaction turns (user→assistant boundaries).
+    pub turn_count: i32,
+    pub reasoning: i64,
+    pub cost: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HourlyReport {
+    pub entries: Vec<HourlyUsage>,
+    pub total_cost: f64,
+    pub processing_time_ms: u32,
+}
+
 pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, String> {
     home_dir_option
         .clone()
@@ -322,7 +352,13 @@ fn parse_all_messages_with_pricing(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
 ) -> Vec<UnifiedMessage> {
-    parse_all_messages_with_pricing_with_env_strategy(home_dir, clients, pricing, true)
+    parse_all_messages_with_pricing_with_env_strategy(
+        home_dir,
+        clients,
+        pricing,
+        true,
+        &scanner::ScannerSettings::default(),
+    )
 }
 
 fn parse_all_messages_with_pricing_with_env_strategy(
@@ -330,6 +366,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
     use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
 ) -> Vec<UnifiedMessage> {
     #[derive(Debug)]
     struct CachedParseOutcome {
@@ -609,7 +646,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         parse_full_log_source(path, pricing, is_headless)
     }
 
-    let scan_result = scanner::scan_all_clients_with_env_strategy(home_dir, clients, use_env_roots);
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        home_dir,
+        clients,
+        use_env_roots,
+        scanner_settings,
+    );
     let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
     let mut source_cache = message_cache::SourceMessageCache::load();
     source_cache.prune_missing_files();
@@ -621,17 +663,26 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     // suppress legacy JSON overlap by message identity.
     let mut opencode_seen: HashSet<String> = HashSet::new();
 
-    if let Some(db_path) = &scan_result.opencode_db {
-        let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+    for db_path in &scan_result.opencode_dbs {
+        let CachedParseOutcome {
+            messages,
+            cache_entry,
+        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
             sessions::opencode::parse_opencode_sqlite(path)
         });
-        for message in &outcome.messages {
-            if let Some(ref key) = message.dedup_key {
-                opencode_seen.insert(key.clone());
-            }
-        }
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+
+        // Dedup across channel-suffixed dbs: the same session can end up in
+        // both `opencode.db` and `opencode-<channel>.db` if the user
+        // switches channels mid-session. `discover_opencode_dbs` returns
+        // paths in sorted order, so the first-seen copy is deterministic.
+        all_messages.extend(messages.into_iter().filter(|message| {
+            message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| opencode_seen.insert(key.clone()))
+        }));
+
+        if let Some(entry) = cache_entry {
             source_cache.insert(entry);
         }
     }
@@ -663,9 +714,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Claude)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::claudecode::parse_claude_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_claude_code_path,
+                sessions::claudecode::parse_claude_file,
+            )
         })
         .collect();
     let mut claude_messages_raw: Vec<(String, UnifiedMessage)> = Vec::new();
@@ -693,6 +748,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .map(|path| load_or_parse_codex_source(path, &source_cache, pricing, &headless_roots))
         .collect();
     for outcome in codex_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    let copilot_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Copilot)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::copilot::parse_copilot_file(path)
+            })
+        })
+        .collect();
+    for outcome in copilot_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -886,6 +957,19 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             })
             .collect();
         all_messages.extend(kilo_messages);
+    }
+
+    if let Some(db_path) = &scan_result.hermes_db {
+        let hermes_messages: Vec<UnifiedMessage> = sessions::hermes::parse_hermes_sqlite(db_path)
+            .into_iter()
+            .map(|mut msg| {
+                if msg.cost <= 0.0 {
+                    apply_pricing_if_available(&mut msg, pricing);
+                }
+                msg
+            })
+            .collect();
+        all_messages.extend(hermes_messages);
     }
 
     for source in &scan_result.crush_dbs {
@@ -1086,12 +1170,13 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         clients
     });
 
-    let pricing = pricing::PricingService::get_or_init().await?;
+    let pricing = load_pricing_for_local_parse().await;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        Some(&pricing),
+        pricing.as_deref(),
         options.use_env_roots,
+        &options.scanner_settings,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
@@ -1141,12 +1226,13 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         clients
     });
 
-    let pricing = pricing::PricingService::get_or_init().await?;
+    let pricing = load_pricing_for_local_parse().await;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        Some(&pricing),
+        pricing.as_deref(),
         options.use_env_roots,
+        &options.scanner_settings,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
@@ -1198,7 +1284,27 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     })
 }
 
-pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
+#[derive(Default)]
+struct HourAggregator {
+    clients: HashSet<String>,
+    models: HashSet<String>,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    message_count: i32,
+    turn_count: i32,
+    cost: f64,
+}
+
+/// Generate hourly usage report, keyed by "YYYY-MM-DD HH:00".
+///
+/// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms).
+/// Falls back to date + "00:00" when timestamp is zero or missing.
+pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, String> {
+    use chrono::{Local, TimeZone};
+
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -1213,11 +1319,100 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+
+    let filtered = filter_messages_for_report(all_messages, &options);
+
+    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
+
+    for msg in filtered {
+        let hour_key = if msg.timestamp > 0 {
+            let ts_secs = msg.timestamp / 1000;
+            match Local.timestamp_opt(ts_secs, 0) {
+                chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
+                _ => format!("{} 00:00", msg.date),
+            }
+        } else {
+            format!("{} 00:00", msg.date)
+        };
+
+        let entry = hour_map.entry(hour_key).or_default();
+
+        entry.clients.insert(msg.client.clone());
+        entry
+            .models
+            .insert(normalize_model_for_grouping(&msg.model_id));
+        entry.input += msg.tokens.input;
+        entry.output += msg.tokens.output;
+        entry.cache_read += msg.tokens.cache_read;
+        entry.cache_write += msg.tokens.cache_write;
+        entry.reasoning += msg.tokens.reasoning;
+        entry.message_count += msg.message_count.max(0);
+        if msg.is_turn_start {
+            entry.turn_count += 1;
+        }
+        entry.cost += msg.cost;
+    }
+
+    let mut entries: Vec<HourlyUsage> = hour_map
+        .into_iter()
+        .map(|(hour, agg)| HourlyUsage {
+            hour,
+            clients: {
+                let mut v: Vec<String> = agg.clients.into_iter().collect();
+                v.sort();
+                v
+            },
+            models: {
+                let mut v: Vec<String> = agg.models.into_iter().collect();
+                v.sort();
+                v
+            },
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            message_count: agg.message_count,
+            turn_count: agg.turn_count,
+            reasoning: agg.reasoning,
+            cost: agg.cost,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| a.hour.cmp(&b.hour));
+
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+
+    Ok(HourlyReport {
+        entries,
+        total_cost,
+        processing_time_ms: start.elapsed().as_millis() as u32,
+    })
+}
+
+async fn generate_graph_with_loaded_pricing(
+    options: ReportOptions,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<GraphResult, String> {
+    let start = Instant::now();
+
+    let home_dir = get_home_dir_string(&options.home_dir)?;
+
+    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
+        let mut clients: Vec<String> = ClientId::ALL
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+        clients
+    });
+
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        Some(&pricing),
+        pricing,
         options.use_env_roots,
+        &options.scanner_settings,
     );
 
     let filtered = filter_messages_for_report(all_messages, &options);
@@ -1228,6 +1423,16 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
     let result = aggregator::generate_graph_result(contributions, processing_time_ms);
 
     Ok(result)
+}
+
+pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
+    let pricing = pricing::PricingService::get_or_init().await?;
+    generate_graph_with_loaded_pricing(options, Some(&pricing)).await
+}
+
+pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
+    let pricing = load_pricing_for_local_parse().await;
+    generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
 }
 
 fn filter_messages_for_report(
@@ -1345,6 +1550,7 @@ fn parse_local_unified_messages_resolved(
         clients,
         pricing,
         options.use_env_roots,
+        &options.scanner_settings,
     );
     Ok(filter_unified_messages(messages, &options))
 }
@@ -1364,8 +1570,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
 
-    let scan_result =
-        scanner::scan_all_clients_with_env_strategy(&home_dir, &clients, options.use_env_roots);
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        &home_dir,
+        &clients,
+        options.use_env_roots,
+        &options.scanner_settings,
+    );
     let headless_roots =
         scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
@@ -1379,20 +1589,24 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let mut seen: HashSet<String> = HashSet::new();
         let mut count: i32 = 0;
 
-        if let Some(db_path) = &scan_result.opencode_db {
+        for db_path in &scan_result.opencode_dbs {
             let sqlite_msgs: Vec<(String, ParsedMessage)> =
                 sessions::opencode::parse_opencode_sqlite(db_path)
                     .into_iter()
-                    .map(|msg| {
+                    .filter_map(|msg| {
                         let key = msg.dedup_key.clone().unwrap_or_default();
-                        (key, unified_to_parsed(&msg))
+                        // Dedup across multiple channel-suffixed dbs: the
+                        // same session can end up in both `opencode.db` and
+                        // `opencode-<channel>.db` if the user switches
+                        // channels mid-session.
+                        if !key.is_empty() && !seen.insert(key.clone()) {
+                            return None;
+                        }
+                        Some((key, unified_to_parsed(&msg)))
                     })
                     .collect();
             count += sqlite_msgs.len() as i32;
-            for (key, parsed) in sqlite_msgs {
-                if !key.is_empty() {
-                    seen.insert(key);
-                }
+            for (_key, parsed) in sqlite_msgs {
                 messages.push(parsed);
             }
         }
@@ -1421,8 +1635,8 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
         .get(ClientId::Claude)
         .par_iter()
-        .flat_map(|path| {
-            sessions::claudecode::parse_claude_file(path)
+        .map_init(std::collections::HashMap::new, |parent_cache, path| {
+            sessions::claudecode::parse_claude_file_with_cache(path, parent_cache)
                 .into_iter()
                 .map(|msg| {
                     let dedup_key = msg.dedup_key.clone().unwrap_or_default();
@@ -1430,6 +1644,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 })
                 .collect::<Vec<_>>()
         })
+        .flatten()
         .collect();
 
     let mut seen_keys: HashSet<String> = HashSet::new();
@@ -1459,6 +1674,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let codex_count = codex_msgs.len() as i32;
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
+
+    let copilot_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Copilot)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::copilot::parse_copilot_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let copilot_count = copilot_msgs.len() as i32;
+    counts.set(ClientId::Copilot, copilot_count);
+    messages.extend(copilot_msgs);
 
     let gemini_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Gemini)
@@ -1616,6 +1845,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         0
     };
 
+    if let Some(db_path) = &scan_result.hermes_db {
+        let hermes_msgs: Vec<ParsedMessage> = sessions::hermes::parse_hermes_sqlite(db_path)
+            .into_iter()
+            .map(|msg| unified_to_parsed(&msg))
+            .collect();
+        let count = summed_parsed_message_count(&hermes_msgs);
+        counts.set(ClientId::Hermes, count);
+        messages.extend(hermes_msgs);
+    }
+
     let crush_msgs: Vec<ParsedMessage> = scan_result
         .crush_dbs
         .par_iter()
@@ -1757,6 +1996,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         message_count: msg.message_count,
         agent: msg.agent.clone(),
         dedup_key: None,
+        is_turn_start: false,
     }
 }
 
@@ -1765,9 +2005,9 @@ mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, message_cache,
         normalize_model_for_grouping, parse_all_messages_with_pricing, parse_local_clients,
-        parsed_to_unified, pricing, retain_for_requested_clients, select_local_parse_pricing,
-        unified_to_parsed, ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
-        UNKNOWN_WORKSPACE_LABEL,
+        parsed_to_unified, pricing, retain_for_requested_clients, scanner,
+        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
+        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -2513,6 +2753,122 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
+        // Regression guard: a session that appears in both `opencode.db` and
+        // `opencode-<channel>.db` (e.g. the user switches channels mid-session)
+        // must only be counted once.
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let db_dir = source_home.path().join(".local/share/opencode");
+            std::fs::create_dir_all(&db_dir).unwrap();
+
+            let schema = "PRAGMA journal_mode=WAL;
+                 PRAGMA wal_autocheckpoint=0;
+                 CREATE TABLE message (
+                     id TEXT PRIMARY KEY,
+                     session_id TEXT NOT NULL,
+                     data TEXT NOT NULL
+                 );";
+            let row = |input: u64, ts: u64| {
+                format!(
+                    r#"{{
+                        "role": "assistant",
+                        "modelID": "claude-sonnet-4",
+                        "providerID": "anthropic",
+                        "tokens": {{ "input": {input}, "output": 10, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+                        "time": {{ "created": {ts}.0 }}
+                    }}"#
+                )
+            };
+
+            let default_db = db_dir.join("opencode.db");
+            let conn = rusqlite::Connection::open(&default_db).unwrap();
+            conn.execute_batch(schema).unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "shared-msg",
+                    "session-shared",
+                    row(100, 1_700_000_000_000u64)
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "latest-only",
+                    "session-latest",
+                    row(200, 1_700_000_001_000u64)
+                ],
+            )
+            .unwrap();
+            drop(conn);
+
+            let stable_db = db_dir.join("opencode-stable.db");
+            let conn = rusqlite::Connection::open(&stable_db).unwrap();
+            conn.execute_batch(schema).unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "shared-msg",
+                    "session-shared",
+                    row(100, 1_700_000_000_000u64)
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "stable-only",
+                    "session-stable",
+                    row(300, 1_700_000_002_000u64)
+                ],
+            )
+            .unwrap();
+            drop(conn);
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["opencode".to_string()],
+                None,
+            );
+            assert_eq!(
+                messages.len(),
+                3,
+                "expected 3 unique messages (shared + latest-only + stable-only), got {}",
+                messages.len()
+            );
+            let mut ids: Vec<String> = messages
+                .iter()
+                .filter_map(|m| m.dedup_key.clone())
+                .collect();
+            ids.sort();
+            assert_eq!(ids, vec!["latest-only", "shared-msg", "stable-only"]);
+
+            let messages_warm = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["opencode".to_string()],
+                None,
+            );
+            assert_eq!(
+                messages_warm.len(),
+                3,
+                "warm cache must also dedup shared message across channel dbs"
+            );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_parse_all_messages_with_pricing_opencode_sqlite_deduplicates_forked_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
@@ -2656,6 +3012,7 @@ mod tests {
                 since: None,
                 until: None,
                 year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
             })
             .unwrap();
 
@@ -3376,6 +3733,7 @@ mod tests {
             since: None,
             until: None,
             year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
         })
         .unwrap();
 
@@ -3436,6 +3794,7 @@ mod tests {
             since: None,
             until: None,
             year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
         })
         .unwrap();
 
@@ -3447,5 +3806,178 @@ mod tests {
         assert_eq!(parsed.messages[0].client, "opencode");
         assert_eq!(parsed.messages[0].model_id, "deepseek-v3-0324");
         assert_eq!(parsed.messages[0].provider_id, "fireworks");
+    }
+
+    #[test]
+    fn test_parse_local_clients_honors_scanner_settings_opencode_db_paths() {
+        // Regression guard: `parse_local_clients` used to call
+        // `scan_all_clients_with_env_strategy`, which silently dropped
+        // `options.scanner_settings`. Users with
+        // `scanner.opencodeDbPaths` pointing at an OPENCODE_DB outside the
+        // XDG data dir would see no rows through the clients/wrapped
+        // command paths even though model/monthly/graph reports honored
+        // the same config.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // Deliberately do not create ~/.local/share/opencode so nothing
+        // is auto-discoverable; the only db the scanner can find must
+        // come from `scanner_settings`.
+        let outside_dir = temp_dir.path().join("elsewhere");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let external_db = outside_dir.join("opencode.db");
+
+        let conn = rusqlite::Connection::open(&external_db).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "ext-msg-1",
+                "ext-session",
+                r#"{
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4",
+                    "providerID": "anthropic",
+                    "tokens": { "input": 42, "output": 7, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                    "time": { "created": 1700000000000.0 }
+                }"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Without scanner_settings: no rows (nothing auto-discoverable).
+        let parsed_default = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed_default.counts.get(ClientId::OpenCode), 0);
+        assert!(parsed_default.messages.is_empty());
+
+        // With scanner_settings pointing at the external db: the user
+        // row must show up.
+        let parsed_with_settings = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                opencode_db_paths: vec![external_db.clone()],
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            parsed_with_settings.counts.get(ClientId::OpenCode),
+            1,
+            "scanner.opencodeDbPaths must reach the parse_local_clients path"
+        );
+        assert_eq!(parsed_with_settings.messages.len(), 1);
+        assert_eq!(parsed_with_settings.messages[0].client, "opencode");
+        assert_eq!(parsed_with_settings.messages[0].model_id, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn test_parse_local_clients_claude_filter_ignores_scanner_settings_opencode_db_paths() {
+        // Regression guard for the scanner client-filter bypass: even
+        // when `scanner.opencodeDbPaths` pins an external opencode db,
+        // a `--clients claude` request must NOT pull in OpenCode rows.
+        // Before the fix, the merge ran outside the OpenCode-enabled
+        // guard so user-pinned dbs leaked through both `messages` and
+        // `counts` (the latter is computed before the message-level
+        // client filter, so even the post-filter pipeline could not
+        // hide a leaked count).
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        // Claude session: one assistant message, the only thing the
+        // filter should accept.
+        let claude_dir = temp_dir.path().join(".claude/projects/myproject");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("conversation.jsonl"),
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+        )
+        .unwrap();
+
+        // External opencode.db that the user has pinned via
+        // scanner.opencodeDbPaths. Without the fix, this would leak
+        // into the Claude-only result.
+        let outside_dir = temp_dir.path().join("elsewhere");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let external_db = outside_dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&external_db).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "leaked-opencode",
+                "should-not-show-up",
+                r#"{
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4",
+                    "providerID": "anthropic",
+                    "tokens": { "input": 9999, "output": 9999, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                    "time": { "created": 1700000000000.0 }
+                }"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["claude".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                opencode_db_paths: vec![external_db.clone()],
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            parsed.counts.get(ClientId::OpenCode),
+            0,
+            "OpenCode count must stay zero under a Claude-only filter even \
+             when scanner.opencodeDbPaths is set"
+        );
+        assert_eq!(
+            parsed.counts.get(ClientId::Claude),
+            1,
+            "Claude message must still be counted"
+        );
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "claude");
+        assert!(
+            parsed.messages.iter().all(|m| m.client != "opencode"),
+            "no OpenCode messages may leak into a Claude-only result, got {:?}",
+            parsed.messages
+        );
     }
 }

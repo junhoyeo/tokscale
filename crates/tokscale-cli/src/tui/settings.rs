@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use tokscale_core::scanner::ScannerSettings;
 
 use super::themes::ThemeName;
 
@@ -28,6 +29,15 @@ pub struct Settings {
     pub include_unused_models: bool,
     #[serde(default = "default_native_timeout_ms")]
     pub native_timeout_ms: u64,
+    /// Persistent scanner configuration. Allows users to pin additional
+    /// OpenCode SQLite paths (and, in future, other scanner overrides)
+    /// without having to set env vars on every invocation.
+    ///
+    /// `#[serde(default)]` makes this a drop-in addition — settings.json
+    /// files written before the field existed still load cleanly, and an
+    /// empty `"scanner": {}` is equivalent to not setting it at all.
+    #[serde(default)]
+    pub scanner: ScannerSettings,
 }
 
 fn default_color_palette() -> String {
@@ -50,8 +60,20 @@ impl Default for Settings {
             auto_refresh_ms: DEFAULT_AUTO_REFRESH_MS,
             include_unused_models: false,
             native_timeout_ms: DEFAULT_NATIVE_TIMEOUT_MS,
+            scanner: ScannerSettings::default(),
         }
     }
+}
+
+/// Thin helper that loads settings and returns just the scanner portion.
+///
+/// Every CLI entry point that builds `LocalParseOptions`/`ReportOptions`
+/// calls this so user-configured scanner paths are honored on every
+/// invocation. Errors during load fall through to
+/// [`ScannerSettings::default`] — a missing or malformed settings.json
+/// should never break `tokscale` runs.
+pub fn load_scanner_settings() -> ScannerSettings {
+    Settings::load().scanner
 }
 
 impl Settings {
@@ -145,5 +167,133 @@ impl Settings {
 
         let clamped = timeout_ms.clamp(MIN_NATIVE_TIMEOUT_MS, MAX_NATIVE_TIMEOUT_MS);
         Duration::from_millis(clamped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn settings_load_backfills_scanner_when_missing_from_json() {
+        // Older settings.json files predate the `scanner` key. They must
+        // still deserialize cleanly and fall through to ScannerSettings::default.
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.scanner.opencode_db_paths.is_empty());
+    }
+
+    #[test]
+    fn settings_load_reads_scanner_opencode_db_paths() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000,
+            "scanner": {
+                "opencodeDbPaths": [
+                    "/custom/one.db",
+                    "/custom/opencode-stable.db"
+                ]
+            }
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.scanner.opencode_db_paths,
+            vec![
+                PathBuf::from("/custom/one.db"),
+                PathBuf::from("/custom/opencode-stable.db"),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_load_reads_scanner_extra_scan_paths() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000,
+            "scanner": {
+                "extraScanPaths": {
+                    "codex": ["/tmp/project-a/.codex/sessions"],
+                    "openclaw": ["/tmp/imports/openclaw/agents"]
+                }
+            }
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(
+            serialized["scanner"]["extraScanPaths"]["codex"][0],
+            serde_json::json!("/tmp/project-a/.codex/sessions")
+        );
+        assert_eq!(
+            serialized["scanner"]["extraScanPaths"]["openclaw"][0],
+            serde_json::json!("/tmp/imports/openclaw/agents")
+        );
+    }
+
+    #[test]
+    fn settings_accepts_empty_scanner_object() {
+        // `"scanner": {}` is the documented "no-op" form; must be valid.
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000,
+            "scanner": {}
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.scanner.opencode_db_paths.is_empty());
+    }
+
+    #[test]
+    fn settings_round_trips_scanner_section_through_json() {
+        // Saving and loading must preserve scanner paths verbatim so that
+        // the TUI settings save flow never drops the key silently.
+        let mut settings = Settings::default();
+        settings.scanner.opencode_db_paths = vec![PathBuf::from("/a/b/opencode.db")];
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let parsed: Settings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            parsed.scanner.opencode_db_paths,
+            vec![PathBuf::from("/a/b/opencode.db")]
+        );
+    }
+
+    #[test]
+    fn settings_round_trips_scanner_extra_scan_paths_through_json() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000,
+            "scanner": {
+                "extraScanPaths": {
+                    "gemini": ["/tmp/imports/gemini/tmp"]
+                }
+            }
+        }"#;
+
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            round_trip["scanner"]["extraScanPaths"]["gemini"][0],
+            serde_json::json!("/tmp/imports/gemini/tmp")
+        );
     }
 }

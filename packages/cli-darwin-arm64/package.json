@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/cli-darwin-arm64",
-  "version": "2.0.17",
+  "version": "2.0.26",
   "description": "tokscale CLI binary for darwin arm64",
   "license": "MIT",
   "type": "module",

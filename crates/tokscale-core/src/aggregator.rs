@@ -468,6 +468,7 @@ mod tests {
             message_count: 1,
             agent: None,
             dedup_key: None,
+            is_turn_start: false,
         }
     }
 

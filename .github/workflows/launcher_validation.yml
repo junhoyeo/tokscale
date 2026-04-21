@@ -1,0 +1,65 @@
+name: Launcher Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+    paths:
+      - "packages/cli/bin.js"
+      - "packages/cli/src/**"
+      - "packages/cli/tsconfig.json"
+      - "packages/cli/package.json"
+      - "packages/tokscale/bin.js"
+      - "packages/tokscale/package.json"
+      - "packages/cli-*/package.json"
+      - "scripts/test-package-launchers.sh"
+      - ".github/workflows/launcher_validation.yml"
+      - "package.json"
+      - "bun.lock"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "packages/cli/bin.js"
+      - "packages/cli/src/**"
+      - "packages/cli/tsconfig.json"
+      - "packages/cli/package.json"
+      - "packages/tokscale/bin.js"
+      - "packages/tokscale/package.json"
+      - "packages/cli-*/package.json"
+      - "scripts/test-package-launchers.sh"
+      - ".github/workflows/launcher_validation.yml"
+      - "package.json"
+      - "bun.lock"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  launcher-smoke:
+    name: Launcher Smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.3.10
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run launcher smoke tests
+        run: bash scripts/test-package-launchers.sh

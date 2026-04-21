@@ -5,10 +5,36 @@ import { Footer } from "@/components/layout/Footer";
 import { BlackholeHero } from "@/components/BlackholeHero";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
 import { getLeaderboardData, getUserRank } from "@/lib/leaderboard/getLeaderboard";
-import type { SortBy } from "@/lib/leaderboard/types";
+import type { LeaderboardData, SortBy } from "@/lib/leaderboard/types";
 import { getSession } from "@/lib/auth/session";
 import { SORT_BY_COOKIE_NAME, isValidSortBy } from "@/lib/leaderboard/constants";
+
+function isMissingDatabaseUrl(error: unknown): boolean {
+  return error instanceof Error && error.message === "DATABASE_URL environment variable is not set";
+}
 import LeaderboardClient from "./LeaderboardClient";
+
+function createEmptyLeaderboardData(sortBy: SortBy): LeaderboardData {
+  return {
+    users: [],
+    pagination: {
+      page: 1,
+      limit: 50,
+      totalUsers: 0,
+      totalPages: 0,
+      hasNext: false,
+      hasPrev: false,
+    },
+    stats: {
+      totalTokens: 0,
+      totalCost: 0,
+      totalSubmissions: null,
+      uniqueUsers: 0,
+    },
+    period: "all",
+    sortBy,
+  };
+}
 
 export default function LeaderboardPage() {
   return (
@@ -40,12 +66,27 @@ async function LeaderboardWithPreferences() {
   const sortBy: SortBy = isValidSortBy(sortByCookie) ? sortByCookie : "tokens";
 
   const [initialData, session] = await Promise.all([
-    getLeaderboardData("all", 1, 50, sortBy),
-    getSession(),
+    getLeaderboardData("all", 1, 50, sortBy).catch((error) => {
+      if (isMissingDatabaseUrl(error)) {
+        return createEmptyLeaderboardData(sortBy);
+      }
+      throw error;
+    }),
+    getSession().catch((error) => {
+      if (isMissingDatabaseUrl(error)) {
+        return null;
+      }
+      throw error;
+    }),
   ]);
 
   const initialUserRank = session
-    ? await getUserRank(session.username, "all", sortBy)
+    ? await getUserRank(session.username, "all", sortBy).catch((error) => {
+        if (isMissingDatabaseUrl(error)) {
+          return null;
+        }
+        throw error;
+      })
     : null;
 
   return (

@@ -4,12 +4,13 @@ use ratatui::widgets::{
 };
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
-use super::widgets::{format_tokens, get_model_color};
-use crate::tui::app::App;
+use super::widgets::format_tokens;
+use crate::tui::app::{App, ChartGranularity};
 use tokscale_core::GroupBy;
 
 struct ModelRowData {
     model: String,
+    provider: String,
     workspace_label: Option<String>,
     tokens_input: u64,
     tokens_output: u64,
@@ -73,37 +74,78 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
-    let daily = &app.data.daily;
     let group_by = app.group_by.borrow().clone();
-    let mut sorted_daily: Vec<_> = daily.iter().collect();
-    sorted_daily.sort_by(|a, b| a.date.cmp(&b.date));
 
-    let data: Vec<StackedBarData> = sorted_daily
-        .iter()
-        .rev()
-        .take(60)
-        .rev()
-        .map(|d| {
-            let date = d.date.format("%m/%d").to_string();
-            let total = d.tokens.total();
+    let data: Vec<StackedBarData> = match app.chart_granularity {
+        ChartGranularity::Daily => {
+            let daily = &app.data.daily;
+            let mut sorted_daily: Vec<_> = daily.iter().collect();
+            sorted_daily.sort_by_key(|a| a.date);
 
-            let models: Vec<ModelSegment> = d
-                .models
-                .values()
-                .map(|info| ModelSegment {
-                    model_id: info.display_name.clone(),
-                    tokens: info.tokens.total(),
-                    color: get_model_color(overview_color_key(&group_by, &info.color_key)),
+            sorted_daily
+                .iter()
+                .rev()
+                .take(60)
+                .rev()
+                .map(|d| {
+                    let mut models_by_key =
+                        std::collections::BTreeMap::<String, ModelSegment>::new();
+                    for source_info in d.source_breakdown.values() {
+                        for (key, info) in &source_info.models {
+                            let entry =
+                                models_by_key
+                                    .entry(key.clone())
+                                    .or_insert_with(|| ModelSegment {
+                                        model_id: info.display_name.clone(),
+                                        tokens: 0,
+                                        color: app.model_color_for(
+                                            &info.provider,
+                                            overview_color_key(&group_by, &info.color_key),
+                                        ),
+                                    });
+                            entry.tokens = entry.tokens.saturating_add(info.tokens.total());
+                        }
+                    }
+                    let models: Vec<ModelSegment> = models_by_key.into_values().collect();
+
+                    StackedBarData {
+                        date: d.date.format("%m/%d").to_string(),
+                        models,
+                        total: d.tokens.total(),
+                    }
                 })
-                .collect();
+                .collect()
+        }
+        ChartGranularity::Hourly => {
+            let hourly = &app.data.hourly;
+            let mut sorted: Vec<_> = hourly.iter().collect();
+            sorted.sort_by_key(|a| a.datetime);
 
-            StackedBarData {
-                date,
-                models,
-                total,
-            }
-        })
-        .collect();
+            sorted
+                .iter()
+                .rev()
+                .take(60)
+                .rev()
+                .map(|h| {
+                    let models: Vec<ModelSegment> = h
+                        .models
+                        .values()
+                        .map(|info| ModelSegment {
+                            model_id: info.display_name.clone(),
+                            tokens: info.tokens.total(),
+                            color: app.model_color_for(&info.provider, &info.color_key),
+                        })
+                        .collect();
+
+                    StackedBarData {
+                        date: h.datetime.format("%d %H:%M").to_string(),
+                        models,
+                        total: h.tokens.total(),
+                    }
+                })
+                .collect()
+        }
+    };
 
     render_stacked_bar_chart(frame, app, area, &data);
 }
@@ -121,7 +163,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         .map(|m| {
             (
                 overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
-                get_model_color(&m.model),
+                app.model_color_for(&m.provider, &m.model),
             )
         })
         .collect();
@@ -170,6 +212,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         .iter()
         .map(|m| ModelRowData {
             model: m.model.clone(),
+            provider: m.provider.clone(),
             workspace_label: m.workspace_label.clone(),
             tokens_input: m.tokens.input,
             tokens_output: m.tokens.output,
@@ -251,7 +294,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             Style::default()
         };
 
-        let model_color = get_model_color(&model.model);
+        let model_color = app.model_color_for(&model.provider, &model.model);
         let display_name =
             overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
         let name = truncate_string(&display_name, max_name_width);

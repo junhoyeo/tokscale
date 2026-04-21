@@ -1,8 +1,15 @@
 import { unstable_cache } from "next/cache";
-import { db, users, submissions } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { db, users, submissions, dailyBreakdown } from "@/lib/db";
+import { eq, sql, and, gte } from "drizzle-orm";
 
 export type EmbedSortBy = "tokens" | "cost";
+
+export interface EmbedContributionDay {
+  date: string;
+  totalTokens: number;
+  totalCost: number;
+  intensity: 0 | 1 | 2 | 3 | 4;
+}
 
 export interface UserEmbedStats {
   user: {
@@ -87,6 +94,64 @@ export function getUserEmbedStats(username: string, sortBy: EmbedSortBy = "token
     [`embed-user:${username}:${sortBy}`],
     {
       tags: [`user:${username}`, `embed-user:${username}`, `embed-user:${username}:${sortBy}`],
+      revalidate: 60,
+    }
+  )();
+}
+
+async function fetchUserEmbedContributions(username: string): Promise<EmbedContributionDay[] | null> {
+  const [user] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.username, username))
+    .limit(1);
+
+  if (!user) return null;
+
+  // Use UTC-based date and include a 7-day buffer before "one year ago"
+  // so that all dates visible in the first week of the contribution grid are included.
+  const today = new Date();
+  const cutoffDate = new Date(Date.UTC(today.getUTCFullYear() - 1, today.getUTCMonth(), today.getUTCDate()));
+  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - 7);
+  const cutoff = cutoffDate.toISOString().split("T")[0];
+
+  const rows = await db
+    .select({
+      date: dailyBreakdown.date,
+      tokens: sql<number>`sum(${dailyBreakdown.tokens})`.as("tokens"),
+      cost: sql<number>`sum(${dailyBreakdown.cost})`.as("cost"),
+    })
+    .from(dailyBreakdown)
+    .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
+    .where(and(eq(submissions.userId, user.id), gte(dailyBreakdown.date, cutoff)))
+    .groupBy(dailyBreakdown.date)
+    .orderBy(dailyBreakdown.date);
+
+  if (rows.length === 0) return [];
+
+  const costs = rows.map((row) => Number(row.cost) || 0).filter((c) => c > 0);
+  const maxCost = Math.max(...costs, 0);
+
+  return rows.map((row) => {
+    const totalTokens = Number(row.tokens) || 0;
+    const cost = Number(row.cost) || 0;
+    return {
+      date: row.date,
+      totalTokens,
+      totalCost: cost,
+      intensity: (
+        maxCost === 0 ? 0 : cost === 0 ? 0 : cost <= maxCost * 0.25 ? 1 : cost <= maxCost * 0.5 ? 2 : cost <= maxCost * 0.75 ? 3 : 4
+      ) as 0 | 1 | 2 | 3 | 4,
+    };
+  });
+}
+
+export function getUserEmbedContributions(username: string): Promise<EmbedContributionDay[] | null> {
+  return unstable_cache(
+    () => fetchUserEmbedContributions(username),
+    [`embed-contrib:${username}`],
+    {
+      tags: [`user:${username}`, `embed-contrib:${username}`],
       revalidate: 60,
     }
   )();

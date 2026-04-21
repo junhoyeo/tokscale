@@ -7,6 +7,7 @@ import { toast } from "react-toastify";
 
 type EmbedTheme = "dark" | "light";
 type EmbedSortBy = "tokens" | "cost";
+type EmbedView = "2d" | "3d";
 
 interface ProfileEmbedDialogProps {
   open: boolean;
@@ -26,6 +27,7 @@ export function ProfileEmbedDialog({
   const [theme, setTheme] = useState<EmbedTheme>("dark");
   const [sortBy, setSortBy] = useState<EmbedSortBy>("tokens");
   const [compact, setCompact] = useState(false);
+  const [view, setView] = useState<EmbedView>("2d");
 
   useEffect(() => {
     if (!open) return;
@@ -48,13 +50,13 @@ export function ProfileEmbedDialog({
 
   const {
     embedUrl,
-    previewUrl,
     markdownSnippet,
     htmlSnippet,
     profileUrl,
   } = useMemo(() => {
     const params = new URLSearchParams();
 
+    if (view === "3d") params.set("view", "3d");
     if (theme !== "dark") params.set("theme", theme);
     if (sortBy !== "tokens") params.set("sort", sortBy);
     if (compact) params.set("compact", "1");
@@ -66,12 +68,11 @@ export function ProfileEmbedDialog({
 
     return {
       embedUrl: resolvedEmbedUrl,
-      previewUrl: `${resolvedEmbedUrl}${query ? "&" : "?"}preview=1`,
       markdownSnippet: `[![Tokscale Stats](${resolvedEmbedUrl})](${resolvedProfileUrl})`,
       htmlSnippet: `<a href="${resolvedProfileUrl}"><img alt="Tokscale Stats for @${username}" src="${resolvedEmbedUrl}" /></a>`,
       profileUrl: resolvedProfileUrl,
     };
-  }, [compact, sortBy, theme, username]);
+  }, [compact, sortBy, theme, username, view]);
 
   const copyToClipboard = async (value: string, label: string) => {
     try {
@@ -117,7 +118,7 @@ export function ProfileEmbedDialog({
               <PreviewLabel>Live preview</PreviewLabel>
               <PreviewFrame>
                 <PreviewImage
-                  src={previewUrl}
+                  src={embedUrl}
                   alt={`Tokscale README embed preview for ${displayName || username}`}
                 />
               </PreviewFrame>
@@ -131,6 +132,26 @@ export function ProfileEmbedDialog({
           </PreviewPanel>
 
           <ControlsPanel>
+            <OptionGroup>
+              <OptionLabel>View</OptionLabel>
+              <SegmentedControl>
+                <SegmentButton
+                  type="button"
+                  $active={view === "2d"}
+                  onClick={() => setView("2d")}
+                >
+                  2D
+                </SegmentButton>
+                <SegmentButton
+                  type="button"
+                  $active={view === "3d"}
+                  onClick={() => setView("3d")}
+                >
+                  3D
+                </SegmentButton>
+              </SegmentedControl>
+            </OptionGroup>
+
             <OptionGroup>
               <OptionLabel>Theme</OptionLabel>
               <SegmentedControl>

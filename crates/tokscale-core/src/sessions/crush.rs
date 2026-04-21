@@ -4,6 +4,7 @@
 //! The database exposes reliable session-level cost, but not reliable
 //! per-message token accounting for import.
 
+use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use chrono::{Local, TimeZone};
@@ -37,12 +38,8 @@ struct DayBucket {
 /// - session cost is allocated across those days proportionally
 /// - token fields remain zero
 pub fn parse_crush_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
+    let Some(conn) = open_readonly_sqlite(db_path) else {
+        return Vec::new();
     };
 
     let root_sessions = load_root_sessions(&conn);

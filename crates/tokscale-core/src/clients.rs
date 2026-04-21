@@ -280,6 +280,27 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: false
+    },
+    Hermes = 16 => {
+        id: "hermes",
+        root: PathRoot::EnvVar {
+            var: "HERMES_HOME",
+            fallback_relative: ".hermes",
+        },
+        relative: "state.db",
+        pattern: "state.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Copilot = 17 => {
+        id: "copilot",
+        root: PathRoot::Home,
+        relative: ".copilot/otel",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -332,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 16);
+        assert_eq!(ClientId::COUNT, 18);
     }
 
     #[test]
@@ -492,5 +513,17 @@ mod tests {
     #[test]
     fn test_crush_submit_default_is_false() {
         assert!(!ClientId::Crush.submit_default());
+    }
+
+    #[test]
+    fn test_hermes_root_uses_hermes_home_env_var() {
+        assert_eq!(
+            ClientId::Hermes.data().root,
+            PathRoot::EnvVar {
+                var: "HERMES_HOME",
+                fallback_relative: ".hermes",
+            }
+        );
+        assert_eq!(ClientId::Hermes.data().relative_path, "state.db");
     }
 }

@@ -5,10 +5,12 @@
 pub mod amp;
 pub mod claudecode;
 pub mod codex;
+pub mod copilot;
 pub mod crush;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod hermes;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
@@ -39,6 +41,10 @@ pub struct UnifiedMessage {
     pub message_count: i32,
     pub agent: Option<String>,
     pub dedup_key: Option<String>,
+    /// True if this message is the first assistant response after a user turn.
+    /// Used to count user interaction turns (as opposed to API message count).
+    #[serde(default)]
+    pub is_turn_start: bool,
 }
 
 const fn default_message_count() -> i32 {
@@ -235,6 +241,7 @@ impl UnifiedMessage {
             message_count: default_message_count(),
             agent,
             dedup_key,
+            is_turn_start: false,
         }
     }
 

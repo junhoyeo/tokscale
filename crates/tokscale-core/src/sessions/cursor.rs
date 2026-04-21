@@ -4,8 +4,10 @@
 //! CSV files are cached locally at ~/.config/tokscale/cursor-cache/*.csv
 //! (legacy single-account cache uses usage.csv; additional accounts may use usage.<account>.csv)
 //!
-//! CSV Format (actual from API):
-//! Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+//! CSV Formats:
+//! - v1 (old): Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you
+//! - v2 (new): Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+//! - v3 (latest): Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
@@ -56,8 +58,11 @@ fn parse_cost(cost_str: &str) -> f64 {
     let cleaned = cost_str.replace(['$', ','], "");
     let trimmed = cleaned.trim();
 
-    // Handle empty or NaN values
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("nan") {
+    // Handle empty, NaN, or non-numeric values (e.g., "Included", "-" in v3)
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("nan")
+        || !trimmed.chars().any(|c| c.is_ascii_digit())
+    {
         return 0.0;
     }
 
@@ -89,9 +94,10 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         return vec![];
     }
 
-    // Detect format by checking for "Kind" column
+    // Detect format by checking for "Kind" column and column count
     let header_fields: Vec<&str> = parse_csv_line(header);
     let has_kind_column = header_fields.iter().any(|f| f.trim() == "Kind");
+    let column_count = header_fields.len();
 
     // Column indices based on format
     let (
@@ -101,11 +107,14 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         cache_read_idx,
         output_idx,
         cost_idx,
-    ) = if has_kind_column {
-        // New format: Date,Kind,Model,Max Mode,Input (w/ Cache Write),...
+    ) = if has_kind_column && column_count >= 11 {
+        // v3 format: Date,Cloud Agent ID,Automation ID,Kind,Model,...
+        (4, 6, 7, 8, 9, 11)
+    } else if has_kind_column {
+        // v2 format: Date,Kind,Model,Max Mode,Input (w/ Cache Write),...
         (2, 4, 5, 6, 7, 9)
     } else {
-        // Old format: Date,Model,Input (w/ Cache Write),...
+        // v1 format: Date,Model,Input (w/ Cache Write),...
         (1, 2, 3, 4, 5, 7)
     };
 
@@ -270,6 +279,9 @@ mod tests {
         assert_eq!(parse_cost("NaN"), 0.0);
         assert_eq!(parse_cost("nan"), 0.0);
         assert_eq!(parse_cost("  "), 0.0);
+        // v3 format values
+        assert_eq!(parse_cost("Included"), 0.0);
+        assert_eq!(parse_cost("-"), 0.0);
     }
 
     #[test]
@@ -354,5 +366,35 @@ mod tests {
         assert_eq!(messages[1].provider_id, "openai"); // gpt -> openai
         assert_eq!(messages[1].tokens.input, 8263);
         assert_eq!(messages[1].tokens.cache_read, 66964);
+    }
+
+    #[test]
+    fn test_parse_cursor_csv_sample_v3_format() {
+        // v3 format includes Cloud Agent ID and Automation ID columns
+        let csv = r#"Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-04-09T20:01:10.528Z","bc-a380fb49-e1a5-414e-817d-6a85b6cdc51c","cc30782e-26cc-4359-bc22-7567efe282be","Included","composer-2","Yes","0","343446","29045760","915201","30304407","Included"
+"2026-04-09T18:02:13.576Z","bc-19a9b74b-2af3-46e2-9f61-3ba1cdac46c8","1a0df38f-1474-4dfe-896b-70b841d4a833","On-Demand","composer-2","Yes","0","43478","420864","7957","472299","0.11"
+"2026-04-09T07:39:09.091Z","bc-49262501-0ee0-49f9-b856-a5b0466deddb","","Errored, No Charge","composer-2","Yes","0","104504","985600","3666","1093770","-""#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.csv");
+        std::fs::write(&file_path, csv).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 3);
+
+        // First message: "Included" cost should be 0
+        assert_eq!(messages[0].client, "cursor");
+        assert_eq!(messages[0].model_id, "composer-2");
+        assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(messages[0].tokens.cache_read, 29045760);
+
+        // Second message: actual cost from "On-Demand"
+        assert_eq!(messages[1].model_id, "composer-2");
+        assert!((messages[1].cost - 0.11).abs() < 0.001);
+
+        // Third message: "-" cost should be 0 (Errored, No Charge)
+        assert_eq!(messages[2].model_id, "composer-2");
+        assert_eq!(messages[2].cost, 0.0);
     }
 }

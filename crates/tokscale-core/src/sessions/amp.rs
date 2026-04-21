@@ -2,6 +2,7 @@
 //!
 //! Parses JSON files from ~/.local/share/amp/threads/
 
+use super::utils::read_file_or_none;
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -72,9 +73,8 @@ fn get_provider_from_model(model: &str) -> &'static str {
 
 /// Parse an Amp thread JSON file
 pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
-    let content = match std::fs::read(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+    let Some(content) = read_file_or_none(path) else {
+        return Vec::new();
     };
 
     // Get file mtime as last-resort timestamp fallback

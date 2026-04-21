@@ -32,6 +32,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/claude.jpg";
       case "codex":
         return "/assets/logos/openai.jpg";
+      case "copilot":
+        return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg";
       case "gemini":
         return "/assets/logos/gemini.png";
       case "cursor":
@@ -42,6 +44,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/droid.png";
       case "openclaw":
         return "/assets/logos/openclaw.jpg";
+      case "hermes":
+        return "/assets/logos/hermes.png";
       case "pi":
         return "/assets/logos/pi.png";
       case "kimi":
@@ -55,6 +59,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/kilocode.png";
       case "mux":
         return "/assets/logos/mux.png";
+      case "crush":
+        return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png";
       case "synthetic":
         return "/assets/logos/synthetic.png";
       default:

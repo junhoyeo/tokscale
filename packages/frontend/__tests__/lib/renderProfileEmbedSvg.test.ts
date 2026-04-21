@@ -27,7 +27,6 @@ describe("renderProfileEmbedSvg", () => {
 
     expect(svg).toContain("<svg");
     expect(svg).toContain("Tokscale Stats");
-    expect(svg).toContain("README EMBED");
     expect(svg).toContain("@octocat");
     expect(svg).toContain("1,234,567");
     expect(svg).toContain("$42.42");
@@ -47,9 +46,9 @@ describe("renderProfileEmbedSvg", () => {
 
     expect(svg).toContain('width="460"');
     expect(svg).toContain('height="162"');
-    expect(svg).toContain("README EMBED");
+    expect(svg).toContain("Tokscale Stats");
     expect(svg).toContain("@octocat");
-    expect(svg).toContain('stop-color="#F6FAFF"');
+    expect(svg).toContain('stop-color="#FFFFFF"');
     expect(svg).not.toContain("Submissions");
   });
 
@@ -69,13 +68,13 @@ describe("renderProfileEmbedSvg", () => {
     expect(costSvg).toContain("RANK · COST");
   });
 
-  it("uses gradient tokens, green cost, and medal rank colors", () => {
+  it("uses gradient tokens, green cost, and rank-specific colors", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    expect(svg).toContain('id="tokens-gradient"');
-    expect(svg).toContain('fill="url(#tokens-gradient)"');
-    expect(svg).toContain('fill="#53D18C"');
-    expect(svg).toContain('fill="#D97706"');
+    expect(svg).toContain('id="token-grad"');
+    expect(svg).toContain('fill="url(#token-grad)"');
+    expect(svg).toContain('fill="#3FB950"');
+    expect(svg).toContain('fill="#DA7E1A"');
   });
 
   it("uses gold color for rank #1", () => {
@@ -83,17 +82,30 @@ describe("renderProfileEmbedSvg", () => {
       ...mockStats,
       stats: { ...mockStats.stats, rank: 1 },
     });
-    expect(svg).toContain('fill="#EAB308"');
+    expect(svg).toContain('fill="#E3B341"');
   });
 
-  it("renders branded gradient surfaces for the refreshed card", () => {
+  it("uses amber accent bar for non-medal ranks instead of brand blue", () => {
+    const svg = renderProfileEmbedSvg({
+      ...mockStats,
+      stats: { ...mockStats.stats, rank: 42 },
+    });
+    const accRankMatch = svg.match(/id="acc-rank"[\s\S]*?<\/linearGradient>/);
+    expect(accRankMatch).toBeTruthy();
+    expect(accRankMatch![0]).toContain('stop-color="#D29922"');
+    expect(accRankMatch![0]).not.toContain('stop-color="#58A6FF"');
+  });
+
+  it("renders redesigned card structure with brand icon and accent bars", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    expect(svg).toContain('id="card-bg"');
-    expect(svg).toContain('id="shell-bg"');
-    expect(svg).toContain('id="header-bg"');
-    expect(svg).toContain('id="metric-sheen"');
-    expect(svg).toContain('filter="url(#soft-glow)"');
+    expect(svg).toContain('id="bg"');
+    expect(svg).toContain('id="glow"');
+    expect(svg).toContain('id="divider-grad"');
+    expect(svg).toContain('id="acc-tokens"');
+    expect(svg).toContain('id="acc-cost"');
+    expect(svg).toContain('id="acc-rank"');
+    expect(svg).toContain('clip-path="url(#card-clip)"');
   });
 
   it("escapes XML in user-provided text", () => {
@@ -122,7 +134,7 @@ describe("renderProfileEmbedSvg", () => {
     const displayNameTag = svg.match(/<text x="(\d+(?:\.\d+)?)"[^>]*>The Octocat<\/text>/);
     expect(displayNameTag).toBeTruthy();
     const x = Number(displayNameTag![1]);
-    expect(x).toBeGreaterThanOrEqual(20 + 18 + 8 * 9 + 8);
+    expect(x).toBeGreaterThanOrEqual(24 + 8 * 17 * 0.6 + 8);
   });
 
   it("hides display name when username is too long to leave room", () => {
@@ -170,6 +182,82 @@ describe("renderProfileEmbedSvg", () => {
     expect(compactSvg).toContain(expectedDisplayName);
     expect(defaultSvg).toContain(expectedDisplayName);
   });
+
+  it("auto-scales font size for very long token values", () => {
+    const svg = renderProfileEmbedSvg({
+      ...mockStats,
+      stats: { ...mockStats.stats, totalTokens: 15726314363 },
+    });
+
+    expect(svg).toContain("15,726,314,363");
+    const valueTag = svg.match(/font-size="(\d+)"[^>]*font-weight="800"[^>]*>15,726,314,363/);
+    expect(valueTag).toBeTruthy();
+    const fontSize = Number(valueTag![1]);
+    expect(fontSize).toBeLessThan(28);
+    expect(fontSize).toBeGreaterThanOrEqual(14);
+  });
+});
+
+describe("renderProfileEmbedSvg with contributions graph", () => {
+  const mockContributions = [
+    { date: "2026-01-15", intensity: 0 as const },
+    { date: "2026-02-10", intensity: 2 as const },
+    { date: "2026-02-20", intensity: 4 as const },
+  ];
+
+  it("extends card height when contributions provided", () => {
+    const withoutGraph = renderProfileEmbedSvg(mockStats);
+    const withGraph = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(withoutGraph).toContain('height="186"');
+    const heightMatch = withGraph.match(/height="(\d+)"/);
+    expect(heightMatch).toBeTruthy();
+    expect(Number(heightMatch![1])).toBeGreaterThan(186);
+  });
+
+  it("renders GitHub-style contribution grid cells", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(svg).toContain('rx="2"');
+    expect(svg).toContain('fill="#161B22"');
+    expect(svg).toContain("Less");
+    expect(svg).toContain("More");
+  });
+
+  it("renders day labels (Mon, Wed, Fri)", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(svg).toContain(">Mon<");
+    expect(svg).toContain(">Wed<");
+    expect(svg).toContain(">Fri<");
+  });
+
+  it("renders month labels", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+
+    expect(svg).toContain(">Jan<");
+  });
+
+  it("ignores contributions in compact mode", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { compact: true, contributions: mockContributions });
+
+    expect(svg).toContain('height="162"');
+    expect(svg).not.toContain("Less");
+    expect(svg).not.toContain("More");
+  });
+
+  it("uses light theme graph colors", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { theme: "light", contributions: mockContributions });
+
+    expect(svg).toContain('fill="#EBEDF0"');
+  });
+
+  it("does not render graph when contributions is null", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { contributions: null });
+
+    expect(svg).toContain('height="186"');
+    expect(svg).not.toContain("Less");
+  });
 });
 
 describe("renderProfileEmbedErrorSvg", () => {
@@ -177,10 +265,9 @@ describe("renderProfileEmbedErrorSvg", () => {
     const svg = renderProfileEmbedErrorSvg("User <unknown>", { theme: "light" });
 
     expect(svg).toContain("Tokscale Stats");
-    expect(svg).toContain("README EMBED");
     expect(svg).toContain("User &lt;unknown&gt;");
     expect(svg).not.toContain("User <unknown>");
     expect(svg).toContain("family=Figtree");
-    expect(svg).toContain('id="error-bg"');
+    expect(svg).toContain('id="err-bg"');
   });
 });

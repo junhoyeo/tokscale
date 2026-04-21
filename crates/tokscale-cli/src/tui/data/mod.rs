@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
 use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
@@ -10,6 +10,21 @@ use tokscale_core::{
     normalize_model_for_grouping, parse_local_unified_messages, sessions, ClientId, GroupBy,
     LocalParseOptions,
 };
+
+/// Returns the scanner settings that `DataLoader` should use when building
+/// `LocalParseOptions`. Under `#[cfg(test)]` this intentionally ignores
+/// `~/.config/tokscale/settings.json` so data-loader unit tests stay
+/// hermetic across developer machines; production builds still honor
+/// user-configured paths.
+#[cfg(not(test))]
+fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
+    crate::tui::settings::load_scanner_settings()
+}
+
+#[cfg(test)]
+fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
+    tokscale_core::scanner::ScannerSettings::default()
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TokenBreakdown {
@@ -53,11 +68,26 @@ pub struct AgentUsage {
 
 #[derive(Debug, Clone)]
 pub struct DailyModelInfo {
-    pub client: String,
+    /// API provider identifier (e.g. "anthropic", "openai").
+    ///
+    /// **Caveat**: For `GroupBy::Model`, `GroupBy::ClientModel`, and
+    /// `GroupBy::WorkspaceModel`, multiple providers may be merged into a
+    /// single daily model entry.  In that case this field retains whichever
+    /// provider was seen first and is **not** authoritative.  Only treat it
+    /// as exact when `group_by == GroupBy::ClientProviderModel`.
+    pub provider: String,
     pub display_name: String,
     pub color_key: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    pub messages: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DailySourceInfo {
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub models: BTreeMap<String, DailyModelInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +95,29 @@ pub struct DailyUsage {
     pub date: NaiveDate,
     pub tokens: TokenBreakdown,
     pub cost: f64,
-    pub models: BTreeMap<String, DailyModelInfo>,
+    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
+    pub message_count: u32,
+    pub turn_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct HourlyModelInfo {
+    pub provider: String,
+    pub display_name: String,
+    pub color_key: String,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HourlyUsage {
+    pub datetime: NaiveDateTime,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub clients: BTreeSet<String>,
+    pub models: BTreeMap<String, HourlyModelInfo>,
+    pub message_count: u32,
+    pub turn_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +138,7 @@ pub struct UsageData {
     pub models: Vec<ModelUsage>,
     pub agents: Vec<AgentUsage>,
     pub daily: Vec<DailyUsage>,
+    pub hourly: Vec<HourlyUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -131,6 +184,53 @@ fn workspace_model_daily_key(workspace_group_key: &str, model: &str) -> String {
         "{}:{workspace_group_key}:{model}",
         workspace_group_key.len()
     )
+}
+
+fn daily_source_model_key(
+    group_by: &GroupBy,
+    workspace_group_key: &str,
+    provider_id: &str,
+    model: &str,
+) -> String {
+    match group_by {
+        GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
+        GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
+        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+    }
+}
+
+fn daily_source_model_display_name(
+    group_by: &GroupBy,
+    workspace_label: &str,
+    provider_id: &str,
+    model: &str,
+) -> String {
+    match group_by {
+        GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
+        GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
+        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+    }
+}
+
+fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
+    match group_by {
+        GroupBy::ClientProviderModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+    }
+}
+
+fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
+    match group_by {
+        GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+    }
+}
+
+fn hourly_model_display_name(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
+    match group_by {
+        GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+    }
 }
 
 impl DataLoader {
@@ -183,6 +283,7 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
+            scanner_settings: data_loader_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -231,6 +332,7 @@ impl DataLoader {
             until: self.until.clone(),
             year: self.year.clone(),
             use_env_roots: false,
+            scanner_settings: data_loader_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -265,6 +367,7 @@ impl DataLoader {
         let mut agent_map: HashMap<String, AgentUsage> = HashMap::new();
         let mut agent_clients: HashMap<String, BTreeSet<String>> = HashMap::new();
         let mut daily_map: HashMap<NaiveDate, DailyUsage> = HashMap::new();
+        let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
 
         for msg in &messages {
@@ -399,7 +502,9 @@ impl DataLoader {
                     date,
                     tokens: TokenBreakdown::default(),
                     cost: 0.0,
-                    models: BTreeMap::new(),
+                    source_breakdown: BTreeMap::new(),
+                    message_count: 0,
+                    turn_count: 0,
                 });
 
                 daily_entry.tokens.input = daily_entry
@@ -428,26 +533,64 @@ impl DataLoader {
                     0.0
                 };
                 daily_entry.cost += msg_cost;
+                daily_entry.message_count += msg.message_count.max(0) as u32;
+                if msg.is_turn_start {
+                    daily_entry.turn_count += 1;
+                }
 
-                let daily_model_key = if *group_by == GroupBy::WorkspaceModel {
-                    workspace_model_daily_key(&workspace_group_key, &normalized_model)
-                } else {
-                    normalized_model.clone()
-                };
+                let source_entry = daily_entry
+                    .source_breakdown
+                    .entry(msg.client.clone())
+                    .or_insert_with(|| DailySourceInfo {
+                        tokens: TokenBreakdown::default(),
+                        cost: 0.0,
+                        models: BTreeMap::new(),
+                    });
 
-                let model_info = daily_entry
+                source_entry.tokens.input = source_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                source_entry.tokens.output = source_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                source_entry.tokens.cache_read = source_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                source_entry.tokens.cache_write = source_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                source_entry.tokens.reasoning = source_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                source_entry.cost += msg_cost;
+
+                let daily_model_key = daily_source_model_key(
+                    group_by,
+                    &workspace_group_key,
+                    &msg.provider_id,
+                    &normalized_model,
+                );
+
+                let model_info = source_entry
                     .models
                     .entry(daily_model_key)
                     .or_insert_with(|| DailyModelInfo {
-                        client: msg.client.clone(),
-                        display_name: if *group_by == GroupBy::WorkspaceModel {
-                            workspace_model_display_label(&workspace_label, &normalized_model)
-                        } else {
-                            normalized_model.clone()
-                        },
-                        color_key: normalized_model.clone(),
+                        provider: msg.provider_id.clone(),
+                        display_name: daily_source_model_display_name(
+                            group_by,
+                            &workspace_label,
+                            &msg.provider_id,
+                            &normalized_model,
+                        ),
+                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
+                        messages: 0,
                     });
 
                 model_info.tokens.input = model_info
@@ -470,12 +613,93 @@ impl DataLoader {
                     .tokens
                     .reasoning
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                let model_msg_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
+                model_info.cost += msg_cost;
+                model_info.messages = model_info
+                    .messages
+                    .saturating_add(msg.message_count.max(0) as u64);
+            }
+
+            // Hourly aggregation: derive hour from timestamp (Unix ms)
+            if let Some(hour_dt) = timestamp_to_hour(msg.timestamp) {
+                let hourly_entry = hourly_map.entry(hour_dt).or_insert_with(|| HourlyUsage {
+                    datetime: hour_dt,
+                    tokens: TokenBreakdown::default(),
+                    cost: 0.0,
+                    clients: BTreeSet::new(),
+                    models: BTreeMap::new(),
+                    message_count: 0,
+                    turn_count: 0,
+                });
+
+                hourly_entry.tokens.input = hourly_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                hourly_entry.tokens.output = hourly_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                hourly_entry.tokens.cache_read = hourly_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                hourly_entry.tokens.cache_write = hourly_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                hourly_entry.tokens.reasoning = hourly_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                let h_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
                     msg.cost
                 } else {
                     0.0
                 };
-                model_info.cost += model_msg_cost;
+                hourly_entry.cost += h_cost;
+                hourly_entry.message_count += msg.message_count.max(0) as u32;
+                if msg.is_turn_start {
+                    hourly_entry.turn_count += 1;
+                }
+                hourly_entry.clients.insert(msg.client.clone());
+
+                let hourly_model_key =
+                    hourly_model_key(group_by, &msg.provider_id, &normalized_model);
+                let h_model = hourly_entry
+                    .models
+                    .entry(hourly_model_key)
+                    .or_insert_with(|| HourlyModelInfo {
+                        provider: msg.provider_id.clone(),
+                        display_name: hourly_model_display_name(
+                            group_by,
+                            &msg.provider_id,
+                            &normalized_model,
+                        ),
+                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
+                        tokens: TokenBreakdown::default(),
+                        cost: 0.0,
+                    });
+                h_model.tokens.input = h_model
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                h_model.tokens.output = h_model
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                h_model.tokens.cache_read = h_model
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                h_model.tokens.cache_write = h_model
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                h_model.tokens.reasoning = h_model
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                h_model.cost += h_cost;
             }
         }
 
@@ -485,7 +709,6 @@ impl DataLoader {
                 .total_cmp(&a.cost)
                 .then_with(|| a.model.cmp(&b.model))
                 .then_with(|| a.provider.cmp(&b.provider))
-                .then_with(|| a.client.cmp(&b.client))
         });
 
         for (agent, clients) in agent_clients {
@@ -503,7 +726,10 @@ impl DataLoader {
         });
 
         let mut daily: Vec<DailyUsage> = daily_map.into_values().collect();
-        daily.sort_by(|a, b| b.date.cmp(&a.date));
+        daily.sort_by_key(|b| std::cmp::Reverse(b.date));
+
+        let mut hourly: Vec<HourlyUsage> = hourly_map.into_values().collect();
+        hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
         let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
         let total_cost: f64 = models
@@ -518,6 +744,7 @@ impl DataLoader {
             models,
             agents,
             daily,
+            hourly,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -531,6 +758,27 @@ impl DataLoader {
 
 fn parse_date(date_str: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+}
+
+/// Convert Unix ms timestamp to a NaiveDateTime truncated to the hour (local tz).
+fn timestamp_to_hour(timestamp_ms: i64) -> Option<NaiveDateTime> {
+    use chrono::TimeZone;
+    if timestamp_ms <= 0 {
+        return None;
+    }
+    let ts_secs = timestamp_ms / 1000;
+    match Local.timestamp_opt(ts_secs, 0) {
+        chrono::LocalResult::Single(dt) => {
+            let naive = dt.naive_local();
+            Some(
+                naive
+                    .date()
+                    .and_hms_opt(naive.hour(), 0, 0)
+                    .unwrap_or(naive),
+            )
+        }
+        _ => None,
+    }
 }
 
 fn build_contribution_graph(daily: &[DailyUsage]) -> GraphData {
@@ -647,6 +895,100 @@ fn calculate_streaks_for_today(daily: &[DailyUsage], today: NaiveDate) -> (u32, 
     (current_streak, longest_streak)
 }
 
+/// Time-of-day period bucket for profile view
+#[derive(Debug, Clone)]
+pub struct PeriodBucket {
+    pub label: &'static str,
+    pub hour_range: &'static str,
+    pub total_tokens: u64,
+}
+
+/// Weekday bucket for profile view
+#[derive(Debug, Clone)]
+pub struct WeekdayBucket {
+    pub day: &'static str,
+    pub total_tokens: u64,
+}
+
+/// Aggregate hourly data into time-of-day periods
+pub fn aggregate_by_period(hourly: &[HourlyUsage]) -> Vec<PeriodBucket> {
+    let periods: [(&str, &str, Vec<usize>); 4] = [
+        ("Morning", "05:00-11:59", (5..=11).collect()),
+        ("Daytime", "12:00-16:59", (12..=16).collect()),
+        ("Evening", "17:00-21:59", (17..=21).collect()),
+        ("Night", "22:00-04:59", vec![22, 23, 0, 1, 2, 3, 4]),
+    ];
+
+    periods
+        .iter()
+        .map(|(label, hour_range, hours)| {
+            let mut total_tokens = 0u64;
+
+            for entry in hourly {
+                let hour = entry.datetime.hour() as usize;
+                if hours.contains(&hour) {
+                    total_tokens = total_tokens.saturating_add(entry.tokens.total());
+                }
+            }
+
+            PeriodBucket {
+                label,
+                hour_range,
+                total_tokens,
+            }
+        })
+        .collect()
+}
+
+/// Aggregate hourly data by weekday
+pub fn aggregate_by_weekday(hourly: &[HourlyUsage]) -> Vec<WeekdayBucket> {
+    use chrono::Datelike;
+
+    let weekdays = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ];
+    let mut buckets: Vec<u64> = vec![0; 7];
+
+    for entry in hourly {
+        let weekday = entry.datetime.weekday().num_days_from_monday() as usize;
+        buckets[weekday] = buckets[weekday].saturating_add(entry.tokens.total());
+    }
+
+    weekdays
+        .iter()
+        .enumerate()
+        .map(|(i, day)| WeekdayBucket {
+            day,
+            total_tokens: buckets[i],
+        })
+        .collect()
+}
+
+/// Find peak hour across all hourly data
+pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
+    use std::collections::HashMap;
+
+    let mut hour_totals: HashMap<u32, (u64, f64)> = HashMap::new();
+
+    for entry in hourly {
+        let hour = entry.datetime.hour();
+        let entry_totals = hour_totals.entry(hour).or_insert((0, 0.0));
+        entry_totals.0 = entry_totals.0.saturating_add(entry.tokens.total());
+        entry_totals.1 += entry.cost;
+    }
+
+    hour_totals
+        .into_iter()
+        .max_by_key(|(_, (tokens, _))| *tokens)
+        .map(|(hour, (tokens, cost))| (hour, tokens, cost))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +1061,7 @@ mod tests {
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
+            scanner_settings: data_loader_scanner_settings(),
         };
 
         let messages = if Handle::try_current().is_ok() {
@@ -788,7 +1131,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 16);
+        assert_eq!(clients.len(), 18);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -805,6 +1148,8 @@ mod tests {
         assert_eq!(clients[13], ClientId::Mux);
         assert_eq!(clients[14], ClientId::Kilo);
         assert_eq!(clients[15], ClientId::Crush);
+        assert_eq!(clients[16], ClientId::Hermes);
+        assert_eq!(clients[17], ClientId::Copilot);
     }
 
     #[test]
@@ -820,6 +1165,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Codex),
             "Codex"
+        );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Copilot),
+            "Copilot"
         );
         assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Cursor),
@@ -858,6 +1207,10 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Crush),
             "Crush"
         );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Hermes),
+            "Hermes Agent"
+        );
     }
 
     #[test]
@@ -865,6 +1218,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenCode), '1');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Claude), '2');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codex), '3');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Copilot), 'c');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cursor), '4');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gemini), '5');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Amp), '6');
@@ -878,6 +1232,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), 'x');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), 'l');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), 'h');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hermes), 'e');
     }
 
     #[test]
@@ -893,6 +1248,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('3'),
             Some(ClientId::Codex)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('c'),
+            Some(ClientId::Copilot)
         );
         assert_eq!(
             crate::tui::client_ui::from_hotkey('4'),
@@ -936,6 +1295,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('h'),
             Some(ClientId::Crush)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('e'),
+            Some(ClientId::Hermes)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('a'), None);
     }
@@ -986,6 +1349,29 @@ mod tests {
     }
 
     #[test]
+    fn test_data_loader_scanner_settings_is_hermetic_under_cfg_test() {
+        // Regression guard: the `#[cfg(test)]` branch of
+        // `data_loader_scanner_settings` must not read
+        // `~/.config/tokscale/settings.json`. Otherwise every DataLoader
+        // unit test becomes machine-dependent as soon as a developer
+        // pins extra OpenCode dbs in their real settings.json.
+        //
+        // This test cannot sandbox HOME (many of the sibling tests in
+        // this module would race against each other if it did), so
+        // instead it asserts the cfg(test) helper returns a default
+        // ScannerSettings regardless of what the real settings file
+        // contains on the developer's machine.
+        let settings = super::data_loader_scanner_settings();
+        assert!(
+            settings.opencode_db_paths.is_empty(),
+            "under #[cfg(test)] data_loader_scanner_settings must return \
+             ScannerSettings::default() so unit tests stay hermetic, but \
+             got {:?}",
+            settings.opencode_db_paths
+        );
+    }
+
+    #[test]
     fn test_data_loader_with_filters() {
         let loader = DataLoader::with_filters(
             Some(PathBuf::from("/tmp/sessions")),
@@ -1025,7 +1411,9 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
-            models: BTreeMap::new(),
+            source_breakdown: BTreeMap::new(),
+            message_count: 0,
+            turn_count: 0,
         }];
         let graph = build_contribution_graph_for_today(&daily, today);
         let last_day = graph
@@ -1236,10 +1624,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.daily.len(), 1);
-        let daily_keys: Vec<_> = usage.daily[0].models.keys().cloned().collect();
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
         assert_eq!(daily_keys.len(), 2);
         assert_ne!(daily_keys[0], daily_keys[1]);
-        let daily_display_names: Vec<_> = usage.daily[0]
+        let daily_display_names: Vec<_> = claude
             .models
             .values()
             .map(|info| info.display_name.clone())
@@ -1283,8 +1672,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.daily.len(), 1);
-        assert_eq!(usage.daily[0].models.len(), 2);
-        let display_names: Vec<_> = usage.daily[0]
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+
+        // Keys must differ even though display names are identical
+        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
+        assert_eq!(daily_keys.len(), 2);
+        assert_ne!(daily_keys[0], daily_keys[1]);
+
+        let display_names: Vec<_> = claude
             .models
             .values()
             .map(|info| info.display_name.clone())
@@ -1296,6 +1692,131 @@ mod tests {
                 "demo / claude-sonnet-4-5".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_aggregate_messages_client_provider_model_splits_providers_in_daily_breakdown() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 10,
+                            output: 5,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        1.0,
+                    ),
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "github-copilot",
+                        "session-2",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 20,
+                            output: 10,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        2.0,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+
+        let anthropic_key = "anthropic:claude-sonnet-4-5";
+        let copilot_key = "github-copilot:claude-sonnet-4-5";
+        let anthropic_model = claude.models.get(anthropic_key).unwrap();
+        assert_eq!(
+            anthropic_model.display_name,
+            "anthropic / claude-sonnet-4-5"
+        );
+        assert_eq!(anthropic_model.provider, "anthropic");
+        assert_eq!(anthropic_model.tokens.total(), 15);
+        assert_eq!(anthropic_model.messages, 1);
+
+        let copilot_model = claude.models.get(copilot_key).unwrap();
+        assert_eq!(
+            copilot_model.display_name,
+            "github-copilot / claude-sonnet-4-5"
+        );
+        assert_eq!(copilot_model.provider, "github-copilot");
+        assert_eq!(copilot_model.tokens.total(), 30);
+        assert_eq!(copilot_model.messages, 1);
+    }
+
+    #[test]
+    fn test_aggregate_messages_keeps_same_model_split_across_sources_in_daily_breakdown() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 10,
+                            output: 5,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        1.0,
+                    ),
+                    UnifiedMessage::new(
+                        "cursor",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-2",
+                        1_735_689_600_000,
+                        tokscale_core::TokenBreakdown {
+                            input: 20,
+                            output: 10,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        2.0,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        assert_eq!(usage.daily[0].source_breakdown.len(), 2);
+
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.cost, 1.0);
+        assert_eq!(claude.models.len(), 1);
+        let claude_model = claude.models.get("claude-sonnet-4-5").unwrap();
+        assert_eq!(claude_model.display_name, "claude-sonnet-4-5");
+        assert_eq!(claude_model.tokens.total(), 15);
+
+        let cursor = usage.daily[0].source_breakdown.get("cursor").unwrap();
+        assert_eq!(cursor.cost, 2.0);
+        assert_eq!(cursor.models.len(), 1);
+        let cursor_model = cursor.models.get("claude-sonnet-4-5").unwrap();
+        assert_eq!(cursor_model.display_name, "claude-sonnet-4-5");
+        assert_eq!(cursor_model.tokens.total(), 30);
     }
 
     #[test]
@@ -1664,13 +2185,17 @@ after"#,
                 date: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
-                models: BTreeMap::new(),
+                source_breakdown: BTreeMap::new(),
+                message_count: 0,
+                turn_count: 0,
             },
             DailyUsage {
                 date: NaiveDate::from_ymd_opt(2026, 3, 3).unwrap(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
-                models: BTreeMap::new(),
+                source_breakdown: BTreeMap::new(),
+                message_count: 0,
+                turn_count: 0,
             },
         ];
         let (current, longest) = calculate_streaks_for_today(&daily, today);

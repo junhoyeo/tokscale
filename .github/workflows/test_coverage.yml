@@ -1,18 +1,31 @@
 name: Test & Coverage
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, develop]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'packages/cli/package.json'
+      - 'packages/tokscale/package.json'
+      - 'packages/cli-*/package.json'
+      - 'scripts/check-version-coherence.sh'
+      - '.github/workflows/publish-cli.yml'
+      - '.github/workflows/test_coverage.yml'
   pull_request:
     branches: [main, develop]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'packages/cli/package.json'
+      - 'packages/tokscale/package.json'
+      - 'packages/cli-*/package.json'
+      - 'scripts/check-version-coherence.sh'
+      - '.github/workflows/publish-cli.yml'
+      - '.github/workflows/test_coverage.yml'
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,6 +47,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Verify version coherence
+        run: bash scripts/check-version-coherence.sh
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -100,40 +115,36 @@ jobs:
           restore-keys: |
             coverage-${{ runner.os }}-cargo-
 
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
       - name: Install cargo-tarpaulin
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage report
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           cargo tarpaulin \
             --workspace \
             --all-features \
-            --out Xml \
+            --out Xml Json \
             --output-dir ./coverage \
             --timeout 300 \
             --verbose
 
-      - name: Generate coverage JSON
-        run: |
-          cargo tarpaulin \
-            --workspace \
-            --out Json \
-            --output-dir ./coverage \
-            --timeout 300
-
       - name: Extract coverage percentage
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         id: coverage
         run: |
-          # Compute total covered / total coverable (not average of per-file percentages)
-          # Guards against division by zero and NaN from files with coverable=0
-          COVERAGE=$(cat ./coverage/tarpaulin.json | jq -r '
-            .files | to_entries | map(.value) |
+          COVERAGE=$(cat ./coverage/tarpaulin-report.json | jq -r '
+            [.files[]] |
             (map(.covered) | add) as $total_covered |
             (map(.coverable) | add) as $total_coverable |
-            if $total_coverable > 0 then 
+            if $total_coverable > 0 then
               ($total_covered / $total_coverable * 100)
-            else 
-              0 
+            else
+              0
             end
           ')
           COVERAGE_INT=$(printf "%.0f" $COVERAGE)
@@ -153,9 +164,11 @@ jobs:
           fi
 
       - name: Create badges directory
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: mkdir -p .github/badges
 
       - name: Generate coverage badge
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: emibcn/badge-action@v2.0.3
         with:
           label: 'coverage'
@@ -164,7 +177,7 @@ jobs:
           path: .github/badges/coverage.svg
 
       - name: Commit coverage badge
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
@@ -173,7 +186,7 @@ jobs:
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v4
-        if: always()
+        if: "!cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
         with:
           name: coverage-report
           path: ./coverage/

@@ -42,7 +42,9 @@ refactor: extract streaming logic to separate module
 docs: update README with new CLI options
 ```
 
-### Commit Message Rules (CRITICAL)
+### Commit Message & PR Title Rules (CRITICAL)
+
+> These rules apply to **both commit messages AND pull request titles**. PR titles become the squash-merge commit message, so they must follow the same conventions.
 
 **DO:**
 - Describe the actual change in plain, technical terms
@@ -50,8 +52,9 @@ docs: update README with new CLI options
 - Use the format: `<type>(<scope>): <what changed and why>`
 
 **DON'T:**
-- Reference internal review labels (P0, P1, P2, etc.)
-- Mention "Oracle", "audit", "review findings" in commit messages
+- Reference internal review labels (P0, P1, P2, etc.) in commits or PR titles
+- Mention "Oracle", "audit", "review findings", "hardening" in commits or PR titles
+- Use agent-internal jargon: "wave", "hardening", "compliance", "verification pass"
 - Bundle multiple unrelated fixes into one commit
 - Use vague messages like "fix issues" or "address feedback"
 
@@ -69,6 +72,8 @@ fix: address P0 issues from Oracle review      ❌
 fix(hardening): Oracle Round 4 fixes           ❌
 fix: audit findings                            ❌
 fix: various improvements                      ❌
+fix(tui): harden unreleased changes — P0-P3    ❌  (PR title)
+fix: hardening wave 1 compliance fixes         ❌  (PR title)
 ```
 
 ## Agent Command Execution
@@ -96,12 +101,12 @@ Releases are published to npm via a GitHub Actions `workflow_dispatch` pipeline,
 
 | # | Job | Description |
 |---|-----|-------------|
-| 1 | `bump-versions` | Reads current version from `packages/cli/package.json`, calculates new version, updates all platform package.json files + CLI + wrapper, uploads as artifact |
+| 1 | `bump-versions` | Reads current version from `packages/cli/package.json`, calculates new version, updates the Rust workspace version plus the CLI, wrapper, and platform package manifests, then uploads the bumped manifests as an artifact |
 | 2 | `build-cli-binary` | 8-target parallel native Rust builds (macOS x86/arm64, Linux glibc/musl x86/arm64, Windows x86/arm64) |
 | 3 | `publish-platform-packages` | Publishes platform-specific packages (`@tokscale/cli-darwin-arm64`, etc.) containing native binaries to npm |
 | 4 | `publish-cli` | Publishes `@tokscale/cli` to npm (binary dispatcher + optionalDependencies) |
 | 5 | `publish-alias` | Publishes `tokscale` wrapper package to npm |
-| 6 | `finalize` | Commits bumped `package.json` files back to repo as `chore: bump version to X.Y.Z` (authored by `github-actions[bot]`) |
+| 6 | `finalize` | Commits the bumped release manifests back to repo as `chore: bump version to X.Y.Z` (authored by `github-actions[bot]`) |
 
 **Duration:** ~15-20 minutes end-to-end.
 
@@ -127,10 +132,11 @@ The CI pipeline does **NOT** create the git tag or GitHub Release. After the wor
 | `minor` | New client support, significant features, UI overhauls | `1.1.2` → `1.2.0` |
 | `major` | Breaking changes (never used so far) | `1.2.1` → `2.0.0` |
 
-Version is stored in 3 places (all updated by CI):
-- `packages/cli/package.json` — source of truth
-- Platform packages (`packages/cli-*/package.json`) — version synced
-- `packages/tokscale/package.json` — version + `@tokscale/cli` dependency version
+Release version is stored in the Rust workspace and the npm package manifests, and CI updates them together:
+- `Cargo.toml` (`[workspace.package].version`) — Rust binary and exported metadata version
+- `packages/cli/package.json` — CLI package version and platform optional dependency versions
+- Platform packages (`packages/cli-*/package.json`) — native package versions
+- `packages/tokscale/package.json` — wrapper version plus `@tokscale/cli` dependency version
 
 ### CI-Only Workflow
 

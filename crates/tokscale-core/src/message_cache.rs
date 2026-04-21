@@ -111,6 +111,18 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, related_paths)
     }
 
+    /// Fingerprint for a Claude Code JSONL file that may have a sibling `.meta.json`
+    /// sidecar. When the sidecar appears or changes (e.g. after a Claude Code upgrade),
+    /// the fingerprint changes and the cache invalidates.
+    pub(crate) fn from_claude_code_path(path: &Path) -> Option<Self> {
+        let related = path.file_stem().and_then(|s| s.to_str()).map(|stem| {
+            let meta_filename = format!("{}.meta.json", stem);
+            let meta_path = path.with_file_name(meta_filename);
+            (".meta.json".to_string(), meta_path)
+        });
+        Self::from_path_with_related(path, related)
+    }
+
     fn from_path_with_related<I>(path: &Path, related_paths: I) -> Option<Self>
     where
         I: IntoIterator<Item = (String, PathBuf)>,
@@ -670,6 +682,46 @@ mod tests {
         std::fs::write(&shm_path, b"shm-1").unwrap();
         let with_shm = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
         assert_eq!(before_shm, with_shm);
+    }
+
+    #[test]
+    fn test_claude_code_fingerprint_tracks_meta_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let jsonl_path = dir.path().join("agent-abc123.jsonl");
+        std::fs::write(&jsonl_path, b"jsonl-content").unwrap();
+
+        // No meta sidecar → baseline fingerprint
+        let base = SourceFingerprint::from_claude_code_path(&jsonl_path).unwrap();
+
+        // Add meta sidecar → fingerprint changes
+        let meta_path = dir.path().join("agent-abc123.meta.json");
+        std::fs::write(&meta_path, br#"{"agentType":"explore"}"#).unwrap();
+        let with_meta = SourceFingerprint::from_claude_code_path(&jsonl_path).unwrap();
+        assert_ne!(
+            base, with_meta,
+            "Adding meta sidecar should change fingerprint"
+        );
+
+        // Update meta sidecar → fingerprint changes again
+        std::fs::write(&meta_path, br#"{"agentType":"executor"}"#).unwrap();
+        let updated_meta = SourceFingerprint::from_claude_code_path(&jsonl_path).unwrap();
+        assert_ne!(
+            with_meta, updated_meta,
+            "Updating meta sidecar should change fingerprint"
+        );
+
+        // Main session file (no agent- prefix) → unaffected by unrelated meta files
+        let main_path = dir.path().join("session-uuid.jsonl");
+        std::fs::write(&main_path, b"main-session").unwrap();
+        let main_fp1 = SourceFingerprint::from_claude_code_path(&main_path).unwrap();
+        // Create a meta file with the main session stem (unlikely in practice)
+        let main_meta = dir.path().join("session-uuid.meta.json");
+        std::fs::write(&main_meta, br#"{"agentType":"x"}"#).unwrap();
+        let main_fp2 = SourceFingerprint::from_claude_code_path(&main_path).unwrap();
+        assert_ne!(
+            main_fp1, main_fp2,
+            "from_claude_code_path always tracks .meta.json if it exists"
+        );
     }
 
     #[test]
