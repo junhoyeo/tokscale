@@ -80,6 +80,7 @@ fn get_author_provider_name(model_id: &str) -> Option<&'static str> {
         "cohere" => Some("Cohere"),
         "perplexity" => Some("Perplexity"),
         "moonshotai" => Some("Moonshot AI"),
+        "xiaomi" => Some("Xiaomi"),
         _ => None,
     }
 }

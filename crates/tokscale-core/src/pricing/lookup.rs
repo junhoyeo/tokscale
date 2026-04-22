@@ -13,6 +13,7 @@ const PROVIDER_PREFIXES: &[&str] = &[
     "qwen/",
     "cohere/",
     "perplexity/",
+    "xiaomi/",
     "x-ai/",
 ];
 
@@ -30,6 +31,7 @@ const ORIGINAL_PROVIDER_PREFIXES: &[&str] = &[
     "cohere/",
     "perplexity/",
     "moonshotai/",
+    "xiaomi/",
 ];
 
 const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
@@ -1556,6 +1558,28 @@ mod tests {
             },
         );
 
+        // === MiMo family (LiteLLM flash fallback entries) ===
+        m.insert(
+            "openrouter/xiaomi/mimo-v2-flash".into(),
+            ModelPricing {
+                input_cost_per_token: Some(9e-8),
+                output_cost_per_token: Some(2.9e-7),
+                cache_read_input_token_cost: Some(0.0),
+                cache_creation_input_token_cost: Some(0.0),
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "novita/xiaomimimo/mimo-v2-flash".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-7),
+                output_cost_per_token: Some(3e-7),
+                cache_read_input_token_cost: Some(2e-8),
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+
         m
     }
 
@@ -1667,6 +1691,18 @@ mod tests {
                 input_cost_per_token: Some(2.2e-7),
                 output_cost_per_token: Some(9.5e-7),
                 cache_read_input_token_cost: None,
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+
+        // === OpenRouter: Xiaomi ===
+        m.insert(
+            "xiaomi/mimo-v2-pro".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000001),
+                output_cost_per_token: Some(0.000003),
+                cache_read_input_token_cost: Some(0.0000002),
                 cache_creation_input_token_cost: None,
                 ..Default::default()
             },
@@ -2066,6 +2102,17 @@ mod tests {
         let result = lookup.lookup("glm-4.7").unwrap();
         assert_eq!(result.matched_key, "z-ai/glm-4.7");
         assert_eq!(result.source, "OpenRouter");
+    }
+
+    #[test]
+    fn test_xiaomi_mimo_v2_pro_prefers_openrouter_exact_over_flash_fallback() {
+        let lookup = create_lookup();
+
+        for model_id in ["mimo-v2-pro", "xiaomi/mimo-v2-pro"] {
+            let result = lookup.lookup(model_id).unwrap();
+            assert_eq!(result.matched_key, "xiaomi/mimo-v2-pro");
+            assert_eq!(result.source, "OpenRouter");
+        }
     }
 
     #[test]
