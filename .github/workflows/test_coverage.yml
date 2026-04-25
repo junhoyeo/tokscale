@@ -38,7 +38,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Check out the PR branch for same-repo PRs so we can push auto-fixes back
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || '' }}
@@ -50,7 +50,7 @@ jobs:
       - name: Verify version coherence
         run: bash scripts/check-version-coherence.sh
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -97,13 +97,13 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -169,7 +169,7 @@ jobs:
 
       - name: Generate coverage badge
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        uses: emibcn/badge-action@v2.0.3
+        uses: emibcn/badge-action@v2.0.4
         with:
           label: 'coverage'
           status: ${{ steps.coverage.outputs.percentage_int }}%
@@ -185,7 +185,7 @@ jobs:
           git diff --staged --quiet || (git commit -m "ci: update coverage badge [skip ci]" && git push)
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: "!cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
         with:
           name: coverage-report
