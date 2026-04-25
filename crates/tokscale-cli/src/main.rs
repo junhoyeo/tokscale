@@ -5,7 +5,7 @@ mod tui;
 
 use crate::tui::client_ui;
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -568,47 +568,122 @@ fn main() -> Result<()> {
     }
 }
 
+/// Client identifiers exposed via `--client`.
+///
+/// Mirrors `tokscale_core::ClientId` plus the `Synthetic` meta-client. We
+/// duplicate the variant set on the CLI side so `tokscale-core` stays free of
+/// CLI-parsing dependencies and so `Synthetic` (which has no scan path of its
+/// own) can be treated as a first-class filter value without changing core
+/// invariants.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[value(rename_all = "lowercase")]
+pub enum ClientFilter {
+    Opencode,
+    Claude,
+    Codex,
+    Copilot,
+    Gemini,
+    Cursor,
+    Amp,
+    Droid,
+    Openclaw,
+    Hermes,
+    Pi,
+    Kimi,
+    Qwen,
+    Roocode,
+    Kilocode,
+    Kilo,
+    Mux,
+    Crush,
+    Synthetic,
+}
+
+impl ClientFilter {
+    /// Returns the canonical lowercase identifier consumed by
+    /// `tokscale_core` filter lists. Must match `ClientId::as_str` for every
+    /// variant that has a corresponding `ClientId`.
+    pub fn as_filter_str(&self) -> &'static str {
+        match self {
+            Self::Opencode => "opencode",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Copilot => "copilot",
+            Self::Gemini => "gemini",
+            Self::Cursor => "cursor",
+            Self::Amp => "amp",
+            Self::Droid => "droid",
+            Self::Openclaw => "openclaw",
+            Self::Hermes => "hermes",
+            Self::Pi => "pi",
+            Self::Kimi => "kimi",
+            Self::Qwen => "qwen",
+            Self::Roocode => "roocode",
+            Self::Kilocode => "kilocode",
+            Self::Kilo => "kilo",
+            Self::Mux => "mux",
+            Self::Crush => "crush",
+            Self::Synthetic => "synthetic",
+        }
+    }
+}
+
 #[derive(Args, Clone, Debug, Default)]
 pub struct ClientFlags {
-    #[arg(long, help = "Show only OpenCode usage")]
+    /// Canonical client filter. Repeatable or comma-separated.
+    /// Example: `--client opencode,claude` or `-c opencode -c claude`.
+    #[arg(
+        long = "client",
+        short = 'c',
+        value_enum,
+        value_delimiter = ',',
+        action = clap::ArgAction::Append,
+        help = "Filter by client(s). Repeatable or comma-separated (e.g. -c opencode,claude)."
+    )]
+    pub clients: Vec<ClientFilter>,
+
+    // ---- Deprecated legacy boolean flags ------------------------------
+    // Hidden from --help. Kept for backward compatibility; print a stderr
+    // deprecation warning when used. Slated for removal in the next major.
+    #[arg(long, hide = true)]
     pub opencode: bool,
-    #[arg(long, help = "Show only Claude Code usage")]
+    #[arg(long, hide = true)]
     pub claude: bool,
-    #[arg(long, help = "Show only Codex CLI usage")]
+    #[arg(long, hide = true)]
     pub codex: bool,
-    #[arg(long, help = "Show only Copilot CLI usage")]
+    #[arg(long, hide = true)]
     pub copilot: bool,
-    #[arg(long, help = "Show only Gemini CLI usage")]
+    #[arg(long, hide = true)]
     pub gemini: bool,
-    #[arg(long, help = "Show only Cursor IDE usage")]
+    #[arg(long, hide = true)]
     pub cursor: bool,
-    #[arg(long, help = "Show only Amp usage")]
+    #[arg(long, hide = true)]
     pub amp: bool,
-    #[arg(long, help = "Show only Droid usage")]
+    #[arg(long, hide = true)]
     pub droid: bool,
-    #[arg(long, help = "Show only OpenClaw usage")]
+    #[arg(long, hide = true)]
     pub openclaw: bool,
-    #[arg(long, help = "Show only Hermes Agent usage")]
+    #[arg(long, hide = true)]
     pub hermes: bool,
-    #[arg(long, help = "Show only Pi usage")]
+    #[arg(long, hide = true)]
     pub pi: bool,
-    #[arg(long, help = "Show only Kimi CLI usage")]
+    #[arg(long, hide = true)]
     pub kimi: bool,
-    #[arg(long, help = "Show only Qwen CLI usage")]
+    #[arg(long, hide = true)]
     pub qwen: bool,
-    #[arg(long, help = "Show only Roo Code usage")]
+    #[arg(long, hide = true)]
     pub roocode: bool,
-    #[arg(long, help = "Show only KiloCode usage")]
+    #[arg(long, hide = true)]
     pub kilocode: bool,
-    #[arg(long, help = "Show only Kilo CLI usage")]
+    #[arg(long, hide = true)]
     pub kilo: bool,
-    #[arg(long, help = "Show only Mux usage")]
+    #[arg(long, hide = true)]
     pub mux: bool,
-    #[arg(long, help = "Show only Crush usage")]
+    #[arg(long, hide = true)]
     pub crush: bool,
-    #[arg(long, help = "Show only Goose usage")]
+    #[arg(long, hide = true)]
     pub goose: bool,
-    #[arg(long, help = "Show only Synthetic usage")]
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -628,44 +703,86 @@ pub struct DateRangeFlags {
     pub year: Option<String>,
 }
 
+/// Builds the client filter list passed to `tokscale_core`.
+///
+/// Resolution order:
+/// 1. Collect canonical `--client/-c` values (preserves user order).
+/// 2. Append any legacy `--<client>` boolean flags that are set, emitting a
+///    one-time stderr deprecation warning so existing scripts keep working.
+/// 3. Deduplicate while preserving first-seen order.
+///
+/// Returns `None` when no filters are active so the caller can scan all
+/// configured clients.
 fn build_client_filter(flags: ClientFlags) -> Option<Vec<String>> {
-    use tokscale_core::ClientId;
+    let mut ordered: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
 
-    let mut clients: Vec<String> = [
-        (ClientId::OpenCode, flags.opencode),
-        (ClientId::Claude, flags.claude),
-        (ClientId::Codex, flags.codex),
-        (ClientId::Copilot, flags.copilot),
-        (ClientId::Gemini, flags.gemini),
-        (ClientId::Cursor, flags.cursor),
-        (ClientId::Amp, flags.amp),
-        (ClientId::Droid, flags.droid),
-        (ClientId::OpenClaw, flags.openclaw),
-        (ClientId::Hermes, flags.hermes),
-        (ClientId::Pi, flags.pi),
-        (ClientId::Kimi, flags.kimi),
-        (ClientId::Qwen, flags.qwen),
-        (ClientId::RooCode, flags.roocode),
-        (ClientId::KiloCode, flags.kilocode),
-        (ClientId::Kilo, flags.kilo),
-        (ClientId::Mux, flags.mux),
-        (ClientId::Crush, flags.crush),
-        (ClientId::Goose, flags.goose),
-    ]
-    .into_iter()
-    .filter(|(_, enabled)| *enabled)
-    .map(|(client, _)| client.as_str().to_string())
-    .collect();
-
-    if flags.synthetic {
-        clients.push("synthetic".to_string());
+    for client in &flags.clients {
+        let id = client.as_filter_str();
+        if seen.insert(id) {
+            ordered.push(id.to_string());
+        }
     }
 
-    if clients.is_empty() {
+    let legacy: [(bool, ClientFilter); 19] = [
+        (flags.opencode, ClientFilter::Opencode),
+        (flags.claude, ClientFilter::Claude),
+        (flags.codex, ClientFilter::Codex),
+        (flags.copilot, ClientFilter::Copilot),
+        (flags.gemini, ClientFilter::Gemini),
+        (flags.cursor, ClientFilter::Cursor),
+        (flags.amp, ClientFilter::Amp),
+        (flags.droid, ClientFilter::Droid),
+        (flags.openclaw, ClientFilter::Openclaw),
+        (flags.hermes, ClientFilter::Hermes),
+        (flags.pi, ClientFilter::Pi),
+        (flags.kimi, ClientFilter::Kimi),
+        (flags.qwen, ClientFilter::Qwen),
+        (flags.roocode, ClientFilter::Roocode),
+        (flags.kilocode, ClientFilter::Kilocode),
+        (flags.kilo, ClientFilter::Kilo),
+        (flags.mux, ClientFilter::Mux),
+        (flags.crush, ClientFilter::Crush),
+        (flags.synthetic, ClientFilter::Synthetic),
+    ];
+
+    let mut legacy_used: Vec<&'static str> = Vec::new();
+    for (enabled, client) in legacy {
+        if !enabled {
+            continue;
+        }
+        let id = client.as_filter_str();
+        legacy_used.push(id);
+        if seen.insert(id) {
+            ordered.push(id.to_string());
+        }
+    }
+
+    if !legacy_used.is_empty() {
+        emit_legacy_client_flag_warning(&legacy_used);
+    }
+
+    if ordered.is_empty() {
         None
     } else {
-        Some(clients)
+        Some(ordered)
     }
+}
+
+/// Emits a single stderr deprecation warning when legacy `--<client>` flags
+/// are used. Suppressed entirely when stderr is not a TTY (e.g. when piping
+/// JSON output through scripts) so machine-parseable output stays clean.
+fn emit_legacy_client_flag_warning(used: &[&'static str]) {
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    let pretty: Vec<String> = used.iter().map(|id| format!("--{id}")).collect();
+    let replacement = used.join(",");
+    eprintln!(
+        "warning: {} is deprecated; use `--client {}` instead. The legacy flags will be removed in the next major release.",
+        pretty.join(", "),
+        replacement
+    );
 }
 
 fn default_submit_clients() -> Vec<String> {
@@ -3868,54 +3985,15 @@ mod tests {
 
     #[test]
     fn test_build_client_filter_all_false() {
-        let flags = ClientFlags {
-            opencode: false,
-            claude: false,
-            codex: false,
-            copilot: false,
-            gemini: false,
-            cursor: false,
-            amp: false,
-            droid: false,
-            openclaw: false,
-            hermes: false,
-            pi: false,
-            kimi: false,
-            qwen: false,
-            roocode: false,
-            kilocode: false,
-            kilo: false,
-            mux: false,
-            crush: false,
-            goose: false,
-            synthetic: false,
-        };
+        let flags = ClientFlags::default();
         assert_eq!(build_client_filter(flags), None);
     }
 
     #[test]
-    fn test_build_client_filter_single_client() {
+    fn test_build_client_filter_single_legacy_flag() {
         let flags = ClientFlags {
             opencode: true,
-            claude: false,
-            codex: false,
-            copilot: false,
-            gemini: false,
-            cursor: false,
-            amp: false,
-            droid: false,
-            openclaw: false,
-            hermes: false,
-            pi: false,
-            kimi: false,
-            qwen: false,
-            roocode: false,
-            kilocode: false,
-            kilo: false,
-            mux: false,
-            crush: false,
-            goose: false,
-            synthetic: false,
+            ..ClientFlags::default()
         };
         assert_eq!(
             build_client_filter(flags),
@@ -3924,29 +4002,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_client_filter_multiple_clients() {
+    fn test_build_client_filter_multiple_legacy_flags_preserve_order() {
         let flags = ClientFlags {
             opencode: true,
             claude: true,
-            codex: false,
-            copilot: false,
-            gemini: false,
-            cursor: false,
-            amp: false,
-            droid: false,
-            openclaw: false,
-            hermes: false,
             pi: true,
-            kimi: false,
-            qwen: false,
-            roocode: false,
-            kilocode: false,
-            kilo: false,
-            mux: false,
-            crush: false,
-            goose: false,
-            synthetic: false,
+            ..ClientFlags::default()
         };
+        // Legacy iteration order is the declaration order in `legacy[]`,
+        // not the order the user typed flags on the command line. This is
+        // a deliberate trade-off: legacy flags are deprecated, and the
+        // canonical `--client a,b,c` form preserves user order.
         assert_eq!(
             build_client_filter(flags),
             Some(vec![
@@ -3958,28 +4024,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_client_filter_synthetic_only() {
+    fn test_build_client_filter_synthetic_only_legacy() {
         let flags = ClientFlags {
-            opencode: false,
-            claude: false,
-            codex: false,
-            copilot: false,
-            gemini: false,
-            cursor: false,
-            amp: false,
-            droid: false,
-            openclaw: false,
-            hermes: false,
-            pi: false,
-            kimi: false,
-            qwen: false,
-            roocode: false,
-            kilocode: false,
-            kilo: false,
-            mux: false,
-            crush: false,
-            goose: false,
             synthetic: true,
+            ..ClientFlags::default()
         };
         assert_eq!(
             build_client_filter(flags),
@@ -3988,7 +4036,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_client_filter_all_clients() {
+    fn test_build_client_filter_all_legacy_flags() {
         let flags = ClientFlags {
             opencode: true,
             claude: true,
@@ -4010,32 +4058,157 @@ mod tests {
             crush: true,
             goose: true,
             synthetic: true,
+            ..ClientFlags::default()
         };
         let result = build_client_filter(flags);
         assert!(result.is_some());
         let sources = result.unwrap();
-        let expected_len = tokscale_core::ClientId::iter().count() + 1; // synthetic is not in ClientId
+        // ClientId::COUNT does not include synthetic, but ClientFilter does.
+        let expected_len = tokscale_core::ClientId::iter().count() + 1;
         assert_eq!(sources.len(), expected_len);
-        assert!(sources.contains(&"opencode".to_string()));
-        assert!(sources.contains(&"claude".to_string()));
-        assert!(sources.contains(&"codex".to_string()));
-        assert!(sources.contains(&"copilot".to_string()));
-        assert!(sources.contains(&"gemini".to_string()));
-        assert!(sources.contains(&"cursor".to_string()));
-        assert!(sources.contains(&"amp".to_string()));
-        assert!(sources.contains(&"droid".to_string()));
-        assert!(sources.contains(&"openclaw".to_string()));
-        assert!(sources.contains(&"hermes".to_string()));
-        assert!(sources.contains(&"pi".to_string()));
-        assert!(sources.contains(&"kimi".to_string()));
-        assert!(sources.contains(&"qwen".to_string()));
-        assert!(sources.contains(&"roocode".to_string()));
-        assert!(sources.contains(&"kilocode".to_string()));
-        assert!(sources.contains(&"kilo".to_string()));
-        assert!(sources.contains(&"mux".to_string()));
-        assert!(sources.contains(&"crush".to_string()));
-        assert!(sources.contains(&"goose".to_string()));
-        assert!(sources.contains(&"synthetic".to_string()));
+        for required in [
+            "opencode",
+            "claude",
+            "codex",
+            "copilot",
+            "gemini",
+            "cursor",
+            "amp",
+            "droid",
+            "openclaw",
+            "hermes",
+            "pi",
+            "kimi",
+            "qwen",
+            "roocode",
+            "kilocode",
+            "kilo",
+            "mux",
+            "crush",
+            "goose",
+            "synthetic",
+        ] {
+            assert!(
+                sources.contains(&required.to_string()),
+                "missing client filter id: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_client_filter_canonical_clients_preserve_user_order() {
+        // `--client claude,opencode,pi` should keep user-typed order so
+        // downstream display (e.g. table grouping previews) is stable.
+        let flags = ClientFlags {
+            clients: vec![
+                ClientFilter::Claude,
+                ClientFilter::Opencode,
+                ClientFilter::Pi,
+            ],
+            ..ClientFlags::default()
+        };
+        assert_eq!(
+            build_client_filter(flags),
+            Some(vec![
+                "claude".to_string(),
+                "opencode".to_string(),
+                "pi".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_build_client_filter_canonical_dedups_repeats() {
+        let flags = ClientFlags {
+            clients: vec![
+                ClientFilter::Claude,
+                ClientFilter::Claude,
+                ClientFilter::Opencode,
+            ],
+            ..ClientFlags::default()
+        };
+        assert_eq!(
+            build_client_filter(flags),
+            Some(vec!["claude".to_string(), "opencode".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_build_client_filter_canonical_and_legacy_dedup() {
+        // Mixing canonical `--client claude` with legacy `--claude` must not
+        // double-list claude. Canonical entries come first, legacy fills in
+        // anything missing.
+        let flags = ClientFlags {
+            clients: vec![ClientFilter::Claude],
+            opencode: true,
+            claude: true,
+            ..ClientFlags::default()
+        };
+        assert_eq!(
+            build_client_filter(flags),
+            Some(vec!["claude".to_string(), "opencode".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_client_filter_as_filter_str_matches_client_id_for_overlap() {
+        // Every ClientFilter variant except Synthetic must agree with
+        // ClientId::as_str() so the core filter list stays consistent.
+        for filter in ClientFilter::value_variants() {
+            if matches!(filter, ClientFilter::Synthetic) {
+                continue;
+            }
+            let id = filter.as_filter_str();
+            assert!(
+                tokscale_core::ClientId::from_str(id).is_some(),
+                "ClientFilter::{:?} -> {:?} has no matching ClientId",
+                filter,
+                id,
+            );
+        }
+    }
+
+    #[test]
+    fn test_client_filter_parses_lowercase_canonical_names() {
+        // clap ValueEnum should accept the lowercase ids verbatim so
+        // `--client opencode,claude` mirrors the legacy flag spelling.
+        for filter in ClientFilter::value_variants() {
+            let id = filter.as_filter_str();
+            let parsed =
+                <ClientFilter as ValueEnum>::from_str(id, true).expect("variant should parse");
+            assert_eq!(
+                parsed.as_filter_str(),
+                id,
+                "round-trip mismatch for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_client_flags_parses_canonical_form() {
+        // End-to-end smoke test: ensure clap derives accept the new
+        // `--client a,b` and `-c a -c b` shapes through the CLI parser.
+        let cli =
+            Cli::try_parse_from(["tokscale", "--client", "opencode,claude"]).expect("parse ok");
+        assert_eq!(
+            cli.clients.clients,
+            vec![ClientFilter::Opencode, ClientFilter::Claude]
+        );
+
+        let cli = Cli::try_parse_from(["tokscale", "-c", "opencode", "-c", "claude"])
+            .expect("parse ok");
+        assert_eq!(
+            cli.clients.clients,
+            vec![ClientFilter::Opencode, ClientFilter::Claude]
+        );
+    }
+
+    #[test]
+    fn test_client_flags_legacy_still_parses() {
+        // Legacy `--claude` keeps working even though it is hidden in --help.
+        let cli = Cli::try_parse_from(["tokscale", "--claude"]).expect("parse ok");
+        assert!(cli.clients.claude);
+        assert!(cli.clients.clients.is_empty());
     }
 
     #[test]
