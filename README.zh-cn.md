@@ -327,7 +327,7 @@ tokscale --since 2024-01-01 --until 2024-12-31
 tokscale --year 2024
 
 # 与其他选项组合
-tokscale models --week --claude --json
+tokscale models --week --client claude --json
 tokscale monthly --month --benchmark
 ```
 
@@ -387,7 +387,7 @@ tokscale whoami
 tokscale submit
 
 # 带筛选提交
-tokscale submit --opencode --claude --since 2024-01-01
+tokscale submit --client opencode,claude --since 2024-01-01
 
 # 预览将要提交的内容（试运行）
 tokscale submit --dry-run
@@ -755,7 +755,7 @@ tokscale graph --since 2024-01-01 --until 2024-12-31
 tokscale graph --year 2024
 
 # 按平台筛选
-tokscale graph --opencode --claude
+tokscale graph --client opencode,claude
 
 # 显示处理时间基准
 tokscale graph --output data.json --benchmark

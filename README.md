@@ -330,7 +330,7 @@ tokscale --since 2024-01-01 --until 2024-12-31
 tokscale --year 2024
 
 # Combine with other options
-tokscale models --week --claude --json
+tokscale models --week --client claude --json
 tokscale monthly --month --benchmark
 ```
 
@@ -390,7 +390,7 @@ tokscale whoami
 tokscale submit
 
 # Submit with filters
-tokscale submit --opencode --claude --since 2024-01-01
+tokscale submit --client opencode,claude --since 2024-01-01
 
 # Preview what would be submitted (dry run)
 tokscale submit --dry-run
@@ -775,7 +775,7 @@ tokscale graph --since 2024-01-01 --until 2024-12-31
 tokscale graph --year 2024
 
 # Filter by platform
-tokscale graph --opencode --claude
+tokscale graph --client opencode,claude
 
 # Show processing time benchmark
 tokscale graph --output data.json --benchmark

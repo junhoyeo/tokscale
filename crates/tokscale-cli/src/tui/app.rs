@@ -4,7 +4,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use clap::ValueEnum;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
@@ -201,27 +200,23 @@ impl App {
             .unwrap_or_else(|_| settings.theme_name());
         let theme = Theme::from_name(theme_name);
 
-        let mut enabled_clients: HashSet<ClientFilter> = HashSet::new();
-
-        if let Some(ref cli_clients) = config.clients {
+        let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
             // lowercase id (`opencode`, `claude`, ..., `synthetic`).
             // Unknown ids are dropped silently; the CLI parser already
             // validated against `ClientFilter` so this lookup should be
             // total in practice.
-            for client_str in cli_clients {
-                if let Some(filter) = ClientFilter::from_filter_str(&client_str.to_lowercase()) {
-                    enabled_clients.insert(filter);
-                }
-            }
+            cli_clients
+                .iter()
+                .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+                .collect()
         } else {
-            // No filter → enable every client plus Synthetic (matches
-            // pre-refactor behavior where a missing filter defaulted to
-            // "scan everything I know about").
-            for variant in ClientFilter::value_variants() {
-                enabled_clients.insert(*variant);
-            }
-        }
+            // No filter → use the canonical default set (every real
+            // client, Synthetic opt-in only). MUST stay in sync with
+            // `run_warm_tui_cache()` so a fresh cache warm produces a
+            // fresh hit on the next no-filter launch.
+            ClientFilter::default_set()
+        };
 
         let auto_refresh_interval = if config.refresh > 0 {
             Duration::from_secs(config.refresh)
@@ -1357,6 +1352,27 @@ mod tests {
             initial_tab: None,
         };
         App::new_with_cached_data(config, None).unwrap()
+    }
+
+    #[test]
+    fn test_app_no_filter_default_matches_default_set() {
+        // Regression for an Oracle-flagged HIGH bug: the no-filter TUI
+        // default and the `submit` warm-cache filter set drifted apart,
+        // making every TUI launch after submit a stale-cache reuse
+        // instead of a fresh hit. Both paths now go through
+        // `ClientFilter::default_set()`; assert it stays that way.
+        let app = make_app();
+        let actual = app.enabled_clients.borrow().clone();
+        let expected = ClientFilter::default_set();
+        assert_eq!(
+            actual, expected,
+            "no-filter App default drifted from ClientFilter::default_set() — \
+             warm cache and TUI launch will mismatch"
+        );
+        assert!(
+            !actual.contains(&ClientFilter::Synthetic),
+            "no-filter default must not include Synthetic (opt-in only)"
+        );
     }
 
     fn make_app_with_models(n: usize) -> App {

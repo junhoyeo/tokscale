@@ -699,6 +699,25 @@ impl ClientFilter {
             .copied()
             .find(|f| f.as_filter_str() == s)
     }
+
+    /// The "no filter" default set: every real client, with `Synthetic`
+    /// **excluded**. Matches the pre-refactor behavior where a missing
+    /// filter scanned every `ClientId` but did NOT post-process synthetic
+    /// (synthetic detection has always been opt-in because it
+    /// re-attributes messages from other clients to a different bucket).
+    ///
+    /// Single source of truth: every code path that needs a default
+    /// filter (TUI launch, `submit` warm cache, etc.) must consult this
+    /// so the cache key, the in-app state, and the loader filter all
+    /// agree. Drift between them produces stale-cache misses on every
+    /// launch.
+    pub fn default_set() -> std::collections::HashSet<Self> {
+        Self::value_variants()
+            .iter()
+            .copied()
+            .filter(|f| !matches!(f, Self::Synthetic))
+            .collect()
+    }
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -3791,20 +3810,21 @@ fn spawn_warm_tui_cache_detached() {
 
 fn run_warm_tui_cache() -> Result<()> {
     use crate::tui::{save_cached_data, DataLoader};
-    use std::collections::HashSet;
     use tokscale_core::{ClientId, GroupBy};
 
-    // Warm the cache as if the user had no filters: every client enabled,
-    // synthetic excluded (matches the conservative default — synthetic
-    // detection is opt-in because it post-processes other agents' data).
-    let all_clients: Vec<ClientId> = ClientId::iter().collect();
-    let enabled_set: HashSet<ClientFilter> = ClientFilter::value_variants()
+    // Warm the cache using the same default filter set the TUI uses on
+    // a no-filter launch. Going through `ClientFilter::default_set()`
+    // keeps these two paths in lockstep — if they drift, every TUI
+    // launch after `submit` becomes a stale-cache reuse instead of a
+    // fresh hit, which defeats the warming.
+    let enabled_set = ClientFilter::default_set();
+    let scan_clients: Vec<ClientId> = enabled_set
         .iter()
-        .copied()
-        .filter(|f| !matches!(f, ClientFilter::Synthetic))
+        .filter_map(|f| f.to_client_id())
         .collect();
+    let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
     let loader = DataLoader::with_filters(None, None, None, None);
-    if let Ok(data) = loader.load(&all_clients, &GroupBy::default(), false) {
+    if let Ok(data) = loader.load(&scan_clients, &GroupBy::default(), include_synthetic) {
         save_cached_data(&data, &enabled_set, &GroupBy::default());
     }
     Ok(())
@@ -4340,6 +4360,36 @@ mod tests {
             assert_eq!(ClientFilter::from_filter_str(id), Some(*filter));
         }
         assert_eq!(ClientFilter::from_filter_str("not-a-client"), None);
+    }
+
+    #[test]
+    fn test_client_filter_default_set_excludes_synthetic() {
+        // Synthetic detection is opt-in: it post-processes other clients'
+        // sessions to re-attribute messages to a different bucket. The
+        // pre-refactor default was "every ClientId, include_synthetic =
+        // false"; default_set() must preserve that contract.
+        let default = ClientFilter::default_set();
+        assert!(
+            !default.contains(&ClientFilter::Synthetic),
+            "default_set() must NOT include Synthetic — it is opt-in only"
+        );
+        // Every real client must be present so first-launch reports cover
+        // every integration the binary knows about.
+        for filter in ClientFilter::value_variants() {
+            if matches!(filter, ClientFilter::Synthetic) {
+                continue;
+            }
+            assert!(
+                default.contains(filter),
+                "default_set() missing {filter:?}"
+            );
+        }
+        // Size sanity: every variant minus Synthetic.
+        assert_eq!(
+            default.len(),
+            ClientFilter::value_variants().len() - 1,
+            "default_set() size drifted from value_variants() - 1"
+        );
     }
 
     #[test]

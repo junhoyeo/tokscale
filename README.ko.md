@@ -326,7 +326,7 @@ tokscale --since 2024-01-01 --until 2024-12-31
 tokscale --year 2024
 
 # 다른 옵션과 조합
-tokscale models --week --claude --json
+tokscale models --week --client claude --json
 tokscale monthly --month --benchmark
 ```
 
@@ -386,7 +386,7 @@ tokscale whoami
 tokscale submit
 
 # 필터와 함께 제출
-tokscale submit --opencode --claude --since 2024-01-01
+tokscale submit --client opencode,claude --since 2024-01-01
 
 # 제출될 내용 미리보기 (드라이 런)
 tokscale submit --dry-run
@@ -754,7 +754,7 @@ tokscale graph --since 2024-01-01 --until 2024-12-31
 tokscale graph --year 2024
 
 # 플랫폼별 필터
-tokscale graph --opencode --claude
+tokscale graph --client opencode,claude
 
 # 처리 시간 벤치마크 표시
 tokscale graph --output data.json --benchmark

@@ -327,7 +327,7 @@ tokscale --since 2024-01-01 --until 2024-12-31
 tokscale --year 2024
 
 # 他のオプションと組み合わせ
-tokscale models --week --claude --json
+tokscale models --week --client claude --json
 tokscale monthly --month --benchmark
 ```
 
@@ -387,7 +387,7 @@ tokscale whoami
 tokscale submit
 
 # フィルター付きで送信
-tokscale submit --opencode --claude --since 2024-01-01
+tokscale submit --client opencode,claude --since 2024-01-01
 
 # 送信内容をプレビュー（ドライラン）
 tokscale submit --dry-run
@@ -755,7 +755,7 @@ tokscale graph --since 2024-01-01 --until 2024-12-31
 tokscale graph --year 2024
 
 # プラットフォーム別フィルター
-tokscale graph --opencode --claude
+tokscale graph --client opencode,claude
 
 # 処理時間ベンチマークを表示
 tokscale graph --output data.json --benchmark

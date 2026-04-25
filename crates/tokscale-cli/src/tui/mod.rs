@@ -30,7 +30,6 @@ use std::sync::Arc;
 use std::panic;
 
 use anyhow::Result;
-use clap::ValueEnum;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -74,19 +73,16 @@ pub fn run(
     // Build the unified filter set used by the cache key, the App
     // constructor, and the background loader. We mirror the same
     // resolution rules App::new_with_cached_data uses so the cache
-    // lookup and the in-app state always agree.
-    let mut enabled_clients: HashSet<ClientFilter> = HashSet::new();
-    if let Some(ref cli_clients) = clients {
-        for client_str in cli_clients {
-            if let Some(filter) = ClientFilter::from_filter_str(&client_str.to_lowercase()) {
-                enabled_clients.insert(filter);
-            }
-        }
+    // lookup and the in-app state always agree. Drift between them
+    // makes every launch a stale-cache hit instead of a fresh one.
+    let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = clients {
+        cli_clients
+            .iter()
+            .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+            .collect()
     } else {
-        for variant in ClientFilter::value_variants() {
-            enabled_clients.insert(*variant);
-        }
-    }
+        ClientFilter::default_set()
+    };
 
     // Single file read: load cache and check freshness in one pass.
     let initial_group_by = tokscale_core::GroupBy::Model;
