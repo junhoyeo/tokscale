@@ -4,9 +4,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use clap::ValueEnum;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
+
+use crate::ClientFilter;
 
 use ratatui::style::Color;
 
@@ -142,8 +145,13 @@ pub struct App {
     pub data: UsageData,
     pub data_loader: DataLoader,
 
-    pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
-    pub include_synthetic: Rc<RefCell<bool>>,
+    /// Set of clients currently selected in the source picker. The
+    /// `Synthetic` variant is part of the same set so dialog code can
+    /// uniformly toggle/inspect every option without a separate boolean.
+    /// Code that talks to `tokscale_core` (which still expects a
+    /// `Vec<ClientId>` plus a `bool include_synthetic`) projects this set
+    /// at the boundary via `App::scan_clients` and `App::include_synthetic`.
+    pub enabled_clients: Rc<RefCell<HashSet<ClientFilter>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
@@ -193,20 +201,25 @@ impl App {
             .unwrap_or_else(|_| settings.theme_name());
         let theme = Theme::from_name(theme_name);
 
-        let mut enabled_clients = HashSet::new();
-        let mut include_synthetic = false;
+        let mut enabled_clients: HashSet<ClientFilter> = HashSet::new();
 
         if let Some(ref cli_clients) = config.clients {
+            // CLI-provided filter list. Each entry is the canonical
+            // lowercase id (`opencode`, `claude`, ..., `synthetic`).
+            // Unknown ids are dropped silently; the CLI parser already
+            // validated against `ClientFilter` so this lookup should be
+            // total in practice.
             for client_str in cli_clients {
-                if client_str.eq_ignore_ascii_case("synthetic") {
-                    include_synthetic = true;
-                } else if let Some(client) = ClientId::from_str(client_str) {
-                    enabled_clients.insert(client);
+                if let Some(filter) = ClientFilter::from_filter_str(&client_str.to_lowercase()) {
+                    enabled_clients.insert(filter);
                 }
             }
         } else {
-            for client in ClientId::iter() {
-                enabled_clients.insert(client);
+            // No filter → enable every client plus Synthetic (matches
+            // pre-refactor behavior where a missing filter defaulted to
+            // "scan everything I know about").
+            for variant in ClientFilter::value_variants() {
+                enabled_clients.insert(*variant);
             }
         }
 
@@ -240,7 +253,6 @@ impl App {
             data,
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
-            include_synthetic: Rc::new(RefCell::new(include_synthetic)),
             group_by: Rc::new(RefCell::new(tokscale_core::GroupBy::Model)),
             sort_field: SortField::Cost,
             sort_direction: SortDirection::Descending,
@@ -771,10 +783,36 @@ impl App {
     fn open_client_picker(&mut self) {
         let dialog = ClientPickerDialog::new(
             self.enabled_clients.clone(),
-            self.include_synthetic.clone(),
             self.dialog_needs_reload.clone(),
         );
         self.dialog_stack.show(Box::new(dialog));
+    }
+
+    /// Project the unified `HashSet<ClientFilter>` into the
+    /// `Vec<ClientId>` shape that `tokscale_core` scanners still consume.
+    /// `ClientFilter::Synthetic` does not have a `ClientId` and is
+    /// excluded from this projection — use [`Self::include_synthetic`]
+    /// for that signal.
+    pub fn scan_clients(&self) -> Vec<ClientId> {
+        let mut out: Vec<ClientId> = self
+            .enabled_clients
+            .borrow()
+            .iter()
+            .filter_map(|f| f.to_client_id())
+            .collect();
+        // Stable order for downstream cache key + log output. Sort by the
+        // declaration index in ClientId::ALL so the projection mirrors
+        // the canonical ordering used elsewhere.
+        out.sort_by_key(|c| *c as usize);
+        out
+    }
+
+    /// Whether the user has Synthetic enabled. Boundary helper for code
+    /// paths that still take a separate `bool include_synthetic` argument.
+    pub fn include_synthetic(&self) -> bool {
+        self.enabled_clients
+            .borrow()
+            .contains(&ClientFilter::Synthetic)
     }
 
     fn open_group_by_picker(&mut self) {

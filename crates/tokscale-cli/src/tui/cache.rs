@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::{ClientId, GroupBy};
+use tokscale_core::GroupBy;
+
+use crate::ClientFilter;
 
 use super::data::{
     AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
@@ -613,11 +615,13 @@ enum ClientMatch {
 /// Load cached TUI data from disk with a single read/parse.
 /// Returns Fresh/Stale/Miss so the caller can decide whether to
 /// display cached data immediately and/or trigger a background refresh.
-pub fn load_cache(
-    enabled_clients: &HashSet<ClientId>,
-    include_synthetic: bool,
-    group_by: &GroupBy,
-) -> CacheResult {
+///
+/// `enabled_clients` is the unified `HashSet<ClientFilter>` (Synthetic
+/// included as a set member). The on-disk format keeps the legacy
+/// `(enabled_clients: Vec<String>, include_synthetic: bool)` shape so
+/// existing user caches keep working across upgrades — projection
+/// happens here.
+pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -> CacheResult {
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
     };
@@ -652,7 +656,6 @@ pub fn load_cache(
     // Check how cached clients relate to enabled clients
     let client_match = check_client_match(
         enabled_clients,
-        include_synthetic,
         &cached.enabled_clients,
         cached.include_synthetic,
     );
@@ -688,30 +691,40 @@ pub fn load_cache(
 /// - `Subset`   — cached clients ⊆ enabled clients (e.g. update added a new client),
 ///   and cached doesn't carry data the user doesn't want
 /// - `Mismatch` — anything else (superset, disjoint, unwanted synthetic data)
+///
+/// Cached side stays in the legacy `(Vec<String>, bool)` shape so we can
+/// read pre-refactor cache files without a migration step. Enabled side
+/// is the new unified `HashSet<ClientFilter>`.
 fn check_client_match(
-    enabled_clients: &HashSet<ClientId>,
-    include_synthetic: bool,
+    enabled_clients: &HashSet<ClientFilter>,
     cached_clients: &[String],
     cached_include_synthetic: bool,
 ) -> ClientMatch {
+    let include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
+
     // If cache has synthetic data but user doesn't want it → mismatch
     // (showing unwanted data is worse than a cache miss)
     if cached_include_synthetic && !include_synthetic {
         return ClientMatch::Mismatch;
     }
 
-    // Every cached client must exist in the enabled set
+    // Every cached client must exist in the enabled set. Compare on the
+    // canonical lowercase id so we don't have to round-trip through
+    // ClientId for clients that map 1:1.
     for cached_client_str in cached_clients {
         let in_enabled = enabled_clients
             .iter()
-            .any(|c| c.as_str() == cached_client_str);
+            .any(|f| f.as_filter_str() == cached_client_str);
         if !in_enabled {
             return ClientMatch::Mismatch;
         }
     }
 
-    // Exact match: same size + same synthetic flag + all cached ∈ enabled (checked above)
-    let same_size = enabled_clients.len() == cached_clients.len();
+    // Exact match requires same set membership on BOTH sides:
+    //   |enabled non-synthetic| == |cached_clients|  AND
+    //   include_synthetic == cached_include_synthetic
+    let enabled_non_synthetic = enabled_clients.len() - usize::from(include_synthetic);
+    let same_size = enabled_non_synthetic == cached_clients.len();
     let same_synthetic = include_synthetic == cached_include_synthetic;
 
     if same_size && same_synthetic {
@@ -721,11 +734,15 @@ fn check_client_match(
     }
 }
 
-/// Save TUI data to disk cache
+/// Save TUI data to disk cache.
+///
+/// On-disk schema keeps the legacy `(Vec<String> enabled_clients, bool
+/// include_synthetic)` pair so caches written by older releases remain
+/// readable across upgrades. We project the unified
+/// `HashSet<ClientFilter>` here.
 pub fn save_cached_data(
     data: &UsageData,
-    enabled_clients: &HashSet<ClientId>,
-    include_synthetic: bool,
+    enabled_clients: &HashSet<ClientFilter>,
     group_by: &GroupBy,
 ) {
     let Some(cache_path) = cache_file() else {
@@ -744,13 +761,22 @@ pub fn save_cached_data(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // Project unified set into the legacy on-disk shape.
+    let include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
+    let mut clients_vec: Vec<String> = enabled_clients
+        .iter()
+        .filter(|f| !matches!(f, ClientFilter::Synthetic))
+        .map(|f| f.as_filter_str().to_string())
+        .collect();
+    // Sort so the cache key is deterministic across runs / HashSet
+    // iteration order — otherwise unrelated runs would invalidate each
+    // other's caches just because the JSON ordering shuffled.
+    clients_vec.sort();
+
     let cached = CachedTUIData {
         schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
-        enabled_clients: enabled_clients
-            .iter()
-            .map(|s| s.as_str().to_string())
-            .collect(),
+        enabled_clients: clients_vec,
         include_synthetic,
         group_by: Some(group_by.to_string()),
         data: data.into(),
@@ -783,18 +809,25 @@ mod tests {
     use std::{env, fs};
     use tempfile::TempDir;
 
-    fn make_clients(ids: &[ClientId]) -> HashSet<ClientId> {
-        ids.iter().copied().collect()
+    /// Build a unified filter set. Pass `synthetic=true` to include
+    /// `ClientFilter::Synthetic` as a set member (the new way to express
+    /// "user has synthetic enabled").
+    fn make_filters(filters: &[ClientFilter], synthetic: bool) -> HashSet<ClientFilter> {
+        let mut set: HashSet<ClientFilter> = filters.iter().copied().collect();
+        if synthetic {
+            set.insert(ClientFilter::Synthetic);
+        }
+        set
     }
 
     // ── check_client_match ──────────────────────────────────────────
 
     #[test]
     fn test_exact_match() {
-        let enabled = make_clients(&[ClientId::Claude, ClientId::OpenCode]);
+        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Opencode], false);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Exact,
         );
     }
@@ -802,10 +835,17 @@ mod tests {
     #[test]
     fn test_subset_new_client_added() {
         // Simulates: update added Qwen, cache only has Claude + OpenCode
-        let enabled = make_clients(&[ClientId::Claude, ClientId::OpenCode, ClientId::Qwen]);
+        let enabled = make_filters(
+            &[
+                ClientFilter::Claude,
+                ClientFilter::Opencode,
+                ClientFilter::Qwen,
+            ],
+            false,
+        );
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
@@ -813,10 +853,10 @@ mod tests {
     #[test]
     fn test_subset_synthetic_added() {
         // Cache was saved without synthetic, now user enables it
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], true);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, true, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
@@ -824,20 +864,20 @@ mod tests {
     #[test]
     fn test_mismatch_superset() {
         // Cache has more clients than enabled (user narrowed filter)
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Mismatch,
         );
     }
 
     #[test]
     fn test_mismatch_disjoint() {
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached = vec!["opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Mismatch,
         );
     }
@@ -845,20 +885,20 @@ mod tests {
     #[test]
     fn test_mismatch_unwanted_synthetic() {
         // Cache has synthetic data but user doesn't want it
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, true),
+            check_client_match(&enabled, &cached, true),
             ClientMatch::Mismatch,
         );
     }
 
     #[test]
     fn test_exact_with_synthetic() {
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], true);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, true, &cached, true),
+            check_client_match(&enabled, &cached, true),
             ClientMatch::Exact,
         );
     }
@@ -866,20 +906,20 @@ mod tests {
     #[test]
     fn test_subset_both_new_client_and_synthetic() {
         // Update added new client AND user also enabled synthetic
-        let enabled = make_clients(&[ClientId::Claude, ClientId::Qwen]);
+        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Qwen], true);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, true, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
 
     #[test]
     fn test_empty_cache_is_subset() {
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached: Vec<String> = vec![];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
@@ -914,9 +954,9 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
+        let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, false, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model),
             CacheResult::Miss
         ));
 
@@ -958,9 +998,9 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
+        let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, false, &GroupBy::WorkspaceModel),
+            load_cache(&clients, &GroupBy::WorkspaceModel),
             CacheResult::Miss
         ));
 
@@ -1027,8 +1067,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Stale(data) => {
                 let source = data.daily[0].source_breakdown.get("claude").unwrap();
                 let daily_model = source.models.get("claude-sonnet-4-5").unwrap();
@@ -1147,8 +1187,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude, ClientId::Cursor]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Fresh(data) => {
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
@@ -1228,8 +1268,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Fresh(data) | CacheResult::Stale(data) => {
                 let hourly_model = data.hourly[0].models.get("claude-sonnet-4-5").unwrap();
                 assert_eq!(hourly_model.display_name, "claude-sonnet-4-5");
@@ -1301,8 +1341,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Stale(data) => {
                 assert!(
                     data.daily[0].source_breakdown.contains_key("unknown"),

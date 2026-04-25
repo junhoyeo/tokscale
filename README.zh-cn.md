@@ -454,7 +454,8 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 ```json
 {
   "colorPalette": "blue",
-  "includeUnusedModels": false
+  "includeUnusedModels": false,
+  "defaultClients": ["opencode", "claude"]
 }
 ```
 
@@ -465,6 +466,7 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | `autoRefreshEnabled` | boolean | `false` | 在 TUI 中启用自动刷新 |
 | `autoRefreshMs` | number | `60000` | 自动刷新间隔（30000-3600000ms） |
 | `nativeTimeoutMs` | number | `300000` | 原生子进程处理最大时间（5000-3600000ms） |
+| `defaultClients` | string[] | `[]` | 未传递 `--client/-c` 选项时应用的客户端筛选。接受与 `--client` 相同的 ID（例如 `["opencode", "claude", "synthetic"]`）。未知 ID 会被静默丢弃。命令行选项会完全覆盖此列表 — 不会合并。 |
 
 ### 环境变量
 

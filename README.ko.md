@@ -453,7 +453,8 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 ```json
 {
   "colorPalette": "blue",
-  "includeUnusedModels": false
+  "includeUnusedModels": false,
+  "defaultClients": ["opencode", "claude"]
 }
 ```
 
@@ -464,6 +465,7 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 | `autoRefreshEnabled` | boolean | `false` | TUI 자동 새로고침 활성화 |
 | `autoRefreshMs` | number | `60000` | 자동 새로고침 간격 (30000-3600000ms) |
 | `nativeTimeoutMs` | number | `300000` | 네이티브 서브프로세스 처리 최대 시간 (5000-3600000ms) |
+| `defaultClients` | string[] | `[]` | `--client/-c` 플래그를 전달하지 않을 때 적용되는 기본 클라이언트 필터. `--client`와 동일한 ID를 받습니다 (예: `["opencode", "claude", "synthetic"]`). 알 수 없는 ID는 자동으로 무시됩니다. CLI 플래그가 있으면 이 목록은 완전히 무시됩니다 — 병합되지 않습니다. |
 
 ### 환경 변수
 

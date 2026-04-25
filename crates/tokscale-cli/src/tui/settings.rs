@@ -38,6 +38,17 @@ pub struct Settings {
     /// empty `"scanner": {}` is equivalent to not setting it at all.
     #[serde(default)]
     pub scanner: ScannerSettings,
+    /// Default `--client` filter applied when the user does not pass any
+    /// CLI client flag. Lets people pin "I only care about my OpenCode and
+    /// Claude usage" without typing `--client opencode,claude` on every
+    /// invocation.
+    ///
+    /// Stored as canonical lowercase ids matching `ClientFilter::as_filter_str`
+    /// (e.g. `["opencode", "claude", "synthetic"]`). Unknown ids are dropped
+    /// silently at load time so a typo or stale entry never breaks tokscale.
+    /// CLI flags always override this list completely — no merging.
+    #[serde(default)]
+    pub default_clients: Vec<String>,
 }
 
 fn default_color_palette() -> String {
@@ -61,6 +72,7 @@ impl Default for Settings {
             include_unused_models: false,
             native_timeout_ms: DEFAULT_NATIVE_TIMEOUT_MS,
             scanner: ScannerSettings::default(),
+            default_clients: Vec::new(),
         }
     }
 }
@@ -74,6 +86,16 @@ impl Default for Settings {
 /// should never break `tokscale` runs.
 pub fn load_scanner_settings() -> ScannerSettings {
     Settings::load().scanner
+}
+
+/// Returns the user's configured `defaultClients` list as raw lowercase
+/// ids. Validation against the live `ClientFilter` enum happens at the
+/// CLI boundary so this module stays independent of the CLI types.
+///
+/// Returns an empty `Vec` when settings.json is missing, malformed, or
+/// the field is unset — never errors.
+pub fn load_default_clients() -> Vec<String> {
+    Settings::load().default_clients
 }
 
 impl Settings {
@@ -294,6 +316,52 @@ mod tests {
         assert_eq!(
             round_trip["scanner"]["extraScanPaths"]["gemini"][0],
             serde_json::json!("/tmp/imports/gemini/tmp")
+        );
+    }
+
+    #[test]
+    fn settings_default_clients_defaults_to_empty() {
+        // Older settings.json files have no `defaultClients` key — they
+        // must still parse and yield the "no defaults configured" state.
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.default_clients.is_empty());
+    }
+
+    #[test]
+    fn settings_default_clients_round_trips() {
+        // User-configured list must survive load+save unchanged. This is
+        // what `tokscale --client opencode,claude` consults when no CLI
+        // flag is present.
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000,
+            "defaultClients": ["opencode", "claude", "synthetic"]
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.default_clients,
+            vec![
+                "opencode".to_string(),
+                "claude".to_string(),
+                "synthetic".to_string()
+            ]
+        );
+
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            round_trip["defaultClients"],
+            serde_json::json!(["opencode", "claude", "synthetic"])
         );
     }
 }

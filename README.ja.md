@@ -454,7 +454,8 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 ```json
 {
   "colorPalette": "blue",
-  "includeUnusedModels": false
+  "includeUnusedModels": false,
+  "defaultClients": ["opencode", "claude"]
 }
 ```
 
@@ -465,6 +466,7 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 | `autoRefreshEnabled` | boolean | `false` | TUIの自動更新を有効化 |
 | `autoRefreshMs` | number | `60000` | 自動更新間隔（30000-3600000ms） |
 | `nativeTimeoutMs` | number | `300000` | ネイティブサブプロセス処理の最大時間（5000-3600000ms） |
+| `defaultClients` | string[] | `[]` | `--client/-c` フラグを渡さない場合に適用されるクライアントフィルター。`--client` と同じ ID を受け付けます（例: `["opencode", "claude", "synthetic"]`）。未知の ID は無視されます。CLI フラグが指定されるとこのリストは完全に無視されます — マージはしません。 |
 
 ### 環境変数
 

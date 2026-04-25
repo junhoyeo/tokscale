@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use clap::ValueEnum;
 use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -10,46 +11,50 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
-use tokscale_core::ClientId;
 
 use crate::tui::client_ui;
 use crate::tui::themes::Theme;
+use crate::ClientFilter;
 
 use super::{DialogContent, DialogResult};
 
+/// Hotkey assigned to the Synthetic option in the dialog.
+///
+/// NOTE: `'x'` collides with `client_ui::CLIENT_UI[Mux]`. The collision is
+/// pre-existing — the toggle path checks `client_ui::from_hotkey` first, so
+/// pressing `x` toggles Mux and the Synthetic hotkey display is purely
+/// cosmetic. Left as-is here so this refactor stays scope-clean; tracked
+/// for a follow-up that picks a free letter.
+const SYNTHETIC_HOTKEY: char = 'x';
+
+/// TUI dialog that lets the user toggle which clients (and Synthetic) are
+/// included in reports. Backed by the same unified
+/// `Rc<RefCell<HashSet<ClientFilter>>>` the rest of the app sees, so
+/// toggles propagate without a separate sync step.
 pub struct ClientPickerDialog {
-    sources: Vec<SourceOption>,
-    enabled: Rc<RefCell<HashSet<ClientId>>>,
-    include_synthetic: Rc<RefCell<bool>>,
+    /// Every selectable filter in the same order they appear on screen.
+    /// Mirrors `ClientFilter::value_variants()` so the listing order is
+    /// the canonical chronological order across the whole CLI/TUI.
+    sources: Vec<ClientFilter>,
+    enabled: Rc<RefCell<HashSet<ClientFilter>>>,
     needs_reload: Rc<RefCell<bool>>,
     selected: usize,
     filter: String,
+    /// Indices into `sources` that match the current type-to-filter
+    /// substring. `selected` indexes into this vec, not into `sources`.
     filtered_indices: Vec<usize>,
-}
-
-#[derive(Clone, Copy)]
-enum SourceOption {
-    Client(ClientId),
-    Synthetic,
 }
 
 impl ClientPickerDialog {
     pub fn new(
-        enabled: Rc<RefCell<HashSet<ClientId>>>,
-        include_synthetic: Rc<RefCell<bool>>,
+        enabled: Rc<RefCell<HashSet<ClientFilter>>>,
         needs_reload: Rc<RefCell<bool>>,
     ) -> Self {
-        let mut sources: Vec<SourceOption> = ClientId::ALL
-            .iter()
-            .copied()
-            .map(SourceOption::Client)
-            .collect();
-        sources.push(SourceOption::Synthetic);
+        let sources: Vec<ClientFilter> = ClientFilter::value_variants().to_vec();
         let filtered_indices: Vec<usize> = (0..sources.len()).collect();
         Self {
             sources,
             enabled,
-            include_synthetic,
             needs_reload,
             selected: 0,
             filter: String::new(),
@@ -72,41 +77,30 @@ impl ClientPickerDialog {
         self.selected = next as usize;
     }
 
+    /// Toggle the currently highlighted source. Refuses to disable the
+    /// last enabled source (downstream code assumes at least one
+    /// filter is active when the picker is in use).
     fn toggle_selected(&mut self) {
         if let Some(&idx) = self.filtered_indices.get(self.selected) {
-            let source = self.sources[idx];
-            let enabled_source_count = self.enabled_source_count();
-            match source {
-                SourceOption::Client(client) => {
-                    let mut enabled = self.enabled.borrow_mut();
-                    let is_enabled = enabled.contains(&client);
-
-                    if is_enabled && enabled_source_count > 1 {
-                        enabled.remove(&client);
-                        *self.needs_reload.borrow_mut() = true;
-                    } else if !is_enabled {
-                        enabled.insert(client);
-                        *self.needs_reload.borrow_mut() = true;
-                    }
-                }
-                SourceOption::Synthetic => {
-                    let is_enabled = *self.include_synthetic.borrow();
-                    if is_enabled && enabled_source_count > 1 {
-                        *self.include_synthetic.borrow_mut() = false;
-                        *self.needs_reload.borrow_mut() = true;
-                    } else if !is_enabled {
-                        *self.include_synthetic.borrow_mut() = true;
-                        *self.needs_reload.borrow_mut() = true;
-                    }
-                }
-            }
+            self.toggle(self.sources[idx]);
         }
     }
 
-    fn enabled_source_count(&self) -> usize {
-        let client_count = self.enabled.borrow().len();
-        let synthetic_count = usize::from(*self.include_synthetic.borrow());
-        client_count + synthetic_count
+    fn toggle(&self, client: ClientFilter) {
+        let mut enabled = self.enabled.borrow_mut();
+        let total = enabled.len();
+        let is_enabled = enabled.contains(&client);
+
+        if is_enabled && total > 1 {
+            enabled.remove(&client);
+            *self.needs_reload.borrow_mut() = true;
+        } else if !is_enabled {
+            enabled.insert(client);
+            *self.needs_reload.borrow_mut() = true;
+        }
+        // Refusing to disable the last source is intentional: an empty
+        // filter set would mean "scan nothing", which is never what the
+        // user wants from this dialog.
     }
 
     fn rebuild_filter(&mut self) {
@@ -118,7 +112,7 @@ impl ClientPickerDialog {
                 .sources
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| source_display_name(**s).to_lowercase().contains(&needle))
+                .filter(|(_, c)| display_name(**c).to_lowercase().contains(&needle))
                 .map(|(i, _)| i)
                 .collect();
         }
@@ -187,14 +181,11 @@ impl DialogContent for ClientPickerDialog {
 
             let source = self.sources[idx];
             let is_selected = flat_idx == self.selected;
-            let is_enabled = match source {
-                SourceOption::Client(client) => self.enabled.borrow().contains(&client),
-                SourceOption::Synthetic => *self.include_synthetic.borrow(),
-            };
+            let is_enabled = self.enabled.borrow().contains(&source);
 
             let checkbox = if is_enabled { "[●]" } else { "[ ]" };
-            let key_hint = format!("[{}]", source_hotkey(source));
-            let name = source_display_name(source);
+            let key_hint = format!("[{}]", hotkey(source));
+            let name = display_name(source);
 
             let usable = list_area.width.saturating_sub(4) as usize;
             let left = format!("{} {} {}", checkbox, key_hint, name);
@@ -253,26 +244,14 @@ impl DialogContent for ClientPickerDialog {
                 DialogResult::None
             }
             KeyCode::Char(c) => {
-                let enabled_source_count = self.enabled_source_count();
-                if let Some(client) = client_ui::from_hotkey(c) {
-                    let mut enabled = self.enabled.borrow_mut();
-                    let is_enabled = enabled.contains(&client);
-                    if is_enabled && enabled_source_count > 1 {
-                        enabled.remove(&client);
-                        *self.needs_reload.borrow_mut() = true;
-                    } else if !is_enabled {
-                        enabled.insert(client);
-                        *self.needs_reload.borrow_mut() = true;
-                    }
-                } else if c == 'x' {
-                    let is_enabled = *self.include_synthetic.borrow();
-                    if is_enabled && enabled_source_count > 1 {
-                        *self.include_synthetic.borrow_mut() = false;
-                        *self.needs_reload.borrow_mut() = true;
-                    } else if !is_enabled {
-                        *self.include_synthetic.borrow_mut() = true;
-                        *self.needs_reload.borrow_mut() = true;
-                    }
+                // Hotkey toggle: route through the centralized
+                // `ClientFilter` mapping so adding a new hotkey only
+                // requires editing `client_ui.rs` + (if it's a non-client
+                // meta source) updating SYNTHETIC_HOTKEY here.
+                if let Some(client_id) = client_ui::from_hotkey(c) {
+                    self.toggle(ClientFilter::from_client_id(client_id));
+                } else if c == SYNTHETIC_HOTKEY {
+                    self.toggle(ClientFilter::Synthetic);
                 } else {
                     self.filter.push(c);
                     self.rebuild_filter();
@@ -284,16 +263,20 @@ impl DialogContent for ClientPickerDialog {
     }
 }
 
-fn source_display_name(source: SourceOption) -> &'static str {
-    match source {
-        SourceOption::Client(client) => client_ui::display_name(client),
-        SourceOption::Synthetic => "Synthetic",
+/// Display name for a `ClientFilter` row in the picker. Delegates to the
+/// existing `client_ui` registry for `ClientId`-backed variants and adds
+/// the meta-client label for `Synthetic`.
+fn display_name(client: ClientFilter) -> &'static str {
+    match client.to_client_id() {
+        Some(id) => client_ui::display_name(id),
+        None => "Synthetic",
     }
 }
 
-fn source_hotkey(source: SourceOption) -> char {
-    match source {
-        SourceOption::Client(client) => client_ui::hotkey(client),
-        SourceOption::Synthetic => 'x',
+/// Hotkey for a `ClientFilter` row. Mirrors `display_name`'s split.
+fn hotkey(client: ClientFilter) -> char {
+    match client.to_client_id() {
+        Some(id) => client_ui::hotkey(id),
+        None => SYNTHETIC_HOTKEY,
     }
 }

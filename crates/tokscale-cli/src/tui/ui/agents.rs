@@ -2,10 +2,10 @@ use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
-use tokscale_core::ClientId;
 
 use super::widgets::{format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::ClientFilter;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -193,7 +193,7 @@ fn get_empty_message(app: &App) -> String {
     let only_codex = !enabled_clients.is_empty()
         && enabled_clients
             .iter()
-            .all(|client| *client == ClientId::Codex);
+            .all(|client| *client == ClientFilter::Codex);
 
     if only_codex {
         "No agent breakdown is available for the current sources.\nThe selected source usually does not record agent metadata for regular sessions.\nPress 's' to try a different source."
@@ -232,9 +232,9 @@ mod tests {
     use super::get_empty_message;
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
-    use tokscale_core::ClientId;
+    use crate::ClientFilter;
 
-    fn make_app(clients: Vec<ClientId>) -> App {
+    fn make_app(clients: Vec<ClientFilter>) -> App {
         let app = App::new_with_cached_data(
             TuiConfig {
                 theme: "tokscale".to_string(),
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_get_empty_message_for_codex_only() {
-        let app = make_app(vec![ClientId::Codex]);
+        let app = make_app(vec![ClientFilter::Codex]);
         let message = get_empty_message(&app);
 
         assert!(message.contains("selected source usually does not record"));
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_get_empty_message_for_mixed_sources() {
-        let app = make_app(vec![ClientId::OpenCode, ClientId::RooCode]);
+        let app = make_app(vec![ClientFilter::Opencode, ClientFilter::Roocode]);
         let message = get_empty_message(&app);
 
         assert!(message.contains("Only some sources record agent metadata"));
