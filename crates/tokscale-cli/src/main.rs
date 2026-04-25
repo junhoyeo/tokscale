@@ -3808,16 +3808,54 @@ fn spawn_warm_tui_cache_detached() {
     let _ = cmd.spawn();
 }
 
+/// Resolve the filter set used by a no-`--client`-flag TUI launch.
+///
+/// Mirrors the resolution that `build_client_filter` + `tui::run` perform
+/// when the user passes no CLI client flag:
+///
+/// 1. If `defaultClients` from `~/.config/tokscale/settings.json` is
+///    set, use that (after dropping unknown ids).
+/// 2. Otherwise fall back to `ClientFilter::default_set()` (every real
+///    client, Synthetic excluded).
+///
+/// This **must** stay in lockstep with the resolution that
+/// `tui::run(.., clients = None, ..)` would compute. If it drifts, the
+/// `submit` warm cache uses one filter set while the next no-flag TUI
+/// launch wants another, the cache key mismatches, and the warming
+/// becomes a wasted background scan.
+fn resolve_default_tui_filter_set() -> std::collections::HashSet<ClientFilter> {
+    resolve_default_tui_filter_set_with(&tui::settings::load_default_clients())
+}
+
+/// Pure variant of `resolve_default_tui_filter_set` for unit-testable
+/// resolution. `configured` is the (raw, pre-validation) list of ids
+/// from settings.json.
+fn resolve_default_tui_filter_set_with(
+    configured: &[String],
+) -> std::collections::HashSet<ClientFilter> {
+    let parsed: Vec<ClientFilter> = configured
+        .iter()
+        .filter_map(|s| ClientFilter::from_filter_str(s))
+        .collect();
+    if parsed.is_empty() {
+        ClientFilter::default_set()
+    } else {
+        parsed.into_iter().collect()
+    }
+}
+
 fn run_warm_tui_cache() -> Result<()> {
     use crate::tui::{save_cached_data, DataLoader};
     use tokscale_core::{ClientId, GroupBy};
 
     // Warm the cache using the same default filter set the TUI uses on
-    // a no-filter launch. Going through `ClientFilter::default_set()`
-    // keeps these two paths in lockstep — if they drift, every TUI
-    // launch after `submit` becomes a stale-cache reuse instead of a
-    // fresh hit, which defeats the warming.
-    let enabled_set = ClientFilter::default_set();
+    // a no-flag launch. Going through `resolve_default_tui_filter_set()`
+    // keeps these two paths in lockstep — including the user's
+    // `defaultClients` setting, which the TUI honors via
+    // `build_client_filter`. If they drift, every TUI launch after
+    // `submit` becomes a cache miss instead of a fresh hit, defeating
+    // the warming.
+    let enabled_set = resolve_default_tui_filter_set();
     let scan_clients: Vec<ClientId> = enabled_set
         .iter()
         .filter_map(|f| f.to_client_id())
@@ -4111,10 +4149,17 @@ mod tests {
             .unwrap()
     }
 
+    // Tests below call `build_client_filter_with_defaults` directly with
+    // an explicit `defaults` slice instead of `build_client_filter`, which
+    // reads from `~/.config/tokscale/settings.json`. Reading host config
+    // makes tests non-hermetic — a developer with their own
+    // `defaultClients` set would break the assertions. The wrapper is
+    // covered separately by tests that pass an explicit `&[]`.
+
     #[test]
     fn test_build_client_filter_all_false() {
         let flags = ClientFlags::default();
-        assert_eq!(build_client_filter(flags), None);
+        assert_eq!(build_client_filter_with_defaults(flags, &[]), None);
     }
 
     #[test]
@@ -4124,7 +4169,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter(flags),
+            build_client_filter_with_defaults(flags, &[]),
             Some(vec!["opencode".to_string()])
         );
     }
@@ -4142,7 +4187,7 @@ mod tests {
         // a deliberate trade-off: legacy flags are deprecated, and the
         // canonical `--client a,b,c` form preserves user order.
         assert_eq!(
-            build_client_filter(flags),
+            build_client_filter_with_defaults(flags, &[]),
             Some(vec![
                 "opencode".to_string(),
                 "claude".to_string(),
@@ -4158,7 +4203,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter(flags),
+            build_client_filter_with_defaults(flags, &[]),
             Some(vec!["synthetic".to_string()])
         );
     }
@@ -4188,7 +4233,7 @@ mod tests {
             synthetic: true,
             ..ClientFlags::default()
         };
-        let result = build_client_filter(flags);
+        let result = build_client_filter_with_defaults(flags, &[]);
         assert!(result.is_some());
         let sources = result.unwrap();
         // ClientId::COUNT does not include synthetic, but ClientFilter does.
@@ -4236,7 +4281,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter(flags),
+            build_client_filter_with_defaults(flags, &[]),
             Some(vec![
                 "claude".to_string(),
                 "opencode".to_string(),
@@ -4256,7 +4301,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter(flags),
+            build_client_filter_with_defaults(flags, &[]),
             Some(vec!["claude".to_string(), "opencode".to_string()])
         );
     }
@@ -4273,7 +4318,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter(flags),
+            build_client_filter_with_defaults(flags, &[]),
             Some(vec!["claude".to_string(), "opencode".to_string()])
         );
     }
@@ -4387,6 +4432,61 @@ mod tests {
             ClientFilter::value_variants().len() - 1,
             "default_set() size drifted from value_variants() - 1"
         );
+    }
+
+    #[test]
+    fn test_resolve_default_tui_filter_set_uses_configured_defaults() {
+        // When `defaultClients` is set, the warm-cache resolver must use
+        // it verbatim — otherwise the warm cache would store all 18
+        // clients while the next no-flag TUI launch wants only the 2
+        // configured ones, producing a guaranteed cache miss.
+        let configured = vec!["opencode".to_string(), "claude".to_string()];
+        let set = resolve_default_tui_filter_set_with(&configured);
+        let mut expected = std::collections::HashSet::new();
+        expected.insert(ClientFilter::Opencode);
+        expected.insert(ClientFilter::Claude);
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn test_resolve_default_tui_filter_set_falls_back_when_empty() {
+        // No defaultClients configured → use the canonical default set.
+        let set = resolve_default_tui_filter_set_with(&[]);
+        assert_eq!(set, ClientFilter::default_set());
+    }
+
+    #[test]
+    fn test_resolve_default_tui_filter_set_drops_unknown_ids() {
+        // A stale settings.json entry (renamed/removed client) must not
+        // crash; unknown ids are dropped and the resolver still produces
+        // a usable filter set.
+        let configured = vec!["opencode".to_string(), "not-a-real-client".to_string()];
+        let set = resolve_default_tui_filter_set_with(&configured);
+        let mut expected = std::collections::HashSet::new();
+        expected.insert(ClientFilter::Opencode);
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn test_resolve_default_tui_filter_set_all_unknown_falls_back() {
+        // If every configured id is invalid, treat as if nothing is
+        // configured rather than producing an empty filter set (which
+        // would mean "scan nothing", definitely not the intent).
+        let configured = vec!["not-real".to_string(), "also-fake".to_string()];
+        let set = resolve_default_tui_filter_set_with(&configured);
+        assert_eq!(set, ClientFilter::default_set());
+    }
+
+    #[test]
+    fn test_resolve_default_tui_filter_set_supports_synthetic() {
+        // Power users who explicitly want synthetic detection on every
+        // launch can put it in defaultClients.
+        let configured = vec!["claude".to_string(), "synthetic".to_string()];
+        let set = resolve_default_tui_filter_set_with(&configured);
+        let mut expected = std::collections::HashSet::new();
+        expected.insert(ClientFilter::Claude);
+        expected.insert(ClientFilter::Synthetic);
+        assert_eq!(set, expected);
     }
 
     #[test]
