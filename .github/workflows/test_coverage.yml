@@ -185,7 +185,7 @@ jobs:
           git diff --staged --quiet || (git commit -m "ci: update coverage badge [skip ci]" && git push)
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: "!cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
         with:
           name: coverage-report

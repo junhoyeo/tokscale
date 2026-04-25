@@ -139,7 +139,7 @@ jobs:
           echo "📝 Version bump prepared (will commit after successful publish)"
 
       - name: Upload bumped manifest files
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: bumped-manifests
           path: |
@@ -225,7 +225,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
@@ -278,7 +278,7 @@ jobs:
         run: ${{ matrix.settings.strip }}
 
       - name: Upload CLI binary artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.settings.artifact_name }}
           path: target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}
@@ -329,7 +329,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
@@ -340,7 +340,7 @@ jobs:
           bun-version: 1.1.38
 
       - name: Download CLI binary artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: ${{ matrix.settings.artifact_name }}
           path: artifacts/${{ matrix.settings.package_dir }}
@@ -372,7 +372,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
@@ -407,7 +407,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
@@ -439,7 +439,7 @@ jobs:
           fetch-tags: true
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
