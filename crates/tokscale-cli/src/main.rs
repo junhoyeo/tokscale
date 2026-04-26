@@ -464,7 +464,12 @@ fn main() -> Result<()> {
             let month = date.month;
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
-            let clients = build_client_filter(clients);
+            // Bypass settings.json defaultClients for the submit path: we want the
+            // submit-specific default_submit_clients() fallback (in run_submit_command)
+            // to fire when the user passes no client flags, not the user's general
+            // defaultClients view filter (which may exclude clients they still want
+            // to upload). Pass an explicit empty defaults slice.
+            let clients = build_client_filter_with_defaults(clients, &[]);
             run_submit_command(clients, since, until, year, dry_run)
         }
         Some(Commands::Headless {
@@ -602,6 +607,7 @@ pub enum ClientFilter {
     Crush,
     Hermes,
     Copilot,
+    Goose,
     Synthetic,
 }
 
@@ -629,6 +635,7 @@ impl ClientFilter {
             Self::Crush => "crush",
             Self::Hermes => "hermes",
             Self::Copilot => "copilot",
+            Self::Goose => "goose",
             Self::Synthetic => "synthetic",
         }
     }
@@ -659,6 +666,7 @@ impl ClientFilter {
             Self::Crush => Some(ClientId::Crush),
             Self::Hermes => Some(ClientId::Hermes),
             Self::Copilot => Some(ClientId::Copilot),
+            Self::Goose => Some(ClientId::Goose),
             Self::Synthetic => None,
         }
     }
@@ -686,6 +694,7 @@ impl ClientFilter {
             ClientId::Crush => Self::Crush,
             ClientId::Hermes => Self::Hermes,
             ClientId::Copilot => Self::Copilot,
+            ClientId::Goose => Self::Goose,
         }
     }
 
@@ -829,7 +838,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 19] = [
+    let legacy: [(bool, ClientFilter); 20] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -848,6 +857,7 @@ fn build_client_filter_with_defaults(
         (flags.crush, ClientFilter::Crush),
         (flags.hermes, ClientFilter::Hermes),
         (flags.copilot, ClientFilter::Copilot),
+        (flags.goose, ClientFilter::Goose),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -4609,6 +4619,48 @@ mod tests {
         let clients = default_submit_clients();
         assert!(clients.contains(&"synthetic".to_string()));
         assert!(!clients.contains(&"crush".to_string()));
+    }
+
+    #[test]
+    fn test_build_client_filter_with_defaults_uses_defaults_when_no_flags() {
+        let flags = ClientFlags::default();
+        let defaults = vec!["opencode".to_string(), "claude".to_string()];
+        assert_eq!(
+            build_client_filter_with_defaults(flags, &defaults),
+            Some(vec!["opencode".to_string(), "claude".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_build_client_filter_with_defaults_empty_defaults_returns_none() {
+        let flags = ClientFlags::default();
+        assert_eq!(build_client_filter_with_defaults(flags, &[]), None);
+    }
+
+    #[test]
+    fn test_client_filter_goose_round_trip() {
+        assert_eq!(
+            ClientFilter::from_filter_str("goose"),
+            Some(ClientFilter::Goose)
+        );
+        assert_eq!(ClientFilter::Goose.as_filter_str(), "goose");
+        assert_eq!(
+            ClientFilter::Goose.to_client_id(),
+            Some(tokscale_core::ClientId::Goose)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Goose),
+            ClientFilter::Goose
+        );
+    }
+
+    #[test]
+    fn test_client_filter_default_set_includes_goose() {
+        let default = ClientFilter::default_set();
+        assert!(
+            default.contains(&ClientFilter::Goose),
+            "default_set() must include Goose so the no-filter path scans it"
+        );
     }
 
     #[test]

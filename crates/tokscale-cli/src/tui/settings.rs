@@ -47,8 +47,27 @@ pub struct Settings {
     /// (e.g. `["opencode", "claude", "synthetic"]`). Unknown ids are dropped
     /// silently at load time so a typo or stale entry never breaks tokscale.
     /// CLI flags always override this list completely — no merging.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
     pub default_clients: Vec<String>,
+}
+
+/// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
+/// JSON values, keeps only string elements, and silently drops anything
+/// else. Hand-edited settings.json files sometimes end up with stray nulls,
+/// numbers, or trailing trash; failing the whole load over one bad element
+/// would silently fall back to defaults for *every* setting in the file
+/// (theme, scanner paths, etc.), which is a much worse user experience
+/// than dropping the bad entry.
+fn deserialize_string_array_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<Vec<serde_json::Value>> = Option::deserialize(deserializer).ok().flatten();
+    Ok(value
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect())
 }
 
 fn default_color_palette() -> String {
@@ -362,6 +381,20 @@ mod tests {
         assert_eq!(
             round_trip["defaultClients"],
             serde_json::json!(["opencode", "claude", "synthetic"])
+        );
+    }
+
+    #[test]
+    fn settings_default_clients_drops_non_string_elements_silently() {
+        let json = r#"{
+            "colorPalette": "halloween",
+            "defaultClients": ["opencode", 123, null, "claude", true, {"x":1}]
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).expect("settings should still load");
+        assert_eq!(parsed.color_palette, "halloween");
+        assert_eq!(
+            parsed.default_clients,
+            vec!["opencode".to_string(), "claude".to_string()]
         );
     }
 }
