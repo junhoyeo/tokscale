@@ -42,6 +42,15 @@ use tokscale_core::ClientId;
 
 use crate::ClientFilter;
 
+fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
+    let cached_data = match load_result {
+        CacheResult::Fresh(data) | CacheResult::Stale(data) => Some(data),
+        CacheResult::Miss => None,
+    };
+
+    (cached_data, true)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     theme: &str,
@@ -86,12 +95,8 @@ pub fn run(
 
     // Single file read: load cache and check freshness in one pass.
     let initial_group_by = tokscale_core::GroupBy::Model;
-    let (cached_data, cache_is_stale) = match load_cache(&enabled_clients, &initial_group_by) {
-        CacheResult::Fresh(data) => (Some(data), false),
-        CacheResult::Stale(data) => (Some(data), true),
-        CacheResult::Miss => (None, true),
-    };
-    let has_cached_data = cached_data.is_some();
+    let (cached_data, needs_background_load) =
+        decide_initial_data(load_cache(&enabled_clients, &initial_group_by));
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -129,7 +134,6 @@ pub fn run(
     };
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
-    let needs_background_load = !has_cached_data || cache_is_stale;
 
     if needs_background_load {
         app.set_background_loading(true);
@@ -184,6 +188,28 @@ pub fn run(
     restore_terminal(&mut terminal);
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launches_with_24h_old_cache_renders_immediately() {
+        let (cached_data, needs_background_load) =
+            decide_initial_data(CacheResult::Stale(UsageData::default()));
+
+        assert!(cached_data.is_some());
+        assert!(needs_background_load);
+    }
+
+    #[test]
+    fn miss_renders_empty_until_background_completes() {
+        let (cached_data, needs_background_load) = decide_initial_data(CacheResult::Miss);
+
+        assert!(cached_data.is_none());
+        assert!(needs_background_load);
+    }
 }
 
 fn restore_terminal_best_effort() {
