@@ -35,6 +35,20 @@ impl PathRoot {
                     }
                 }
 
+                // Match paths::get_config_dir() platform branches so the
+                // scanner reads from the same root the writer (e.g.
+                // get_antigravity_cache_dir) targets. Hardcoding
+                // `{home}/.config/tokscale` everywhere would diverge from
+                // dirs::config_dir() on Windows (where it resolves to
+                // %APPDATA%\tokscale), causing synced data to land in
+                // %APPDATA% while the scanner looks in %USERPROFILE%.
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(dir) = dirs::config_dir() {
+                        return dir.join("tokscale").to_string_lossy().into_owned();
+                    }
+                }
+
                 format!("{home_dir}/.config/tokscale")
             }
             PathRoot::EnvVar {
@@ -491,6 +505,34 @@ mod tests {
 
         restore_env("TOKSCALE_CONFIG_DIR", previous_override);
         restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_path_root_config_uses_dirs_config_dir_on_windows() {
+        // Windows must resolve PathRoot::Config to the same root that
+        // paths::get_config_dir() and get_antigravity_cache_dir() use,
+        // i.e. dirs::config_dir() (= %APPDATA%\tokscale). Hardcoding
+        // {home}/.config/tokscale would diverge from the writer side
+        // and silently hide synced Antigravity data from reports.
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        unsafe {
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let resolved = PathRoot::Config.resolve("C:\\fake-home");
+        let expected = dirs::config_dir()
+            .expect("Windows always exposes dirs::config_dir")
+            .join("tokscale")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            resolved, expected,
+            "PathRoot::Config on Windows must match dirs::config_dir().join('tokscale') so the scanner agrees with the writer"
+        );
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
     }
 
     #[test]
