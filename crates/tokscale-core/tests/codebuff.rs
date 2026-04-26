@@ -328,3 +328,97 @@ fn test_parse_codebuff_run_state_skips_entries_missing_provider_options() {
     assert_eq!(msgs[0].tokens.output, 56);
     assert_eq!(msgs[0].model_id, "claude-sonnet-4-20250514");
 }
+
+#[test]
+fn test_parse_codebuff_run_state_accumulates_across_entries_when_newest_has_model_only() {
+    let dir = TempDir::new().unwrap();
+    let path = write_chat(
+        &dir,
+        "manicode",
+        "proj",
+        "2025-12-19T15-00-00.000Z",
+        r#"[
+            {
+                "variant": "assistant",
+                "timestamp": "2025-12-19T15:00:00.000Z",
+                "metadata": {
+                    "runState": {
+                        "sessionState": {
+                            "mainAgentState": {
+                                "messageHistory": [
+                                    {
+                                        "role": "assistant",
+                                        "providerOptions": {
+                                            "codebuff": {
+                                                "usage": {
+                                                    "inputTokens": 4242,
+                                                    "outputTokens": 99
+                                                }
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "role": "user",
+                                        "providerOptions": {}
+                                    },
+                                    {
+                                        "role": "assistant",
+                                        "providerOptions": {
+                                            "codebuff": {
+                                                "model": "openai/gpt-5-newer"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        ]"#,
+    );
+
+    let msgs = parse_codebuff_file(&path);
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].tokens.input, 4242);
+    assert_eq!(msgs[0].tokens.output, 99);
+    assert_eq!(msgs[0].model_id, "openai/gpt-5-newer");
+}
+
+#[test]
+fn test_parse_codebuff_dedup_key_distinguishes_id_less_messages_by_ordinal() {
+    let dir = TempDir::new().unwrap();
+    let path = write_chat(
+        &dir,
+        "manicode",
+        "proj",
+        "2025-12-21T16-00-00.000Z",
+        r#"[
+            {
+                "variant": "ai",
+                "timestamp": "2025-12-21T16:00:00.000Z",
+                "metadata": {
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": { "inputTokens": 50, "outputTokens": 25 }
+                }
+            },
+            {
+                "variant": "ai",
+                "timestamp": "2025-12-21T16:00:00.000Z",
+                "metadata": {
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": { "inputTokens": 50, "outputTokens": 25 }
+                }
+            }
+        ]"#,
+    );
+
+    let msgs = parse_codebuff_file(&path);
+    assert_eq!(msgs.len(), 2);
+    let key_a = msgs[0].dedup_key.as_deref().unwrap();
+    let key_b = msgs[1].dedup_key.as_deref().unwrap();
+    assert_ne!(
+        key_a, key_b,
+        "id-less messages with identical session/ts/model/tokens must use ordinal to stay distinct"
+    );
+}
