@@ -26,6 +26,19 @@ fn prime_pricing_cache(base: &Path) {
     }
 }
 
+fn prime_override_pricing_cache(config_dir: &Path) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let payload = format!(r#"{{"timestamp":{},"data":{{}}}}"#, now);
+
+    let cache_dir = config_dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("pricing-litellm.json"), &payload).unwrap();
+    fs::write(cache_dir.join("pricing-openrouter.json"), &payload).unwrap();
+}
+
 /// Create a temporary directory with minimal OpenCode fixture data.
 ///
 /// Layout:
@@ -1714,6 +1727,7 @@ fn test_root_light_output() {
 fn light_with_write_cache_writes_to_canonical_path() {
     let tmp = create_temp_fixture_dir();
     let config_dir = tmp.path().join("custom-config-root");
+    prime_override_pricing_cache(&config_dir);
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_CONFIG_DIR", &config_dir)

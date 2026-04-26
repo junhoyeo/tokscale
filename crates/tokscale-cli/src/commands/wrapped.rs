@@ -1793,6 +1793,15 @@ mod tests {
     use std::env;
     use tempfile::TempDir;
 
+    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+        unsafe {
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
+
     // ========== format_tokens_short tests ==========
 
     #[test]
@@ -2007,9 +2016,11 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        let previous_xdg_config = env::var_os("XDG_CONFIG_HOME");
         unsafe {
             env::set_var("HOME", temp_home.path());
             env::remove_var("TOKSCALE_CONFIG_DIR");
+            env::remove_var("XDG_CONFIG_HOME");
         }
 
         let legacy_path = temp_home
@@ -2024,14 +2035,9 @@ mod tests {
 
         assert_eq!(fs::read(&canonical_path).unwrap(), b"legacy-font-bytes");
 
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-        match previous_override {
-            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
-        }
+        restore_env_var("HOME", previous_home);
+        restore_env_var("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env_var("XDG_CONFIG_HOME", previous_xdg_config);
     }
 
     // ========== format_model_name tests ==========
