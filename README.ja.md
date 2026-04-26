@@ -491,6 +491,19 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 | `autoRefreshMs` | number | `60000` | 自動更新間隔（30000-3600000ms） |
 | `nativeTimeoutMs` | number | `300000` | ネイティブサブプロセス処理の最大時間（5000-3600000ms） |
 | `defaultClients` | string[] | `[]` | `--client/-c` フラグを渡さない場合に適用されるクライアントフィルター。`--client` と同じ ID を受け付けます（例: `["opencode", "claude", "synthetic"]`）。未知の ID は無視されます。CLI フラグが指定されるとこのリストは完全に無視されます — マージはしません。 |
+| `light.writeCache` | boolean | `false` | `true` のとき、`tokscale --light` はレンダリング直後に TUI キャッシュを原子的に上書きします。CLI フラグ `--write-cache` / `--no-write-cache` が実行ごとに優先されます。 |
+
+#### キャッシュディレクトリ構成
+
+再生成可能なキャッシュはすべて `~/.config/tokscale/cache/` 配下に保存されます（`TOKSCALE_CONFIG_DIR` を設定した場合は `${TOKSCALE_CONFIG_DIR}/cache/`）。
+
+- `tui-data-cache.json` — TUI 起動キャッシュ
+- `source-message-cache.bin` + `source-message-cache.lock` — ソースメッセージキャッシュとロックファイル
+- `pricing-litellm.json` / `pricing-openrouter.json` — 料金キャッシュ
+- `opencode-migration.json` — OpenCode 移行記録
+- `fonts/`、`images/` — Wrapped アセットキャッシュ
+
+このディレクトリは削除しても安全です。必要になれば Tokscale が再作成し、再生成します。
 
 ### 環境変数
 
@@ -499,7 +512,7 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 | 変数 | デフォルト | 説明 |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000`（5分） | `nativeTimeoutMs` 設定をオーバーライド |
-| `TOKSCALE_CONFIG_DIR` | unset | 設定ディレクトリ（`settings.json` と `star-cache.json` の保存場所）をオーバーライドします。絶対パス推奨；相対パスはプロセス CWD を基準に解決されます。CI サンドボックスや非デフォルトの場所を固定したい場合に便利です。設定されている場合、tokscale は macOS のレガシーパス（`~/Library/Application Support/tokscale/`）にフォールバックしません。 |
+| `TOKSCALE_CONFIG_DIR` | unset | 設定ディレクトリ（`settings.json`、`star-cache.json`、および `${TOKSCALE_CONFIG_DIR}/cache/` 配下のすべてのキャッシュ保存場所）をオーバーライドします。絶対パス推奨；相対パスはプロセス CWD を基準に解決されます。CI サンドボックスや非デフォルトの場所を固定したい場合に便利です。設定されている場合、tokscale は macOS のレガシーパス（`~/Library/Application Support/tokscale/`）にフォールバックしません。 |
 
 ```bash
 # 例：非常に大きなデータセット用にタイムアウトを増加
@@ -900,7 +913,8 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 
 Tokscaleは以下の場所に設定を保存します：
 - **TUI設定**: `%APPDATA%\tokscale\settings.json`（プラットフォームのデフォルト。`TOKSCALE_CONFIG_DIR` でオーバーライド可能）
-- **キャッシュ**: `%USERPROFILE%\.cache\tokscale\`
+- **キャッシュ**: `%APPDATA%\tokscale\cache\`（統合キャッシュルート）
+- **レガシーキャッシュパス**: 以前のリリースで使われていた `%USERPROFILE%\.cache\tokscale\` のような分散パスは、新しい場所に再生成可能データが書かれるまで残ることがあります。
 - **Cursor認証情報**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
 - **Tokscaleアカウント認証情報**: `%USERPROFILE%\.config\tokscale\credentials.json`
 

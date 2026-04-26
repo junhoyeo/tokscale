@@ -501,11 +501,24 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `autoRefreshMs` | number | `60000` | Auto-refresh interval (30000-3600000ms) |
 | `nativeTimeoutMs` | number | `300000` | Maximum time for native subprocess processing (5000-3600000ms) |
 | `defaultClients` | string[] | `[]` | Client filter applied when no `--client/-c` flag is passed. Accepts the same ids as `--client` (e.g. `["opencode", "claude", "synthetic"]`). Unknown ids are silently dropped. CLI flags always override this list completely — no merging. |
+| `light.writeCache` | boolean | `false` | When true, `tokscale --light` overwrites the TUI cache atomically after rendering. CLI flags `--write-cache` / `--no-write-cache` override per-invocation. |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 
 Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories or imported Gemini/OpenClaw histories. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
 
 Use `defaultClients` to pin a personal default — for example, set it to `["opencode", "claude"]` if those are the only clients you use, and `tokscale` (with no flags) will scope every report to them automatically. Pass `--client` on the command line to override for a single run.
+
+#### Cache directory layout
+
+All regenerable caches now live under `~/.config/tokscale/cache/` (or `${TOKSCALE_CONFIG_DIR}/cache/` when overridden):
+
+- `tui-data-cache.json` — TUI startup cache
+- `source-message-cache.bin` + `source-message-cache.lock` — source-message cache + lock file
+- `pricing-litellm.json` / `pricing-openrouter.json` — pricing caches
+- `opencode-migration.json` — OpenCode migration record
+- `fonts/` and `images/` — Wrapped asset caches
+
+It is safe to delete this directory. Tokscale will recreate and repopulate it on demand.
 
 ### Environment Variables
 
@@ -515,7 +528,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
-| `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory (where `settings.json` and `star-cache.json` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
+| `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory (where `settings.json`, `star-cache.json`, and all caches under `${TOKSCALE_CONFIG_DIR}/cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
 
 ```bash
 # Example: Increase timeout for very large datasets
@@ -919,7 +932,8 @@ AI coding tools store their session data in cross-platform locations. Most tools
 
 Tokscale stores its configuration in:
 - **TUI settings**: `%APPDATA%\tokscale\settings.json` (platform default; override with `TOKSCALE_CONFIG_DIR`)
-- **Cache**: `%USERPROFILE%\.cache\tokscale\`
+- **Cache**: `%APPDATA%\tokscale\cache\` (consolidated cache root)
+- **Legacy cache paths**: `%USERPROFILE%\.cache\tokscale\` and `%LOCALAPPDATA%\tokscale\cache\` equivalents from older releases may still exist until regenerated data is written to the new path
 - **Cursor credentials**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
 - **Tokscale account credentials**: `%USERPROFILE%\.config\tokscale\credentials.json`
 
