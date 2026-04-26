@@ -16,6 +16,16 @@ const DEFAULT_NATIVE_TIMEOUT_MS: u64 = 300_000;
 const MIN_NATIVE_TIMEOUT_MS: u64 = 5_000;
 const MAX_NATIVE_TIMEOUT_MS: u64 = 3_600_000;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightSettings {
+    /// When true, every `tokscale --light` run atomically overwrites the
+    /// TUI cache (same semantics as `--light --write-cache`). The CLI
+    /// flags `--write-cache` / `--no-write-cache` override this per-invocation.
+    #[serde(default)]
+    pub write_cache: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -49,6 +59,8 @@ pub struct Settings {
     /// CLI flags always override this list completely — no merging.
     #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
     pub default_clients: Vec<String>,
+    #[serde(default)]
+    pub light: LightSettings,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -92,6 +104,7 @@ impl Default for Settings {
             native_timeout_ms: DEFAULT_NATIVE_TIMEOUT_MS,
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
+            light: LightSettings::default(),
         }
     }
 }
@@ -513,5 +526,26 @@ mod tests {
             parsed.default_clients,
             vec!["opencode".to_string(), "claude".to_string()]
         );
+    }
+
+    #[test]
+    fn settings_load_accepts_legacy_json_without_light_section() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(!parsed.light.write_cache);
+    }
+
+    #[test]
+    fn light_settings_round_trip() {
+        let light = LightSettings { write_cache: true };
+        let serialized = serde_json::to_string(&light).unwrap();
+        let parsed: LightSettings = serde_json::from_str(&serialized).unwrap();
+        assert!(parsed.write_cache);
     }
 }

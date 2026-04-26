@@ -41,6 +41,22 @@ struct Cli {
     #[arg(long, help = "Use legacy CLI table output")]
     light: bool,
 
+    #[arg(
+        long = "write-cache",
+        requires = "light",
+        conflicts_with = "no_write_cache",
+        help = "After --light renders, atomically overwrite the TUI cache with this report's data so the next `tokscale tui` starts from fresh data. Persists across invocations via settings.json `light.writeCache`."
+    )]
+    write_cache: bool,
+
+    #[arg(
+        long = "no-write-cache",
+        requires = "light",
+        conflicts_with = "write_cache",
+        help = "Skip cache write even if settings.json `light.writeCache` is true. Only valid with --light."
+    )]
+    no_write_cache: bool,
+
     #[command(flatten)]
     clients: ClientFlags,
 
@@ -320,6 +336,8 @@ fn main() -> Result<()> {
                     week,
                     month,
                     group_by,
+                    false,
+                    false,
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
@@ -578,6 +596,8 @@ fn main() -> Result<()> {
                     week,
                     month,
                     group_by,
+                    cli.write_cache,
+                    cli.no_write_cache,
                 )
             } else if cli.light || !can_use_tui {
                 run_models_report(
@@ -593,6 +613,8 @@ fn main() -> Result<()> {
                     week,
                     month,
                     group_by,
+                    cli.write_cache,
+                    cli.no_write_cache,
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
@@ -1246,6 +1268,8 @@ fn run_models_report(
     week: bool,
     month_flag: bool,
     group_by: tokscale_core::GroupBy,
+    cli_write_cache: bool,
+    cli_no_write_cache: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
@@ -1264,12 +1288,12 @@ fn run_models_report(
     let report = rt
         .block_on(async {
             get_model_report(ReportOptions {
-                home_dir,
+                home_dir: home_dir.clone(),
                 use_env_roots,
-                clients,
-                since,
-                until,
-                year,
+                clients: clients.clone(),
+                since: since.clone(),
+                until: until.clone(),
+                year: year.clone(),
                 group_by: group_by.clone(),
                 scanner_settings: tui::settings::load_scanner_settings(),
             })
@@ -1778,6 +1802,13 @@ fn run_models_report(
                 "{}",
                 format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
             );
+        }
+
+        io::stdout().flush()?;
+
+        let settings = tui::settings::Settings::load();
+        if resolve_should_write_cache(cli_write_cache, cli_no_write_cache, &settings) {
+            write_light_cache(&home_dir, &clients, &since, &until, &year, &group_by)?;
         }
     }
 
@@ -3923,6 +3954,61 @@ fn resolve_default_tui_filter_set_with(
     }
 }
 
+fn resolve_should_write_cache(
+    cli_write: bool,
+    cli_no_write: bool,
+    settings: &tui::settings::Settings,
+) -> bool {
+    if cli_no_write {
+        return false;
+    }
+    if cli_write {
+        return true;
+    }
+    settings.light.write_cache
+}
+
+fn resolve_light_cache_filter_set(
+    clients: &Option<Vec<String>>,
+) -> std::collections::HashSet<ClientFilter> {
+    if let Some(clients) = clients {
+        clients
+            .iter()
+            .filter_map(|client| ClientFilter::from_filter_str(client))
+            .collect()
+    } else {
+        resolve_default_tui_filter_set()
+    }
+}
+
+fn write_light_cache(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+    since: &Option<String>,
+    until: &Option<String>,
+    year: &Option<String>,
+    group_by: &tokscale_core::GroupBy,
+) -> Result<()> {
+    use crate::tui::{save_cached_data, DataLoader};
+
+    let enabled_set = resolve_light_cache_filter_set(clients);
+    let scan_clients: Vec<tokscale_core::ClientId> = enabled_set
+        .iter()
+        .filter_map(|filter| filter.to_client_id())
+        .collect();
+    let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
+
+    let loader = DataLoader::with_filters(
+        home_dir.as_ref().map(PathBuf::from),
+        since.clone(),
+        until.clone(),
+        year.clone(),
+    );
+    let data = loader.load(&scan_clients, group_by, include_synthetic)?;
+    save_cached_data(&data, &enabled_set, group_by);
+    Ok(())
+}
+
 fn run_warm_tui_cache() -> Result<()> {
     use crate::tui::{save_cached_data, DataLoader};
     use tokscale_core::{ClientId, GroupBy};
@@ -5310,5 +5396,71 @@ mod tests {
                 None => env::remove_var("TOKSCALE_CONFIG_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn resolve_cli_write_overrides_settings_false() {
+        let settings = tui::settings::Settings {
+            light: tui::settings::LightSettings { write_cache: false },
+            ..tui::settings::Settings::default()
+        };
+        assert!(resolve_should_write_cache(true, false, &settings));
+    }
+
+    #[test]
+    fn resolve_cli_no_write_overrides_settings_true() {
+        let settings = tui::settings::Settings {
+            light: tui::settings::LightSettings { write_cache: true },
+            ..tui::settings::Settings::default()
+        };
+        assert!(!resolve_should_write_cache(false, true, &settings));
+    }
+
+    #[test]
+    fn resolve_settings_true_with_no_cli_flag() {
+        let settings = tui::settings::Settings {
+            light: tui::settings::LightSettings { write_cache: true },
+            ..tui::settings::Settings::default()
+        };
+        assert!(resolve_should_write_cache(false, false, &settings));
+    }
+
+    #[test]
+    fn resolve_settings_false_with_no_cli_flag() {
+        let settings = tui::settings::Settings {
+            light: tui::settings::LightSettings { write_cache: false },
+            ..tui::settings::Settings::default()
+        };
+        assert!(!resolve_should_write_cache(false, false, &settings));
+    }
+
+    #[test]
+    fn resolve_settings_default_returns_false() {
+        assert!(!resolve_should_write_cache(
+            false,
+            false,
+            &tui::settings::Settings::default()
+        ));
+    }
+
+    #[test]
+    fn clap_rejects_write_cache_without_light() {
+        assert!(Cli::try_parse_from(["tokscale", "--write-cache"]).is_err());
+    }
+
+    #[test]
+    fn clap_rejects_no_write_cache_without_light() {
+        assert!(Cli::try_parse_from(["tokscale", "--no-write-cache"]).is_err());
+    }
+
+    #[test]
+    fn clap_rejects_both_write_flags_together() {
+        assert!(Cli::try_parse_from([
+            "tokscale",
+            "--light",
+            "--write-cache",
+            "--no-write-cache",
+        ])
+        .is_err());
     }
 }

@@ -1711,6 +1711,24 @@ fn test_root_light_output() {
 }
 
 #[test]
+fn light_with_write_cache_writes_to_canonical_path() {
+    let tmp = create_temp_fixture_dir();
+    let config_dir = tmp.path().join("custom-config-root");
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_CONFIG_DIR", &config_dir)
+        .args(["--light", "--opencode", "--write-cache", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Token Usage Report by Model"));
+
+    assert!(
+        config_dir.join("cache/tui-data-cache.json").exists(),
+        "--write-cache should populate the canonical cache path"
+    );
+}
+
+#[test]
 fn test_root_with_date_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
