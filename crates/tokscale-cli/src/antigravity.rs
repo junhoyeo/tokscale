@@ -7,7 +7,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
+const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
+const SYNC_LOCK_STALE_SECS: u64 = 600;
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
@@ -65,7 +70,7 @@ pub struct TrajectorySummary {
 impl Default for AntigravityManifest {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: ANTIGRAVITY_MANIFEST_VERSION,
             synced_at: None,
             connections: Vec::new(),
             sessions: Vec::new(),
@@ -140,13 +145,15 @@ pub fn run_antigravity_sync() -> Result<()> {
     ensure_dir(&cache_dir)?;
     ensure_dir(&sessions_dir)?;
 
+    let _lock = SyncLockGuard::acquire(&cache_dir)?;
+
     let manifest = load_antigravity_manifest()?;
     let connections = detect_antigravity_connections()?;
     let summaries = list_trajectory_summaries(&connections)?;
     let filesystem_candidates = scan_filesystem_session_candidates()?;
     let export_candidates = merge_export_candidates(&manifest, &summaries, &filesystem_candidates);
     let mut next_manifest = AntigravityManifest {
-        version: 1,
+        version: ANTIGRAVITY_MANIFEST_VERSION,
         synced_at: Some(chrono::Utc::now().to_rfc3339()),
         connections: connections
             .iter()
@@ -340,6 +347,89 @@ fn ensure_config_dir() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct SyncLockGuard {
+    path: PathBuf,
+}
+
+impl SyncLockGuard {
+    fn acquire(cache_dir: &Path) -> Result<Self> {
+        let lock_path = cache_dir.join("sync.lock");
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                let pid = std::process::id();
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let _ = writeln!(file, "{pid} {timestamp}");
+                Ok(SyncLockGuard { path: lock_path })
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some((existing_pid, existing_ts)) = read_sync_lock(&lock_path) {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let stale = now.saturating_sub(existing_ts) > SYNC_LOCK_STALE_SECS;
+                    if !stale && pid_is_alive(existing_pid) {
+                        anyhow::bail!(
+                            "Another tokscale antigravity sync is in progress (pid {existing_pid}); aborting"
+                        );
+                    }
+                    let _ = std::fs::remove_file(&lock_path);
+                    return Self::acquire(cache_dir);
+                }
+                let _ = std::fs::remove_file(&lock_path);
+                Self::acquire(cache_dir)
+            }
+            Err(err) => {
+                Err(anyhow::Error::new(err).context("Failed to acquire Antigravity sync lock"))
+            }
+        }
+    }
+}
+
+impl Drop for SyncLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn read_sync_lock(path: &Path) -> Option<(u32, u64)> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut parts = contents.split_whitespace();
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let timestamp = parts.next()?.parse::<u64>().ok()?;
+    Some((pid, timestamp))
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc_kill(pid as i32, 0) };
+        return result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, sig: i32) -> i32;
+}
+
 pub fn load_antigravity_manifest() -> Result<AntigravityManifest> {
     let manifest_path = get_antigravity_manifest_path()?;
     if !manifest_path.exists() {
@@ -353,14 +443,52 @@ pub fn load_antigravity_manifest() -> Result<AntigravityManifest> {
         )
     })?;
 
-    let manifest = serde_json::from_str::<AntigravityManifest>(&content).with_context(|| {
-        format!(
-            "Failed to parse Antigravity manifest at {}",
-            manifest_path.display()
-        )
-    })?;
+    let manifest = match serde_json::from_str::<AntigravityManifest>(&content) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            let backup_path = backup_corrupted_manifest(&manifest_path);
+            eprintln!(
+                "Warning: Antigravity manifest at {} is corrupted: {err}; starting fresh{}",
+                manifest_path.display(),
+                backup_path
+                    .map(|p| format!(" (moved aside to {})", p.display()))
+                    .unwrap_or_default()
+            );
+            return Ok(AntigravityManifest::default());
+        }
+    };
+
+    if manifest.version > ANTIGRAVITY_MANIFEST_VERSION {
+        anyhow::bail!(
+            "Manifest from a newer tokscale version detected; refusing to overwrite (got version {}, supported {})",
+            manifest.version,
+            ANTIGRAVITY_MANIFEST_VERSION
+        );
+    }
+
+    if manifest.version < ANTIGRAVITY_MANIFEST_VERSION {
+        eprintln!(
+            "Info: Antigravity manifest at {} is at version {} (current {}); starting fresh",
+            manifest_path.display(),
+            manifest.version,
+            ANTIGRAVITY_MANIFEST_VERSION
+        );
+        return Ok(AntigravityManifest::default());
+    }
 
     Ok(manifest)
+}
+
+fn backup_corrupted_manifest(manifest_path: &Path) -> Option<PathBuf> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let file_name = manifest_path.file_name()?.to_string_lossy().to_string();
+    let backup_name = format!("{file_name}.corrupt-{timestamp}");
+    let backup_path = manifest_path.with_file_name(backup_name);
+    fs::rename(manifest_path, &backup_path).ok()?;
+    Some(backup_path)
 }
 
 pub fn save_antigravity_manifest(manifest: &AntigravityManifest) -> Result<()> {
@@ -614,6 +742,18 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
             continue;
         }
 
+        // Defense-in-depth: a same-user process can advertise the matching
+        // CLI args to poison cache discovery. Verify the executable path
+        // (when introspection is available) actually points at an
+        // antigravity binary. Default to true on platforms where exe path
+        // lookup is unavailable so we do not regress detection.
+        let exe_ok = process_executable_path(pid)
+            .map(|p| p.to_string_lossy().to_lowercase().contains("antigravity"))
+            .unwrap_or(true);
+        if !exe_ok {
+            continue;
+        }
+
         let Some(csrf_token) = extract_csrf_token(&command) else {
             continue;
         };
@@ -645,6 +785,32 @@ fn is_antigravity_process(command: &str) -> bool {
         && (lower.contains("antigravity") || lower.contains("--app_data_dir antigravity")))
         || lower.contains("/antigravity/")
         || lower.contains("\\antigravity\\")
+}
+
+fn process_executable_path(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let link = format!("/proc/{pid}/exe");
+        return std::fs::read_link(&link).ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let pid_str = pid.to_string();
+        let output = run_command("lsof", &["-p", &pid_str, "-Fn"]).ok()?;
+        for line in output.lines() {
+            if let Some(rest) = line.strip_prefix('n') {
+                if rest.contains(".app/Contents/MacOS/") {
+                    return Some(PathBuf::from(rest));
+                }
+            }
+        }
+        return None;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 fn extract_csrf_token(command: &str) -> Option<String> {
@@ -791,8 +957,122 @@ fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
     }
 
     let mut buffer = String::new();
-    let _ = reader.read_to_string(&mut buffer);
-    true
+    let _ = reader
+        .by_ref()
+        .take(MAX_IDENTITY_PROBE_BYTES as u64)
+        .read_to_string(&mut buffer);
+
+    if !heartbeat_response_looks_well_formed(&buffer) {
+        return false;
+    }
+
+    probe_endpoint_identity(port, csrf_token)
+}
+
+fn heartbeat_response_looks_well_formed(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    let json_start = trimmed
+        .find(|c: char| c == '{' || c == '[')
+        .map(|idx| &trimmed[idx..]);
+    let Some(slice) = json_start else {
+        return false;
+    };
+    serde_json::from_str::<Value>(slice).is_ok()
+}
+
+fn probe_endpoint_identity(port: u16, csrf_token: &str) -> bool {
+    for method in [
+        "GetCascadeTrajectoryGeneratorMetadata",
+        "GetAllCascadeTrajectories",
+    ] {
+        if let Some(body) = identity_probe_request(port, csrf_token, method) {
+            if response_contains_antigravity_marker(&body) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+
+    let body = r#"{}"#;
+    let request = format!(
+        "POST /exa.language_server_pb.LanguageServerService/{} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnect-Protocol-Version: 1\r\nX-Codeium-Csrf-Token: {}\r\nConnection: close\r\n\r\n{}",
+        method,
+        port,
+        body.len(),
+        csrf_token,
+        body
+    );
+
+    if stream.write_all(request.as_bytes()).is_err() {
+        return None;
+    }
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    if reader.read_line(&mut status_line).is_err() {
+        return None;
+    }
+
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).is_err() {
+            return None;
+        }
+        if header.trim().is_empty() {
+            break;
+        }
+    }
+
+    let mut buffer = String::new();
+    let _ = reader
+        .by_ref()
+        .take(MAX_IDENTITY_PROBE_BYTES as u64)
+        .read_to_string(&mut buffer);
+    Some(buffer)
+}
+
+fn response_contains_antigravity_marker(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    let json_start = trimmed.find(|c: char| c == '{' || c == '[');
+    let Some(idx) = json_start else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&trimmed[idx..]) else {
+        return false;
+    };
+    contains_antigravity_marker(&value)
+}
+
+fn contains_antigravity_marker(value: &Value) -> bool {
+    const MARKERS: &[&str] = &[
+        "cascadeId",
+        "cascadeTrajectories",
+        "trajectorySummaries",
+        "generatorMetadata",
+        "serverInfo",
+        "serverCapabilities",
+    ];
+    match value {
+        Value::Object(map) => {
+            for (key, val) in map {
+                if MARKERS.iter().any(|m| m.eq_ignore_ascii_case(key)) {
+                    return true;
+                }
+                if contains_antigravity_marker(val) {
+                    return true;
+                }
+            }
+            false
+        }
+        Value::Array(items) => items.iter().any(contains_antigravity_marker),
+        _ => false,
+    }
 }
 
 fn run_command(program: &str, args: &[&str]) -> Result<String> {
@@ -1111,6 +1391,11 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
     }
 
     let response_body = if let Some(length) = content_length {
+        if length > MAX_RPC_BODY_BYTES {
+            anyhow::bail!(
+                "Antigravity RPC body of {length} bytes exceeds {MAX_RPC_BODY_BYTES} cap"
+            );
+        }
         let mut bytes = vec![0_u8; length];
         reader.read_exact(&mut bytes)?;
         String::from_utf8(bytes)?
@@ -1118,7 +1403,16 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
         read_chunked_body(&mut reader)?
     } else {
         let mut text = String::new();
-        reader.read_to_string(&mut text)?;
+        reader
+            .by_ref()
+            .take(MAX_RPC_BODY_BYTES as u64 + 1)
+            .read_to_string(&mut text)?;
+        if text.len() > MAX_RPC_BODY_BYTES {
+            anyhow::bail!(
+                "Antigravity RPC body of {} bytes exceeds {MAX_RPC_BODY_BYTES} cap",
+                text.len()
+            );
+        }
         text
     };
 
@@ -1142,6 +1436,15 @@ fn read_chunked_body(reader: &mut BufReader<TcpStream>) -> Result<String> {
         let chunk_size = parse_chunk_size_line(&size_line)?;
         if chunk_size == 0 {
             break;
+        }
+
+        if chunk_size > MAX_RPC_BODY_BYTES
+            || body.len().saturating_add(chunk_size) > MAX_RPC_BODY_BYTES
+        {
+            anyhow::bail!(
+                "Antigravity RPC body of {} bytes exceeds {MAX_RPC_BODY_BYTES} cap",
+                body.len().saturating_add(chunk_size)
+            );
         }
 
         let mut chunk = vec![0_u8; chunk_size];
@@ -1475,7 +1778,7 @@ mod tests {
 
     fn sample_manifest() -> AntigravityManifest {
         AntigravityManifest {
-            version: 1,
+            version: ANTIGRAVITY_MANIFEST_VERSION,
             synced_at: Some("2026-03-24T00:00:00Z".to_string()),
             connections: vec![ManifestConnectionEntry {
                 fingerprint: "pid:1:port:1234".to_string(),
@@ -1862,5 +2165,240 @@ mod tests {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn serve_once(body: Vec<u8>, headers_extra: &str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let header_owned = headers_extra.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Connection: close\r\n\r\n",
+                header_owned
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+        });
+        port
+    }
+
+    #[test]
+    fn rpc_request_rejects_oversized_content_length_body() {
+        let port = serve_once(
+            vec![b'a'; 32],
+            &format!("Content-Length: {}\r\n", MAX_RPC_BODY_BYTES + 1),
+        );
+        let connection = AntigravityConnection {
+            pid: 1,
+            port,
+            csrf_token: "abcdef0123456789abcdef0123456789".to_string(),
+            fingerprint: format!("pid:1:port:{port}"),
+        };
+        let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "expected cap error, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn read_chunked_body_rejects_oversized_accumulated_chunks() {
+        let chunk_size = MAX_RPC_BODY_BYTES / 4 + 1;
+        let mut body = Vec::new();
+        for _ in 0..5 {
+            body.extend_from_slice(format!("{:x}\r\n", chunk_size).as_bytes());
+            body.extend(std::iter::repeat(b'a').take(chunk_size));
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+        let port = serve_once(body, "Transfer-Encoding: chunked\r\n");
+        let connection = AntigravityConnection {
+            pid: 1,
+            port,
+            csrf_token: "abcdef0123456789abcdef0123456789".to_string(),
+            fingerprint: format!("pid:1:port:{port}"),
+        };
+        let err = rpc_request(&connection, "X", &serde_json::json!({})).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "expected cap error, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn contains_antigravity_marker_accepts_known_keys() {
+        let v: Value = serde_json::json!({
+            "trajectorySummaries": [{"cascadeId": "abc"}]
+        });
+        assert!(contains_antigravity_marker(&v));
+
+        let nested: Value = serde_json::json!({
+            "data": {"serverInfo": {"name": "x"}}
+        });
+        assert!(contains_antigravity_marker(&nested));
+    }
+
+    #[test]
+    fn contains_antigravity_marker_rejects_html_and_arbitrary_json() {
+        assert!(!response_contains_antigravity_marker(
+            "<html><body>not json"
+        ));
+        assert!(!response_contains_antigravity_marker(r#"{"foo":"bar"}"#));
+        assert!(!response_contains_antigravity_marker(r#"[]"#));
+    }
+
+    #[test]
+    fn response_contains_antigravity_marker_accepts_real_shape() {
+        let body = r#"{"trajectorySummaries":[{"cascadeId":"sess-1","stepCount":3}]}"#;
+        assert!(response_contains_antigravity_marker(body));
+    }
+
+    #[test]
+    #[serial]
+    fn load_antigravity_manifest_rejects_newer_version() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp_dir.path());
+
+        ensure_config_dir().unwrap();
+        let cache_dir = get_antigravity_cache_dir().unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let manifest_path = get_antigravity_manifest_path().unwrap();
+        std::fs::write(
+            &manifest_path,
+            r#"{"version":2,"syncedAt":null,"connections":[],"sessions":[]}"#,
+        )
+        .unwrap();
+
+        let err = load_antigravity_manifest().unwrap_err();
+        assert!(err.to_string().contains("newer tokscale version"));
+
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_antigravity_manifest_treats_older_version_as_fresh_start() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp_dir.path());
+
+        ensure_config_dir().unwrap();
+        let cache_dir = get_antigravity_cache_dir().unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let manifest_path = get_antigravity_manifest_path().unwrap();
+        std::fs::write(
+            &manifest_path,
+            r#"{"version":0,"syncedAt":null,"connections":[],"sessions":[]}"#,
+        )
+        .unwrap();
+
+        let manifest = load_antigravity_manifest().unwrap();
+        assert_eq!(manifest.version, ANTIGRAVITY_MANIFEST_VERSION);
+        assert!(manifest.sessions.is_empty());
+
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_antigravity_manifest_recovers_from_corrupted_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp_dir.path());
+
+        ensure_config_dir().unwrap();
+        let cache_dir = get_antigravity_cache_dir().unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let manifest_path = get_antigravity_manifest_path().unwrap();
+        std::fs::write(&manifest_path, "{ this is not valid json").unwrap();
+
+        let manifest = load_antigravity_manifest().unwrap();
+        assert_eq!(manifest.version, ANTIGRAVITY_MANIFEST_VERSION);
+        assert!(manifest.sessions.is_empty());
+
+        let parent = manifest_path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("manifest.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected one backup file");
+
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn sync_lock_guard_blocks_when_self_pid_lock_present() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
+        let pid = std::process::id();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        std::fs::write(&lock_path, format!("{pid} {now}")).unwrap();
+
+        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Another tokscale antigravity sync"),
+            "got: {err:#}"
+        );
+
+        std::fs::remove_file(&lock_path).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn sync_lock_guard_acquires_when_no_lock_present() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        {
+            let _guard = SyncLockGuard::acquire(&cache_dir).unwrap();
+            assert!(cache_dir.join("sync.lock").exists());
+        }
+        assert!(
+            !cache_dir.join("sync.lock").exists(),
+            "guard drop should remove lock"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn sync_lock_guard_overwrites_stale_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
+        let stale_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .saturating_sub(SYNC_LOCK_STALE_SECS + 60);
+        std::fs::write(&lock_path, format!("999999 {stale_ts}")).unwrap();
+
+        let _guard = SyncLockGuard::acquire(&cache_dir).unwrap();
+        assert!(lock_path.exists());
     }
 }
