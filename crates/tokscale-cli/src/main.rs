@@ -3991,6 +3991,21 @@ fn write_light_cache(
 ) -> Result<()> {
     use crate::tui::{save_cached_data, DataLoader};
 
+    // The TUI cache key is `(enabled_clients, group_by)` only — it does
+    // NOT include `--since`, `--until`, `--year`, or `--home`. Writing
+    // date-filtered or home-scoped data under that key would silently
+    // poison subsequent TUI launches: the next `tokscale tui` would
+    // hit the cache and render the date-filtered slice as if it were
+    // the full report. Refuse the write when any of those filters is
+    // present and tell the user; their CLI report still prints fine.
+    if since.is_some() || until.is_some() || year.is_some() || home_dir.is_some() {
+        eprintln!(
+            "tokscale: --write-cache skipped because --since/--until/--year/--home are set; \
+             the TUI cache key does not include those filters and writing would poison future TUI launches."
+        );
+        return Ok(());
+    }
+
     let enabled_set = resolve_light_cache_filter_set(clients);
     let scan_clients: Vec<tokscale_core::ClientId> = enabled_set
         .iter()
@@ -3998,12 +4013,10 @@ fn write_light_cache(
         .collect();
     let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
 
-    let loader = DataLoader::with_filters(
-        home_dir.as_ref().map(PathBuf::from),
-        since.clone(),
-        until.clone(),
-        year.clone(),
-    );
+    // No date/home filters at this point (guarded above), so passing
+    // None into `with_filters` matches what the TUI itself does on
+    // launch — keeps the cache key derivation byte-identical.
+    let loader = DataLoader::with_filters(None, None, None, None);
     let data = loader.load(&scan_clients, group_by, include_synthetic)?;
     save_cached_data(&data, &enabled_set, group_by);
     Ok(())
@@ -5459,5 +5472,74 @@ mod tests {
             Cli::try_parse_from(["tokscale", "--light", "--write-cache", "--no-write-cache",])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn write_light_cache_refuses_when_since_filter_set() {
+        // Date/home filters are NOT part of the TUI cache key. Writing
+        // the filtered slice would silently poison subsequent TUI launches
+        // (next `tokscale tui` would render the filtered slice as if it
+        // were the default report). Refuse the write and return Ok so the
+        // CLI report still prints normally — the eprintln tells the user.
+        let group_by = tokscale_core::GroupBy::default();
+        let result = write_light_cache(
+            &None,
+            &None,
+            &Some("2025-01-01".to_string()),
+            &None,
+            &None,
+            &group_by,
+        );
+        assert!(
+            result.is_ok(),
+            "filter-guard refusal must not propagate as an error"
+        );
+    }
+
+    #[test]
+    fn write_light_cache_refuses_when_until_filter_set() {
+        let group_by = tokscale_core::GroupBy::default();
+        let result = write_light_cache(
+            &None,
+            &None,
+            &None,
+            &Some("2025-12-31".to_string()),
+            &None,
+            &group_by,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn write_light_cache_refuses_when_year_filter_set() {
+        let group_by = tokscale_core::GroupBy::default();
+        let result = write_light_cache(
+            &None,
+            &None,
+            &None,
+            &None,
+            &Some("2025".to_string()),
+            &group_by,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn write_light_cache_refuses_when_home_dir_set() {
+        // --home rebinds the scan root; DataLoader::load currently ignores
+        // this field and resolves home from dirs::home_dir() with
+        // use_env_roots=true, so the printed --light report is built from
+        // <home> while a naive cache write would store data scanned from
+        // the default home. Refuse the write to avoid that drift.
+        let group_by = tokscale_core::GroupBy::default();
+        let result = write_light_cache(
+            &Some("/tmp/fake-home".to_string()),
+            &None,
+            &None,
+            &None,
+            &None,
+            &group_by,
+        );
+        assert!(result.is_ok());
     }
 }

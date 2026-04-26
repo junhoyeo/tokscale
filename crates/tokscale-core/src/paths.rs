@@ -17,8 +17,12 @@ use std::path::PathBuf;
 /// Resolve the tokscale config dir, honoring `TOKSCALE_CONFIG_DIR` first.
 ///
 /// Resolution order:
-/// 1. `TOKSCALE_CONFIG_DIR` taken verbatim. Absolute paths are recommended;
-///    relative paths are accepted and resolved against the process CWD.
+/// 1. `TOKSCALE_CONFIG_DIR` taken verbatim when set to a non-empty value.
+///    Absolute paths are recommended; relative paths are accepted and
+///    resolved against the process CWD. Empty strings are treated as
+///    unset so the user gets the platform default instead of a surprise
+///    `./` write — keeps the resolver consistent with
+///    [`is_config_dir_overridden`], which also rejects empty strings.
 /// 2. macOS: `$HOME/.config/tokscale` (overrides `dirs::config_dir()`,
 ///    which would return `~/Library/Application Support/` and split state
 ///    across two roots — see module docs).
@@ -28,8 +32,10 @@ use std::path::PathBuf;
 /// 4. Windows (and any other platform): `dirs::config_dir().join("tokscale")`.
 /// 5. Last-ditch fallback: `./.tokscale` so a missing HOME never panics.
 pub fn get_config_dir() -> PathBuf {
-    if let Ok(custom) = std::env::var("TOKSCALE_CONFIG_DIR") {
-        return PathBuf::from(custom);
+    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
+        if !custom.is_empty() {
+            return PathBuf::from(custom);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -225,6 +231,30 @@ mod tests {
         assert!(
             legacy_dot_cache_tokscale_dir().is_some(),
             "HOME is set in test environments"
+        );
+        restore_env(prev);
+    }
+
+    #[test]
+    #[serial]
+    fn get_config_dir_treats_empty_override_as_unset() {
+        // Empty TOKSCALE_CONFIG_DIR previously slipped through and
+        // produced PathBuf::from(""), which silently relocated cache
+        // writes to ./cache and ./.tokscale. The resolver must agree
+        // with `is_config_dir_overridden`: empty == unset.
+        let prev = save_env();
+        unsafe {
+            env::set_var("TOKSCALE_CONFIG_DIR", "");
+        }
+        let resolved = get_config_dir();
+        assert_ne!(
+            resolved,
+            PathBuf::from(""),
+            "empty override must not resolve to the empty path"
+        );
+        assert!(
+            resolved.is_absolute() || resolved == PathBuf::from(".tokscale"),
+            "empty override must fall through to platform default, got {resolved:?}"
         );
         restore_env(prev);
     }
