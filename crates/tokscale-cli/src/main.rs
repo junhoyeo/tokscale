@@ -4304,6 +4304,7 @@ mod tests {
             mux: true,
             crush: true,
             goose: true,
+            antigravity: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -4334,6 +4335,7 @@ mod tests {
             "mux",
             "crush",
             "goose",
+            "antigravity",
             "synthetic",
         ] {
             assert!(
