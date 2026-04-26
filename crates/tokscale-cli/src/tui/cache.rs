@@ -26,12 +26,22 @@ const CACHE_SCHEMA_VERSION: u32 = 6;
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
 fn cache_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cache").join("tokscale"))
+    Some(crate::paths::get_cache_dir())
 }
 
 /// Get the cache file path
 fn cache_file() -> Option<PathBuf> {
     cache_dir().map(|d| d.join("tui-data-cache.json"))
+}
+
+fn legacy_cache_files() -> Vec<PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return Vec::new();
+    }
+
+    crate::paths::legacy_dot_cache_tokscale_dir()
+        .map(|dir| vec![dir.join("tui-data-cache.json")])
+        .unwrap_or_default()
 }
 
 /// Cached TUI data structure (serializable)
@@ -625,17 +635,15 @@ pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
     };
-    if !cache_path.exists() {
+    let cached: Option<CachedTUIData> = std::iter::once(cache_path)
+        .chain(legacy_cache_files())
+        .find_map(|path| {
+            let file = File::open(path).ok()?;
+            let reader = BufReader::new(file);
+            serde_json::from_reader(reader).ok()
+        });
+    let Some(cached) = cached else {
         return CacheResult::Miss;
-    }
-    let file = match File::open(&cache_path) {
-        Ok(f) => f,
-        Err(_) => return CacheResult::Miss,
-    };
-    let reader = BufReader::new(file);
-    let cached: CachedTUIData = match serde_json::from_reader(reader) {
-        Ok(c) => c,
-        Err(_) => return CacheResult::Miss,
     };
     if cached.schema_version > CACHE_SCHEMA_VERSION {
         return CacheResult::Miss;
@@ -782,7 +790,10 @@ pub fn save_cached_data(
         data: data.into(),
     };
 
-    // Write to temp file first, then rename (atomic)
+    // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
+    // the canonical cache file before writing — a partial save or process
+    // crash between delete and rename would lose the cache. The temp-file
+    // pattern makes corruption-on-crash impossible.
     let temp_path = cache_path.with_extension("json.tmp");
     let file = match File::create(&temp_path) {
         Ok(f) => f,
@@ -806,6 +817,7 @@ pub fn save_cached_data(
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
     use tempfile::TempDir;
 
@@ -1362,6 +1374,172 @@ mod tests {
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_cache_falls_back_to_legacy_dot_cache_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let legacy_path = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            r#"{
+  "schemaVersion": 6,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model),
+            CacheResult::Fresh(_)
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_cache_skips_legacy_when_overridden() {
+        let temp_dir = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::set_var("TOKSCALE_CONFIG_DIR", override_dir.path());
+        }
+
+        let legacy_path = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            r#"{
+  "schemaVersion": 6,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn save_cached_data_does_not_delete_destination() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let old_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        fs::write(
+            &cache_path,
+            format!(
+                r#"{{
+  "schemaVersion": 6,
+  "timestamp": {old_timestamp},
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {{
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }}
+}}"#
+            ),
+        )
+        .unwrap();
+        assert!(fs::metadata(&cache_path).is_ok());
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model);
+
+        let metadata = fs::metadata(&cache_path).unwrap();
+        assert!(metadata.is_file());
+        let saved: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert!(saved.timestamp >= old_timestamp);
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
         }
     }
 

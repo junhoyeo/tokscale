@@ -1097,6 +1097,9 @@ async fn ensure_fonts_loaded(client: &reqwest::Client) -> Result<FontSet> {
     let regular_path = cache_dir.join(FIGTREE_REGULAR_FILE);
     let bold_path = cache_dir.join(FIGTREE_BOLD_FILE);
 
+    copy_legacy_wrapped_cache_file("fonts", FIGTREE_REGULAR_FILE, &regular_path);
+    copy_legacy_wrapped_cache_file("fonts", FIGTREE_BOLD_FILE, &bold_path);
+
     if !regular_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_REGULAR_URL, &regular_path).await;
     }
@@ -1142,6 +1145,7 @@ async fn fetch_and_cache_image(
     ensure_cache_dir(&cache_dir)?;
 
     let cached_path = cache_dir.join(filename);
+    copy_legacy_wrapped_cache_file("images", filename, &cached_path);
     if !cached_path.exists() {
         fetch_to_file(client, url, &cached_path).await?;
     }
@@ -1159,6 +1163,7 @@ async fn fetch_svg_and_convert_to_png(
     ensure_cache_dir(&cache_dir)?;
 
     let cached_path = cache_dir.join(filename);
+    copy_legacy_wrapped_cache_file("images", filename, &cached_path);
     if cached_path.exists() {
         return Ok(cached_path);
     }
@@ -1231,13 +1236,37 @@ fn load_rgba_image(path: &Path) -> Result<RgbaImage> {
 }
 
 fn get_image_cache_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".cache").join("tokscale").join("images"))
+    Ok(crate::paths::get_cache_dir().join("images"))
 }
 
 fn get_font_cache_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".cache").join("tokscale").join("fonts"))
+    Ok(crate::paths::get_cache_dir().join("fonts"))
+}
+
+fn legacy_wrapped_cache_file(subdir: &str, filename: &str) -> Option<PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return None;
+    }
+
+    crate::paths::legacy_dot_cache_tokscale_dir().map(|dir| dir.join(subdir).join(filename))
+}
+
+fn copy_legacy_wrapped_cache_file(subdir: &str, filename: &str, canonical_path: &Path) {
+    if canonical_path.exists() {
+        return;
+    }
+
+    let Some(legacy_path) = legacy_wrapped_cache_file(subdir, filename) else {
+        return;
+    };
+    if !legacy_path.exists() {
+        return;
+    }
+
+    if let Some(parent) = canonical_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::copy(legacy_path, canonical_path);
 }
 
 fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
@@ -1760,6 +1789,9 @@ fn default_clients() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
 
     // ========== format_tokens_short tests ==========
 
@@ -1967,6 +1999,39 @@ mod tests {
             split_quality_suffix("gpt-4"),
             ("gpt-4".to_string(), String::new())
         );
+    }
+
+    #[test]
+    #[serial]
+    fn font_cache_copies_from_legacy_path_when_present() {
+        let temp_home = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_home.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let legacy_path = temp_home
+            .path()
+            .join(".cache/tokscale/fonts")
+            .join(FIGTREE_REGULAR_FILE);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, b"legacy-font-bytes").unwrap();
+
+        let canonical_path = get_font_cache_dir().unwrap().join(FIGTREE_REGULAR_FILE);
+        copy_legacy_wrapped_cache_file("fonts", FIGTREE_REGULAR_FILE, &canonical_path);
+
+        assert_eq!(fs::read(&canonical_path).unwrap(), b"legacy-font-bytes");
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
     }
 
     // ========== format_model_name tests ==========

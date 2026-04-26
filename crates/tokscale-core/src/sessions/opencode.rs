@@ -237,7 +237,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 const MIGRATION_CACHE_FILENAME: &str = "opencode-migration.json";
 
 /// Persisted migration status for OpenCode JSON → SQLite migration.
-/// Stored at ~/.cache/tokscale/opencode-migration.json.
+/// Stored at <config_dir>/cache/opencode-migration.json.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenCodeMigrationCache {
     /// True when every legacy JSON message was already present in SQLite.
@@ -251,20 +251,36 @@ pub struct OpenCodeMigrationCache {
 }
 
 fn migration_cache_dir() -> std::path::PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("tokscale")
+    crate::paths::get_cache_dir()
 }
 
 fn migration_cache_path() -> std::path::PathBuf {
     migration_cache_dir().join(MIGRATION_CACHE_FILENAME)
 }
 
+fn legacy_migration_cache_paths() -> Vec<std::path::PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return Vec::new();
+    }
+
+    [
+        crate::paths::legacy_dirs_cache_dir().map(|d| d.join(MIGRATION_CACHE_FILENAME)),
+        crate::paths::legacy_dot_cache_tokscale_dir().map(|d| d.join(MIGRATION_CACHE_FILENAME)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Load the migration cache from disk. Returns `None` if the file is missing or
 /// unparseable.
 pub fn load_opencode_migration_cache() -> Option<OpenCodeMigrationCache> {
-    let content = std::fs::read_to_string(migration_cache_path()).ok()?;
-    serde_json::from_str(&content).ok()
+    std::iter::once(migration_cache_path())
+        .chain(legacy_migration_cache_paths())
+        .find_map(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            serde_json::from_str(&content).ok()
+        })
 }
 
 /// Persist the migration cache atomically (write to temp file, then rename).
@@ -289,6 +305,10 @@ pub fn save_opencode_migration_cache(cache: &OpenCodeMigrationCache) {
     let tmp_name = format!(".opencode-migration.{}.{:x}.tmp", std::process::id(), nanos);
     let tmp_path = dir.join(tmp_name);
 
+    // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
+    // the canonical cache file before writing — a partial save or process
+    // crash between delete and rename would lose the cache. The temp-file
+    // pattern makes corruption-on-crash impossible.
     let result = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(content.as_bytes())?;
@@ -1052,6 +1072,52 @@ mod tests {
             !is_valid,
             "Cache should not allow skipping when migration_complete=false"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn migration_record_falls_back_to_legacy_path() {
+        use std::env;
+
+        let temp_home = tempfile::tempdir().unwrap();
+        let temp_xdg_cache = tempfile::tempdir().unwrap();
+        let prev_home = env::var_os("HOME");
+        let prev_xdg_cache = env::var_os("XDG_CACHE_HOME");
+        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_home.path());
+            env::set_var("XDG_CACHE_HOME", temp_xdg_cache.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let legacy_path = crate::paths::legacy_dirs_cache_dir()
+            .unwrap()
+            .join(MIGRATION_CACHE_FILENAME);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_path,
+            r#"{"migration_complete":true,"json_file_count":2,"json_dir_mtime_secs":3,"checked_at_secs":4}"#,
+        )
+        .unwrap();
+
+        let loaded = load_opencode_migration_cache().unwrap();
+        assert!(loaded.migration_complete);
+        assert_eq!(loaded.json_file_count, 2);
+
+        unsafe {
+            match prev_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+            match prev_xdg_cache {
+                Some(v) => env::set_var("XDG_CACHE_HOME", v),
+                None => env::remove_var("XDG_CACHE_HOME"),
+            }
+            match prev_override {
+                Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
+                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
+            }
+        }
     }
 }
 

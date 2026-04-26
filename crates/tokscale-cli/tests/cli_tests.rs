@@ -18,6 +18,7 @@ fn prime_pricing_cache(base: &Path) {
     for dir in [
         base.join("Library/Caches/tokscale"),
         base.join(".cache/tokscale"),
+        base.join(".config/tokscale/cache"),
     ] {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
