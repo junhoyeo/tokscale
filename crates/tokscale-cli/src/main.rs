@@ -336,8 +336,8 @@ fn main() -> Result<()> {
                     week,
                     month,
                     group_by,
-                    false,
-                    false,
+                    cli.write_cache,
+                    cli.no_write_cache,
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
