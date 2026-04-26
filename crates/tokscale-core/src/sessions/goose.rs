@@ -245,10 +245,11 @@ mod tests {
     fn test_parse_created_at_sqlite_timestamp() {
         let ts = parse_created_at("2026-04-14 16:18:53");
         assert!(ts > 0.0);
-        let expected = chrono::NaiveDateTime::parse_from_str("2026-04-14 16:18:53", "%Y-%m-%d %H:%M:%S")
-            .unwrap()
-            .and_utc()
-            .timestamp_millis() as f64;
+        let expected =
+            chrono::NaiveDateTime::parse_from_str("2026-04-14 16:18:53", "%Y-%m-%d %H:%M:%S")
+                .unwrap()
+                .and_utc()
+                .timestamp_millis() as f64;
         assert_eq!(ts, expected);
     }
 
