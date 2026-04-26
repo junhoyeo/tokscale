@@ -349,6 +349,21 @@ pub fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, previous) in self.0.drain(..) {
+                unsafe {
+                    match previous {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     fn create_opencode_sqlite_db(db_path: &Path) -> Connection {
         let conn = Connection::open(db_path).unwrap();
         conn.execute_batch(
@@ -1084,6 +1099,11 @@ mod tests {
         let prev_home = env::var_os("HOME");
         let prev_xdg_cache = env::var_os("XDG_CACHE_HOME");
         let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        let _guard = EnvGuard(vec![
+            ("TOKSCALE_CONFIG_DIR", prev_override),
+            ("XDG_CACHE_HOME", prev_xdg_cache),
+            ("HOME", prev_home),
+        ]);
         unsafe {
             env::set_var("HOME", temp_home.path());
             env::set_var("XDG_CACHE_HOME", temp_xdg_cache.path());
@@ -1103,21 +1123,6 @@ mod tests {
         let loaded = load_opencode_migration_cache().unwrap();
         assert!(loaded.migration_complete);
         assert_eq!(loaded.json_file_count, 2);
-
-        unsafe {
-            match prev_home {
-                Some(v) => env::set_var("HOME", v),
-                None => env::remove_var("HOME"),
-            }
-            match prev_xdg_cache {
-                Some(v) => env::set_var("XDG_CACHE_HOME", v),
-                None => env::remove_var("XDG_CACHE_HOME"),
-            }
-            match prev_override {
-                Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
-                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
-            }
-        }
     }
 }
 

@@ -253,13 +253,14 @@ mod tests {
             "empty override must not resolve to the empty path"
         );
         assert!(
-            resolved.is_absolute() || resolved == PathBuf::from(".tokscale"),
+            resolved.is_absolute() || resolved == ".tokscale",
             "empty override must fall through to platform default, got {resolved:?}"
         );
         restore_env(prev);
     }
 
     #[test]
+    #[serial]
     fn is_config_dir_overridden_treats_empty_string_as_unset() {
         let prev = save_env();
         unsafe {
