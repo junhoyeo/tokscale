@@ -275,3 +275,56 @@ fn test_parse_codebuff_dedup_key_falls_back_when_id_missing() {
         "fallback dedup key should be namespaced; got {key}"
     );
 }
+
+#[test]
+fn test_parse_codebuff_run_state_skips_entries_missing_provider_options() {
+    // Regression: the run-state recovery walked the message history in
+    // reverse, and the most recent assistant entry can lack providerOptions
+    // while an earlier one carries the real usage payload. The recovery loop
+    // must continue past entries without providerOptions instead of bailing
+    // out of the entire function.
+    let dir = TempDir::new().unwrap();
+    let path = write_chat(
+        &dir,
+        "manicode",
+        "proj",
+        "2025-12-18T14-00-00.000Z",
+        r#"[
+            {
+                "variant": "assistant",
+                "timestamp": "2025-12-18T14:00:00.000Z",
+                "metadata": {
+                    "runState": {
+                        "sessionState": {
+                            "mainAgentState": {
+                                "messageHistory": [
+                                    {
+                                        "role": "assistant",
+                                        "providerOptions": {
+                                            "codebuff": {
+                                                "model": "claude-sonnet-4-20250514",
+                                                "usage": { "inputTokens": 1234, "outputTokens": 56 }
+                                            }
+                                        }
+                                    },
+                                    { "role": "user" },
+                                    { "role": "assistant" }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        ]"#,
+    );
+
+    let msgs = parse_codebuff_file(&path);
+    assert_eq!(
+        msgs.len(),
+        1,
+        "earlier assistant entry's providerOptions must survive missing providerOptions on later entry"
+    );
+    assert_eq!(msgs[0].tokens.input, 1234);
+    assert_eq!(msgs[0].tokens.output, 56);
+    assert_eq!(msgs[0].model_id, "claude-sonnet-4-20250514");
+}

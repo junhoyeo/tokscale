@@ -1131,7 +1131,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 19);
+        assert_eq!(clients.len(), 20);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -1150,7 +1150,8 @@ mod tests {
         assert_eq!(clients[15], ClientId::Crush);
         assert_eq!(clients[16], ClientId::Hermes);
         assert_eq!(clients[17], ClientId::Copilot);
-        assert_eq!(clients[18], ClientId::Codebuff);
+        assert_eq!(clients[18], ClientId::Goose);
+        assert_eq!(clients[19], ClientId::Codebuff);
     }
 
     #[test]

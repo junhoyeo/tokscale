@@ -294,7 +294,9 @@ fn extract_usage_from_run_state(metadata: &Value) -> Option<AssistantUsage> {
         if role != "assistant" {
             continue;
         }
-        let provider_options = entry.get("providerOptions")?;
+        let Some(provider_options) = entry.get("providerOptions") else {
+            continue;
+        };
         let mut usage = AssistantUsage::default();
         if let Some(u) = provider_options.get("usage") {
             usage.merge_fallback(parse_usage_object(u));
