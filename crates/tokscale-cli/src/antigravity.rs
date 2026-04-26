@@ -20,7 +20,14 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 pub fn get_antigravity_cache_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".config/tokscale/antigravity-cache"))
+    // Route through `paths::get_config_dir()` so `TOKSCALE_CONFIG_DIR`
+    // covers the antigravity sync cache too — without this, an isolated
+    // CI profile would still leak to the host's
+    // `~/.config/tokscale/antigravity-cache/`. On macOS and Linux without
+    // an override the resolved path is byte-identical to the historic
+    // hardcoded `~/.config/tokscale/antigravity-cache/`, so existing
+    // users see no path change and no data migration is required.
+    Ok(crate::paths::get_config_dir().join("antigravity-cache"))
 }
 
 pub fn get_antigravity_sessions_dir() -> Result<PathBuf> {

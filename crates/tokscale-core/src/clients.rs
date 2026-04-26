@@ -2,6 +2,7 @@
 pub enum PathRoot {
     Home,
     XdgData,
+    Config,
     EnvVar {
         var: &'static str,
         fallback_relative: &'static str,
@@ -19,6 +20,22 @@ impl PathRoot {
                 } else {
                     format!("{}/.local/share", home_dir)
                 }
+            }
+            PathRoot::Config => {
+                if use_env_roots {
+                    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
+                        if !custom.is_empty() {
+                            return custom.to_string_lossy().into_owned();
+                        }
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+                        return format!("{xdg_config_home}/tokscale");
+                    }
+                }
+
+                format!("{home_dir}/.config/tokscale")
             }
             PathRoot::EnvVar {
                 var,
@@ -325,8 +342,8 @@ define_clients!(
     },
     Antigravity = 20 => {
         id: "antigravity",
-        root: PathRoot::Home,
-        relative: ".config/tokscale/antigravity-cache/sessions",
+        root: PathRoot::Config,
+        relative: "antigravity-cache/sessions",
         pattern: "*.jsonl",
         headless: false,
         parse_local: true,
@@ -439,6 +456,58 @@ mod tests {
         assert_eq!(resolved, "/tmp/home/.local/share");
 
         restore_env("XDG_DATA_HOME", previous);
+    }
+
+    #[test]
+    fn test_path_root_config_uses_override_when_set() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/custom-config-root");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_path_root_config_uses_xdg_config_home_when_override_unset() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/xdg-config-home/tokscale");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    fn test_path_root_config_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.config/tokscale");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
     }
 
     #[test]
