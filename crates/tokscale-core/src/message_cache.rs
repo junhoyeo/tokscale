@@ -1016,7 +1016,9 @@ mod tests {
             None,
         );
 
-        let legacy_path = crate::paths::legacy_dirs_cache_dir().unwrap().join(CACHE_FILENAME);
+        let legacy_path = crate::paths::legacy_dirs_cache_dir()
+            .unwrap()
+            .join(CACHE_FILENAME);
         ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
         let store = CachedSourceStore {
             schema_version: CACHE_SCHEMA_VERSION,

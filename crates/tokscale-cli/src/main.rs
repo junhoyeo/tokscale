@@ -5455,12 +5455,9 @@ mod tests {
 
     #[test]
     fn clap_rejects_both_write_flags_together() {
-        assert!(Cli::try_parse_from([
-            "tokscale",
-            "--light",
-            "--write-cache",
-            "--no-write-cache",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["tokscale", "--light", "--write-cache", "--no-write-cache",])
+                .is_err()
+        );
     }
 }
