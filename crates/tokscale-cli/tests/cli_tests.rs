@@ -288,7 +288,13 @@ fn cmd_with_conflicting_env(tmp: &Path) -> Command {
 
 fn offline_cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
+    // Pin every XDG_* var so the cache resolvers stay inside the sandbox.
+    // Without XDG_CONFIG_HOME the post-#470 cache root can leak to the
+    // host's $XDG_CONFIG_HOME (set globally on some CI runners) and
+    // either find pricing data outside the fixture or write to the
+    // host filesystem. Mirrors what cmd_with_home does.
     cmd.env("HOME", tmp)
+        .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("HTTP_PROXY", "http://127.0.0.1:9")
@@ -304,7 +310,16 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     );
     let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
 
+    // Seed all three locations so the test exercises the same fallback
+    // chain the binary uses post-#470: canonical
+    // <config_dir>/cache/, then legacy dirs::cache_dir()/tokscale, then
+    // ~/.cache/tokscale. Without the canonical path seeded, CI runners
+    // where dirs::cache_dir() resolves outside the sandboxed HOME (e.g.
+    // some Linux runners with XDG_CACHE_HOME set globally) miss the
+    // pricing cache entirely and the report falls back to embedded
+    // source costs.
     for dir in [
+        base.join(".config/tokscale/cache"),
         base.join("Library/Caches/tokscale"),
         base.join(".cache/tokscale"),
     ] {
