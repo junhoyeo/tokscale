@@ -119,9 +119,7 @@ pub fn load_default_clients() -> Vec<String> {
 
 impl Settings {
     fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?
-            .join("tokscale");
+        let config_dir = crate::paths::get_config_dir();
 
         if !config_dir.exists() {
             fs::create_dir_all(&config_dir)?;
@@ -130,11 +128,28 @@ impl Settings {
         Ok(config_dir.join("settings.json"))
     }
 
+    /// Returns the legacy `~/Library/Application Support/tokscale/settings.json`
+    /// path on macOS so `load()` can fall back to it during the transition.
+    /// Returns `None` on other platforms or when HOME cannot be resolved.
+    fn legacy_macos_path() -> Option<PathBuf> {
+        crate::paths::legacy_macos_config_dir().map(|d| d.join("settings.json"))
+    }
+
     pub fn load() -> Self {
-        Self::config_path()
+        let primary = Self::config_path()
             .ok()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|content| serde_json::from_str(&content).ok())
+            .and_then(|path| fs::read_to_string(path).ok());
+
+        // Transparent macOS fallback: pre-fix releases wrote settings.json under
+        // `~/Library/Application Support/tokscale/`. Read it once if the new
+        // path is empty so users don't lose theme / scanner / defaultClients
+        // preferences after upgrading. The next `save()` lands at the new
+        // canonical path under `~/.config/tokscale/`.
+        let raw = primary.or_else(|| {
+            Self::legacy_macos_path().and_then(|legacy| fs::read_to_string(legacy).ok())
+        });
+
+        raw.and_then(|content| serde_json::from_str(&content).ok())
             .map(|mut s: Settings| {
                 s.auto_refresh_ms = s
                     .auto_refresh_ms
@@ -215,6 +230,53 @@ impl Settings {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[serial_test::serial]
+    fn load_falls_back_to_legacy_macos_path_when_new_path_missing() {
+        // Sandbox HOME so the test never reads or writes a real user's
+        // settings.json. Existing macOS users upgrading to the unified
+        // path must keep the theme + scanner settings they already have
+        // under `~/Library/Application Support/tokscale/`.
+        use std::env;
+        let temp = tempfile::TempDir::new().unwrap();
+        let prev_home = env::var_os("HOME");
+        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let legacy_dir = temp
+            .path()
+            .join("Library/Application Support/tokscale");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("settings.json"),
+            r#"{"colorPalette":"halloween","defaultClients":["opencode"]}"#,
+        )
+        .unwrap();
+
+        // Sanity: new path must be empty so the fallback is what we exercise.
+        let new_path = temp.path().join(".config/tokscale/settings.json");
+        assert!(!new_path.exists());
+
+        let loaded = Settings::load();
+        assert_eq!(loaded.color_palette, "halloween");
+        assert_eq!(loaded.default_clients, vec!["opencode".to_string()]);
+
+        unsafe {
+            match prev_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+            match prev_override {
+                Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
+                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
+            }
+        }
+    }
 
     #[test]
     fn settings_load_backfills_scanner_when_missing_from_json() {

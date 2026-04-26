@@ -497,6 +497,7 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 | 변수 | 기본값 | 설명 |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5분) | `nativeTimeoutMs` 설정 오버라이드 |
+| `TOKSCALE_CONFIG_DIR` | unset | 설정 디렉토리(`settings.json` 위치)를 오버라이드합니다. 절대 경로. CI 샌드박스나 비기본 위치를 고정할 때 유용합니다. |
 
 ```bash
 # 예시: 매우 큰 데이터셋에 대한 타임아웃 증가
@@ -895,9 +896,10 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 #### Windows 전용 설정
 
 Tokscale은 다음 위치에 설정을 저장합니다:
-- **설정**: `%USERPROFILE%\.config\tokscale\settings.json`
+- **TUI 설정**: `%APPDATA%\tokscale\settings.json` (플랫폼 기본값. `TOKSCALE_CONFIG_DIR`로 오버라이드 가능)
 - **캐시**: `%USERPROFILE%\.cache\tokscale\`
 - **Cursor 자격 증명**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
+- **Tokscale 계정 자격 증명**: `%USERPROFILE%\.config\tokscale\credentials.json`
 
 ## 세션 데이터 보존
 

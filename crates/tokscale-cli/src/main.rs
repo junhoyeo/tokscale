@@ -2,6 +2,7 @@ mod antigravity;
 mod auth;
 mod commands;
 mod cursor;
+mod paths;
 mod tui;
 
 use crate::tui::client_ui;
@@ -3307,7 +3308,7 @@ struct StarCache {
 }
 
 fn star_cache_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("tokscale").join("star-cache.json"))
+    Some(crate::paths::get_config_dir().join("star-cache.json"))
 }
 
 fn load_star_cache(username: &str) -> Option<StarCache> {

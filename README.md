@@ -515,6 +515,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
+| `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory (where `settings.json` lives). Absolute path. Useful for CI sandboxes or pinning a non-default location. |
 
 ```bash
 # Example: Increase timeout for very large datasets
@@ -917,9 +918,10 @@ AI coding tools store their session data in cross-platform locations. Most tools
 #### Windows-Specific Configuration
 
 Tokscale stores its configuration in:
-- **Config**: `%USERPROFILE%\.config\tokscale\settings.json`
+- **TUI settings**: `%APPDATA%\tokscale\settings.json` (platform default; override with `TOKSCALE_CONFIG_DIR`)
 - **Cache**: `%USERPROFILE%\.cache\tokscale\`
 - **Cursor credentials**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
+- **Tokscale account credentials**: `%USERPROFILE%\.config\tokscale\credentials.json`
 
 ## Session Data Retention
 

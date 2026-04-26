@@ -498,6 +498,7 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000`（5 分钟） | 覆盖 `nativeTimeoutMs` 配置 |
+| `TOKSCALE_CONFIG_DIR` | unset | 覆盖配置目录（`settings.json` 所在位置）。绝对路径。适用于 CI 沙箱或固定到非默认位置。 |
 
 ```bash
 # 示例：为非常大的数据集增加超时时间
@@ -896,9 +897,10 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 #### Windows 特定配置
 
 Tokscale 将配置存储在：
-- **配置**: `%USERPROFILE%\.config\tokscale\settings.json`
+- **TUI 设置**: `%APPDATA%\tokscale\settings.json`（平台默认值。可用 `TOKSCALE_CONFIG_DIR` 覆盖）
 - **缓存**: `%USERPROFILE%\.cache\tokscale\`
 - **Cursor 凭据**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
+- **Tokscale 账号凭据**: `%USERPROFILE%\.config\tokscale\credentials.json`
 
 ## 会话数据保留
 
