@@ -2361,8 +2361,7 @@ mod tests {
         setup_mock_codebuff_chat(home, "manicode-dev", "2025-12-14T11-00-00.000Z");
         setup_mock_codebuff_chat(home, "manicode-staging", "2025-12-14T12-00-00.000Z");
 
-        let result =
-            scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        let result = scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 3);
 
         restore_env("CODEBUFF_DATA_DIR", previous);
@@ -2381,8 +2380,7 @@ mod tests {
         setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
         setup_mock_codebuff_chat(home, "manicode-dev", "2025-12-14T11-00-00.000Z");
 
-        let result =
-            scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        let result = scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 2);
 
         restore_env("CODEBUFF_DATA_DIR", previous);
@@ -2408,11 +2406,13 @@ mod tests {
         File::create(override_chat_dir.join("chat-messages.json")).unwrap();
 
         unsafe {
-            std::env::set_var("CODEBUFF_DATA_DIR", override_root.to_string_lossy().as_ref())
+            std::env::set_var(
+                "CODEBUFF_DATA_DIR",
+                override_root.to_string_lossy().as_ref(),
+            )
         };
 
-        let result =
-            scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        let result = scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 1);
         assert!(result.get(ClientId::Codebuff)[0]
             .to_string_lossy()

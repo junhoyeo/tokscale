@@ -415,7 +415,7 @@ fn pid_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let result = unsafe { libc_kill(pid as i32, 0) };
-        return result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1);
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
     }
     #[cfg(not(unix))]
     {
@@ -791,7 +791,7 @@ fn process_executable_path(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         let link = format!("/proc/{pid}/exe");
-        return std::fs::read_link(&link).ok();
+        std::fs::read_link(&link).ok()
     }
     #[cfg(target_os = "macos")]
     {
@@ -971,9 +971,7 @@ fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
 
 fn heartbeat_response_looks_well_formed(body: &str) -> bool {
     let trimmed = body.trim_start();
-    let json_start = trimmed
-        .find(|c: char| c == '{' || c == '[')
-        .map(|idx| &trimmed[idx..]);
+    let json_start = trimmed.find(['{', '[']).map(|idx| &trimmed[idx..]);
     let Some(slice) = json_start else {
         return false;
     };
@@ -1039,7 +1037,7 @@ fn identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<S
 
 fn response_contains_antigravity_marker(body: &str) -> bool {
     let trimmed = body.trim_start();
-    let json_start = trimmed.find(|c: char| c == '{' || c == '[');
+    let json_start = trimmed.find(['{', '[']);
     let Some(idx) = json_start else {
         return false;
     };
