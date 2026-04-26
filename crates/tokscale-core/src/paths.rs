@@ -253,7 +253,7 @@ mod tests {
             "empty override must not resolve to the empty path"
         );
         assert!(
-            resolved.is_absolute() || resolved == ".tokscale",
+            resolved.is_absolute() || resolved == PathBuf::from(".tokscale"),
             "empty override must fall through to platform default, got {resolved:?}"
         );
         restore_env(prev);
