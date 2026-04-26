@@ -784,6 +784,7 @@ pub struct ClientFlags {
         value_enum,
         value_delimiter = ',',
         action = clap::ArgAction::Append,
+        ignore_case = true,
         help = "Filter by client(s). Repeatable or comma-separated (e.g. -c opencode,claude)."
     )]
     pub clients: Vec<ClientFilter>,
@@ -4514,9 +4515,9 @@ mod tests {
     #[test]
     fn test_resolve_default_tui_filter_set_uses_configured_defaults() {
         // When `defaultClients` is set, the warm-cache resolver must use
-        // it verbatim — otherwise the warm cache would store all 18
-        // clients while the next no-flag TUI launch wants only the 2
-        // configured ones, producing a guaranteed cache miss.
+        // it verbatim — otherwise the warm cache would store every real
+        // client while the next no-flag TUI launch wants only the configured
+        // ones, producing a guaranteed cache miss.
         let configured = vec!["opencode".to_string(), "claude".to_string()];
         let set = resolve_default_tui_filter_set_with(&configured);
         let mut expected = std::collections::HashSet::new();
@@ -4679,6 +4680,35 @@ mod tests {
         let cli = Cli::try_parse_from(["tokscale", "--claude"]).expect("parse ok");
         assert!(cli.clients.claude);
         assert!(cli.clients.clients.is_empty());
+    }
+
+    #[test]
+    fn test_client_flag_accepts_uppercase() {
+        let cli =
+            Cli::try_parse_from(["tokscale", "--client", "OPENCODE"]).expect("uppercase parses");
+        assert_eq!(cli.clients.clients, vec![ClientFilter::Opencode]);
+
+        let cli = Cli::try_parse_from(["tokscale", "-c", "Codebuff,Antigravity"])
+            .expect("mixed-case parses");
+        assert_eq!(
+            cli.clients.clients,
+            vec![ClientFilter::Codebuff, ClientFilter::Antigravity]
+        );
+    }
+
+    #[test]
+    fn test_client_flag_rejects_unknown_and_empty_values() {
+        assert!(Cli::try_parse_from(["tokscale", "--client", "unknown"]).is_err());
+        assert!(Cli::try_parse_from(["tokscale", "--client", ""]).is_err());
+    }
+
+    #[test]
+    fn test_legacy_bool_flag_rejects_duplicates() {
+        let result = Cli::try_parse_from(["tokscale", "--opencode", "--opencode"]);
+        assert!(
+            result.is_err(),
+            "clap rejects duplicated boolean flags by default; if this changes, document it explicitly"
+        );
     }
 
     #[test]

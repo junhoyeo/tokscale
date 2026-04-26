@@ -20,12 +20,12 @@ use super::{DialogContent, DialogResult};
 
 /// Hotkey assigned to the Synthetic option in the dialog.
 ///
-/// NOTE: `'x'` collides with `client_ui::CLIENT_UI[Mux]`. The collision is
-/// pre-existing — the toggle path checks `client_ui::from_hotkey` first, so
-/// pressing `x` toggles Mux and the Synthetic hotkey display is purely
-/// cosmetic. Left as-is here so this refactor stays scope-clean; tracked
-/// for a follow-up that picks a free letter.
-const SYNTHETIC_HOTKEY: char = 'x';
+/// `'n'` is reserved here for Synthetic so it does not collide with any
+/// real client hotkey in [`crate::tui::client_ui::CLIENT_UI`]. The toggle
+/// path checks `client_ui::from_hotkey` first, so any future client that
+/// also wants `'n'` would silently shadow Synthetic — keep this value in
+/// sync with the client hotkey table.
+const SYNTHETIC_HOTKEY: char = 'n';
 
 /// TUI dialog that lets the user toggle which clients (and Synthetic) are
 /// included in reports. Backed by the same unified
