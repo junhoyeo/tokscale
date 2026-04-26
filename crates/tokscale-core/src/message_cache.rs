@@ -291,7 +291,7 @@ impl SourceMessageCache {
             return Self::default();
         };
         if let Some(lock_dir) = lock_path.parent() {
-            if fs::create_dir_all(lock_dir).is_err() {
+            if ensure_cache_dir(lock_dir).is_err() {
                 return Self::default();
             }
         }
