@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
+#[cfg(test)]
 const SYNC_LOCK_STALE_SECS: u64 = 600;
 
 fn home_dir() -> Result<PathBuf> {
@@ -352,45 +353,53 @@ struct SyncLockGuard {
     path: PathBuf,
 }
 
+const SYNC_LOCK_ACQUIRE_ATTEMPTS: usize = 3;
+
 impl SyncLockGuard {
     fn acquire(cache_dir: &Path) -> Result<Self> {
         let lock_path = cache_dir.join("sync.lock");
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&lock_path)
-        {
-            Ok(mut file) => {
-                let pid = std::process::id();
-                let timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let _ = writeln!(file, "{pid} {timestamp}");
-                Ok(SyncLockGuard { path: lock_path })
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Some((existing_pid, existing_ts)) = read_sync_lock(&lock_path) {
-                    let now = SystemTime::now()
+        for _ in 0..SYNC_LOCK_ACQUIRE_ATTEMPTS {
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    let pid = std::process::id();
+                    let timestamp = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let stale = now.saturating_sub(existing_ts) > SYNC_LOCK_STALE_SECS;
-                    if !stale && pid_is_alive(existing_pid) {
-                        anyhow::bail!(
-                            "Another tokscale antigravity sync is in progress (pid {existing_pid}); aborting"
-                        );
+                    let _ = writeln!(file, "{pid} {timestamp}");
+                    return Ok(SyncLockGuard { path: lock_path });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Only evict the lock when its owner is provably dead.
+                    // Long-running syncs MUST keep exclusive access as
+                    // long as their PID is alive, or two processes will
+                    // overlap on the manifest and delete each other's
+                    // artifacts. Age-based eviction was removed for this
+                    // reason.
+                    if let Some((existing_pid, _)) = read_sync_lock(&lock_path) {
+                        if pid_is_alive(existing_pid) {
+                            anyhow::bail!(
+                                "Another tokscale antigravity sync is in progress (pid {existing_pid}); aborting"
+                            );
+                        }
                     }
                     let _ = std::fs::remove_file(&lock_path);
-                    return Self::acquire(cache_dir);
+                    continue;
                 }
-                let _ = std::fs::remove_file(&lock_path);
-                Self::acquire(cache_dir)
-            }
-            Err(err) => {
-                Err(anyhow::Error::new(err).context("Failed to acquire Antigravity sync lock"))
+                Err(err) => {
+                    return Err(
+                        anyhow::Error::new(err).context("Failed to acquire Antigravity sync lock")
+                    );
+                }
             }
         }
+        anyhow::bail!(
+            "Could not acquire Antigravity sync lock after {SYNC_LOCK_ACQUIRE_ATTEMPTS} attempts; another process keeps recreating the lock file"
+        );
     }
 }
 
@@ -742,13 +751,20 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
             continue;
         }
 
-        // Defense-in-depth: a same-user process can advertise the matching
-        // CLI args to poison cache discovery. Verify the executable path
-        // (when introspection is available) actually points at an
-        // antigravity binary. Default to true on platforms where exe path
-        // lookup is unavailable so we do not regress detection.
+        // Defense-in-depth: a same-user process can advertise matching CLI
+        // args to poison cache discovery. When exe-path introspection is
+        // available, accept the candidate only if the binary path looks
+        // like a language server or an antigravity binary, since
+        // `is_antigravity_process` already validated the antigravity
+        // affiliation via argv (e.g. `--app_data_dir antigravity` invoked
+        // against a generic `language_server` binary). Default to true on
+        // platforms where exe-path lookup is unavailable so detection does
+        // not regress.
         let exe_ok = process_executable_path(pid)
-            .map(|p| p.to_string_lossy().to_lowercase().contains("antigravity"))
+            .map(|path| {
+                let lower = path.to_string_lossy().to_lowercase();
+                lower.contains("antigravity") || lower.contains("language_server")
+            })
             .unwrap_or(true);
         if !exe_ok {
             continue;
@@ -954,6 +970,16 @@ fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
         .is_some_and(|status| status == 200);
     if !status_ok {
         return false;
+    }
+
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).is_err() {
+            return false;
+        }
+        if header.trim().is_empty() {
+            break;
+        }
     }
 
     let mut buffer = String::new();
