@@ -1,55 +1,19 @@
-//! Cross-platform resolution for tokscale's user config directory.
+//! CLI-side path helpers.
 //!
-//! macOS users following the docs expect `~/.config/tokscale/` because that
-//! is what `auth.rs`, `cursor.rs`, and `antigravity.rs` already write to.
-//! `dirs::config_dir()` would instead return `~/Library/Application Support/`
-//! on macOS, splitting state across two roots and silently ignoring
-//! settings.json edits the user made via the documented path. This module
-//! enforces the unified `~/.config/tokscale/` location on macOS + Linux,
-//! while keeping the platform default on Windows.
+//! The cross-platform config and cache directory resolution lives in
+//! `tokscale_core::paths` so the core crate's caches can resolve the same
+//! locations without depending on tokscale-cli. This module re-exports
+//! those helpers and adds the macOS legacy-config helper that
+//! `Settings::load()` and `load_star_cache()` need (they have to read
+//! `~/Library/Application Support/tokscale/` once on upgrade — see #468).
 
 use std::path::PathBuf;
 
-/// Resolve the tokscale config dir, honoring `TOKSCALE_CONFIG_DIR` first.
-///
-/// Resolution order:
-/// 1. `TOKSCALE_CONFIG_DIR` taken verbatim. Absolute paths are recommended;
-///    relative paths are accepted and resolved against the process CWD.
-/// 2. macOS: `$HOME/.config/tokscale` (overrides `dirs::config_dir()`,
-///    which would return `~/Library/Application Support/` and split state
-///    across two roots — see module docs).
-/// 3. Linux: `dirs::config_dir().join("tokscale")` so XDG_CONFIG_HOME is
-///    honored. Falls through to `$HOME/.config/tokscale` when neither
-///    `XDG_CONFIG_HOME` nor `HOME` resolve.
-/// 4. Windows (and any other platform): `dirs::config_dir().join("tokscale")`.
-/// 5. Last-ditch fallback: `./.tokscale` so a missing HOME never panics.
-pub fn get_config_dir() -> PathBuf {
-    if let Ok(custom) = std::env::var("TOKSCALE_CONFIG_DIR") {
-        return PathBuf::from(custom);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(".config").join("tokscale");
-        }
-    }
-
-    dirs::config_dir()
-        .map(|d| d.join("tokscale"))
-        .unwrap_or_else(|| PathBuf::from(".tokscale"))
-}
-
-/// Whether `TOKSCALE_CONFIG_DIR` is explicitly set in the environment.
-///
-/// Callers that want to read a legacy on-disk location during the macOS
-/// transition MUST gate that fallback on this returning `false`. When the
-/// override is set (CI sandbox, tests, isolated profile), the user has
-/// asked for an explicit, hermetic config root — silently ingesting
-/// `~/Library/Application Support/tokscale/` defeats that contract.
-pub fn is_config_dir_overridden() -> bool {
-    std::env::var_os("TOKSCALE_CONFIG_DIR").is_some_and(|v| !v.is_empty())
-}
+#[allow(unused_imports)]
+pub use tokscale_core::paths::{
+    get_cache_dir, get_config_dir, is_config_dir_overridden, legacy_dirs_cache_dir,
+    legacy_dot_cache_tokscale_dir,
+};
 
 /// Legacy macOS config dir (`~/Library/Application Support/tokscale`).
 ///
@@ -79,12 +43,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn env_override_is_returned_verbatim() {
+    #[cfg(target_os = "macos")]
+    fn legacy_macos_returns_none_when_overridden() {
         let prev = env::var_os("TOKSCALE_CONFIG_DIR");
         unsafe {
-            env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/tokscale-custom");
+            env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/tokscale-cli-paths-override");
         }
-        assert_eq!(get_config_dir(), PathBuf::from("/tmp/tokscale-custom"));
+        assert!(legacy_macos_config_dir().is_none());
         unsafe {
             match prev {
                 Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
@@ -94,69 +59,17 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn unix_default_is_dot_config_tokscale_under_home() {
-        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        let prev_home = env::var_os("HOME");
-        let prev_xdg = env::var_os("XDG_CONFIG_HOME");
-        unsafe {
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-            env::remove_var("XDG_CONFIG_HOME");
-            env::set_var("HOME", "/tmp/tokscale-home-test");
-        }
-        assert_eq!(
-            get_config_dir(),
-            PathBuf::from("/tmp/tokscale-home-test/.config/tokscale"),
-        );
-        unsafe {
-            match prev_override {
-                Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
-                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
-            }
-            match prev_home {
-                Some(v) => env::set_var("HOME", v),
-                None => env::remove_var("HOME"),
-            }
-            match prev_xdg {
-                Some(v) => env::set_var("XDG_CONFIG_HOME", v),
-                None => env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
-    }
-
-    #[test]
-    #[serial]
-    #[cfg(target_os = "linux")]
-    fn linux_honors_xdg_config_home_when_set() {
-        // XDG_CONFIG_HOME is the documented way to relocate the user
-        // config directory on Linux. Hardcoding `$HOME/.config` would
-        // silently break setups that point this elsewhere.
-        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        let prev_xdg = env::var_os("XDG_CONFIG_HOME");
-        unsafe {
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-            env::set_var("XDG_CONFIG_HOME", "/tmp/tokscale-xdg-config");
-        }
-        assert_eq!(
-            get_config_dir(),
-            PathBuf::from("/tmp/tokscale-xdg-config/tokscale"),
-        );
-        unsafe {
-            match prev_override {
-                Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
-                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
-            }
-            match prev_xdg {
-                Some(v) => env::set_var("XDG_CONFIG_HOME", v),
-                None => env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
-    }
-
-    #[test]
     #[cfg(not(target_os = "macos"))]
-    fn legacy_helper_returns_none_off_macos() {
+    fn legacy_macos_returns_none_off_macos() {
         assert!(legacy_macos_config_dir().is_none());
+    }
+
+    #[test]
+    fn re_exports_compile_and_match_core() {
+        let _config: PathBuf = get_config_dir();
+        let _cache: PathBuf = get_cache_dir();
+        let _: bool = is_config_dir_overridden();
+        let _: Option<PathBuf> = legacy_dirs_cache_dir();
+        let _: Option<PathBuf> = legacy_dot_cache_tokscale_dir();
     }
 }

@@ -4,6 +4,7 @@ mod aggregator;
 pub mod clients;
 mod message_cache;
 mod parser;
+pub mod paths;
 pub mod pricing;
 mod provider_identity;
 pub mod scanner;
