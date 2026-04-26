@@ -415,7 +415,28 @@ fn resolve_cache_relative_artifact_path(relative_path: &str) -> Result<PathBuf> 
         anyhow::bail!("Artifact path must point to a session artifact");
     }
 
-    Ok(get_antigravity_cache_dir()?.join(relative))
+    let cache_dir = get_antigravity_cache_dir()?;
+    let candidate = cache_dir.join(relative);
+
+    let canonical_root = cache_dir
+        .canonicalize()
+        .unwrap_or_else(|_| cache_dir.clone());
+    let canonical_sessions = canonical_root.join("sessions");
+
+    if candidate.exists() {
+        let canonical_candidate = candidate.canonicalize().with_context(|| {
+            format!(
+                "Failed to canonicalize artifact path {}",
+                candidate.display()
+            )
+        })?;
+        if !canonical_candidate.starts_with(&canonical_sessions) {
+            anyhow::bail!("Artifact path must stay within sessions cache root");
+        }
+        return Ok(canonical_candidate);
+    }
+
+    Ok(candidate)
 }
 
 #[cfg(test)]
@@ -1716,6 +1737,38 @@ mod tests {
 
         let err = delete_artifact_relative_path("manifest.json").unwrap_err();
         assert!(err.to_string().contains("session artifact"));
+
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn delete_artifact_relative_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp_dir.path());
+
+        let cache_dir = get_antigravity_cache_dir().unwrap();
+        let sessions_dir = cache_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let outside_dir = temp_dir.path().join("escape");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_file = outside_dir.join("secret.jsonl");
+        std::fs::write(&outside_file, "secret").unwrap();
+
+        let symlink_path = sessions_dir.join("escape.jsonl");
+        symlink(&outside_file, &symlink_path).unwrap();
+
+        let err = delete_artifact_relative_path("sessions/escape.jsonl").unwrap_err();
+        assert!(err.to_string().contains("sessions cache root"));
+        assert!(outside_file.exists());
 
         match previous_home {
             Some(home) => std::env::set_var("HOME", home),
