@@ -69,10 +69,21 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
             .model
             .clone()
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        let provider =
-            provider_identity::inferred_provider_from_model(&model).unwrap_or("anthropic");
+        // Fall back to a neutral provider when we cannot infer one from the
+        // model id. Codebuff routes calls across multiple providers, so
+        // hardcoding "anthropic" would skew per-provider stats for any
+        // token-bearing message that lacks a recognizable model hint.
+        let provider = provider_identity::inferred_provider_from_model(&model).unwrap_or("unknown");
 
-        results.push(UnifiedMessage::new(
+        // Stable dedup key so the same chat history scanned from multiple
+        // roots (or re-imported into a parallel channel) is not double
+        // counted. Prefer the upstream ChatMessage `id`; otherwise derive a
+        // deterministic key from the session, timestamp, model and token
+        // shape so identical re-imports collapse to a single record.
+        let dedup_key = upstream_message_id(msg)
+            .unwrap_or_else(|| derive_dedup_key(&session_id, ts, &model, &usage));
+
+        results.push(UnifiedMessage::new_with_dedup(
             "codebuff",
             &model,
             provider,
@@ -86,10 +97,34 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning: 0,
             },
             usage.credits.max(0.0),
+            Some(dedup_key),
         ));
     }
 
     results
+}
+
+/// Extract the upstream `ChatMessage.id` if present, so dedup keys remain
+/// stable across re-imports of the same chat history.
+fn upstream_message_id(msg: &Value) -> Option<String> {
+    msg.get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Build a deterministic fallback dedup key for messages that don't expose
+/// a stable upstream id. Combines the session, timestamp, model and full
+/// token breakdown so two structurally identical messages collapse, while
+/// genuinely different messages stay distinct.
+fn derive_dedup_key(session_id: &str, ts: i64, model: &str, usage: &AssistantUsage) -> String {
+    format!(
+        "codebuff:{session_id}:{ts}:{model}:{i}:{o}:{cr}:{cw}",
+        i = usage.input_tokens.max(0),
+        o = usage.output_tokens.max(0),
+        cr = usage.cache_read_input_tokens.max(0),
+        cw = usage.cache_creation_input_tokens.max(0),
+    )
 }
 
 /// Convert a filesystem-safe `chatId` back to epoch milliseconds.
@@ -264,7 +299,10 @@ fn extract_usage_from_run_state(metadata: &Value) -> Option<AssistantUsage> {
         if let Some(u) = provider_options.get("usage") {
             usage.merge_fallback(parse_usage_object(u));
         }
-        if let Some(u) = provider_options.get("codebuff").and_then(|c| c.get("usage")) {
+        if let Some(u) = provider_options
+            .get("codebuff")
+            .and_then(|c| c.get("usage"))
+        {
             usage.merge_fallback(parse_usage_object(u));
         }
         if let Some(model) = provider_options
@@ -288,7 +326,12 @@ fn parse_usage_object(value: &Value) -> AssistantUsage {
 
     let input = pick_number(
         value,
-        &["inputTokens", "input_tokens", "promptTokens", "prompt_tokens"],
+        &[
+            "inputTokens",
+            "input_tokens",
+            "promptTokens",
+            "prompt_tokens",
+        ],
     );
     let output = pick_number(
         value,
