@@ -647,6 +647,41 @@ mod tests {
         }
     }
 
+    /// Pin every env var the cache resolvers consult so the test stays
+    /// inside `temp_home`. CI runners can leak `XDG_CONFIG_HOME` /
+    /// `XDG_CACHE_HOME` from the host, in which case `paths::get_cache_dir`
+    /// resolves outside the sandbox and the legacy fallback never gets
+    /// exercised. Returns the previous values so the caller can restore.
+    fn sandbox_cache_env(
+        temp_home: &std::path::Path,
+    ) -> (
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+    ) {
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        unsafe {
+            std::env::set_var("HOME", temp_home);
+            std::env::set_var("XDG_CONFIG_HOME", temp_home.join(".config"));
+            std::env::set_var("XDG_CACHE_HOME", temp_home.join(".cache"));
+        }
+        (prev_home, prev_xdg_config, prev_xdg_cache)
+    }
+
+    fn restore_cache_env(
+        prev: (
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+        ),
+    ) {
+        restore_env_var("HOME", prev.0);
+        restore_env_var("XDG_CONFIG_HOME", prev.1);
+        restore_env_var("XDG_CACHE_HOME", prev.2);
+    }
+
     fn write_temp_file(content: &[u8]) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content).unwrap();
@@ -804,8 +839,7 @@ mod tests {
     #[serial_test::serial]
     fn test_source_message_cache_round_trip() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        restore_env_var("HOME", Some(temp_home.path()));
+        let prev_env = sandbox_cache_env(temp_home.path());
 
         let file = write_temp_file(b"{}\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
@@ -839,7 +873,7 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         assert!(loaded.get(file.path()).is_some());
 
-        restore_env_var("HOME", original_home);
+        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -1001,10 +1035,12 @@ mod tests {
         let temp_xdg_cache = TempDir::new().unwrap();
         let original_home = std::env::var_os("HOME");
         let original_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let original_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
         let original_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
 
         restore_env_var("HOME", Some(temp_home.path()));
         restore_env_var("XDG_CACHE_HOME", Some(temp_xdg_cache.path()));
+        restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
         restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
 
         let source = write_temp_file(b"legacy-dirs\n");
@@ -1032,6 +1068,7 @@ mod tests {
 
         restore_env_var("HOME", original_home);
         restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
+        restore_env_var("XDG_CONFIG_HOME", original_xdg_config);
         restore_env_var("TOKSCALE_CONFIG_DIR", original_override);
     }
 
@@ -1041,10 +1078,12 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var_os("HOME");
         let original_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let original_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
         let original_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
 
         restore_env_var("HOME", Some(temp_home.path()));
         restore_env_var("XDG_CACHE_HOME", None::<&str>);
+        restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
         restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
 
         let source = write_temp_file(b"legacy-dot\n");
@@ -1072,6 +1111,7 @@ mod tests {
 
         restore_env_var("HOME", original_home);
         restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
+        restore_env_var("XDG_CONFIG_HOME", original_xdg_config);
         restore_env_var("TOKSCALE_CONFIG_DIR", original_override);
     }
 
