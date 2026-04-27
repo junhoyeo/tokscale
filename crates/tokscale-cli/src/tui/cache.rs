@@ -635,13 +635,20 @@ pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
     };
-    let cached: Option<CachedTUIData> = std::iter::once(cache_path)
-        .chain(legacy_cache_files())
-        .find_map(|path| {
-            let file = File::open(path).ok()?;
+    let cached: Option<CachedTUIData> = match File::open(&cache_path) {
+        Ok(file) => {
             let reader = BufReader::new(file);
             serde_json::from_reader(reader).ok()
-        });
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            legacy_cache_files().into_iter().find_map(|path| {
+                let file = File::open(path).ok()?;
+                let reader = BufReader::new(file);
+                serde_json::from_reader(reader).ok()
+            })
+        }
+        Err(_) => None,
+    };
     let Some(cached) = cached else {
         return CacheResult::Miss;
     };
@@ -652,7 +659,7 @@ pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -
     let cached_group_by = cached
         .group_by
         .as_deref()
-        .and_then(|value| value.parse::<GroupBy>().ok());
+        .and_then(|value: &str| value.parse::<GroupBy>().ok());
     if schema_outdated && cached_group_by.is_none() {
         return CacheResult::Miss;
     }
@@ -794,7 +801,19 @@ pub fn save_cached_data(
     // the canonical cache file before writing — a partial save or process
     // crash between delete and rename would lose the cache. The temp-file
     // pattern makes corruption-on-crash impossible.
-    let temp_path = cache_path.with_extension("json.tmp");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let temp_path = cache_path.with_file_name(format!(
+        ".{}.{}.{:x}.tmp",
+        cache_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("tui-data-cache.json"),
+        std::process::id(),
+        nanos
+    ));
     let file = match File::create(&temp_path) {
         Ok(f) => f,
         Err(_) => return,
@@ -802,12 +821,7 @@ pub fn save_cached_data(
     let writer = BufWriter::new(file);
 
     if serde_json::to_writer(writer, &cached).is_ok() {
-        if fs::rename(&temp_path, &cache_path).is_err() {
-            // Windows: rename can't overwrite; copy then cleanup so destination is never removed first.
-            if fs::copy(&temp_path, &cache_path).is_ok() {
-                let _ = fs::remove_file(&temp_path);
-            }
-        }
+        let _ = tokscale_core::fs_atomic::replace_file(&temp_path, &cache_path);
     } else {
         let _ = fs::remove_file(&temp_path);
     }

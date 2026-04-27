@@ -309,9 +309,13 @@ impl SourceMessageCache {
             return Self::default();
         }
 
-        let store = std::iter::once(path)
-            .chain(legacy_cache_paths())
-            .find_map(|path| read_store_from_path(&path));
+        let store = match read_store_from_path_status(&path) {
+            CacheReadStatus::Loaded(store) => Some(store),
+            CacheReadStatus::Missing => legacy_cache_paths()
+                .into_iter()
+                .find_map(|path| read_store_from_path(&path)),
+            CacheReadStatus::Invalid => None,
+        };
         let Some(store) = store else {
             return Self::default();
         };
@@ -443,12 +447,9 @@ impl SourceMessageCache {
                 .map_err(std::io::Error::other)?;
             writer.flush()?;
             writer.get_ref().sync_all()?;
-            if fs::rename(&tmp_path, &final_path).is_err() {
-                fs::copy(&tmp_path, &final_path)?;
-                let final_file = File::open(&final_path)?;
-                final_file.sync_all()?;
-                let _ = fs::remove_file(&tmp_path);
-            }
+            crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
+            let final_file = File::open(&final_path)?;
+            final_file.sync_all()?;
             Ok(())
         })();
 
@@ -480,6 +481,40 @@ fn read_store_from_path(path: &Path) -> Option<CachedSourceStore> {
         return None;
     }
     Some(store)
+}
+
+enum CacheReadStatus {
+    Missing,
+    Invalid,
+    Loaded(CachedSourceStore),
+}
+
+fn read_store_from_path_status(path: &Path) -> CacheReadStatus {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheReadStatus::Missing,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    if metadata.len() > MAX_CACHE_FILE_BYTES {
+        return CacheReadStatus::Invalid;
+    }
+
+    let reader = BufReader::new(file);
+    let store: CachedSourceStore = match bincode::options()
+        .with_limit(MAX_CACHE_FILE_BYTES)
+        .deserialize_from(reader)
+    {
+        Ok(store) => store,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    if store.schema_version != CACHE_SCHEMA_VERSION {
+        return CacheReadStatus::Invalid;
+    }
+    CacheReadStatus::Loaded(store)
 }
 
 fn read_sample_hash(file: &mut File, offset: u64, len: usize) -> Option<FileSampleHash> {

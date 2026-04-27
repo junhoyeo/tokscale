@@ -2,6 +2,7 @@
 
 mod aggregator;
 pub mod clients;
+pub mod fs_atomic;
 mod message_cache;
 mod parser;
 pub mod paths;

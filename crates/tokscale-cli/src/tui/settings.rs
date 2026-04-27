@@ -202,11 +202,7 @@ impl Settings {
             use std::io::Write;
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
-            if fs::rename(&temp_path, &path).is_err() {
-                // Windows: rename can't overwrite; copy then cleanup so destination is never removed first.
-                fs::copy(&temp_path, &path)?;
-                let _ = fs::remove_file(&temp_path);
-            }
+            tokscale_core::fs_atomic::replace_file(&temp_path, &path)?;
             Ok(())
         })();
 

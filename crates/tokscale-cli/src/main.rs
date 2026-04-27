@@ -107,6 +107,20 @@ enum Commands {
             help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model"
         )]
         group_by: String,
+        #[arg(
+            long = "write-cache",
+            requires = "light",
+            conflicts_with = "no_write_cache",
+            help = "After --light renders, atomically overwrite the TUI cache with this report's data so the next `tokscale tui` starts from fresh data. Persists across invocations via settings.json `light.writeCache`."
+        )]
+        write_cache: bool,
+        #[arg(
+            long = "no-write-cache",
+            requires = "light",
+            conflicts_with = "write_cache",
+            help = "Skip cache write even if settings.json `light.writeCache` is true. Only valid with --light."
+        )]
+        no_write_cache: bool,
         #[arg(long, help = "Disable spinner")]
         no_spinner: bool,
     },
@@ -308,6 +322,8 @@ fn main() -> Result<()> {
             date,
             benchmark,
             group_by,
+            write_cache,
+            no_write_cache,
             no_spinner,
         }) => {
             use tokscale_core::GroupBy;
@@ -336,8 +352,8 @@ fn main() -> Result<()> {
                     week,
                     month,
                     group_by,
-                    cli.write_cache,
-                    cli.no_write_cache,
+                    write_cache,
+                    no_write_cache,
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
@@ -3381,9 +3397,29 @@ fn save_star_cache(username: &str, has_starred: bool) {
     };
     if let Ok(content) = serde_json::to_string_pretty(&cache) {
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            if std::fs::create_dir_all(dir).is_err() {
+                return;
+            }
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let tmp_filename = format!(
+                ".star-cache.{}.{:x}.tmp",
+                std::process::id(),
+                nanos
+            );
+            let tmp_path = dir.join(tmp_filename);
+
+            if let Ok(mut file) = std::fs::File::create(&tmp_path) {
+                use std::io::Write;
+                if file.write_all(content.as_bytes()).is_ok() && file.sync_all().is_ok() {
+                    let _ = tokscale_core::fs_atomic::replace_file(&tmp_path, &path);
+                } else {
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
+            }
         }
-        let _ = std::fs::write(&path, content);
     }
 }
 
@@ -5478,6 +5514,11 @@ mod tests {
             Cli::try_parse_from(["tokscale", "--light", "--write-cache", "--no-write-cache",])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn clap_accepts_models_light_write_cache_after_subcommand() {
+        assert!(Cli::try_parse_from(["tokscale", "models", "--light", "--write-cache"]).is_ok());
     }
 
     #[test]

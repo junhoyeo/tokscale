@@ -59,7 +59,7 @@ export const SOURCE_LOGOS: Record<string, string> = {
   gemini: `${GITHUB_CDN_BASE}/client-gemini.png`,
   cursor: `${GITHUB_CDN_BASE}/client-cursor.jpg`,
   amp: `${GITHUB_CDN_BASE}/client-amp.png`,
-  codebuff: "https://avatars.githubusercontent.com/u/189203002?s=200&v=4",
+  codebuff: `${GITHUB_CDN_BASE}/client-codebuff.png`,
   droid: `${GITHUB_CDN_BASE}/client-droid.png`,
   openclaw: `${GITHUB_CDN_BASE}/client-openclaw.jpg`,
   hermes: `${GITHUB_CDN_BASE}/client-hermes.png`,

@@ -275,12 +275,17 @@ fn legacy_migration_cache_paths() -> Vec<std::path::PathBuf> {
 /// Load the migration cache from disk. Returns `None` if the file is missing or
 /// unparseable.
 pub fn load_opencode_migration_cache() -> Option<OpenCodeMigrationCache> {
-    std::iter::once(migration_cache_path())
-        .chain(legacy_migration_cache_paths())
-        .find_map(|path| {
-            let content = std::fs::read_to_string(path).ok()?;
-            serde_json::from_str(&content).ok()
-        })
+    let canonical = migration_cache_path();
+    match std::fs::read_to_string(&canonical) {
+        Ok(content) => serde_json::from_str(&content).ok(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            legacy_migration_cache_paths().into_iter().find_map(|path| {
+                let content = std::fs::read_to_string(path).ok()?;
+                serde_json::from_str(&content).ok()
+            })
+        }
+        Err(_) => None,
+    }
 }
 
 /// Persist the migration cache atomically (write to temp file, then rename).
@@ -313,10 +318,7 @@ pub fn save_opencode_migration_cache(cache: &OpenCodeMigrationCache) {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
-        if std::fs::rename(&tmp_path, &final_path).is_err() {
-            std::fs::copy(&tmp_path, &final_path)?;
-            std::fs::remove_file(&tmp_path)?;
-        }
+        crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
         Ok(())
     })();
 

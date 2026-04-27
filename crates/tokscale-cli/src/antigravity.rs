@@ -147,6 +147,11 @@ struct SessionCandidate {
 pub fn run_antigravity_sync() -> Result<()> {
     use colored::Colorize;
 
+    #[cfg(target_os = "windows")]
+    anyhow::bail!(
+        "Antigravity sync is not supported on Windows yet. Use macOS or Linux for `tokscale antigravity sync`, or remove Antigravity from your release notes for Windows."
+    );
+
     let cache_dir = get_antigravity_cache_dir()?;
     let sessions_dir = get_antigravity_sessions_dir()?;
     ensure_config_dir()?;
@@ -261,6 +266,11 @@ pub fn run_antigravity_sync() -> Result<()> {
 pub fn run_antigravity_status(json: bool) -> Result<()> {
     use colored::Colorize;
 
+    #[cfg(target_os = "windows")]
+    anyhow::bail!(
+        "Antigravity status is not supported on Windows yet because local language-server discovery is not implemented there. Use macOS or Linux for `tokscale antigravity status`."
+    );
+
     let cache_dir = get_antigravity_cache_dir()?;
     let sessions_dir = get_antigravity_sessions_dir()?;
     let manifest_path = get_antigravity_manifest_path()?;
@@ -343,7 +353,7 @@ fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 fn ensure_config_dir() -> Result<()> {
-    let config_dir = home_dir()?.join(".config/tokscale");
+    let config_dir = crate::paths::get_config_dir();
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir)?;
         #[cfg(unix)]
@@ -365,7 +375,8 @@ const SYNC_LOCK_ACQUIRE_ATTEMPTS: usize = 3;
 impl SyncLockGuard {
     fn acquire(cache_dir: &Path) -> Result<Self> {
         let lock_path = cache_dir.join("sync.lock");
-        for _ in 0..SYNC_LOCK_ACQUIRE_ATTEMPTS {
+        let mut stale_recoveries = 0usize;
+        loop {
             match std::fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -394,6 +405,12 @@ impl SyncLockGuard {
                             );
                         }
                     }
+                    if stale_recoveries >= SYNC_LOCK_ACQUIRE_ATTEMPTS {
+                        anyhow::bail!(
+                            "Could not acquire Antigravity sync lock after {SYNC_LOCK_ACQUIRE_ATTEMPTS} stale-lock recoveries; another process keeps recreating the lock file"
+                        );
+                    }
+                    stale_recoveries += 1;
                     let _ = std::fs::remove_file(&lock_path);
                     continue;
                 }
@@ -404,9 +421,6 @@ impl SyncLockGuard {
                 }
             }
         }
-        anyhow::bail!(
-            "Could not acquire Antigravity sync lock after {SYNC_LOCK_ACQUIRE_ATTEMPTS} attempts; another process keeps recreating the lock file"
-        );
     }
 }
 
@@ -436,7 +450,7 @@ fn pid_is_alive(pid: u32) -> bool {
     #[cfg(not(unix))]
     {
         let _ = pid;
-        true
+        false
     }
 }
 
@@ -654,25 +668,14 @@ fn atomic_write_file(path: &Path, contents: &str) -> Result<()> {
         fs::write(&temp_path, contents)?;
     }
 
-    if let Err(err) = fs::rename(&temp_path, path) {
-        if path.exists() {
-            match fs::copy(&temp_path, path) {
-                Ok(_) => {
-                    let _ = fs::remove_file(&temp_path);
-                }
-                Err(copy_err) => {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(anyhow::anyhow!(
-                        "Failed to persist file with rename ({}) and copy fallback ({})",
-                        err,
-                        copy_err
-                    ));
-                }
-            }
-        } else {
-            let _ = fs::remove_file(&temp_path);
-            return Err(err.into());
-        }
+    if let Err(err) = tokscale_core::fs_atomic::replace_file(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(anyhow::anyhow!(
+            "Failed to persist file atomically (temp: {}, final: {}): {}",
+            temp_path.display(),
+            path.display(),
+            err
+        ));
     }
 
     Ok(())
@@ -688,7 +691,9 @@ fn bool_label(value: bool) -> &'static str {
 
 pub fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
     if cfg!(target_os = "windows") {
-        return Ok(Vec::new());
+        anyhow::bail!(
+            "Antigravity connection discovery is not supported on Windows yet. Use macOS or Linux, or sync from another machine and copy artifacts manually."
+        );
     }
 
     let candidates = detect_process_candidates()?;

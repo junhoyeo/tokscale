@@ -23,12 +23,17 @@ fn load_cache_with_policy<T: for<'de> Deserialize<'de>>(
     filename: &str,
     allow_stale: bool,
 ) -> Option<T> {
-    let cached: CachedData<T> = std::iter::once(get_cache_path(filename))
-        .chain(legacy_cache_paths(filename))
-        .find_map(|path| {
-            let content = fs::read_to_string(&path).ok()?;
-            serde_json::from_str(&content).ok()
-        })?;
+    let canonical_path = get_cache_path(filename);
+    let cached: CachedData<T> = match fs::read_to_string(&canonical_path) {
+        Ok(content) => serde_json::from_str(&content).ok()?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            legacy_cache_paths(filename).into_iter().find_map(|path| {
+                let content = fs::read_to_string(&path).ok()?;
+                serde_json::from_str(&content).ok()
+            })?
+        }
+        Err(_) => return None,
+    };
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -86,11 +91,7 @@ pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io:
         let mut file = fs::File::create(&tmp_path)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
-        if fs::rename(&tmp_path, &final_path).is_err() {
-            // Windows: rename can't overwrite; copy then cleanup so destination is never removed first.
-            fs::copy(&tmp_path, &final_path)?;
-            let _ = fs::remove_file(&tmp_path);
-        }
+        crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
         Ok(())
     })();
 

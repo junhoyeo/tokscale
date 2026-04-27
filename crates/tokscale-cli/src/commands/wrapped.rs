@@ -1097,25 +1097,25 @@ async fn ensure_fonts_loaded(client: &reqwest::Client) -> Result<FontSet> {
     let regular_path = cache_dir.join(FIGTREE_REGULAR_FILE);
     let bold_path = cache_dir.join(FIGTREE_BOLD_FILE);
 
-    copy_legacy_wrapped_cache_file("fonts", FIGTREE_REGULAR_FILE, &regular_path);
-    copy_legacy_wrapped_cache_file("fonts", FIGTREE_BOLD_FILE, &bold_path);
+    let regular_source = resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &regular_path);
+    let bold_source = resolve_wrapped_cache_path("fonts", FIGTREE_BOLD_FILE, &bold_path);
 
-    if !regular_path.exists() {
+    if regular_source == regular_path && !regular_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_REGULAR_URL, &regular_path).await;
     }
-    if !bold_path.exists() {
+    if bold_source == bold_path && !bold_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_BOLD_URL, &bold_path).await;
     }
 
-    let regular_font = if regular_path.exists() {
-        fs::read(&regular_path)
+    let regular_font = if regular_source.exists() {
+        fs::read(&regular_source)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
         None
     };
-    let bold_font = if bold_path.exists() {
-        fs::read(&bold_path)
+    let bold_font = if bold_source.exists() {
+        fs::read(&bold_source)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
@@ -1145,7 +1145,12 @@ async fn fetch_and_cache_image(
     ensure_cache_dir(&cache_dir)?;
 
     let cached_path = cache_dir.join(filename);
-    copy_legacy_wrapped_cache_file("images", filename, &cached_path);
+    if cached_path.exists() {
+        return Ok(cached_path);
+    }
+    if let Some(legacy_path) = first_existing_legacy_wrapped_cache_file("images", filename) {
+        return Ok(legacy_path);
+    }
     if !cached_path.exists() {
         fetch_to_file(client, url, &cached_path).await?;
     }
@@ -1163,9 +1168,11 @@ async fn fetch_svg_and_convert_to_png(
     ensure_cache_dir(&cache_dir)?;
 
     let cached_path = cache_dir.join(filename);
-    copy_legacy_wrapped_cache_file("images", filename, &cached_path);
     if cached_path.exists() {
         return Ok(cached_path);
+    }
+    if let Some(legacy_path) = first_existing_legacy_wrapped_cache_file("images", filename) {
+        return Ok(legacy_path);
     }
 
     let response = client
@@ -1196,7 +1203,7 @@ async fn fetch_svg_and_convert_to_png(
     let png = pixmap
         .encode_png()
         .map_err(|err| anyhow::anyhow!("Failed to encode PNG: {err:?}"))?;
-    fs::write(&cached_path, png)?;
+    atomic_write_bytes(&cached_path, &png)?;
 
     Ok(cached_path)
 }
@@ -1213,7 +1220,7 @@ async fn fetch_to_file(client: &reqwest::Client, url: &str, path: &Path) -> Resu
     }
 
     let bytes = response.bytes().await?;
-    fs::write(path, &bytes)?;
+    atomic_write_bytes(path, &bytes)?;
     Ok(())
 }
 
@@ -1243,30 +1250,53 @@ fn get_font_cache_dir() -> Result<PathBuf> {
     Ok(crate::paths::get_cache_dir().join("fonts"))
 }
 
-fn legacy_wrapped_cache_file(subdir: &str, filename: &str) -> Option<PathBuf> {
+fn resolve_wrapped_cache_path(subdir: &str, filename: &str, canonical_path: &Path) -> PathBuf {
+    if canonical_path.exists() {
+        canonical_path.to_path_buf()
+    } else {
+        first_existing_legacy_wrapped_cache_file(subdir, filename)
+            .unwrap_or_else(|| canonical_path.to_path_buf())
+    }
+}
+
+fn first_existing_legacy_wrapped_cache_file(subdir: &str, filename: &str) -> Option<PathBuf> {
     if crate::paths::is_config_dir_overridden() {
         return None;
     }
 
-    crate::paths::legacy_dot_cache_tokscale_dir().map(|dir| dir.join(subdir).join(filename))
+    [
+        crate::paths::legacy_dirs_cache_dir().map(|dir| dir.join(subdir).join(filename)),
+        crate::paths::legacy_dot_cache_tokscale_dir().map(|dir| dir.join(subdir).join(filename)),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.exists())
 }
 
-fn copy_legacy_wrapped_cache_file(subdir: &str, filename: &str, canonical_path: &Path) {
-    if canonical_path.exists() {
-        return;
-    }
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cache path has no parent: {}", path.display()))?;
+    ensure_cache_dir(dir)?;
 
-    let Some(legacy_path) = legacy_wrapped_cache_file(subdir, filename) else {
-        return;
-    };
-    if !legacy_path.exists() {
-        return;
-    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let tmp_name = format!(
+        ".{}.{}.{:x}.tmp",
+        path.file_name().and_then(|f| f.to_str()).unwrap_or("wrapped.cache"),
+        std::process::id(),
+        nanos
+    );
+    let tmp_path = dir.join(tmp_name);
 
-    if let Some(parent) = canonical_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::copy(legacy_path, canonical_path);
+    let mut file = fs::File::create(&tmp_path)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    tokscale_core::fs_atomic::replace_file(&tmp_path, path)?;
+    Ok(())
 }
 
 fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
@@ -1417,7 +1447,9 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Gemini CLI" => Some("https://tokscale.ai/assets/logos/gemini.png"),
         "Cursor IDE" => Some("https://tokscale.ai/assets/logos/cursor.jpg"),
         "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
-        "Codebuff" => Some("https://avatars.githubusercontent.com/u/189203002?s=200&v=4"),
+        "Codebuff" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png",
+        ),
         "Droid" => Some("https://tokscale.ai/assets/logos/droid.png"),
         "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
         "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
@@ -2012,7 +2044,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn font_cache_copies_from_legacy_path_when_present() {
+    fn font_cache_reads_legacy_path_when_canonical_missing() {
         let temp_home = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
@@ -2031,9 +2063,11 @@ mod tests {
         fs::write(&legacy_path, b"legacy-font-bytes").unwrap();
 
         let canonical_path = get_font_cache_dir().unwrap().join(FIGTREE_REGULAR_FILE);
-        copy_legacy_wrapped_cache_file("fonts", FIGTREE_REGULAR_FILE, &canonical_path);
+        let resolved = resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &canonical_path);
 
-        assert_eq!(fs::read(&canonical_path).unwrap(), b"legacy-font-bytes");
+        assert_eq!(resolved, legacy_path);
+        assert!(!canonical_path.exists());
+        assert_eq!(fs::read(&resolved).unwrap(), b"legacy-font-bytes");
 
         restore_env_var("HOME", previous_home);
         restore_env_var("TOKSCALE_CONFIG_DIR", previous_override);
@@ -2431,7 +2465,9 @@ mod tests {
     fn test_client_logo_url_codebuff() {
         assert_eq!(
             client_logo_url("Codebuff"),
-            Some("https://avatars.githubusercontent.com/u/189203002?s=200&v=4")
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png"
+            )
         );
     }
 

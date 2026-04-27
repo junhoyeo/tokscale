@@ -64,7 +64,7 @@
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/*/chats/*.json` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | API sync via `~/.config/tokscale/cursor-cache/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ Yes |
-| <img width="48px" src="https://avatars.githubusercontent.com/u/189203002?s=200&v=4" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; override via `CODEBUFF_DATA_DIR`) | ✅ Yes |
+| <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; override via `CODEBUFF_DATA_DIR`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` and `~/.omp/agent/sessions/` ([Oh My Pi](https://github.com/can1357/oh-my-pi)) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | `~/.kimi/sessions/` | ✅ Yes |
@@ -452,7 +452,7 @@ When you log out, tokscale keeps your cached usage history by moving it to `curs
 
 ### Antigravity Commands
 
-Antigravity sync only works while the Antigravity-enabled editor is running and its local language server is available. tokscale reads usage from that local language server and caches normalized artifacts locally.
+Antigravity sync currently works on macOS and Linux only. The Antigravity-enabled editor must be running and its local language server available; tokscale reads usage from that local language server and caches normalized artifacts locally.
 
 ```bash
 # Check whether tokscale can see running Antigravity language servers
@@ -510,7 +510,7 @@ Use `defaultClients` to pin a personal default — for example, set it to `["ope
 
 #### Cache directory layout
 
-All regenerable caches now live under `~/.config/tokscale/cache/` (or `${TOKSCALE_CONFIG_DIR}/cache/` when overridden):
+The regenerable CLI/TUI/pricing/Wrapped caches now live under `~/.config/tokscale/cache/` (or `${TOKSCALE_CONFIG_DIR}/cache/` when overridden). Antigravity sync artifacts remain at `~/.config/tokscale/antigravity-cache/`: 
 
 - `tui-data-cache.json` — TUI startup cache
 - `source-message-cache.bin` + `source-message-cache.lock` — source-message cache + lock file
@@ -528,7 +528,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
-| `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory (where `settings.json`, `star-cache.json`, and all caches under `${TOKSCALE_CONFIG_DIR}/cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
+| `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, and `antigravity-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
 
 ```bash
 # Example: Increase timeout for very large datasets
@@ -923,7 +923,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | Uses `xdg-basedir` like OpenCode |
 | Crush | `$XDG_DATA_HOME/crush/` (fallback: `~/.local/share/crush/`) | `%USERPROFILE%\.local\share\crush\` (or `%XDG_DATA_HOME%\crush\` if set) | Uses XDG data directory with fallback |
 | Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, legacy Block paths) | `%USERPROFILE%\.local\share\goose\sessions\` | Configurable via `GOOSE_PATH_ROOT` env var |
-| Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | `%USERPROFILE%\.config\tokscale\antigravity-cache\sessions\` | Populated by `tokscale antigravity sync` while editor runs |
+| Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` is currently supported on macOS/Linux only |
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 
 > **Note**: On Windows, `~` expands to `%USERPROFILE%` (e.g., `C:\Users\YourName`). These tools intentionally use Unix-style paths (like `.local/share`) even on Windows for cross-platform consistency, rather than Windows-native paths like `%APPDATA%`.
@@ -1284,8 +1284,8 @@ Tokscale fetches real-time pricing from [LiteLLM's pricing database](https://git
 **Cursor Model Pricing**: For very recently released models not yet in either LiteLLM or OpenRouter (e.g., `gpt-5.3-codex`), Tokscale includes hardcoded pricing sourced from [Cursor's model docs](https://cursor.com/en-US/docs/models). These overrides are checked after all upstream sources but before fuzzy matching, so they automatically yield once real upstream pricing becomes available.
 
 **Caching**: Pricing data is cached to disk with 1-hour TTL for fast startup:
-- LiteLLM cache: `~/.cache/tokscale/pricing-litellm.json`
-- OpenRouter cache: `~/.cache/tokscale/pricing-openrouter.json` (caches author pricing for models from supported providers)
+- LiteLLM cache: `~/.config/tokscale/cache/pricing-litellm.json`
+- OpenRouter cache: `~/.config/tokscale/cache/pricing-openrouter.json` (caches author pricing for models from supported providers)
 
 Pricing includes:
 - Input tokens
