@@ -3407,13 +3407,16 @@ fn save_star_cache(username: &str, has_starred: bool) {
             let tmp_filename = format!(".star-cache.{}.{:x}.tmp", std::process::id(), nanos);
             let tmp_path = dir.join(tmp_filename);
 
-            if let Ok(mut file) = std::fs::File::create(&tmp_path) {
+            let write_result = (|| -> std::io::Result<()> {
                 use std::io::Write;
-                if file.write_all(content.as_bytes()).is_ok() && file.sync_all().is_ok() {
-                    let _ = tokscale_core::fs_atomic::replace_file(&tmp_path, &path);
-                } else {
-                    let _ = std::fs::remove_file(&tmp_path);
-                }
+                let mut file = std::fs::File::create(&tmp_path)?;
+                file.write_all(content.as_bytes())?;
+                file.sync_all()?;
+                tokscale_core::fs_atomic::replace_file(&tmp_path, &path)
+            })();
+
+            if write_result.is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
             }
         }
     }

@@ -1293,12 +1293,20 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     );
     let tmp_path = dir.join(tmp_name);
 
-    let mut file = fs::File::create(&tmp_path)?;
-    use std::io::Write;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    tokscale_core::fs_atomic::replace_file(&tmp_path, path)?;
-    Ok(())
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::File::create(&tmp_path)?;
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        tokscale_core::fs_atomic::replace_file(&tmp_path, path)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    write_result
 }
 
 fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
