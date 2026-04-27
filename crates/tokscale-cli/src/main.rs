@@ -3404,11 +3404,7 @@ fn save_star_cache(username: &str, has_starred: bool) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            let tmp_filename = format!(
-                ".star-cache.{}.{:x}.tmp",
-                std::process::id(),
-                nanos
-            );
+            let tmp_filename = format!(".star-cache.{}.{:x}.tmp", std::process::id(), nanos);
             let tmp_path = dir.join(tmp_filename);
 
             if let Ok(mut file) = std::fs::File::create(&tmp_path) {

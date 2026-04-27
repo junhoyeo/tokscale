@@ -1285,7 +1285,9 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         .unwrap_or(0);
     let tmp_name = format!(
         ".{}.{}.{:x}.tmp",
-        path.file_name().and_then(|f| f.to_str()).unwrap_or("wrapped.cache"),
+        path.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("wrapped.cache"),
         std::process::id(),
         nanos
     );
