@@ -1,5 +1,8 @@
 use super::{aliases, litellm::ModelPricing};
-use crate::{provider_identity, TokenBreakdown};
+use crate::{
+    has_parenthesized_suffix, provider_identity, strip_gpt_parenthesized_reasoning_tier,
+    TokenBreakdown,
+};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -236,6 +239,21 @@ impl PricingLookup {
             Some("openrouter") => self.lookup_openrouter_only(id, provider_id),
             _ => self.lookup_auto(id, provider_id),
         };
+
+        if has_parenthesized_suffix(&lower) {
+            if let Some(base_model) = strip_gpt_parenthesized_reasoning_tier(&lower) {
+                if let Some(result) = do_lookup(base_model) {
+                    return Some(result);
+                }
+            }
+
+            if let Some(result) = try_strip_prefixed_parenthesized_reasoning_tier(&lower, do_lookup)
+            {
+                return Some(result);
+            }
+
+            return None;
+        }
 
         // 1. Try direct lookup
         if let Some(result) = do_lookup(&lower) {
@@ -1065,6 +1083,36 @@ where
     None
 }
 
+fn try_strip_prefixed_parenthesized_reasoning_tier<F>(
+    model_id: &str,
+    do_lookup: F,
+) -> Option<LookupResult>
+where
+    F: Fn(&str) -> Option<LookupResult>,
+{
+    let parts: Vec<&str> = model_id.split('-').collect();
+
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let max_skip = std::cmp::min(parts.len() - 1, MAX_PREFIX_STRIP_SEGMENTS);
+
+    for skip in 1..=max_skip {
+        let candidate: String = parts[skip..].join("-");
+
+        if candidate.len() >= MIN_MODEL_NAME_LEN {
+            if let Some(base_model) = strip_gpt_parenthesized_reasoning_tier(&candidate) {
+                if let Some(result) = do_lookup(base_model) {
+                    return Some(result);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Attempts to find a model by progressively stripping leading segments.
 /// Handles arbitrary routing prefixes (e.g., "myplugin-claude-3.5-sonnet" → "claude-3.5-sonnet").
 /// This replaces the hardcoded STRIPPED_PREFIXES approach.
@@ -1088,10 +1136,17 @@ where
             if let Some(result) = do_lookup(&candidate) {
                 return Some(result);
             }
+            if let Some(base_model) = strip_gpt_parenthesized_reasoning_tier(&candidate) {
+                if let Some(result) = do_lookup(base_model) {
+                    return Some(result);
+                }
+            }
 
-            // Try candidate with suffix stripping
-            if let Some(result) = try_strip_unknown_suffix(&candidate, &do_lookup) {
-                return Some(result);
+            if !has_parenthesized_suffix(&candidate) {
+                // Try candidate with suffix stripping
+                if let Some(result) = try_strip_unknown_suffix(&candidate, &do_lookup) {
+                    return Some(result);
+                }
             }
         }
     }
@@ -2106,6 +2161,37 @@ mod tests {
         let result = lookup.lookup("gpt-5.1-codex-max-xhigh").unwrap();
         assert_eq!(result.matched_key, "gpt-5.1-codex-max");
         assert_eq!(result.source, "LiteLLM");
+    }
+
+    #[test]
+    fn test_gpt_parenthesized_reasoning_tier_lookup() {
+        let lookup = create_lookup();
+
+        let xhigh = lookup.lookup("gpt-5.2(xhigh)").unwrap();
+        assert_eq!(xhigh.matched_key, "gpt-5.2");
+        assert_eq!(xhigh.source, "LiteLLM");
+
+        let high = lookup.lookup("gpt-5.2(high)").unwrap();
+        assert_eq!(high.matched_key, "gpt-5.2");
+        assert_eq!(high.source, "LiteLLM");
+    }
+
+    #[test]
+    fn test_gpt_parenthesized_reasoning_tier_scope_is_narrow() {
+        let lookup = create_lookup();
+
+        assert!(lookup.lookup("gpt-5.2(auto)").is_none());
+        assert!(lookup.lookup("claude-sonnet-4-5(high)").is_none());
+    }
+
+    #[test]
+    fn test_gpt_parenthesized_reasoning_tier_cost_matches_base_model() {
+        let lookup = create_lookup();
+        let base = lookup.calculate_cost("gpt-5.2", 1_000_000, 500_000, 0, 0, 0);
+        let tiered = lookup.calculate_cost("gpt-5.2(xhigh)", 1_000_000, 500_000, 0, 0, 0);
+
+        assert!((tiered - base).abs() < f64::EPSILON);
+        assert!((tiered - 8.75).abs() < 0.001);
     }
 
     #[test]

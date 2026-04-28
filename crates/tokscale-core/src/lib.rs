@@ -22,9 +22,39 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+pub(crate) fn strip_gpt_parenthesized_reasoning_tier(model_id: &str) -> Option<&str> {
+    let without_closing_paren = model_id.strip_suffix(')')?;
+    let (base_model, tier) = without_closing_paren.rsplit_once('(')?;
+
+    if base_model.is_empty() || base_model.trim() != base_model {
+        return None;
+    }
+
+    if !matches!(tier, "low" | "medium" | "high" | "xhigh") {
+        return None;
+    }
+
+    let model_name = base_model.rsplit('/').next().unwrap_or(base_model);
+    if model_name == "gpt" || model_name.starts_with("gpt-") {
+        Some(base_model)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn has_parenthesized_suffix(model_id: &str) -> bool {
+    model_id
+        .strip_suffix(')')
+        .and_then(|without_closing_paren| without_closing_paren.rsplit_once('('))
+        .is_some()
+}
+
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     let mut name = model_id.to_lowercase();
 
+    if let Some(base_model) = strip_gpt_parenthesized_reasoning_tier(&name) {
+        name = base_model.to_string();
+    }
     if name.len() > 9 {
         let potential_date = &name[name.len() - 8..];
         if potential_date.chars().all(|c| c.is_ascii_digit())
@@ -2185,6 +2215,16 @@ mod tests {
         );
 
         assert_eq!(normalize_model_for_grouping("gpt-5.2"), "gpt-5.2");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(xhigh)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(high)"), "gpt-5.4");
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.4(auto)"),
+            "gpt-5.4(auto)"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-sonnet-4.5(high)"),
+            "claude-sonnet-4-5(high)"
+        );
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro"),
             "gemini-2.5-pro"
