@@ -23,7 +23,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub(crate) fn strip_gpt_parenthesized_reasoning_tier(model_id: &str) -> Option<&str> {
+/// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
+///
+/// Mirrors <https://help.router-for.me/configuration/thinking>: the proxy
+/// strips the parentheses before routing, so for pricing lookups we treat the
+/// suffix as cosmetic and resolve to the base model. Accepts the level set the
+/// proxy documents (case-insensitive — callers pass the lowercased id):
+/// `minimal`, `low`, `medium`, `high`, `xhigh`, `auto`, `none`. Numeric
+/// thinking budgets are intentionally not handled here.
+pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str> {
     let without_closing_paren = model_id.strip_suffix(')')?;
     let (base_model, tier) = without_closing_paren.rsplit_once('(')?;
 
@@ -31,29 +39,20 @@ pub(crate) fn strip_gpt_parenthesized_reasoning_tier(model_id: &str) -> Option<&
         return None;
     }
 
-    if !matches!(tier, "low" | "medium" | "high" | "xhigh") {
+    if !matches!(
+        tier,
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "auto" | "none"
+    ) {
         return None;
     }
 
-    let model_name = base_model.rsplit('/').next().unwrap_or(base_model);
-    if model_name == "gpt" || model_name.starts_with("gpt-") {
-        Some(base_model)
-    } else {
-        None
-    }
-}
-
-pub(crate) fn has_parenthesized_suffix(model_id: &str) -> bool {
-    model_id
-        .strip_suffix(')')
-        .and_then(|without_closing_paren| without_closing_paren.rsplit_once('('))
-        .is_some()
+    Some(base_model)
 }
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     let mut name = model_id.to_lowercase();
 
-    if let Some(base_model) = strip_gpt_parenthesized_reasoning_tier(&name) {
+    if let Some(base_model) = strip_parenthesized_reasoning_tier(&name) {
         name = base_model.to_string();
     }
     if name.len() > 9 {
@@ -2218,13 +2217,20 @@ mod tests {
         assert_eq!(normalize_model_for_grouping("gpt-5.2"), "gpt-5.2");
         assert_eq!(normalize_model_for_grouping("gpt-5.4(xhigh)"), "gpt-5.4");
         assert_eq!(normalize_model_for_grouping("gpt-5.4(high)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(minimal)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(auto)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(none)"), "gpt-5.4");
         assert_eq!(
-            normalize_model_for_grouping("gpt-5.4(auto)"),
-            "gpt-5.4(auto)"
+            normalize_model_for_grouping("gpt-5.4(weirdgarbage)"),
+            "gpt-5.4(weirdgarbage)"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4.5(high)"),
-            "claude-sonnet-4-5(high)"
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gemini-3-pro(auto)"),
+            "gemini-3-pro"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro"),
