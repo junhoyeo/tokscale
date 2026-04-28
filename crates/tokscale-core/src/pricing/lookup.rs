@@ -235,6 +235,22 @@ impl PricingLookup {
         // Mirrors the dash-suffix path (e.g. `-xhigh`), which is handled by
         // `try_strip_unknown_suffix` below.
         let normalized_owned = strip_parenthesized_reasoning_tier(&lower).map(str::to_owned);
+
+        // Guard against silent misresolution: if the input ends with `(...)`
+        // but the contents are not a recognized CLIProxyAPI level, refuse the
+        // lookup. Falling through to `try_strip_unknown_suffix` would split on
+        // `-` and could match a shorter, unrelated model id by peeling the
+        // parenthesized fragment off (e.g. `gpt-5.2-codex(invalid)` would
+        // strip `-codex(invalid)` and resolve to `gpt-5.2`).
+        if normalized_owned.is_none()
+            && lower
+                .strip_suffix(')')
+                .and_then(|inner| inner.rsplit_once('('))
+                .is_some()
+        {
+            return None;
+        }
+
         let lower_ref: &str = normalized_owned.as_deref().unwrap_or(&lower);
 
         // Helper to perform lookup with the given source constraint
@@ -2161,11 +2177,16 @@ mod tests {
     fn test_parenthesized_reasoning_tier_unknown_value_does_not_strip() {
         let lookup = create_lookup();
 
-        // Values outside the cliproxyapi level set are not stripped, so the
-        // bracketed id stays intact and finds no match.
+        // Values outside the cliproxyapi level set must not silently
+        // misresolve via `try_strip_unknown_suffix`: without an early
+        // return, splitting on `-` would peel the parenthesized fragment
+        // off and match a shorter, unrelated model id (e.g.
+        // `gpt-5.2-codex(invalid)` collapsing to `gpt-5.2`).
         assert!(lookup.lookup("gpt-5.2(weirdgarbage)").is_none());
         assert!(lookup.lookup("gpt-5.2(1024)").is_none());
         assert!(lookup.lookup("gpt-5.2()").is_none());
+        assert!(lookup.lookup("gpt-5.2-codex(invalid)").is_none());
+        assert!(lookup.lookup("myproxy-gpt-5.2(invalid)").is_none());
     }
 
     #[test]
