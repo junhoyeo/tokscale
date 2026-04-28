@@ -2151,7 +2151,9 @@ mod tests {
         let prefixed = lookup.lookup("myproxy-gpt-5.2(xhigh)").unwrap();
         assert_eq!(prefixed.matched_key, "gpt-5.2");
 
-        let antigravity = lookup.lookup("antigravity-claude-sonnet-4-5(high)").unwrap();
+        let antigravity = lookup
+            .lookup("antigravity-claude-sonnet-4-5(high)")
+            .unwrap();
         assert_eq!(antigravity.matched_key, "claude-sonnet-4-5");
     }
 
