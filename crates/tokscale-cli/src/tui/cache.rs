@@ -3,14 +3,14 @@
 //! This module provides disk-based caching for TUI data to enable instant UI display
 //! while fresh data loads in the background (matching TypeScript implementation behavior).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::GroupBy;
+use tokscale_core::{sessions, GroupBy};
 
 use crate::ClientFilter;
 
@@ -586,7 +586,7 @@ impl TryFrom<CachedUsageData> for UsageData {
 
         Ok(Self {
             models: u.models.into_iter().map(|m| m.into()).collect(),
-            agents: u.agents.into_iter().map(|a| a.into()).collect(),
+            agents: normalize_cached_agents(u.agents),
             daily: daily?,
             hourly: hourly?,
             graph: graph.transpose()?,
@@ -597,6 +597,58 @@ impl TryFrom<CachedUsageData> for UsageData {
             current_streak: u.current_streak,
             longest_streak: u.longest_streak,
         })
+    }
+}
+
+fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
+    let mut merged: BTreeMap<String, AgentUsage> = BTreeMap::new();
+    let mut clients_by_agent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for cached in agents {
+        let normalized_agent = normalize_cached_agent_name(&cached.agent, &cached.clients);
+        let entry = merged
+            .entry(normalized_agent.clone())
+            .or_insert_with(|| AgentUsage {
+                agent: normalized_agent.clone(),
+                clients: String::new(),
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                message_count: 0,
+            });
+
+        let tokens: TokenBreakdown = cached.tokens.into();
+        entry.tokens.input = entry.tokens.input.saturating_add(tokens.input);
+        entry.tokens.output = entry.tokens.output.saturating_add(tokens.output);
+        entry.tokens.cache_read = entry.tokens.cache_read.saturating_add(tokens.cache_read);
+        entry.tokens.cache_write = entry.tokens.cache_write.saturating_add(tokens.cache_write);
+        entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(tokens.reasoning);
+        entry.cost += cached.cost;
+        entry.message_count = entry.message_count.saturating_add(cached.message_count);
+
+        let client_set = clients_by_agent.entry(normalized_agent).or_default();
+        for client in cached
+            .clients
+            .split(", ")
+            .filter(|client| !client.is_empty())
+        {
+            client_set.insert(client.to_string());
+        }
+    }
+
+    let mut agents = merged.into_values().collect::<Vec<_>>();
+    for agent in &mut agents {
+        if let Some(clients) = clients_by_agent.get(&agent.agent) {
+            agent.clients = clients.iter().cloned().collect::<Vec<_>>().join(", ");
+        }
+    }
+    agents
+}
+
+fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
+    if clients.split(", ").any(|client| client == "opencode") {
+        sessions::normalize_opencode_agent_name(agent)
+    } else {
+        sessions::normalize_agent_name(agent)
     }
 }
 
@@ -844,6 +896,51 @@ mod tests {
             set.insert(ClientFilter::Synthetic);
         }
         set
+    }
+
+    fn cached_agent(agent: &str, clients: &str, total_seed: u64) -> CachedAgentUsage {
+        CachedAgentUsage {
+            agent: agent.to_string(),
+            clients: clients.to_string(),
+            tokens: CachedTokenBreakdown {
+                input: total_seed,
+                output: 1,
+                cache_read: 2,
+                cache_write: 3,
+                reasoning: 4,
+            },
+            cost: total_seed as f64,
+            message_count: 1,
+        }
+    }
+
+    #[test]
+    fn test_normalize_cached_agents_merges_opencode_display_variants() {
+        let agents = normalize_cached_agents(vec![
+            cached_agent("Sisyphus", "opencode", 10),
+            cached_agent("\u{200B} Sisyphus   -   Ultraworker", "opencode", 20),
+            cached_agent(
+                "\u{200B}\u{200B}\u{200B} Prometheus    Plan Builder",
+                "opencode",
+                30,
+            ),
+        ]);
+
+        assert_eq!(agents.len(), 2);
+        let sisyphus = agents
+            .iter()
+            .find(|agent| agent.agent == "Sisyphus")
+            .unwrap();
+        assert_eq!(sisyphus.clients, "opencode");
+        assert_eq!(sisyphus.message_count, 2);
+        assert_eq!(sisyphus.tokens.input, 30);
+        assert!((sisyphus.cost - 30.0).abs() < f64::EPSILON);
+
+        let prometheus = agents
+            .iter()
+            .find(|agent| agent.agent == "Prometheus")
+            .unwrap();
+        assert_eq!(prometheus.message_count, 1);
     }
 
     // ── check_client_match ──────────────────────────────────────────
