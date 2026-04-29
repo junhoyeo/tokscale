@@ -109,10 +109,9 @@ fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
         | "prometheus plan builder"
         | "prometheus (planner)"
         | "prometheus" => "Prometheus",
-        "atlas (plan executor)"
-        | "atlas - plan executor"
-        | "atlas plan executor"
-        | "atlas" => "Atlas",
+        "atlas (plan executor)" | "atlas - plan executor" | "atlas plan executor" | "atlas" => {
+            "Atlas"
+        }
         "metis (plan consultant)"
         | "metis - plan consultant"
         | "metis plan consultant"
