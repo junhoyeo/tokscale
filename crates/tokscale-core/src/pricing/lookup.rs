@@ -2187,6 +2187,15 @@ mod tests {
         assert!(lookup.lookup("gpt-5.2()").is_none());
         assert!(lookup.lookup("gpt-5.2-codex(invalid)").is_none());
         assert!(lookup.lookup("myproxy-gpt-5.2(invalid)").is_none());
+
+        // The same guard must hold across model families so that the
+        // generalized stripper never misresolves a non-GPT id by peeling
+        // a parenthesized fragment off through the dash-suffix path.
+        assert!(lookup
+            .lookup("antigravity-claude-sonnet-4-5(invalid)")
+            .is_none());
+        assert!(lookup.lookup("claude-sonnet-4-5(garbage)").is_none());
+        assert!(lookup.lookup("gemini-3-pro(weird)").is_none());
     }
 
     #[test]
