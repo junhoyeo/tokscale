@@ -161,6 +161,9 @@ npx tokscale@latest
 # またはbunxを使用
 bunx tokscale@latest
 
+# たはdeno dxを使用
+dx tokscale@latest
+
 # ライトモード（テーブルレンダリングのみ）
 npx tokscale@latest --light
 ```
