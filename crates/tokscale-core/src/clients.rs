@@ -208,7 +208,7 @@ define_clients!(
         id: "gemini",
         root: PathRoot::Home,
         relative: ".gemini/tmp",
-        pattern: "*.json",
+        pattern: "*.json|*.jsonl",
         headless: false,
         parse_local: true,
         submit_default: true

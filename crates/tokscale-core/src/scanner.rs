@@ -188,6 +188,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
 
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
+                "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
                 // OpenClaw: also match archived transcripts
                 // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
@@ -1031,6 +1032,26 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_directory_json_or_jsonl_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("session.json")).unwrap();
+        File::create(path.join("session.jsonl")).unwrap();
+        File::create(path.join("session.txt")).unwrap();
+
+        let session_files = scan_directory(path.to_str().unwrap(), "*.json|*.jsonl");
+        assert_eq!(session_files.len(), 2);
+        assert_eq!(
+            session_files
+                .iter()
+                .map(|path| path.file_name().unwrap().to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["session.json", "session.jsonl"]
+        );
+    }
+
+    #[test]
     fn test_scan_directory_jsonl_pattern() {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
@@ -1851,6 +1872,19 @@ mod tests {
         let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
         assert_eq!(result.get(ClientId::Gemini).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_gemini_jsonl_session() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let gemini_path = home.join(".gemini/tmp/123/chats");
+        fs::create_dir_all(&gemini_path).unwrap();
+        File::create(gemini_path.join("session-abc.jsonl")).unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
+        assert_eq!(result.get(ClientId::Gemini).len(), 1);
+        assert!(result.get(ClientId::Gemini)[0].ends_with("session-abc.jsonl"));
     }
 
     #[test]
