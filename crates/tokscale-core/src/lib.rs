@@ -465,6 +465,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             };
         }
 
+        if parsed.unresolved_model_events {
+            return CachedParseOutcome {
+                messages,
+                cache_entry: None,
+            };
+        }
+
         let cache_entry = build_codex_cache_entry(
             path,
             parsed.messages,
@@ -654,6 +661,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                             fallback_timestamp,
                         );
 
+                        if parsed.unresolved_model_events {
+                            return CachedParseOutcome {
+                                messages,
+                                cache_entry: None,
+                            };
+                        }
                         let cache_entry = build_codex_cache_entry(
                             path,
                             raw_messages,
@@ -3376,6 +3389,73 @@ mod tests {
 
             let cache = message_cache::SourceMessageCache::load();
             assert!(cache.get(&path).is_none());
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_codex_cache_does_not_persist_unknown_before_later_turn_context() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let session_dir = source_home.path().join(".codex/sessions");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            let path = session_dir.join("session.jsonl");
+            std::fs::write(
+                &path,
+                concat!(
+                    r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
+                    "\n",
+                    r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                    "\n"
+                ),
+            )
+            .unwrap();
+
+            let initial_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+            assert_eq!(initial_messages.len(), 1);
+            assert_eq!(initial_messages[0].model_id, "unknown");
+            assert!(message_cache::SourceMessageCache::load()
+                .get(&path)
+                .is_none());
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(
+                concat!(
+                    r#"{"timestamp":"2026-04-27T10:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                    "\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let resumed_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+            assert_eq!(resumed_messages.len(), 1);
+            assert_eq!(resumed_messages[0].model_id, "gpt-5.5");
+            assert!(message_cache::SourceMessageCache::load()
+                .get(&path)
+                .is_some());
         }
 
         match original_home {
