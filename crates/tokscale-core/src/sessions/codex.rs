@@ -176,6 +176,44 @@ fn session_id_from_path(path: &Path) -> String {
         .to_string()
 }
 
+fn codex_workspace_from_cwd(cwd: &str) -> (Option<String>, Option<String>) {
+    let workspace_key = normalize_codex_workspace_key(cwd);
+    let workspace_label = workspace_key
+        .as_deref()
+        .and_then(workspace_label_from_key);
+
+    if workspace_label.is_none() {
+        return (None, None);
+    }
+
+    (workspace_key, workspace_label)
+}
+
+fn normalize_codex_workspace_key(raw: &str) -> Option<String> {
+    let normalized = normalize_workspace_key(raw)?;
+    if normalized.chars().any(char::is_control) {
+        return None;
+    }
+
+    if looks_like_explicit_workspace_path(&normalized) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn looks_like_explicit_workspace_path(path: &str) -> bool {
+    if path.starts_with("//") || path.starts_with('/') {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'/'
+}
+
 fn parse_codex_reader<R: BufRead>(
     mut reader: R,
     session_id: &str,
@@ -225,11 +263,9 @@ fn parse_codex_reader<R: BufRead>(
                         state.session_agent = Some(nickname.clone());
                     }
                     if let Some(ref cwd) = payload.cwd {
-                        state.session_workspace_key = normalize_workspace_key(cwd);
-                        state.session_workspace_label = state
-                            .session_workspace_key
-                            .as_deref()
-                            .and_then(workspace_label_from_key);
+                        let (workspace_key, workspace_label) = codex_workspace_from_cwd(cwd);
+                        state.session_workspace_key = workspace_key;
+                        state.session_workspace_label = workspace_label;
                     }
                 }
                 // Extract model from turn_context
@@ -1272,6 +1308,75 @@ mod tests {
             Some("/Users/alice/demo-repo")
         );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("demo-repo"));
+    }
+
+    #[test]
+    fn test_inaccessible_cwd_still_parses_token_usage() {
+        let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"source":"interactive","cwd":"/path/that/does/not/exist/demo-repo"}}"#;
+        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
+        let content = format!("{}\n{}\n{}", line1, line2, line3);
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(messages[0].tokens.output, 3);
+        assert_eq!(messages[0].tokens.cache_read, 2);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/path/that/does/not/exist/demo-repo")
+        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("demo-repo"));
+    }
+
+    #[test]
+    fn test_session_meta_empty_cwd_clears_workspace_metadata() {
+        let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"source":"interactive","cwd":"   "}}"#;
+        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
+        let content = format!("{}\n{}\n{}", line1, line2, line3);
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].workspace_label, None);
+        assert_eq!(messages[0].tokens.input, 8);
+    }
+
+    #[test]
+    fn test_session_meta_malformed_cwd_clears_workspace_metadata() {
+        let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"source":"interactive","cwd":"file:///Users/alice/demo-repo"}}"#;
+        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
+        let content = format!("{}\n{}\n{}", line1, line2, line3);
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].workspace_label, None);
+        assert_eq!(messages[0].tokens.input, 8);
+    }
+
+    #[test]
+    fn test_session_meta_path_like_noncanonical_cwd_normalizes_consistently() {
+        let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"source":"interactive","cwd":"//server//share///demo-repo/"}}"#;
+        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
+        let content = format!("{}\n{}\n{}", line1, line2, line3);
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("//server/share/demo-repo"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("demo-repo"));
+        assert_eq!(messages[0].tokens.input, 8);
     }
 
     #[test]
