@@ -473,7 +473,7 @@ fn parse_codex_reader<R: BufRead>(
         let mut json_probe = trimmed.as_bytes().to_vec();
         if simd_json::from_slice::<Value>(&mut json_probe).is_err() {
             parse_succeeded = false;
-            break;
+            continue;
         }
     }
 
