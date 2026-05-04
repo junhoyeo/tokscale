@@ -403,6 +403,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     struct CachedParseOutcome {
         messages: Vec<UnifiedMessage>,
         cache_entry: Option<message_cache::CachedSourceEntry>,
+        invalidate_cache: bool,
     }
 
     fn apply_pricing_to_messages(
@@ -437,6 +438,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         CachedParseOutcome {
             messages,
             cache_entry: None,
+            invalidate_cache: false,
         }
     }
 
@@ -462,6 +464,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             return CachedParseOutcome {
                 messages,
                 cache_entry: None,
+                invalidate_cache: false,
             };
         }
 
@@ -469,6 +472,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             return CachedParseOutcome {
                 messages,
                 cache_entry: None,
+                invalidate_cache: false,
             };
         }
 
@@ -483,6 +487,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         CachedParseOutcome {
             messages,
             cache_entry,
+            invalidate_cache: false,
         }
     }
 
@@ -517,12 +522,15 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             return None;
         }
 
+        let codex_incremental =
+            message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
+
         Some(message_cache::CachedSourceEntry::new(
             path,
             fingerprint,
             raw_messages,
             fallback_timestamp_indices,
-            message_cache::build_codex_incremental_cache(path, consumed_offset, state),
+            Some(codex_incremental),
         ))
     }
 
@@ -545,6 +553,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 return CachedParseOutcome {
                     messages: cached_messages(cached, pricing),
                     cache_entry: None,
+                    invalidate_cache: false,
                 };
             }
         }
@@ -567,6 +576,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         CachedParseOutcome {
             messages,
             cache_entry,
+            invalidate_cache: false,
         }
     }
 
@@ -619,17 +629,28 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(path);
 
         if let Some(cached) = source_cache.get(path) {
+            let reparse_from_start = |invalidate_cache: bool| {
+                let mut outcome = parse_full_log_source(path, pricing, is_headless);
+                outcome.invalidate_cache = invalidate_cache && outcome.cache_entry.is_none();
+                outcome
+            };
+
             if cached.fingerprint == fingerprint {
-                return CachedParseOutcome {
-                    messages: finalize_codex_messages(
-                        cached.messages.clone(),
-                        pricing,
-                        is_headless,
-                        &cached.fallback_timestamp_indices,
-                        fallback_timestamp,
-                    ),
-                    cache_entry: None,
-                };
+                if message_cache::codex_cache_entry_matches_fingerprint(cached, &fingerprint) {
+                    return CachedParseOutcome {
+                        messages: finalize_codex_messages(
+                            cached.messages.clone(),
+                            pricing,
+                            is_headless,
+                            &cached.fallback_timestamp_indices,
+                            fallback_timestamp,
+                        ),
+                        cache_entry: None,
+                        invalidate_cache: false,
+                    };
+                }
+
+                return reparse_from_start(true);
             }
 
             if let Some(codex_incremental) = cached.codex_incremental.as_ref() {
@@ -641,7 +662,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                         codex_incremental.consumed_offset,
                         codex_incremental.state.clone(),
                     );
-                    if parsed.parse_succeeded {
+                    if parsed.parse_succeeded && !parsed.unresolved_model_events {
                         let mut raw_messages = cached.messages.clone();
                         let mut fallback_timestamp_indices =
                             cached.fallback_timestamp_indices.clone();
@@ -653,38 +674,33 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                                 .map(|index| existing_len + index),
                         );
                         raw_messages.extend(parsed.messages.clone());
-                        let messages = finalize_codex_messages(
-                            raw_messages.clone(),
-                            pricing,
-                            is_headless,
-                            &fallback_timestamp_indices,
-                            fallback_timestamp,
-                        );
-
-                        if parsed.unresolved_model_events {
-                            return CachedParseOutcome {
-                                messages,
-                                cache_entry: None,
-                            };
-                        }
                         let cache_entry = build_codex_cache_entry(
                             path,
-                            raw_messages,
+                            raw_messages.clone(),
                             parsed.consumed_offset,
                             parsed.state,
-                            fallback_timestamp_indices,
+                            fallback_timestamp_indices.clone(),
                         );
-                        if cache_entry.is_none() {
-                            return parse_full_log_source(path, pricing, is_headless);
-                        }
+                        if let Some(cache_entry) = cache_entry {
+                            let messages = finalize_codex_messages(
+                                raw_messages,
+                                pricing,
+                                is_headless,
+                                &fallback_timestamp_indices,
+                                fallback_timestamp,
+                            );
 
-                        return CachedParseOutcome {
-                            messages,
-                            cache_entry,
-                        };
+                            return CachedParseOutcome {
+                                messages,
+                                cache_entry: Some(cache_entry),
+                                invalidate_cache: false,
+                            };
+                        }
                     }
                 }
             }
+
+            return reparse_from_start(true);
         }
 
         parse_full_log_source(path, pricing, is_headless)
@@ -711,6 +727,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         let CachedParseOutcome {
             messages,
             cache_entry,
+            ..
         } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
             sessions::opencode::parse_opencode_sqlite(path)
         });
@@ -786,15 +803,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .collect();
     all_messages.extend(claude_messages);
 
-    let codex_outcomes: Vec<CachedParseOutcome> = scan_result
+    let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Codex)
         .par_iter()
-        .map(|path| load_or_parse_codex_source(path, &source_cache, pricing, &headless_roots))
+        .map(|path| {
+            (
+                path.clone(),
+                load_or_parse_codex_source(path, &source_cache, pricing, &headless_roots),
+            )
+        })
         .collect();
-    for outcome in codex_outcomes {
+    for (path, outcome) in codex_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
+        } else if outcome.invalidate_cache {
+            source_cache.remove(&path);
         }
     }
 
@@ -3160,6 +3184,79 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let fresh_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let codex_dir = source_home.path().join(".codex/sessions");
+            std::fs::create_dir_all(&codex_dir).unwrap();
+            let path = codex_dir.join("session.jsonl");
+            std::fs::write(
+                &path,
+                concat!(
+                    r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                    "\n",
+                    r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                    "\n"
+                ),
+            )
+            .unwrap();
+
+            let initial_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+            assert_eq!(initial_messages.len(), 1);
+            assert_eq!(initial_messages[0].model_id, "gpt-5.4");
+            assert!(message_cache::SourceMessageCache::load()
+                .get(&path)
+                .and_then(|entry| entry.codex_incremental.as_ref())
+                .is_some());
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::fs::write(
+                &path,
+                concat!(
+                    r#"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                    "\n",
+                    r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                    "\n",
+                    r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+                    "\n"
+                ),
+            )
+            .unwrap();
+
+            let warm_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+            std::env::set_var("HOME", fresh_cache_home.path());
+            let fresh_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            assert_eq!(warm_messages, fresh_messages);
+            assert_eq!(warm_messages.len(), 2);
+            assert!(warm_messages.iter().all(|message| message.model_id == "gpt-5.5"));
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_source_cache_keeps_untimestamped_rows_in_sync_after_append() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let fresh_cache_home = tempfile::TempDir::new().unwrap();
@@ -3209,7 +3306,6 @@ mod tests {
                 &["codex".to_string()],
                 None,
             );
-
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
@@ -3279,6 +3375,7 @@ mod tests {
                 &["codex".to_string()],
                 None,
             );
+            assert!(message_cache::SourceMessageCache::load().get(&path).is_none());
 
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
@@ -3354,6 +3451,60 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_codex_cache_repairs_fallback_timestamps_after_source_mtime_change() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let fresh_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let session_dir = source_home.path().join(".codex/sessions");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            let path = session_dir.join("session.jsonl");
+            let contents = concat!(
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n"
+            );
+            std::fs::write(&path, contents).unwrap();
+
+            let initial_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+            assert_eq!(initial_messages.len(), 1);
+
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::fs::write(&path, contents).unwrap();
+
+            let warm_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            std::env::set_var("HOME", fresh_cache_home.path());
+            let fresh_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            assert_eq!(warm_messages, fresh_messages);
+            assert_ne!(warm_messages[0].timestamp, initial_messages[0].timestamp);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_full_log_parse_preserves_valid_messages_before_invalid_line_error() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
@@ -3401,6 +3552,7 @@ mod tests {
     #[serial_test::serial]
     fn test_codex_cache_does_not_persist_unknown_before_later_turn_context() {
         let cache_home = tempfile::TempDir::new().unwrap();
+        let fresh_cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", cache_home.path());
@@ -3451,11 +3603,94 @@ mod tests {
                 &["codex".to_string()],
                 None,
             );
+
+            std::env::set_var("HOME", fresh_cache_home.path());
+            let fresh_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            assert_eq!(resumed_messages, fresh_messages);
             assert_eq!(resumed_messages.len(), 1);
             assert_eq!(resumed_messages[0].model_id, "gpt-5.5");
+
+            std::env::set_var("HOME", cache_home.path());
             assert!(message_cache::SourceMessageCache::load()
                 .get(&path)
                 .is_some());
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let fresh_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let session_dir = source_home.path().join(".codex/sessions");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            let path = session_dir.join("session.jsonl");
+            std::fs::write(
+                &path,
+                concat!(
+                    r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                    "\n",
+                    r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
+                ),
+            )
+            .unwrap();
+
+            let initial_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+            assert_eq!(initial_messages.len(), 1);
+            assert!(message_cache::SourceMessageCache::load()
+                .get(&path)
+                .is_none());
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(
+                concat!(
+                    "\n",
+                    r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+                    "\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            file.flush().unwrap();
+
+            let warm_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            std::env::set_var("HOME", fresh_cache_home.path());
+            let fresh_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            assert_eq!(warm_messages, fresh_messages);
+            assert_eq!(warm_messages.len(), 2);
         }
 
         match original_home {

@@ -10,7 +10,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_SCHEMA_VERSION: u32 = 9;
+const CACHE_SCHEMA_VERSION: u32 = 10;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -347,6 +347,15 @@ impl SourceMessageCache {
         self.entries.get(&key)
     }
 
+    pub(crate) fn remove(&mut self, path: &Path) {
+        let key = CachedPath::from_path(path);
+        if self.entries.remove(&key).is_some() {
+            self.dirty_keys.remove(&key);
+            self.deleted_paths.insert(key);
+            self.dirty = true;
+        }
+    }
+
     pub(crate) fn prune_missing_files(&mut self) {
         let removed_paths: Vec<CachedPath> = self
             .entries
@@ -630,10 +639,15 @@ pub(crate) fn build_codex_incremental_cache(
     consumed_offset: u64,
     state: CodexParseState,
 ) -> Option<CodexIncrementalCache> {
+    let ends_with_newline = consumed_offset == 0 || file_ends_with_newline(path, consumed_offset);
+    if !ends_with_newline {
+        return None;
+    }
+
     Some(CodexIncrementalCache {
         state,
         consumed_offset,
-        ends_with_newline: consumed_offset == 0 || file_ends_with_newline(path, consumed_offset),
+        ends_with_newline,
         prefix_hash: hash_prefix(path, consumed_offset)?,
     })
 }
@@ -664,6 +678,19 @@ pub(crate) fn codex_prefix_matches(path: &Path, cached: &CodexIncrementalCache) 
         Some(prefix_hash) => prefix_hash == cached.prefix_hash,
         None => false,
     }
+}
+
+pub(crate) fn codex_cache_entry_matches_fingerprint(
+    cached: &CachedSourceEntry,
+    fingerprint: &SourceFingerprint,
+) -> bool {
+    let Some(codex_incremental) = cached.codex_incremental.as_ref() else {
+        return false;
+    };
+
+    codex_incremental.consumed_offset == fingerprint.size
+        && codex_incremental.ends_with_newline
+        && codex_incremental.prefix_hash == fingerprint.content_hash
 }
 
 #[cfg(test)]
@@ -831,6 +858,18 @@ mod tests {
             main_fp1, main_fp2,
             "from_claude_code_path always tracks .meta.json if it exists"
         );
+    }
+
+    #[test]
+    fn test_codex_incremental_cache_requires_newline_boundary() {
+        let file = write_temp_file(b"line-1\nline-2");
+
+        assert!(build_codex_incremental_cache(
+            file.path(),
+            file.as_file().metadata().unwrap().len(),
+            CodexParseState::default(),
+        )
+        .is_none());
     }
 
     #[test]
