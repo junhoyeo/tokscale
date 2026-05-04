@@ -252,6 +252,29 @@ fn parse_codex_reader<R: BufRead>(
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<CodexEntry>(&mut buffer) {
             if let Some(payload) = entry.payload {
+                let payload_model = extract_model(&payload);
+                let is_token_count = entry.entry_type == "event_msg"
+                    && payload.payload_type.as_deref() == Some("token_count");
+                let info_model = if is_token_count {
+                    payload.info.as_ref().and_then(extract_model_from_info)
+                } else {
+                    None
+                };
+                let event_model = payload_model.clone().or(info_model.clone());
+
+                if !pending_model_messages.is_empty()
+                    && event_model.is_none()
+                    && !is_token_count
+                    && entry.entry_type != "session_meta"
+                {
+                    flush_pending_model_messages_as_unknown(
+                        &mut pending_model_messages,
+                        &mut messages,
+                        &mut fallback_timestamp_indices,
+                        &mut unresolved_model_events,
+                    );
+                }
+
                 if entry.entry_type == "session_meta" {
                     if payload.source.as_deref() == Some("exec") {
                         state.session_is_headless = true;
@@ -270,7 +293,7 @@ fn parse_codex_reader<R: BufRead>(
                 }
                 // Extract model from turn_context
                 if entry.entry_type == "turn_context" {
-                    state.current_model = extract_model(&payload);
+                    state.current_model = payload_model.clone();
                     if let Some(model) = state.current_model.clone() {
                         flush_pending_model_messages(
                             &mut pending_model_messages,
@@ -283,37 +306,24 @@ fn parse_codex_reader<R: BufRead>(
                 }
 
                 // Process token_count events
-                if entry.entry_type == "event_msg"
-                    && payload.payload_type.as_deref() == Some("token_count")
-                {
-                    // Try to extract model from payload
-                    if let Some(model) = extract_model(&payload) {
-                        state.current_model = Some(model.clone());
-                        flush_pending_model_messages(
-                            &mut pending_model_messages,
-                            &mut messages,
-                            &mut fallback_timestamp_indices,
-                            &model,
-                        );
-                    }
-
+                if is_token_count {
                     let info = match payload.info {
                         Some(i) => i,
                         None => continue,
                     };
 
-                    // Try to extract model from info
-                    if let Some(model) = info.model.clone().or(info.model_name.clone()) {
+                    let model = payload_model
+                        .or(info_model)
+                        .or_else(|| state.current_model.clone());
+                    if let Some(ref model) = model {
                         state.current_model = Some(model.clone());
                         flush_pending_model_messages(
                             &mut pending_model_messages,
                             &mut messages,
                             &mut fallback_timestamp_indices,
-                            &model,
+                            model,
                         );
                     }
-
-                    let model = state.current_model.clone();
 
                     // Use last_token_usage as the primary increment source.
                     // Upstream totals are mutable snapshots (compaction, context-window
@@ -435,13 +445,22 @@ fn parse_codex_reader<R: BufRead>(
             &state.session_agent,
             state.session_is_headless,
         );
-        if let Some(model) = state.current_model.clone() {
-            flush_pending_model_messages(
-                &mut pending_model_messages,
-                &mut messages,
-                &mut fallback_timestamp_indices,
-                &model,
-            );
+        if !pending_model_messages.is_empty() {
+            if let Some(model) = state.current_model.clone() {
+                flush_pending_model_messages(
+                    &mut pending_model_messages,
+                    &mut messages,
+                    &mut fallback_timestamp_indices,
+                    &model,
+                );
+            } else {
+                flush_pending_model_messages_as_unknown(
+                    &mut pending_model_messages,
+                    &mut messages,
+                    &mut fallback_timestamp_indices,
+                    &mut unresolved_model_events,
+                );
+            }
         }
 
         if let Some((mut msg, used_fallback_timestamp)) = headless_message {
@@ -456,15 +475,12 @@ fn parse_codex_reader<R: BufRead>(
         }
     }
 
-    if !pending_model_messages.is_empty() {
-        unresolved_model_events = true;
-        flush_pending_model_messages(
-            &mut pending_model_messages,
-            &mut messages,
-            &mut fallback_timestamp_indices,
-            "unknown",
-        );
-    }
+    flush_pending_model_messages_as_unknown(
+        &mut pending_model_messages,
+        &mut messages,
+        &mut fallback_timestamp_indices,
+        &mut unresolved_model_events,
+    );
 
     ParsedCodexFile {
         messages,
@@ -489,6 +505,25 @@ fn flush_pending_model_messages(
             fallback_timestamp_indices.push(messages.len() - 1);
         }
     }
+}
+
+fn flush_pending_model_messages_as_unknown(
+    pending_model_messages: &mut Vec<(UnifiedMessage, bool)>,
+    messages: &mut Vec<UnifiedMessage>,
+    fallback_timestamp_indices: &mut Vec<usize>,
+    unresolved_model_events: &mut bool,
+) {
+    if pending_model_messages.is_empty() {
+        return;
+    }
+
+    *unresolved_model_events = true;
+    flush_pending_model_messages(
+        pending_model_messages,
+        messages,
+        fallback_timestamp_indices,
+        "unknown",
+    );
 }
 
 /// Parse a Codex JSONL file with stateful tracking
@@ -558,13 +593,14 @@ fn extract_model(payload: &CodexPayload) -> Option<String> {
         .or(payload
             .info
             .as_ref()
-            .and_then(|i| i.model.clone())
-            .filter(|s| !s.is_empty()))
-        .or(payload
-            .info
-            .as_ref()
-            .and_then(|i| i.model_name.clone())
-            .filter(|s| !s.is_empty()))
+            .and_then(extract_model_from_info))
+}
+
+fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
+    info.model
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or(info.model_name.clone().filter(|s| !s.is_empty()))
 }
 
 struct CodexHeadlessUsage {
@@ -1451,5 +1487,48 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-4o");
+    }
+
+    #[test]
+    fn test_pending_model_messages_do_not_bind_across_unrelated_turns() {
+        let file = create_test_file(concat!(
+            r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T10:00:02Z","type":"assistant_message"}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T10:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T10:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+            "\n"
+        ));
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.unresolved_model_events);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].model_id, "unknown");
+        assert_eq!(parsed.messages[1].model_id, "gpt-5.5");
+    }
+
+    #[test]
+    fn test_token_count_ignores_empty_info_model_until_later_valid_model() {
+        let file = create_test_file(concat!(
+            r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"","model_name":"","total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T10:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            "\n"
+        ));
+
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+
+        assert!(parsed.parse_succeeded);
+        assert!(!parsed.unresolved_model_events);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].model_id, "gpt-5.5");
     }
 }
