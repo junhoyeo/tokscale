@@ -3246,7 +3246,9 @@ mod tests {
 
             assert_eq!(warm_messages, fresh_messages);
             assert_eq!(warm_messages.len(), 2);
-            assert!(warm_messages.iter().all(|message| message.model_id == "gpt-5.5"));
+            assert!(warm_messages
+                .iter()
+                .all(|message| message.model_id == "gpt-5.5"));
         }
 
         match original_home {
@@ -3375,7 +3377,9 @@ mod tests {
                 &["codex".to_string()],
                 None,
             );
-            assert!(message_cache::SourceMessageCache::load().get(&path).is_none());
+            assert!(message_cache::SourceMessageCache::load()
+                .get(&path)
+                .is_none());
 
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(

@@ -178,9 +178,7 @@ fn session_id_from_path(path: &Path) -> String {
 
 fn codex_workspace_from_cwd(cwd: &str) -> (Option<String>, Option<String>) {
     let workspace_key = normalize_codex_workspace_key(cwd);
-    let workspace_label = workspace_key
-        .as_deref()
-        .and_then(workspace_label_from_key);
+    let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
     if workspace_label.is_none() {
         return (None, None);
@@ -208,10 +206,7 @@ fn looks_like_explicit_workspace_path(path: &str) -> bool {
     }
 
     let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && bytes[2] == b'/'
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
 fn parse_codex_reader<R: BufRead>(
@@ -597,10 +592,7 @@ fn extract_model(payload: &CodexPayload) -> Option<String> {
         .filter(|s| !s.is_empty())
         .or(payload.model.clone().filter(|s| !s.is_empty()))
         .or(payload.model_name.clone().filter(|s| !s.is_empty()))
-        .or(payload
-            .info
-            .as_ref()
-            .and_then(extract_model_from_info))
+        .or(payload.info.as_ref().and_then(extract_model_from_info))
 }
 
 fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
@@ -1417,7 +1409,10 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key.as_deref(), Some("//server/share/demo-repo"));
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("//server/share/demo-repo")
+        );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("demo-repo"));
         assert_eq!(messages[0].tokens.input, 8);
     }

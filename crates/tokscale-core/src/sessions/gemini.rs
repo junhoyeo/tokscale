@@ -795,7 +795,8 @@ mod tests {
 
     #[test]
     fn test_parse_gemini_stream_jsonl_skips_corrupt_lines() {
-        let content = b"{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\n\
+        let content =
+            b"{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\n\
 not-json\n\
 {\"type\":\"result\",\"stats\":{\"input_tokens\":10,\"output_tokens\":20}}\n";
         let dir = TempDir::new().unwrap();
@@ -815,7 +816,8 @@ not-json\n\
 
     #[test]
     fn test_parse_gemini_stream_jsonl_skips_truncated_final_line() {
-        let content = b"{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\n\
+        let content =
+            b"{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\n\
 {\"type\":\"result\",\"stats\":{\"input_tokens\":10,\"output_tokens\":20}}\n\
 {\"type\":\"result\",\"stats\":{\"input_tokens\":99";
         let dir = TempDir::new().unwrap();
