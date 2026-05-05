@@ -401,7 +401,14 @@ tokscale whoami
 tokscale submit
 
 # Submit in CI/headless environments without writing credentials
+# Precedence: TOKSCALE_API_TOKEN env > saved credentials file (~/.config/tokscale/credentials.json).
+# When the env var is set, the saved file is ignored for that invocation.
 TOKSCALE_API_TOKEN=tt_xxx tokscale submit
+
+# Revoke a token: visit Settings > API Tokens on the leaderboard site
+# (https://tokscale.com/settings) and click "Revoke" on the token row.
+# Revocation takes effect immediately — subsequent requests with that
+# token will get HTTP 401 "Invalid API token".
 
 # Submit with filters
 tokscale submit --client opencode,claude --since 2024-01-01

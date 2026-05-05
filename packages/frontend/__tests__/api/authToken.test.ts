@@ -57,6 +57,22 @@ describe("GET /api/auth/token", () => {
     expect(await response.json()).toEqual({ error: "Invalid API token" });
   });
 
+  it("returns 401 with an expired-token message when the token has expired", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({ status: "expired" });
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/auth/token", {
+        headers: { Authorization: "Bearer tt_expired" },
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_expired", {
+      touchLastUsedAt: false,
+    });
+    expect(await response.json()).toEqual({ error: "API token has expired" });
+  });
+
   it("accepts the bearer scheme case-insensitively", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",

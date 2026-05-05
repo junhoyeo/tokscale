@@ -883,6 +883,7 @@ fn scan_all_clients_with_env_strategy_inner(
         if xdg.is_file() {
             result.zed_db = Some(xdg);
         }
+        #[cfg(target_os = "macos")]
         if result.zed_db.is_none() {
             let macos_path = PathBuf::from(format!(
                 "{}/Library/Application Support/Zed/threads/threads.db",

@@ -1596,6 +1596,14 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
 fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     // Zed bills hosted models at provider list price + 10%.
     // Source: https://zed.dev/docs/ai/plans-and-usage and https://zed.dev/docs/ai/models
+    //
+    // The multiplier is keyed on the message's `provider_id`, not on the
+    // provenance of the matched LiteLLM pricing row. Today this is safe because
+    // tokscale's bundled LiteLLM dataset only carries upstream-provider rows
+    // (anthropic, openai, google) for the underlying models. If a future
+    // LiteLLM update adds rows under provider `zed.dev` that already include
+    // Zed's markup, this function would double-bill — revisit by threading
+    // the matched-price provenance through `apply_pricing_if_available`.
     if message.client == "zed"
         && message
             .provider_id
@@ -3313,6 +3321,82 @@ mod tests {
         }
     }
 
+    fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
+        // Single session with two turns whose `last_token_usage` deltas are
+        // byte-identical but emitted at different timestamps. The fork-dedup
+        // key includes timestamp, so both turns must survive — collapsing
+        // them would erase legitimate usage when a user happens to send two
+        // turns producing the same per-turn delta.
+        let codex_dir = source_home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("twin-deltas.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-04-30T11:00:00Z","type":"session_meta","payload":{"id":"twin-session","source":"interactive","model_provider":"openai","cwd":"/Users/alice/root"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T11:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T11:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T11:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_codex_keeps_twin_token_counts_at_distinct_timestamps() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_twin_token_count_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            assert_eq!(
+                messages.len(),
+                2,
+                "two turns with identical token deltas at distinct timestamps must both survive dedup",
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.input)
+                    .sum::<i64>(),
+                16,
+                "input tokens normalize cache_read out of input: 2 turns × (10 - 2) = 16",
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.output)
+                    .sum::<i64>(),
+                6,
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.tokens.cache_read)
+                    .sum::<i64>(),
+                4,
+            );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_parse_local_clients_codex_counts_deduplicated_forked_history() {
@@ -4031,6 +4115,80 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert!((msg.cost - 0.022).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_skips_zed_markup_for_non_zed_client() {
+        // Non-zed client with provider_id "zed.dev" must not receive the +10%
+        // markup. The multiplier is gated on (client == "zed" AND provider).
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-sonnet-4-5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "claudecode",
+            "claude-sonnet-4-5",
+            crate::sessions::zed::ZED_HOSTED_PROVIDER,
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        // 10 * 0.001 + 5 * 0.002 = 0.020, no markup.
+        assert!((msg.cost - 0.020).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_skips_zed_markup_for_byok_provider() {
+        // A Zed message whose provider_id is the upstream provider directly
+        // (BYOK / non-hosted path) must not be marked up — the user is paying
+        // the upstream API directly, not through Zed.
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-sonnet-4-5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "zed",
+            "claude-sonnet-4-5",
+            "anthropic",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert!((msg.cost - 0.020).abs() < 1e-12);
     }
 
     #[test]

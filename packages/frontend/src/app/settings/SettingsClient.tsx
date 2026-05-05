@@ -377,6 +377,12 @@ export default function SettingsClient() {
   const handleCopyCreatedToken = async () => {
     if (!createdToken) return;
     await navigator.clipboard.writeText(createdToken.token);
+    // The raw token is shown once and only once. After the user has copied
+    // it we drop it from React state so it no longer lives in the component
+    // tree (and thus no longer in any DevTools / extension snapshot of it).
+    // Users who haven't copied yet still have the value in the reveal panel
+    // until they navigate away.
+    setCreatedToken(null);
   };
 
   if (isLoading) {
