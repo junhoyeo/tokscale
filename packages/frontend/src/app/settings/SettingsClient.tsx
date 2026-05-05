@@ -22,6 +22,10 @@ interface ApiToken {
   lastUsedAt: string | null;
 }
 
+interface CreatedApiToken extends ApiToken {
+  token: string;
+}
+
 const PageWrapper = styled.div`
   min-height: 100vh;
   display: flex;
@@ -85,6 +89,99 @@ const CodeText = styled.code`
 const Description = styled.p`
   font-size: 14px;
   margin-bottom: 16px;
+`;
+
+const FieldLabel = styled.label`
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+`;
+
+const ActionRow = styled.div`
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  margin-bottom: 16px;
+
+  @media (max-width: 560px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const TextInput = styled.input`
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-default);
+  color: var(--color-fg-default);
+  font-size: 14px;
+`;
+
+const PrimaryButton = styled.button`
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid var(--color-accent-fg);
+  background: var(--color-accent-fg);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 150ms;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+`;
+
+const TokenReveal = styled.div`
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-success-fg);
+  background: rgba(63, 185, 80, 0.08);
+  margin-bottom: 16px;
+`;
+
+const TokenCodeRow = styled.div`
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 8px;
+
+  @media (max-width: 560px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const TokenCode = styled.code`
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--color-bg-default);
+  font-size: 13px;
+`;
+
+const SecondaryButton = styled.button`
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-default);
+  color: var(--color-fg-default);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+`;
+
+const ErrorText = styled.p`
+  color: #f85149;
+  font-size: 13px;
+  margin: -4px 0 16px;
 `;
 
 const EmptyState = styled.div`
@@ -160,35 +257,78 @@ const TokenName = styled.p`
   font-weight: 500;
 `;
 
+function apiTokenListItem(token: CreatedApiToken): ApiToken {
+  return {
+    id: token.id,
+    name: token.name,
+    createdAt: token.createdAt,
+    lastUsedAt: token.lastUsedAt,
+  };
+}
+
+function prependApiToken(tokens: ApiToken[], token: ApiToken): ApiToken[] {
+  return [token, ...tokens.filter((item) => item.id !== token.id)];
+}
+
+function mergeApiTokenList(
+  serverTokens: ApiToken[],
+  currentTokens: ApiToken[]
+): ApiToken[] {
+  const serverTokenIds = new Set(serverTokens.map((token) => token.id));
+  const localTokens = currentTokens.filter(
+    (token) => !serverTokenIds.has(token.id)
+  );
+  return [...localTokens, ...serverTokens];
+}
+
+async function fetchApiTokens(): Promise<ApiToken[]> {
+  const tokensResponse = await fetch("/api/settings/tokens");
+  const tokensData = await tokensResponse.json();
+  return Array.isArray(tokensData.tokens) ? tokensData.tokens : [];
+}
+
 export default function SettingsClient() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [tokenName, setTokenName] = useState("CI token");
+  const [createdToken, setCreatedToken] = useState<CreatedApiToken | null>(null);
+  const [isCreatingToken, setIsCreatingToken] = useState(false);
+  const [createTokenError, setCreateTokenError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/auth/session")
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data.user) {
+    let cancelled = false;
+
+    async function loadSettings() {
+      try {
+        const sessionResponse = await fetch("/api/auth/session");
+        const sessionData = await sessionResponse.json();
+        if (cancelled) return;
+
+        if (!sessionData.user) {
           router.push("/api/auth/github?returnTo=/settings");
           return;
         }
-        setUser(data.user);
-        setIsLoading(false);
-      })
-      .catch(() => {
-        router.push("/leaderboard");
-      });
 
-    fetch("/api/settings/tokens")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.tokens) {
-          setTokens(data.tokens);
+        const loadedTokens = await fetchApiTokens().catch(() => []);
+
+        if (!cancelled) {
+          setUser(sessionData.user);
+          setTokens((current) => mergeApiTokenList(loadedTokens, current));
+          setIsLoading(false);
         }
-      })
-      .catch(() => {});
+      } catch {
+        if (!cancelled) {
+          router.push("/leaderboard");
+        }
+      }
+    }
+
+    loadSettings();
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   const handleRevokeToken = async (tokenId: string) => {
@@ -205,6 +345,38 @@ export default function SettingsClient() {
     } catch {
       alert("Failed to revoke token");
     }
+  };
+
+  const handleCreateToken = async () => {
+    setIsCreatingToken(true);
+    setCreateTokenError(null);
+
+    try {
+      const response = await fetch("/api/settings/tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: tokenName }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.token) {
+        throw new Error(data.error || "Failed to create token");
+      }
+
+      setCreatedToken(data.token);
+      setTokens((current) =>
+        prependApiToken(current, apiTokenListItem(data.token))
+      );
+    } catch (error) {
+      setCreateTokenError(error instanceof Error ? error.message : "Failed to create token");
+    } finally {
+      setIsCreatingToken(false);
+    }
+  };
+
+  const handleCopyCreatedToken = async () => {
+    if (!createdToken) return;
+    await navigator.clipboard.writeText(createdToken.token);
   };
 
   if (isLoading) {
@@ -271,7 +443,7 @@ export default function SettingsClient() {
             API Tokens
           </SectionTitle>
           <Description style={{ color: "var(--color-fg-muted)" }}>
-            Tokens are created when you run{" "}
+            Create a token for CI or use one generated by{" "}
             <CodeText
               style={{ backgroundColor: "var(--color-bg-subtle)" }}
             >
@@ -280,6 +452,46 @@ export default function SettingsClient() {
             from the CLI.
           </Description>
 
+          <FieldLabel
+            htmlFor="token-name"
+            style={{ color: "var(--color-fg-default)" }}
+          >
+            Token name
+          </FieldLabel>
+          <ActionRow>
+            <TextInput
+              id="token-name"
+              value={tokenName}
+              onChange={(event) => setTokenName(event.target.value)}
+              maxLength={100}
+            />
+            <PrimaryButton
+              type="button"
+              disabled={isCreatingToken}
+              onClick={handleCreateToken}
+            >
+              {isCreatingToken ? "Creating..." : "Create token"}
+            </PrimaryButton>
+          </ActionRow>
+
+          {createTokenError && <ErrorText>{createTokenError}</ErrorText>}
+
+          {createdToken && (
+            <TokenReveal>
+              <SmallText style={{ color: "var(--color-fg-default)", fontWeight: 600 }}>
+                Copy this token now. It will not be shown again.
+              </SmallText>
+              <TokenCodeRow>
+                <TokenCode style={{ color: "var(--color-fg-default)" }}>
+                  {createdToken.token}
+                </TokenCode>
+                <SecondaryButton type="button" onClick={handleCopyCreatedToken}>
+                  Copy
+                </SecondaryButton>
+              </TokenCodeRow>
+            </TokenReveal>
+          )}
+
           {tokens.length === 0 ? (
             <EmptyState style={{ color: "var(--color-fg-muted)" }}>
               <EmptyIcon>
@@ -287,13 +499,13 @@ export default function SettingsClient() {
               </EmptyIcon>
               <p>No API tokens yet.</p>
               <EmptyText>
-                Run{" "}
+                Create one here or run{" "}
                 <CodeText
                   style={{ backgroundColor: "var(--color-bg-subtle)" }}
                 >
                   tokscale login
                 </CodeText>{" "}
-                to create one.
+                from the CLI.
               </EmptyText>
             </EmptyState>
           ) : (

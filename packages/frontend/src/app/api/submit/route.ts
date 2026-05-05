@@ -8,6 +8,7 @@ import {
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
   mergeClientBreakdowns,
   recalculateDayTotals,
@@ -65,15 +66,14 @@ export async function POST(request: Request) {
     // ========================================
     // STEP 1: Authentication
     // ========================================
-    const authHeader = request.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
+    const token = getBearerToken(request.headers.get("Authorization"));
+    if (!token) {
       return NextResponse.json(
         { error: "Missing or invalid Authorization header" },
         { status: 401 }
       );
     }
 
-    const token = authHeader.slice(7);
     const authResult = await authenticatePersonalToken(token, {
       touchLastUsedAt: false,
     });

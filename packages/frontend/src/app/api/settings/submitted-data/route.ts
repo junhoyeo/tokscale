@@ -5,11 +5,11 @@ import { getSession } from "@/lib/auth/session";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import { db, submissions } from "@/lib/db";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
+import { getBearerToken } from "../../../../lib/auth/bearerToken";
 
 async function resolveUser(request: Request): Promise<{ id: string; username: string } | null> {
-  const authHeader = request.headers.get("Authorization");
-  if (authHeader?.startsWith("Bearer ")) {
-    const token = authHeader.slice(7);
+  const token = getBearerToken(request.headers.get("Authorization"));
+  if (token) {
     const result = await authenticatePersonalToken(token, { touchLastUsedAt: false });
     if (result.status === "valid") {
       return { id: result.userId, username: result.username };

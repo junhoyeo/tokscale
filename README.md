@@ -390,11 +390,17 @@ Example: `grok-code` matches `xai/grok-code-fast-1` ($0.20/$1.50) instead of `az
 # Login to Tokscale (opens browser for GitHub auth)
 tokscale login
 
+# Save an existing Tokscale API token without browser auth
+tokscale login --token tt_xxx
+
 # Check who you're logged in as
 tokscale whoami
 
 # Submit your usage data to the leaderboard
 tokscale submit
+
+# Submit in CI/headless environments without writing credentials
+TOKSCALE_API_TOKEN=tt_xxx tokscale submit
 
 # Submit with filters
 tokscale submit --client opencode,claude --since 2024-01-01
@@ -533,6 +539,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
+| `TOKSCALE_API_TOKEN` | unset | Tokscale personal API token for non-interactive `submit` and `delete-submitted-data` runs. Create one from Settings > API Tokens or save it locally with `tokscale login --token tt_xxx`. |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
 | `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, and `antigravity-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
 
@@ -542,6 +549,9 @@ TOKSCALE_NATIVE_TIMEOUT_MS=600000 tokscale graph --output data.json
 
 # Example: one-off extra scan roots
 TOKSCALE_EXTRA_DIRS='codex:/Users/me/workspace/project-a/.codex/sessions,gemini:/Users/me/imports/imac/gemini/tmp' tokscale
+
+# Example: submit from CI without an interactive browser login
+TOKSCALE_API_TOKEN=tt_xxx tokscale submit
 ```
 
 > **Note**: For persistent extra roots, prefer `scanner.extraScanPaths` in `~/.config/tokscale/settings.json`. `TOKSCALE_EXTRA_DIRS` is best for one-off overrides or CI/CD.
@@ -684,7 +694,7 @@ You can also use a shields.io-style badge for a more compact display:
 
 ### Getting Started
 
-1. **Login** - Run `tokscale login` to authenticate via GitHub
+1. **Login** - Run `tokscale login` to authenticate via GitHub, or create an API token in Settings for CI/headless use
 2. **Submit** - Run `tokscale submit` to upload your usage data
 3. **View** - Visit the web platform to see your profile and the leaderboard
 

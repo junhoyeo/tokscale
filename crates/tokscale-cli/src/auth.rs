@@ -5,6 +5,8 @@ use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
 
+const API_TOKEN_ENV_VAR: &str = "TOKSCALE_API_TOKEN";
+
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
@@ -17,6 +19,19 @@ pub struct Credentials {
     pub avatar_url: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiTokenSource {
+    Environment,
+    StoredCredentials,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiTokenAuth {
+    pub token: String,
+    pub username: Option<String>,
+    pub source: ApiTokenSource,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +62,11 @@ struct UserInfo {
     username: String,
     #[serde(rename = "avatarUrl")]
     avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenValidationResponse {
+    user: UserInfo,
 }
 
 fn get_credentials_path() -> Result<PathBuf> {
@@ -101,6 +121,32 @@ pub fn load_credentials() -> Option<Credentials> {
 
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+pub fn load_api_token_from_env() -> Option<String> {
+    let token = std::env::var(API_TOKEN_ENV_VAR).ok()?;
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+pub fn resolve_api_token() -> Option<ApiTokenAuth> {
+    if let Some(token) = load_api_token_from_env() {
+        return Some(ApiTokenAuth {
+            token,
+            username: None,
+            source: ApiTokenSource::Environment,
+        });
+    }
+
+    load_credentials().map(|credentials| ApiTokenAuth {
+        token: credentials.token,
+        username: Some(credentials.username),
+        source: ApiTokenSource::StoredCredentials,
+    })
 }
 
 pub fn clear_credentials() -> Result<bool> {
@@ -300,6 +346,59 @@ pub async fn login() -> Result<()> {
     Ok(())
 }
 
+pub async fn login_with_token(token: &str) -> Result<()> {
+    use colored::Colorize;
+
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("API token cannot be empty.");
+    }
+    if !token.starts_with("tt_") {
+        anyhow::bail!("Tokscale API tokens must start with `tt_`.");
+    }
+
+    let base_url = get_api_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let response = client
+        .get(format!("{}/api/auth/token", base_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        let error = body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("API token validation failed");
+        anyhow::bail!("{} ({})", error, status);
+    }
+
+    let data: TokenValidationResponse = response.json().await?;
+    let credentials = Credentials {
+        token: token.to_string(),
+        username: data.user.username.clone(),
+        avatar_url: data.user.avatar_url,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    save_credentials(&credentials)?;
+
+    println!(
+        "\n  {}",
+        format!("Success! Logged in as {}", credentials.username.bold()).green()
+    );
+    println!(
+        "{}",
+        "  You can now use 'bunx tokscale@latest submit' to share your usage.\n".bright_black()
+    );
+
+    Ok(())
+}
+
 pub fn logout() -> Result<()> {
     use colored::Colorize;
 
@@ -361,6 +460,34 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
+
+    struct TestEnvGuard {
+        name: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = env::var_os(name);
+            unsafe {
+                env::set_var(name, value);
+            }
+            Self { name, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    env::set_var(self.name, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.name);
+                },
+            }
+        }
+    }
 
     #[cfg(target_os = "linux")]
     struct EnvVarGuard {
@@ -689,5 +816,43 @@ mod tests {
         unsafe {
             env::remove_var("HOME");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_api_token_from_env_trims_value() {
+        let _token = TestEnvGuard::set("TOKSCALE_API_TOKEN", "  tt_ci_token  ");
+
+        assert_eq!(load_api_token_from_env(), Some("tt_ci_token".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_api_token_from_env_ignores_empty_values() {
+        let _token = TestEnvGuard::set("TOKSCALE_API_TOKEN", "   ");
+
+        assert_eq!(load_api_token_from_env(), None);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_api_token_prefers_env_over_saved_credentials() {
+        let temp_dir = TempDir::new().unwrap();
+        let _home = TestEnvGuard::set("HOME", temp_dir.path());
+        let _token = TestEnvGuard::set("TOKSCALE_API_TOKEN", "tt_env_token");
+
+        save_credentials(&Credentials {
+            token: "tt_saved_token".to_string(),
+            username: "saved-user".to_string(),
+            avatar_url: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        let auth = resolve_api_token().unwrap();
+
+        assert_eq!(auth.token, "tt_env_token");
+        assert_eq!(auth.username.as_deref(), None);
+        assert_eq!(auth.source, ApiTokenSource::Environment);
     }
 }

@@ -170,7 +170,13 @@ enum Commands {
         json: bool,
     },
     #[command(about = "Login to Tokscale (opens browser for GitHub auth)")]
-    Login,
+    Login {
+        #[arg(
+            long,
+            help = "Save an existing Tokscale API token without browser auth"
+        )]
+        token: Option<String>,
+    },
     #[command(about = "Logout from Tokscale")]
     Logout,
     #[command(about = "Show current logged in user")]
@@ -474,9 +480,9 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "clients")?;
             run_clients_command(json)
         }
-        Some(Commands::Login) => {
+        Some(Commands::Login { token }) => {
             reject_unsupported_home_override(&cli.home, "login")?;
-            run_login_command()
+            run_login_command(token)
         }
         Some(Commands::Logout) => {
             reject_unsupported_home_override(&cli.home, "logout")?;
@@ -3323,11 +3329,16 @@ fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenC
     }
 }
 
-fn run_login_command() -> Result<()> {
+fn run_login_command(token: Option<String>) -> Result<()> {
     use tokio::runtime::Runtime;
 
     let rt = Runtime::new()?;
-    rt.block_on(async { auth::login().await })
+    rt.block_on(async {
+        match token {
+            Some(token) => auth::login_with_token(&token).await,
+            None => auth::login().await,
+        }
+    })
 }
 
 fn run_logout_command() -> Result<()> {
@@ -3343,8 +3354,9 @@ fn run_delete_data_command() -> Result<()> {
     use std::io::{self, Write};
     use tokio::runtime::Runtime;
 
-    let credentials = auth::load_credentials()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `tokscale login` first."))?;
+    let auth_token = auth::resolve_api_token().ok_or_else(|| {
+        anyhow::anyhow!("Not logged in. Run `tokscale login` or set TOKSCALE_API_TOKEN.")
+    })?;
 
     println!("\n{}", "  ⚠ Delete all submitted usage data".red().bold());
     println!("{}", "  This will permanently remove:".bright_black());
@@ -3398,7 +3410,7 @@ fn run_delete_data_command() -> Result<()> {
     let response = rt.block_on(async {
         reqwest::Client::new()
             .delete(format!("{}/api/settings/submitted-data", api_url))
-            .header("Authorization", format!("Bearer {}", credentials.token))
+            .header("Authorization", format!("Bearer {}", auth_token.token))
             .send()
             .await
     });
@@ -3815,20 +3827,25 @@ fn run_submit_command(
     use tokio::runtime::Runtime;
     use tokscale_core::{generate_graph, GroupBy, ReportOptions};
 
-    let credentials = match auth::load_credentials() {
-        Some(creds) => creds,
+    let auth_token = match auth::resolve_api_token() {
+        Some(token) => token,
         None => {
             eprintln!("\n  {}", "Not logged in.".yellow());
             eprintln!(
                 "{}",
-                "  Run 'bunx tokscale@latest login' first.\n".bright_black()
+                "  Run 'bunx tokscale@latest login' or set TOKSCALE_API_TOKEN.\n".bright_black()
             );
             std::process::exit(1);
         }
     };
 
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        let _ = prompt_star_repo(&credentials.username);
+    if auth_token.source == auth::ApiTokenSource::StoredCredentials
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+    {
+        if let Some(username) = auth_token.username.as_deref() {
+            let _ = prompt_star_repo(username);
+        }
     }
 
     println!("\n  {}\n", "Tokscale - Submit Usage Data".cyan());
@@ -3947,7 +3964,7 @@ fn run_submit_command(
         reqwest::Client::new()
             .post(format!("{}/api/submit", api_url))
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", credentials.token))
+            .header("Authorization", format!("Bearer {}", auth_token.token))
             .json(&submit_payload)
             .send()
             .await
@@ -4013,19 +4030,22 @@ fn run_submit_command(
                     println!("{}", format!("    Active days: {}", days).bright_black());
                 }
             }
-            println!();
-            println!(
-                "{}",
-                osc8_link_with_text(
-                    &format!("{}/u/{}", api_url, credentials.username),
-                    &format!(
-                        "  View your profile: {}/u/{}",
-                        api_url, credentials.username
-                    ),
-                )
-                .cyan()
-            );
-            println!();
+            if let Some(username) = body
+                .username
+                .clone()
+                .or_else(|| auth_token.username.clone())
+            {
+                println!();
+                println!(
+                    "{}",
+                    osc8_link_with_text(
+                        &format!("{}/u/{}", api_url, username),
+                        &format!("  View your profile: {}/u/{}", api_url, username),
+                    )
+                    .cyan()
+                );
+                println!();
+            }
 
             if let Some(warnings) = body.warnings {
                 if !warnings.is_empty() {
@@ -5042,6 +5062,17 @@ mod tests {
     fn test_delete_submitted_data_command_parses() {
         let cli = Cli::try_parse_from(["tokscale", "delete-submitted-data"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
+    }
+
+    #[test]
+    fn test_login_token_option_parses() {
+        let cli = Cli::try_parse_from(["tokscale", "login", "--token", "tt_ci_token"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Login {
+                token: Some(token)
+            }) if token == "tt_ci_token"
+        ));
     }
 
     #[test]
