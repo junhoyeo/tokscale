@@ -46,18 +46,26 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
         })
         .collect();
 
-    let chat_contexts = candidate_contexts(&candidates, CopilotUsageSource::ChatSpan);
-    let inference_contexts = candidate_contexts(&candidates, CopilotUsageSource::InferenceLog);
-    let agent_turn_contexts = candidate_contexts(&candidates, CopilotUsageSource::AgentTurnLog);
+    let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
+    let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
+    let agent_turn_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::AgentTurnLog);
+    let chat_response_ids = candidate_response_ids(&candidates, CopilotUsageSource::ChatSpan);
+    let inference_response_ids =
+        candidate_response_ids(&candidates, CopilotUsageSource::InferenceLog);
+    let agent_turn_response_ids =
+        candidate_response_ids(&candidates, CopilotUsageSource::AgentTurnLog);
 
     candidates
         .into_iter()
         .filter(|candidate| {
             should_emit_candidate(
                 candidate,
-                &chat_contexts,
-                &inference_contexts,
-                &agent_turn_contexts,
+                &chat_traces,
+                &inference_traces,
+                &agent_turn_traces,
+                &chat_response_ids,
+                &inference_response_ids,
+                &agent_turn_response_ids,
             )
         })
         .map(CopilotUsageCandidate::into_message)
@@ -81,6 +89,7 @@ struct TraceContext {
 struct CopilotUsageCandidate {
     source: CopilotUsageSource,
     trace_id: Option<String>,
+    response_id: Option<String>,
     model: String,
     provider_id: String,
     session_id: String,
@@ -98,10 +107,6 @@ enum SessionIdPriority {
 }
 
 impl CopilotUsageCandidate {
-    fn context_key(&self) -> &str {
-        self.trace_id.as_deref().unwrap_or(&self.session_id)
-    }
-
     fn into_message(self) -> UnifiedMessage {
         UnifiedMessage::new_with_dedup(
             "copilot",
@@ -246,6 +251,13 @@ fn candidate_from_attributes(
         return None;
     }
 
+    let response_id = attributes
+        .get("gen_ai.response.id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
     let model = first_non_empty_attr(attributes, MODEL_ATTRS)
         .or_else(|| trace_context.and_then(|context| context.model.as_deref()))
         .unwrap_or("unknown")
@@ -273,6 +285,7 @@ fn candidate_from_attributes(
     Some(CopilotUsageCandidate {
         source,
         trace_id,
+        response_id,
         model,
         provider_id,
         session_id,
@@ -282,43 +295,68 @@ fn candidate_from_attributes(
     })
 }
 
-fn candidate_contexts(
+fn candidate_trace_contexts(
     candidates: &[CopilotUsageCandidate],
     source: CopilotUsageSource,
 ) -> HashSet<String> {
     candidates
         .iter()
-        .filter(|candidate| candidate.source == source && candidate.trace_id.is_some())
-        .map(|candidate| candidate.context_key().to_string())
+        .filter(|candidate| candidate.source == source)
+        .filter_map(|candidate| candidate.trace_id.clone())
+        .collect()
+}
+
+fn candidate_response_ids(
+    candidates: &[CopilotUsageCandidate],
+    source: CopilotUsageSource,
+) -> HashSet<String> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.source == source)
+        .filter_map(|candidate| candidate.response_id.clone())
         .collect()
 }
 
 fn should_emit_candidate(
     candidate: &CopilotUsageCandidate,
-    chat_contexts: &HashSet<String>,
-    inference_contexts: &HashSet<String>,
-    agent_turn_contexts: &HashSet<String>,
+    chat_traces: &HashSet<String>,
+    inference_traces: &HashSet<String>,
+    agent_turn_traces: &HashSet<String>,
+    chat_response_ids: &HashSet<String>,
+    inference_response_ids: &HashSet<String>,
+    agent_turn_response_ids: &HashSet<String>,
 ) -> bool {
-    // Cross-source priority filtering only applies within a known OTel trace.
-    // Records lacking a trace_id cannot be reliably grouped (their session_id
-    // fallback can collide with unrelated records), so emit them unconditionally
-    // and rely on per-record dedup keys to suppress true duplicates.
-    if candidate.trace_id.is_none() {
-        return true;
-    }
+    // Cross-source priority filtering keys off two stable per-event identifiers:
+    // the OTel `trace_id` and `gen_ai.response.id`. Either match is sufficient
+    // to suppress a lower-priority lane, which closes the mixed-trace gap where
+    // one record carries a trace_id and another (describing the same response)
+    // does not. Coarse session attributes such as gen_ai.conversation.id span
+    // multiple turns and are intentionally NOT used here.
+    let trace_id = candidate.trace_id.as_deref();
+    let response_id = candidate.response_id.as_deref();
 
-    let context_key = candidate.context_key();
+    let trace_match = |traces: &HashSet<String>| trace_id.is_some_and(|id| traces.contains(id));
+    let response_match =
+        |response_ids: &HashSet<String>| response_id.is_some_and(|id| response_ids.contains(id));
 
     match candidate.source {
         CopilotUsageSource::ChatSpan => true,
-        CopilotUsageSource::InferenceLog => !chat_contexts.contains(context_key),
+        CopilotUsageSource::InferenceLog => {
+            !trace_match(chat_traces) && !response_match(chat_response_ids)
+        }
         CopilotUsageSource::AgentTurnLog => {
-            !chat_contexts.contains(context_key) && !inference_contexts.contains(context_key)
+            !trace_match(chat_traces)
+                && !trace_match(inference_traces)
+                && !response_match(chat_response_ids)
+                && !response_match(inference_response_ids)
         }
         CopilotUsageSource::AgentSummarySpan => {
-            !chat_contexts.contains(context_key)
-                && !inference_contexts.contains(context_key)
-                && !agent_turn_contexts.contains(context_key)
+            !trace_match(chat_traces)
+                && !trace_match(inference_traces)
+                && !trace_match(agent_turn_traces)
+                && !response_match(chat_response_ids)
+                && !response_match(inference_response_ids)
+                && !response_match(agent_turn_response_ids)
         }
     }
 }
@@ -798,12 +836,13 @@ mod tests {
 
     #[test]
     fn test_parse_copilot_traceless_records_do_not_cross_suppress() {
-        // Two unrelated records that both lack a trace_id must not suppress
-        // each other via session_id collision in the cross-source priority
-        // filter. Here the chat span and inference log share gen_ai.response.id
-        // (used as the session fallback) but are independent records.
-        let content = r#"{"type":"span","spanId":"chat-traceless","name":"chat gpt-5.4-mini","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"shared-resp","gen_ai.usage.input_tokens":11,"gen_ai.usage.output_tokens":3}}
-{"hrTime":[1775934262,0],"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"shared-resp","gen_ai.usage.input_tokens":22,"gen_ai.usage.output_tokens":4},"_body":"GenAI inference: gpt-5.4-mini"}"#;
+        // Two traceless records describing distinct OTel responses must both
+        // emit even when they share a coarse session attribute (here
+        // gen_ai.conversation.id, which spans an entire chat). Cross-source
+        // suppression must key on the per-response identifier
+        // (gen_ai.response.id), not on chat-wide session attributes.
+        let content = r#"{"type":"span","spanId":"chat-traceless","name":"chat gpt-5.4-mini","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-shared","gen_ai.response.id":"resp-A","gen_ai.usage.input_tokens":11,"gen_ai.usage.output_tokens":3}}
+{"hrTime":[1775934262,0],"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-shared","gen_ai.response.id":"resp-B","gen_ai.usage.input_tokens":22,"gen_ai.usage.output_tokens":4},"_body":"GenAI inference: gpt-5.4-mini"}"#;
         let file = create_test_file(content);
 
         let messages = parse_copilot_file(file.path());
@@ -861,6 +900,44 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].timestamp, 1_775_934_264_967);
+    }
+
+    #[test]
+    fn test_parse_copilot_mixed_trace_double_count_suppressed_via_response_id() {
+        // Mixed-trace gap: a traceless chat span and a traced inference log
+        // describe the same OTel response (same gen_ai.response.id). With no
+        // shared trace_id, the response-id key is what links them; only the
+        // higher-priority chat span should emit.
+        let content = r#"{"type":"span","spanId":"chat-mixed","name":"chat gpt-5.4-mini","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-mixed","gen_ai.response.id":"resp-mixed","gen_ai.usage.input_tokens":40,"gen_ai.usage.output_tokens":7}}
+{"hrTime":[1775934261,0],"spanContext":{"traceId":"trace-mixed-inf","spanId":"inf-mixed","traceFlags":1},"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-mixed","gen_ai.usage.input_tokens":40,"gen_ai.usage.output_tokens":7},"_body":"GenAI inference: gpt-5.4-mini"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "conv-mixed");
+        assert_eq!(messages[0].tokens.input, 40);
+        assert_eq!(messages[0].tokens.output, 7);
+    }
+
+    #[test]
+    fn test_parse_copilot_traced_chat_suppresses_traceless_inference_via_response_id() {
+        // Inverse of the mixed-trace gap: a traced chat span suppresses a
+        // traceless inference log via shared gen_ai.response.id, even though
+        // the log carries no trace_id to link it through.
+        let content = r#"{"type":"span","traceId":"trace-chat-inv","spanId":"chat-inv","name":"chat gpt-5.4-mini","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-inv","gen_ai.response.id":"resp-inv","gen_ai.usage.input_tokens":33,"gen_ai.usage.output_tokens":5}}
+{"hrTime":[1775934261,0],"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-inv","gen_ai.usage.input_tokens":33,"gen_ai.usage.output_tokens":5},"_body":"GenAI inference: gpt-5.4-mini"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("trace-chat-inv:chat-inv"),
+        );
+        assert_eq!(messages[0].tokens.input, 33);
+        assert_eq!(messages[0].tokens.output, 5);
     }
 
     #[test]
