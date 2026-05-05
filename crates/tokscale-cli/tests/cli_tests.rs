@@ -1590,6 +1590,46 @@ fn test_clients_json() {
 }
 
 #[test]
+fn test_clients_json_includes_claude_transcripts_path() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+
+    assert_eq!(
+        claude["additionalPaths"][0]["path"],
+        serde_json::json!(tmp.path().join(".claude/transcripts"))
+    );
+    assert_eq!(claude["additionalPaths"][0]["exists"], true);
+}
+
+#[test]
+fn test_clients_command_includes_claude_transcripts_text() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
+
+    cmd_with_home(tmp.path())
+        .arg("clients")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "additional: ~/.claude/transcripts ✓",
+        ));
+}
+
+#[test]
 fn test_clients_json_includes_settings_extra_paths() {
     let tmp = create_empty_fixture_dir();
     write_settings_json(

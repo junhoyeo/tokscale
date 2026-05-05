@@ -296,6 +296,22 @@ pub fn extra_scan_paths_for(
         .collect()
 }
 
+pub fn built_in_extra_scan_paths_for(
+    home_dir: &str,
+    enabled: &HashSet<ClientId>,
+) -> Vec<(ClientId, PathBuf)> {
+    let mut paths = Vec::new();
+
+    if enabled.contains(&ClientId::Claude) {
+        paths.push((
+            ClientId::Claude,
+            PathBuf::from(format!("{}/.claude/transcripts", home_dir)),
+        ));
+    }
+
+    paths
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct CrushProjectList {
     #[serde(default)]
@@ -588,6 +604,10 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
+    }
+
+    for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
@@ -1194,6 +1214,15 @@ mod tests {
         fs::create_dir_all(&claude_path).unwrap();
         let mut file = File::create(claude_path.join("conversation.jsonl")).unwrap();
         file.write_all(b"").unwrap();
+    }
+
+    fn setup_mock_claude_transcripts_dir(base: &std::path::Path) -> PathBuf {
+        let transcript_path = base.join(".claude/transcripts");
+        fs::create_dir_all(&transcript_path).unwrap();
+        let file_path = transcript_path.join("ses_123456789012345678901234567.jsonl");
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(b"").unwrap();
+        file_path
     }
 
     fn setup_mock_codex_dir(base: &std::path::Path) {
@@ -1860,6 +1889,40 @@ mod tests {
 
         let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
         assert_eq!(result.get(ClientId::Claude).len(), 1);
+        assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_claude_transcripts() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_claude_dir(home);
+        let transcript = setup_mock_claude_transcripts_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+
+        assert_eq!(result.get(ClientId::Claude).len(), 2);
+        assert!(
+            result
+                .get(ClientId::Claude)
+                .iter()
+                .any(|path| path == &transcript),
+            "expected Claude transcript {} in {:?}",
+            transcript.display(),
+            result.get(ClientId::Claude)
+        );
+        assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_claude_transcripts_without_projects_dir() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let transcript = setup_mock_claude_transcripts_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+
+        assert_eq!(result.get(ClientId::Claude), &vec![transcript]);
         assert!(result.get(ClientId::OpenCode).is_empty());
     }
 

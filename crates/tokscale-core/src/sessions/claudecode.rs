@@ -780,6 +780,18 @@ mod tests {
         (temp_dir, path)
     }
 
+    fn create_transcript_file(content: &str, filename: &str) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(".claude")
+            .join("transcripts")
+            .join(filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        (temp_dir, path)
+    }
+
     #[test]
     fn test_deduplication_skips_duplicate_entries() {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
@@ -1068,6 +1080,40 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
         assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn test_wrapper_transcript_with_usage_is_parsed() {
+        let content = r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"assistant","timestamp":"2026-04-01T10:00:01.000Z","requestId":"req_wrapper","message":{"id":"msg_wrapper","model":"claude-sonnet-4","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":67,"cache_creation_input_tokens":8}}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_123456789012345678901234567.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "ses_123456789012345678901234567");
+        assert_eq!(messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(messages[0].tokens.input, 123);
+        assert_eq!(messages[0].tokens.output, 45);
+        assert_eq!(messages[0].tokens.cache_read, 67);
+        assert_eq!(messages[0].tokens.cache_write, 8);
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].workspace_label, None);
+    }
+
+    #[test]
+    fn test_wrapper_transcript_without_usage_is_skipped() {
+        let content = r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:01.000Z","message":{"content":"Run tool"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:02.000Z","message":{"content":"Tool result"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_765432109876543210987654321.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "wrapper transcripts without usage metadata must not be estimated"
+        );
     }
 
     // --- Sidechain / Agent tracking tests ---

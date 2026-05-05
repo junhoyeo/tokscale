@@ -4453,6 +4453,52 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_local_clients_claude_transcripts_count_only_usage_metadata() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcripts_dir = temp_dir.path().join(".claude/transcripts");
+        std::fs::create_dir_all(&transcripts_dir).unwrap();
+        std::fs::write(
+            transcripts_dir.join("ses_123456789012345678901234567.jsonl"),
+            r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"assistant","timestamp":"2026-04-01T10:00:01.000Z","requestId":"req_wrapper","message":{"id":"msg_wrapper","model":"claude-sonnet-4","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":67,"cache_creation_input_tokens":8}}}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            transcripts_dir.join("ses_765432109876543210987654321.jsonl"),
+            r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:01.000Z","message":{"content":"Run tool"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:02.000Z","message":{"content":"Tool result"}}
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["claude".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Claude), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "claude");
+        assert_eq!(
+            parsed.messages[0].session_id,
+            "ses_123456789012345678901234567"
+        );
+        assert_eq!(parsed.messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(parsed.messages[0].input, 123);
+        assert_eq!(parsed.messages[0].output, 45);
+        assert_eq!(parsed.messages[0].cache_read, 67);
+        assert_eq!(parsed.messages[0].cache_write, 8);
+    }
+
+    #[test]
     fn test_parse_local_clients_amp_partial_ledger_recovers_message_fallback_day() {
         use chrono::TimeZone;
 

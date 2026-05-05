@@ -2809,7 +2809,10 @@ fn capitalize_client(client: &str) -> String {
 }
 
 fn run_clients_command(json: bool) -> Result<()> {
-    use tokscale_core::{extra_scan_paths_for, parse_local_clients, ClientId, LocalParseOptions};
+    use tokscale_core::{
+        built_in_extra_scan_paths_for, extra_scan_paths_for, parse_local_clients, ClientId,
+        LocalParseOptions,
+    };
 
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -2846,6 +2849,8 @@ fn run_clients_command(json: bool) -> Result<()> {
         sessions_path: String,
         sessions_path_exists: bool,
         #[serde(skip_serializing_if = "Vec::is_empty")]
+        additional_paths: Vec<AdditionalPath>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         legacy_paths: Vec<LegacyPath>,
         message_count: i32,
         headless_supported: bool,
@@ -2856,6 +2861,13 @@ fn run_clients_command(json: bool) -> Result<()> {
         exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AdditionalPath {
+        path: String,
+        exists: bool,
     }
 
     #[derive(serde::Serialize)]
@@ -2885,6 +2897,8 @@ fn run_clients_command(json: bool) -> Result<()> {
     let all_clients: std::collections::HashSet<ClientId> = ClientId::iter().collect();
     let extra_dirs: Vec<(ClientId, String)> =
         tokscale_core::parse_extra_dirs(&extra_dirs_val, &all_clients);
+    let built_in_extra_paths =
+        built_in_extra_scan_paths_for(&home_dir.to_string_lossy(), &all_clients);
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients);
     let copilot_exporter_path = tokscale_core::copilot_exporter_path();
 
@@ -2893,6 +2907,14 @@ fn run_clients_command(json: bool) -> Result<()> {
             .map(|client| {
                 let sessions_path = client.data().resolve_path(&home_dir.to_string_lossy());
                 let sessions_path_exists = Path::new(&sessions_path).exists();
+                let additional_paths: Vec<AdditionalPath> = built_in_extra_paths
+                    .iter()
+                    .filter(|(c, _)| *c == client)
+                    .map(|(_, path)| AdditionalPath {
+                        path: path.to_string_lossy().to_string(),
+                        exists: path.exists(),
+                    })
+                    .collect();
                 let legacy_paths = if client == ClientId::OpenClaw {
                     vec![
                         LegacyPath {
@@ -2973,6 +2995,7 @@ fn run_clients_command(json: bool) -> Result<()> {
                     label,
                     sessions_path,
                     sessions_path_exists,
+                    additional_paths,
                     legacy_paths,
                     message_count: parsed.counts.get(client),
                     headless_supported,
@@ -3033,6 +3056,18 @@ fn run_clients_command(json: bool) -> Result<()> {
                 )
                 .bright_black()
             );
+
+            if !row.additional_paths.is_empty() {
+                let additional_desc: Vec<String> = row
+                    .additional_paths
+                    .iter()
+                    .map(|ap| describe_path(&ap.path, ap.exists))
+                    .collect();
+                println!(
+                    "  {}",
+                    format!("additional: {}", additional_desc.join(", ")).bright_black()
+                );
+            }
 
             if !row.legacy_paths.is_empty() {
                 let legacy_desc: Vec<String> = row
