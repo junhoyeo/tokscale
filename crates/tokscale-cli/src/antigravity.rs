@@ -2249,7 +2249,7 @@ mod tests {
         let mut body = Vec::new();
         for _ in 0..5 {
             body.extend_from_slice(format!("{:x}\r\n", chunk_size).as_bytes());
-            body.extend(std::iter::repeat(b'a').take(chunk_size));
+            body.extend(std::iter::repeat_n(b'a', chunk_size));
             body.extend_from_slice(b"\r\n");
         }
         body.extend_from_slice(b"0\r\n\r\n");

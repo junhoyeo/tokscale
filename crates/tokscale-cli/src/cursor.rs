@@ -4,10 +4,26 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
+}
+
+fn cursor_credentials_path(home_dir: &Path) -> PathBuf {
+    home_dir.join(".config/tokscale/cursor-credentials.json")
+}
+
+fn old_cursor_credentials_path(home_dir: &Path) -> PathBuf {
+    home_dir.join(".tokscale/cursor-credentials.json")
+}
+
+fn cursor_cache_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".config/tokscale/cursor-cache")
+}
+
+fn old_cursor_cache_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".tokscale/cursor-cache")
 }
 
 const USAGE_CSV_ENDPOINT: &str =
@@ -49,7 +65,7 @@ pub struct AccountInfo {
     pub is_active: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct SyncCursorResult {
     pub synced: bool,
     pub rows: usize,
@@ -57,28 +73,16 @@ pub struct SyncCursorResult {
 }
 
 pub fn get_cursor_credentials_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".config/tokscale/cursor-credentials.json"))
-}
-
-fn get_old_cursor_credentials_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".tokscale/cursor-credentials.json"))
+    Ok(cursor_credentials_path(&home_dir()?))
 }
 
 pub fn get_cursor_cache_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".config/tokscale/cursor-cache"))
+    Ok(cursor_cache_dir(&home_dir()?))
 }
 
-fn get_old_cursor_cache_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".tokscale/cursor-cache"))
-}
-
-fn migrate_cache_dir_from_old_path() {
-    let Ok(old_dir) = get_old_cursor_cache_dir() else {
-        return;
-    };
-    let Ok(new_dir) = get_cursor_cache_dir() else {
-        return;
-    };
+fn migrate_cache_dir_from_old_path_in_home(home_dir: &Path) {
+    let old_dir = old_cursor_cache_dir(home_dir);
+    let new_dir = cursor_cache_dir(home_dir);
     if !new_dir.exists()
         && old_dir.exists()
         && fs::create_dir_all(&new_dir).is_ok()
@@ -193,8 +197,8 @@ fn atomic_write_file(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_config_dir() -> Result<()> {
-    let config_dir = home_dir()?.join(".config/tokscale");
+fn ensure_config_dir_in_home(home_dir: &Path) -> Result<()> {
+    let config_dir = home_dir.join(".config/tokscale");
 
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir)?;
@@ -264,8 +268,13 @@ fn sanitize_account_id_for_filename(account_id: &str) -> String {
 }
 
 pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
-    let path = get_cursor_credentials_path().ok()?;
-    let old_path = get_old_cursor_credentials_path().ok()?;
+    let home_dir = home_dir().ok()?;
+    load_credentials_store_from_home(&home_dir)
+}
+
+fn load_credentials_store_from_home(home_dir: &Path) -> Option<CursorCredentialsStore> {
+    let path = cursor_credentials_path(home_dir);
+    let old_path = old_cursor_credentials_path(home_dir);
     let read_path = if path.exists() {
         path.clone()
     } else if old_path.exists() {
@@ -286,12 +295,10 @@ pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
                 }
             }
             if changed || read_path != path {
-                let _ = save_credentials_store(&store);
+                let _ = save_credentials_store_in_home(home_dir, &store);
             }
             if read_path != path {
-                if let Ok(old) = get_old_cursor_credentials_path() {
-                    let _ = fs::remove_file(old);
-                }
+                let _ = fs::remove_file(old_cursor_credentials_path(home_dir));
             }
             return Some(store);
         }
@@ -307,11 +314,9 @@ pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
             accounts,
         };
 
-        let _ = save_credentials_store(&migrated);
+        let _ = save_credentials_store_in_home(home_dir, &migrated);
         if read_path != path {
-            if let Ok(old) = get_old_cursor_credentials_path() {
-                let _ = fs::remove_file(old);
-            }
+            let _ = fs::remove_file(old_cursor_credentials_path(home_dir));
         }
         return Some(migrated);
     }
@@ -320,8 +325,12 @@ pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
 }
 
 pub fn save_credentials_store(store: &CursorCredentialsStore) -> Result<()> {
-    ensure_config_dir()?;
-    let path = get_cursor_credentials_path()?;
+    save_credentials_store_in_home(&home_dir()?, store)
+}
+
+fn save_credentials_store_in_home(home_dir: &Path, store: &CursorCredentialsStore) -> Result<()> {
+    ensure_config_dir_in_home(home_dir)?;
+    let path = cursor_credentials_path(home_dir);
     let json = serde_json::to_string_pretty(store)?;
     atomic_write_file(&path, &json)?;
 
@@ -607,11 +616,12 @@ fn is_cursor_usage_csv_filename(name: &str) -> bool {
 }
 
 pub fn has_cursor_usage_cache() -> bool {
-    migrate_cache_dir_from_old_path();
-    let cache_dir = match get_cursor_cache_dir() {
-        Ok(d) => d,
+    let home_dir = match home_dir() {
+        Ok(home_dir) => home_dir,
         Err(_) => return false,
     };
+    migrate_cache_dir_from_old_path_in_home(&home_dir);
+    let cache_dir = cursor_cache_dir(&home_dir);
     if !cache_dir.exists() {
         return false;
     }
@@ -746,10 +756,36 @@ pub async fn fetch_cursor_usage_csv(session_token: &str) -> Result<String> {
     Ok(text)
 }
 
-pub async fn sync_cursor_cache() -> SyncCursorResult {
-    migrate_cache_dir_from_old_path();
+async fn sync_cursor_cache_with_fetcher<F, Fut>(fetch_usage_csv: F) -> SyncCursorResult
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let home_dir = match home_dir() {
+        Ok(home_dir) => home_dir,
+        Err(e) => {
+            return SyncCursorResult {
+                synced: false,
+                rows: 0,
+                error: Some(format!("Failed to get home dir: {}", e)),
+            };
+        }
+    };
 
-    let store = match load_credentials_store() {
+    sync_cursor_cache_with_fetcher_in_home(&home_dir, fetch_usage_csv).await
+}
+
+async fn sync_cursor_cache_with_fetcher_in_home<F, Fut>(
+    home_dir: &Path,
+    fetch_usage_csv: F,
+) -> SyncCursorResult
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    migrate_cache_dir_from_old_path_in_home(home_dir);
+
+    let store = match load_credentials_store_from_home(home_dir) {
         Some(s) => s,
         None => {
             return SyncCursorResult {
@@ -768,16 +804,7 @@ pub async fn sync_cursor_cache() -> SyncCursorResult {
         };
     }
 
-    let cache_dir = match get_cursor_cache_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            return SyncCursorResult {
-                synced: false,
-                rows: 0,
-                error: Some(format!("Failed to get cache dir: {}", e)),
-            };
-        }
-    };
+    let cache_dir = cursor_cache_dir(home_dir);
     if let Err(e) = fs::create_dir_all(&cache_dir) {
         return SyncCursorResult {
             synced: false,
@@ -806,7 +833,7 @@ pub async fn sync_cursor_cache() -> SyncCursorResult {
     for (account_id, credentials) in &store.accounts {
         let is_active = account_id == &store.active_account_id;
 
-        match fetch_cursor_usage_csv(&credentials.session_token).await {
+        match fetch_usage_csv(credentials.session_token.clone()).await {
             Ok(csv_text) => {
                 let file_path = if is_active {
                     cache_dir.join("usage.csv")
@@ -858,6 +885,13 @@ pub async fn sync_cursor_cache() -> SyncCursorResult {
             ))
         },
     }
+}
+
+pub async fn sync_cursor_cache() -> SyncCursorResult {
+    sync_cursor_cache_with_fetcher(|session_token| async move {
+        fetch_cursor_usage_csv(&session_token).await
+    })
+    .await
 }
 
 fn archive_cache_file(file_path: &std::path::Path, label: &str) -> Result<()> {
@@ -1088,6 +1122,37 @@ pub fn run_cursor_accounts(json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn run_cursor_sync(json: bool) -> Result<()> {
+    use colored::Colorize;
+    use tokio::runtime::Runtime;
+
+    let rt = Runtime::new()?;
+    let result = rt.block_on(sync_cursor_cache());
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    println!("\n  {}\n", "Cursor IDE - Sync".cyan());
+    if result.synced {
+        println!(
+            "{}",
+            format!("  Synced {} Cursor usage event(s).", result.rows).green()
+        );
+        if let Some(error) = result.error {
+            println!("{}", format!("  Warning: {}", error).yellow());
+        }
+    } else if let Some(error) = result.error {
+        println!("{}", format!("  Sync failed: {}", error).red());
+    } else {
+        println!("{}", "  Sync failed.".red());
+    }
+    println!();
+
+    Ok(())
+}
+
 pub fn run_cursor_switch(name: &str) -> Result<()> {
     use colored::Colorize;
 
@@ -1103,6 +1168,7 @@ pub fn run_cursor_switch(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -1255,6 +1321,74 @@ mod tests {
         // This test verifies the actual behavior: all parseable rows are counted
         let csv = "Date,Model,Tokens\n2024-01-01,gpt-4,100\ninvalid,row\n2024-01-02,gpt-4,200\n";
         assert_eq!(count_cursor_csv_rows(csv), 3);
+    }
+
+    #[test]
+    fn test_sync_cursor_cache_writes_active_and_secondary_account_files() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account".to_string(),
+            CursorCredentials {
+                session_token: "token-secondary".to_string(),
+                user_id: Some("team/account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("personal".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |session_token| {
+                let csv = match session_token.as_str() {
+                    "token-active" => "Date,Model,Tokens\n2026-01-01,gpt-5,100\n",
+                    "token-secondary" => {
+                        "Date,Model,Tokens\n2026-01-02,gpt-5,200\n2026-01-03,gpt-5,300\n"
+                    }
+                    _ => "Date,Model,Tokens\n",
+                }
+                .to_string();
+                async move { Ok(csv) }
+            },
+        ));
+
+        assert!(result.synced);
+        assert_eq!(result.rows, 3);
+        assert_eq!(result.error, None);
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        assert_eq!(
+            fs::read_to_string(cache_dir.join("usage.csv"))?,
+            "Date,Model,Tokens\n2026-01-01,gpt-5,100\n"
+        );
+        assert_eq!(
+            fs::read_to_string(cache_dir.join("usage.team-account.csv"))?,
+            "Date,Model,Tokens\n2026-01-02,gpt-5,200\n2026-01-03,gpt-5,300\n"
+        );
+        assert!(!cache_dir.join("usage.active-account.csv").exists());
+
+        Ok(())
     }
 
     #[test]

@@ -423,6 +423,9 @@ tokscale cursor status
 # List saved Cursor accounts
 tokscale cursor accounts
 
+# Manually refresh cached Cursor usage
+tokscale cursor sync
+
 # Switch active account (controls which account syncs to cursor-cache/usage.csv)
 tokscale cursor switch work
 

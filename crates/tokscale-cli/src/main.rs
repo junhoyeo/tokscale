@@ -284,6 +284,11 @@ enum CursorSubcommand {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
+    #[command(about = "Sync Cursor usage into the local cache")]
+    Sync {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
     #[command(about = "Switch active Cursor account")]
     Switch {
         #[arg(help = "Account label or id")]
@@ -357,6 +362,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -399,6 +405,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -441,6 +448,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -510,6 +518,7 @@ fn main() -> Result<()> {
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients);
+            auto_sync_cursor_before_tui(&cli.home, &clients)?;
             tui::run(
                 &cli.theme,
                 cli.refresh,
@@ -634,6 +643,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -1006,6 +1016,96 @@ fn emit_legacy_client_flag_warning(used: &[&'static str]) {
     );
 }
 
+fn client_filter_includes_cursor(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_none_or(|sources| sources.iter().any(|source| source == "cursor"))
+}
+
+fn client_filter_explicitly_requests_cursor(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_some_and(|sources| sources.iter().any(|source| source == "cursor"))
+}
+
+fn should_auto_sync_cursor_for_local_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> bool {
+    home_dir.is_none() && client_filter_includes_cursor(clients)
+}
+
+fn auto_sync_cursor_for_local_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Option<cursor::SyncCursorResult> {
+    if !should_auto_sync_cursor_for_local_report(home_dir, clients)
+        || !cursor::is_cursor_logged_in()
+    {
+        return None;
+    }
+
+    Some(run_best_effort_cursor_sync_with_runtime_factory(
+        tokio::runtime::Runtime::new,
+    ))
+}
+
+fn run_best_effort_cursor_sync_with_runtime_factory<F>(build_runtime: F) -> cursor::SyncCursorResult
+where
+    F: FnOnce() -> std::io::Result<tokio::runtime::Runtime>,
+{
+    match build_runtime() {
+        Ok(rt) => rt.block_on(async { cursor::sync_cursor_cache().await }),
+        Err(error) => cursor::SyncCursorResult {
+            synced: false,
+            rows: 0,
+            error: Some(format!(
+                "Failed to initialize Cursor sync runtime: {}",
+                error
+            )),
+        },
+    }
+}
+
+fn auto_sync_cursor_before_tui(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Result<()> {
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(clients);
+    let cursor_sync_result = auto_sync_cursor_for_local_report(home_dir, clients);
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
+    Ok(())
+}
+
+fn emit_cursor_sync_warning(
+    sync: Option<&cursor::SyncCursorResult>,
+    had_cursor_cache: bool,
+    explicit_cursor_filter: bool,
+) {
+    let Some(sync) = sync else {
+        return;
+    };
+    let Some(error) = sync.error.as_ref() else {
+        return;
+    };
+    if sync.synced || had_cursor_cache || explicit_cursor_filter {
+        use colored::Colorize;
+        let prefix = if sync.synced {
+            "Cursor sync warning"
+        } else if had_cursor_cache {
+            "Cursor sync failed; using cached data"
+        } else {
+            "Cursor sync failed"
+        };
+        eprintln!("{}", format!("  {}: {}", prefix, error).yellow());
+    }
+}
+
 fn default_submit_clients() -> Vec<String> {
     let mut clients: Vec<String> = tokscale_core::ClientId::iter()
         .filter(|client| client.submit_default())
@@ -1293,11 +1393,14 @@ fn run_models_report(
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -1320,6 +1423,11 @@ fn run_models_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
 
     let processing_time_ms = start.elapsed().as_millis();
 
@@ -1851,11 +1959,14 @@ fn run_monthly_report(
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -1878,6 +1989,11 @@ fn run_monthly_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
 
     let processing_time_ms = start.elapsed().as_millis();
 
@@ -2137,11 +2253,14 @@ fn run_hourly_report(
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -2164,6 +2283,11 @@ fn run_hourly_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
 
     let processing_time_ms = start.elapsed().as_millis();
 
@@ -4097,6 +4221,7 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
         } => cursor::run_cursor_logout(name, all, purge_cache),
         CursorSubcommand::Status { name } => cursor::run_cursor_status(name),
         CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
+        CursorSubcommand::Sync { json } => cursor::run_cursor_sync(json),
         CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
     }
 }
@@ -5518,6 +5643,59 @@ mod tests {
     #[test]
     fn clap_accepts_models_light_write_cache_after_subcommand() {
         assert!(Cli::try_parse_from(["tokscale", "models", "--light", "--write-cache"]).is_ok());
+    }
+
+    #[test]
+    fn clap_accepts_cursor_sync_command() {
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn cursor_auto_sync_enabled_for_default_report() {
+        assert!(should_auto_sync_cursor_for_local_report(&None, &None));
+    }
+
+    #[test]
+    fn cursor_auto_sync_enabled_when_cursor_filter_is_explicit() {
+        assert!(should_auto_sync_cursor_for_local_report(
+            &None,
+            &Some(vec!["cursor".to_string()])
+        ));
+    }
+
+    #[test]
+    fn cursor_auto_sync_disabled_when_filter_excludes_cursor() {
+        assert!(!should_auto_sync_cursor_for_local_report(
+            &None,
+            &Some(vec!["codex".to_string()])
+        ));
+    }
+
+    #[test]
+    fn cursor_auto_sync_disabled_for_home_override() {
+        assert!(!should_auto_sync_cursor_for_local_report(
+            &Some("/tmp/other-home".to_string()),
+            &None
+        ));
+        assert!(!should_auto_sync_cursor_for_local_report(
+            &Some("/tmp/other-home".to_string()),
+            &Some(vec!["cursor".to_string()])
+        ));
+    }
+
+    #[test]
+    fn cursor_auto_sync_runtime_init_failure_is_best_effort() {
+        let result = run_best_effort_cursor_sync_with_runtime_factory(|| {
+            Err(std::io::Error::other("runtime unavailable"))
+        });
+
+        assert!(!result.synced);
+        assert_eq!(result.rows, 0);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("runtime unavailable")));
     }
 
     #[test]

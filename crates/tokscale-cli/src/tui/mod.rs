@@ -190,28 +190,6 @@ pub fn run(
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn launches_with_24h_old_cache_renders_immediately() {
-        let (cached_data, needs_background_load) =
-            decide_initial_data(CacheResult::Stale(UsageData::default()));
-
-        assert!(cached_data.is_some());
-        assert!(needs_background_load);
-    }
-
-    #[test]
-    fn miss_renders_empty_until_background_completes() {
-        let (cached_data, needs_background_load) = decide_initial_data(CacheResult::Miss);
-
-        assert!(cached_data.is_none());
-        assert!(needs_background_load);
-    }
-}
-
 fn restore_terminal_best_effort() {
     let _ = execute!(
         io::stdout(),
@@ -372,4 +350,26 @@ pub fn test_data_loading() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launches_with_24h_old_cache_renders_immediately() {
+        let (cached_data, needs_background_load) =
+            decide_initial_data(CacheResult::Stale(UsageData::default()));
+
+        assert!(cached_data.is_some());
+        assert!(needs_background_load);
+    }
+
+    #[test]
+    fn miss_renders_empty_until_background_completes() {
+        let (cached_data, needs_background_load) = decide_initial_data(CacheResult::Miss);
+
+        assert!(cached_data.is_none());
+        assert!(needs_background_load);
+    }
 }
