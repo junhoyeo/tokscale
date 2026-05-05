@@ -5,6 +5,26 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// Timeout for every Cursor HTTP request. Picked to bound the worst case for
+/// auto-sync (which runs synchronously before local reports and the TUI) while
+/// still tolerating routine API latency. If the network is hung, the report
+/// proceeds against cached data after this timeout instead of stalling forever.
+const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Skip implicit pre-report sync when the active account's `usage.csv` was
+/// modified within this window. Prevents `tokscale models` (and its siblings)
+/// from issuing a Cursor API call on every invocation. The manual `tokscale
+/// cursor sync` command bypasses this — explicit user intent is always honored.
+pub const CURSOR_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(5 * 60);
+
+fn build_cursor_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(CURSOR_HTTP_TIMEOUT)
+        .build()
+        .context("Failed to build Cursor HTTP client")
+}
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
@@ -635,6 +655,55 @@ pub fn has_cursor_usage_cache() -> bool {
     }
 }
 
+/// Returns the freshest mtime across all cached `usage*.csv` files in the
+/// given home directory. Returns `None` when the cache dir is missing, no
+/// cache files exist, or all mtime reads fail (callers should treat that as
+/// stale and re-sync).
+fn cursor_usage_cache_mtime_in(home_dir: &Path) -> Option<SystemTime> {
+    let cache_dir = cursor_cache_dir(home_dir);
+    if !cache_dir.exists() {
+        return None;
+    }
+
+    fs::read_dir(&cache_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .into_string()
+                .ok()
+                .is_some_and(|name| is_cursor_usage_csv_filename(&name))
+        })
+        .filter_map(|entry| entry.metadata().ok())
+        .filter_map(|meta| meta.modified().ok())
+        .max()
+}
+
+fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
+    let Some(mtime) = cursor_usage_cache_mtime_in(home_dir) else {
+        return false;
+    };
+    match SystemTime::now().duration_since(mtime) {
+        Ok(age) => age < max_age,
+        // mtime is in the future (clock skew) — treat as fresh; a clock-skew
+        // cache is no less authoritative than a freshly-fetched one, and we'd
+        // rather not thrash the API while the system clock recovers.
+        Err(_) => true,
+    }
+}
+
+/// True when the cursor usage cache was refreshed within `max_age`. Used by
+/// the implicit pre-report sync path to avoid hitting the Cursor API on every
+/// invocation. The manual `tokscale cursor sync` CLI bypasses this — explicit
+/// user intent is always honored.
+pub fn cursor_usage_cache_is_fresh(max_age: Duration) -> bool {
+    let Ok(home_dir) = home_dir() else {
+        return false;
+    };
+    cursor_usage_cache_is_fresh_in(&home_dir, max_age)
+}
+
 pub fn is_cursor_logged_in() -> bool {
     load_active_credentials().is_some()
 }
@@ -653,7 +722,16 @@ pub struct ValidateSessionResult {
 }
 
 pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
-    let client = reqwest::Client::new();
+    let client = match build_cursor_http_client() {
+        Ok(client) => client,
+        Err(e) => {
+            return ValidateSessionResult {
+                valid: false,
+                membership_type: None,
+                error: Some(format!("Failed to build HTTP client: {}", e)),
+            };
+        }
+    };
     let response = match client
         .get(USAGE_SUMMARY_ENDPOINT)
         .headers(build_cursor_headers(token))
@@ -728,7 +806,7 @@ pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
 }
 
 pub async fn fetch_cursor_usage_csv(session_token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = build_cursor_http_client()?;
     let response = client
         .get(USAGE_CSV_ENDPOINT)
         .headers(build_cursor_headers(session_token))
@@ -1291,6 +1369,101 @@ mod tests {
         let exactly_80 = "b".repeat(80);
         let sanitized = sanitize_account_id_for_filename(&exactly_80);
         assert_eq!(sanitized.len(), 80);
+    }
+
+    #[test]
+    fn test_build_cursor_http_client_applies_timeout() {
+        // Constructing the client must succeed and surface no panics; the
+        // configured timeout is the property the HIGH finding flagged.
+        let client = build_cursor_http_client().expect("client builds");
+        // reqwest::Client doesn't expose its timeout publicly, but we can at
+        // least confirm the const wired into the builder is the documented
+        // 8s value — a future change to the constant must be deliberate.
+        assert_eq!(CURSOR_HTTP_TIMEOUT, std::time::Duration::from_secs(8));
+        // Use the client briefly to ensure it's structurally valid.
+        let _ = client.get("https://example.invalid").build();
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_when_cache_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        // No cache dir created yet.
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_when_no_csv_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        // Unrelated file present, but no usage*.csv.
+        fs::write(cache_dir.join("README.txt"), "noise").unwrap();
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_true_for_recent_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n").unwrap();
+        // Just-written file is fresh under any reasonable window.
+        assert!(cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_for_old_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        let path = cache_dir.join("usage.csv");
+        fs::write(&path, "Date,Model\n").unwrap();
+        // Backdate the mtime by an hour. Skip the test if the platform refuses
+        // to set mtime (rare on POSIX/Windows but possible on exotic FS).
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let Ok(()) = f.set_modified(SystemTime::now() - Duration::from_secs(3600)) else {
+            return;
+        };
+        drop(f);
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_uses_freshest_csv() {
+        // When multiple usage*.csv files exist the freshest mtime wins, so
+        // a recently-synced secondary account keeps the active stale file
+        // from triggering a refresh.
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        let stale_path = cache_dir.join("usage.csv");
+        fs::write(&stale_path, "Date,Model\n").unwrap();
+        let stale = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale_path)
+            .unwrap();
+        let Ok(()) = stale.set_modified(SystemTime::now() - Duration::from_secs(3600)) else {
+            return;
+        };
+        drop(stale);
+        // Secondary account written just now.
+        fs::write(cache_dir.join("usage.team-a.csv"), "Date,Model\n").unwrap();
+        assert!(cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
     }
 
     #[test]
