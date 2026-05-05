@@ -582,7 +582,13 @@ fn timestamp_ms_from_scalar(value: &Value) -> Option<i64> {
 }
 
 fn timestamp_ms_from_unix_nanos(value: &Value) -> Option<i64> {
-    value_as_i64(value).map(|raw| raw / 1_000_000)
+    // OTel `timeUnixNano` is unsigned-by-spec; a negative or zero value is
+    // malformed. Refuse it and let the caller fall through to the next
+    // timestamp source (or the file modified time) instead of producing a
+    // pre-1970 timestamp downstream.
+    value_as_i64(value)
+        .filter(|raw| *raw > 0)
+        .map(|raw| raw / 1_000_000)
 }
 
 #[cfg(test)]
@@ -827,6 +833,12 @@ mod tests {
         keys.sort();
         assert_eq!(keys.len(), 2);
         assert_ne!(keys[0], keys[1], "dedup keys must be unique: {keys:?}");
+        for key in &keys {
+            assert!(
+                key.starts_with("agent-turn:trace-noidx:idx-"),
+                "expected line-index fallback shape in {key}",
+            );
+        }
     }
 
     #[test]
@@ -849,6 +861,86 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].timestamp, 1_775_934_264_967);
+    }
+
+    #[test]
+    fn test_parse_copilot_inference_log_negative_time_unix_nano_falls_back() {
+        // Malformed `timeUnixNano` must not produce a negative timestamp; the
+        // parser should fall through to the next available timestamp source
+        // (here, the file modified time, which is non-negative).
+        let content = r#"{"timeUnixNano":-1,"spanContext":{"traceId":"trace-bad","spanId":"span-bad","traceFlags":1},"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-bad","gen_ai.usage.input_tokens":5,"gen_ai.usage.output_tokens":2},"_body":"GenAI inference: gpt-5.4-mini"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].timestamp >= 0,
+            "negative timeUnixNano should not leak into output, got {}",
+            messages[0].timestamp,
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_interleaved_multi_trace_suppression_is_per_trace() {
+        // Two traces interleaved on the wire. Source-priority suppression must
+        // be scoped per-trace; both invoke_agent records should be dropped in
+        // favor of their own trace's chat span, regardless of line order.
+        let content = r#"{"type":"span","traceId":"trace-A","spanId":"agent-A","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-A","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":30}}
+{"type":"span","traceId":"trace-B","spanId":"chat-B","name":"chat gpt-5.4-mini","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-B","gen_ai.usage.input_tokens":50,"gen_ai.usage.output_tokens":8}}
+{"type":"span","traceId":"trace-A","spanId":"chat-A","name":"chat gpt-5.4-mini","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-A","gen_ai.usage.input_tokens":40,"gen_ai.usage.output_tokens":6}}
+{"type":"span","traceId":"trace-B","spanId":"agent-B","name":"invoke_agent","endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-B","gen_ai.usage.input_tokens":80,"gen_ai.usage.output_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        let mut keys: Vec<String> = messages
+            .iter()
+            .filter_map(|m| m.dedup_key.clone())
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["trace-A:chat-A".to_string(), "trace-B:chat-B".to_string()],
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_agent_turn_log_with_top_level_trace_id() {
+        // Some VS Code variants emit `traceId` at the top level rather than
+        // nested inside `spanContext`. The agent-turn classifier should still
+        // resolve the trace and produce a stable per-turn dedup key.
+        let content = r#"{"hrTime":[1775934264,0],"traceId":"trace-toplevel","spanId":"turn-toplevel","attributes":{"event.name":"copilot_chat.agent.turn","turn.index":5,"gen_ai.request.model":"claude-sonnet-4.5","gen_ai.usage.input_tokens":15,"gen_ai.usage.output_tokens":4},"_body":"copilot_chat.agent.turn: 5"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4.5");
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("agent-turn:trace-toplevel:5"),
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_traced_span_does_not_suppress_traceless_record_with_colliding_session() {
+        // A traced chat span has trace_id "T-collide". A separate traceless
+        // inference log uses "T-collide" as its session-fallback (gen_ai.response.id).
+        // The traceless record must NOT be suppressed by the traced chat span's
+        // context_key, because they are unrelated events. Both should emit.
+        let content = r#"{"type":"span","traceId":"T-collide","spanId":"chat-traced","name":"chat gpt-5.4-mini","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":2}}
+{"hrTime":[1775934261,0],"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"T-collide","gen_ai.usage.input_tokens":20,"gen_ai.usage.output_tokens":3},"_body":"GenAI inference: gpt-5.4-mini"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
+        let total_output: i64 = messages.iter().map(|m| m.tokens.output).sum();
+        assert_eq!(total_input, 30);
+        assert_eq!(total_output, 5);
     }
 
     #[test]
