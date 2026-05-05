@@ -1811,6 +1811,45 @@ fn parse_timestamp(values: &[Option<&Value>]) -> Option<i64> {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::ffi::OsString;
+
+    /// RAII guard that redirects every tokscale config-dir lookup into a
+    /// caller-supplied directory and restores the previous environment on
+    /// drop (including on panic). Setting `HOME` alone is not sufficient on
+    /// Linux CI runners because `dirs::config_dir()` honors
+    /// `$XDG_CONFIG_HOME` first; tokscale's own `paths::get_config_dir()`
+    /// short-circuits on `TOKSCALE_CONFIG_DIR`, which is the canonical
+    /// hermetic override for tests.
+    struct TestEnvGuard {
+        prev_home: Option<OsString>,
+        prev_config_dir: Option<OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn redirect_to(path: &Path) -> Self {
+            let prev_home = std::env::var_os("HOME");
+            let prev_config_dir = std::env::var_os("TOKSCALE_CONFIG_DIR");
+            std::env::set_var("HOME", path);
+            std::env::set_var("TOKSCALE_CONFIG_DIR", path);
+            Self {
+                prev_home,
+                prev_config_dir,
+            }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            match self.prev_home.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.prev_config_dir.take() {
+                Some(dir) => std::env::set_var("TOKSCALE_CONFIG_DIR", dir),
+                None => std::env::remove_var("TOKSCALE_CONFIG_DIR"),
+            }
+        }
+    }
 
     fn sample_manifest() -> AntigravityManifest {
         AntigravityManifest {
@@ -2014,8 +2053,7 @@ mod tests {
     #[serial]
     fn cleanup_stale_session_artifacts_removes_legacy_files_after_migration() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         let sessions_dir = get_antigravity_sessions_dir().unwrap();
         std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -2053,19 +2091,13 @@ mod tests {
         cleanup_stale_session_artifacts(&previous, &next).unwrap();
         assert!(!legacy_path.exists());
         assert!(new_path.exists());
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     #[serial]
     fn delete_artifact_relative_path_rejects_paths_outside_cache_root() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         let err = delete_artifact_relative_path("../outside.jsonl").unwrap_err();
         assert!(err.to_string().contains("cache root"));
@@ -2076,11 +2108,6 @@ mod tests {
 
         let err = delete_artifact_relative_path("manifest.json").unwrap_err();
         assert!(err.to_string().contains("session artifact"));
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -2090,8 +2117,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         let cache_dir = get_antigravity_cache_dir().unwrap();
         let sessions_dir = cache_dir.join("sessions");
@@ -2108,19 +2134,13 @@ mod tests {
         let err = delete_artifact_relative_path("sessions/escape.jsonl").unwrap_err();
         assert!(err.to_string().contains("sessions cache root"));
         assert!(outside_file.exists());
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     #[serial]
     fn filesystem_scan_finds_brain_and_conversation_candidates() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         let root = temp_dir.path().join(".gemini/antigravity");
         std::fs::create_dir_all(root.join("brain/session-a")).unwrap();
@@ -2136,11 +2156,6 @@ mod tests {
         assert!(ids.contains(&"session-a".to_string()));
         assert!(ids.contains(&"session-b".to_string()));
         assert!(ids.contains(&"session-c".to_string()));
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -2172,8 +2187,7 @@ mod tests {
     #[serial]
     fn manifest_round_trip_and_artifact_write() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         let manifest = sample_manifest();
         save_antigravity_manifest(&manifest).unwrap();
@@ -2196,11 +2210,6 @@ mod tests {
             .to_string();
         assert!(delete_session_artifact(&relative).unwrap());
         assert!(!artifact_path.exists());
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     use std::net::TcpListener;
@@ -2299,8 +2308,7 @@ mod tests {
     #[serial]
     fn load_antigravity_manifest_rejects_newer_version() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         ensure_config_dir().unwrap();
         let cache_dir = get_antigravity_cache_dir().unwrap();
@@ -2314,19 +2322,13 @@ mod tests {
 
         let err = load_antigravity_manifest().unwrap_err();
         assert!(err.to_string().contains("newer tokscale version"));
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     #[serial]
     fn load_antigravity_manifest_treats_older_version_as_fresh_start() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         ensure_config_dir().unwrap();
         let cache_dir = get_antigravity_cache_dir().unwrap();
@@ -2341,19 +2343,13 @@ mod tests {
         let manifest = load_antigravity_manifest().unwrap();
         assert_eq!(manifest.version, ANTIGRAVITY_MANIFEST_VERSION);
         assert!(manifest.sessions.is_empty());
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     #[serial]
     fn load_antigravity_manifest_recovers_from_corrupted_json() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
         ensure_config_dir().unwrap();
         let cache_dir = get_antigravity_cache_dir().unwrap();
@@ -2376,11 +2372,6 @@ mod tests {
             })
             .collect();
         assert_eq!(backups.len(), 1, "expected one backup file");
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
