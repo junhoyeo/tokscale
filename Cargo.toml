@@ -48,6 +48,7 @@ dirs = "5"
 
 # SQLite database support (bundled for cross-compilation)
 rusqlite = { version = "0.32", features = ["bundled"] }
+zstd = "0.13"
 
 # Lazy static initialization
 once_cell = "1"

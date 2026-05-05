@@ -46,6 +46,7 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   crush: "Crush",
   goose: "Goose",
   antigravity: "Antigravity",
+  zed: "Zed Agent",
   synthetic: "Synthetic",
 };
 
@@ -73,6 +74,7 @@ export const SOURCE_LOGOS: Record<string, string> = {
   crush: `${GITHUB_CDN_BASE}/client-crush.png`,
   goose: `${GITHUB_CDN_BASE}/client-goose.png`,
   antigravity: `${GITHUB_CDN_BASE}/client-antigravity.png`,
+  zed: `${GITHUB_CDN_BASE}/client-zed.webp`,
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
 };
 
@@ -98,6 +100,7 @@ export const SOURCE_COLORS: Record<string, string> = {
   crush: "#DC2626",
   goose: "#64B4DC",
   antigravity: "#6366F1",
+  zed: "#084CCF",
   synthetic: "#4ADE80",
 };
 

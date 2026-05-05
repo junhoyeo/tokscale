@@ -1043,6 +1043,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(goose_messages);
     }
 
+    if let Some(db_path) = &scan_result.zed_db {
+        let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+            sessions::zed::parse_zed_sqlite(path)
+        });
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     for source in &scan_result.crush_dbs {
         let crush_messages: Vec<UnifiedMessage> =
             sessions::crush::parse_crush_sqlite(&source.db_path)
@@ -1553,6 +1563,20 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     }
 }
 
+fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
+    // Zed bills hosted models at provider list price + 10%.
+    // Source: https://zed.dev/docs/ai/plans-and-usage and https://zed.dev/docs/ai/models
+    if message.client == "zed"
+        && message
+            .provider_id
+            .eq_ignore_ascii_case(sessions::zed::ZED_HOSTED_PROVIDER)
+    {
+        1.1
+    } else {
+        1.0
+    }
+}
+
 fn apply_pricing_if_available(
     message: &mut UnifiedMessage,
     pricing: Option<&pricing::PricingService>,
@@ -1565,7 +1589,7 @@ fn apply_pricing_if_available(
         &message.model_id,
         Some(&message.provider_id),
         &message.tokens,
-    );
+    ) * pricing_multiplier(message);
 
     if calculated_cost > 0.0 {
         message.cost = calculated_cost;
@@ -1952,6 +1976,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let count = summed_parsed_message_count(&goose_msgs);
         counts.set(ClientId::Goose, count);
         messages.extend(goose_msgs);
+    }
+
+    if let Some(db_path) = &scan_result.zed_db {
+        let zed_msgs: Vec<ParsedMessage> = sessions::zed::parse_zed_sqlite(db_path)
+            .into_iter()
+            .map(|msg| unified_to_parsed(&msg))
+            .collect();
+        let count = summed_parsed_message_count(&zed_msgs);
+        counts.set(ClientId::Zed, count);
+        messages.extend(zed_msgs);
     }
 
     let crush_msgs: Vec<ParsedMessage> = scan_result
@@ -3571,6 +3605,40 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.02);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_applies_zed_hosted_markup() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-sonnet-4-5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "zed",
+            "claude-sonnet-4-5",
+            crate::sessions::zed::ZED_HOSTED_PROVIDER,
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert!((msg.cost - 0.022).abs() < 1e-12);
     }
 
     #[test]

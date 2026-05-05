@@ -25,6 +25,7 @@ pub mod qwen;
 pub mod roocode;
 pub mod synthetic;
 pub(crate) mod utils;
+pub mod zed;
 
 use crate::TokenBreakdown;
 

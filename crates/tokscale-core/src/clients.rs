@@ -362,6 +362,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: false
+    },
+    Zed = 21 => {
+        id: "zed",
+        root: PathRoot::XdgData,
+        relative: "zed/threads/threads.db",
+        pattern: "threads.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -414,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 21);
+        assert_eq!(ClientId::COUNT, 22);
     }
 
     #[test]
@@ -688,5 +697,18 @@ mod tests {
     #[test]
     fn test_antigravity_submit_default_is_false() {
         assert!(!ClientId::Antigravity.submit_default());
+    }
+
+    #[test]
+    fn test_zed_data_dir_path() {
+        assert_eq!(
+            ClientId::Zed.data().resolve_path("/tmp/home"),
+            "/tmp/home/.local/share/zed/threads/threads.db"
+        );
+    }
+
+    #[test]
+    fn test_zed_submit_default_is_true() {
+        assert!(ClientId::Zed.submit_default());
     }
 }
