@@ -288,7 +288,7 @@ fn candidate_contexts(
 ) -> HashSet<String> {
     candidates
         .iter()
-        .filter(|candidate| candidate.source == source)
+        .filter(|candidate| candidate.source == source && candidate.trace_id.is_some())
         .map(|candidate| candidate.context_key().to_string())
         .collect()
 }
@@ -299,6 +299,14 @@ fn should_emit_candidate(
     inference_contexts: &HashSet<String>,
     agent_turn_contexts: &HashSet<String>,
 ) -> bool {
+    // Cross-source priority filtering only applies within a known OTel trace.
+    // Records lacking a trace_id cannot be reliably grouped (their session_id
+    // fallback can collide with unrelated records), so emit them unconditionally
+    // and rely on per-record dedup keys to suppress true duplicates.
+    if candidate.trace_id.is_none() {
+        return true;
+    }
+
     let context_key = candidate.context_key();
 
     match candidate.source {
@@ -377,6 +385,12 @@ fn is_agent_turn_log_record(value: &Value, attributes: &Map<String, Value>) -> b
 }
 
 fn is_span_record(value: &Value) -> bool {
+    // VS Code Copilot Chat exports omit `type: "span"`, so when `type` is absent
+    // we infer span-ness from a top-level `name` plus span identity (spanId or
+    // traceId), span timing, or `kind`. This is intentionally permissive for
+    // VS Code support. Inference-log and agent-turn-log records do NOT carry a
+    // top-level `name` field — that is the property that disambiguates them
+    // here. If a future record shape adds a top-level `name`, revisit this.
     match value.get("type").and_then(Value::as_str) {
         Some("span") => return true,
         Some(_) => return false,
@@ -436,11 +450,19 @@ fn dedup_key_for_record(
             _ => format!("log:{session_id}:{timestamp_ms}:{index}"),
         },
         CopilotUsageSource::AgentTurnLog => {
-            let turn_index = attr_i64_first(attributes, &["turn.index", "copilot_chat.turn.index"]);
+            // When the record actually carries a turn.index, use it so the key
+            // is stable across re-runs. Otherwise fall back to the line index
+            // so two turn-less agent-turn records in the same trace do not
+            // collide on a `0` sentinel.
+            let turn_part = ["turn.index", "copilot_chat.turn.index"]
+                .iter()
+                .find_map(|key| attributes.get(*key).and_then(value_as_i64))
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| format!("idx-{index}"));
             if let Some(trace_id) = trace_id {
-                format!("agent-turn:{trace_id}:{turn_index}")
+                format!("agent-turn:{trace_id}:{turn_part}")
             } else {
-                format!("agent-turn:{session_id}:{turn_index}:{index}")
+                format!("agent-turn:{session_id}:{turn_part}:{index}")
             }
         }
     }
@@ -752,6 +774,81 @@ mod tests {
             messages[0].dedup_key.as_deref(),
             Some("agent-turn:trace-turn:3")
         );
+    }
+
+    #[test]
+    fn test_parse_copilot_prefers_chat_span_over_agent_turn_in_same_trace() {
+        let content = r#"{"type":"span","traceId":"trace-mix","spanId":"chat-mix","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-mix","gen_ai.usage.input_tokens":50,"gen_ai.usage.output_tokens":8}}
+{"hrTime":[1775934265,0],"spanContext":{"traceId":"trace-mix","spanId":"turn-mix","traceFlags":1},"attributes":{"event.name":"copilot_chat.agent.turn","turn.index":1,"gen_ai.usage.input_tokens":50,"gen_ai.usage.output_tokens":8},"_body":"copilot_chat.agent.turn: 1"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("trace-mix:chat-mix"));
+        assert_eq!(messages[0].tokens.input, 50);
+        assert_eq!(messages[0].tokens.output, 8);
+    }
+
+    #[test]
+    fn test_parse_copilot_traceless_records_do_not_cross_suppress() {
+        // Two unrelated records that both lack a trace_id must not suppress
+        // each other via session_id collision in the cross-source priority
+        // filter. Here the chat span and inference log share gen_ai.response.id
+        // (used as the session fallback) but are independent records.
+        let content = r#"{"type":"span","spanId":"chat-traceless","name":"chat gpt-5.4-mini","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"shared-resp","gen_ai.usage.input_tokens":11,"gen_ai.usage.output_tokens":3}}
+{"hrTime":[1775934262,0],"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"shared-resp","gen_ai.usage.input_tokens":22,"gen_ai.usage.output_tokens":4},"_body":"GenAI inference: gpt-5.4-mini"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
+        let total_output: i64 = messages.iter().map(|m| m.tokens.output).sum();
+        assert_eq!(total_input, 33);
+        assert_eq!(total_output, 7);
+    }
+
+    #[test]
+    fn test_parse_copilot_agent_turn_log_without_turn_index_uses_line_index() {
+        // Two agent-turn records in the same trace with no turn.index attribute
+        // must produce distinct dedup keys (no `0` sentinel collision).
+        let content = r#"{"hrTime":[1775934260,0],"spanContext":{"traceId":"trace-noidx","spanId":"turn-a","traceFlags":1},"attributes":{"event.name":"copilot_chat.agent.turn","gen_ai.request.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":2},"_body":"copilot_chat.agent.turn"}
+{"hrTime":[1775934261,0],"spanContext":{"traceId":"trace-noidx","spanId":"turn-b","traceFlags":1},"attributes":{"event.name":"copilot_chat.agent.turn","gen_ai.request.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":11,"gen_ai.usage.output_tokens":3},"_body":"copilot_chat.agent.turn"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        let mut keys: Vec<String> = messages
+            .iter()
+            .filter_map(|m| m.dedup_key.clone())
+            .collect();
+        keys.sort();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1], "dedup keys must be unique: {keys:?}");
+    }
+
+    #[test]
+    fn test_parse_copilot_inference_log_uses_time_unix_nano_timestamp() {
+        let content = r#"{"timeUnixNano":1775934264967317833,"spanContext":{"traceId":"trace-nano","spanId":"span-nano","traceFlags":1},"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-nano","gen_ai.usage.input_tokens":5,"gen_ai.usage.output_tokens":2},"_body":"GenAI inference: gpt-5.4-mini"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_775_934_264_967);
+    }
+
+    #[test]
+    fn test_parse_copilot_agent_turn_log_uses_scalar_timestamp() {
+        let content = r#"{"timestamp":1775934264967,"spanContext":{"traceId":"trace-ts","spanId":"turn-ts","traceFlags":1},"attributes":{"event.name":"copilot_chat.agent.turn","turn.index":2,"gen_ai.request.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":7,"gen_ai.usage.output_tokens":1},"_body":"copilot_chat.agent.turn: 2"}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_775_934_264_967);
     }
 
     #[test]
