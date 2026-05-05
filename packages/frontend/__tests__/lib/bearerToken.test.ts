@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getBearerToken } from "../../src/lib/auth/bearerToken";
+import { getBearerToken } from "@/lib/auth/bearerToken";
 
 describe("getBearerToken", () => {
   it("returns null when the header is missing or malformed", () => {

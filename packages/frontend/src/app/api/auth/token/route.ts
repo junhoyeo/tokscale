@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
-import { getBearerToken } from "../../../../lib/auth/bearerToken";
+import { getBearerToken } from "@/lib/auth/bearerToken";
 
 export async function GET(request: Request) {
   try {
