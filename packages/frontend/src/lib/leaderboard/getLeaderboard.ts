@@ -64,10 +64,19 @@ function toUtcDateString(date: Date): string {
 
 function getPeriodDateRange(
   period: Period,
-  now: Date = new Date()
+  now: Date = new Date(),
+  customFrom?: string,
+  customTo?: string
 ): PeriodDateRange | null {
   if (period === "all") {
     return null;
+  }
+
+  if (period === "custom") {
+    if (!customFrom || !customTo) {
+      return null;
+    }
+    return { start: customFrom, end: customTo };
   }
 
   const end = new Date(
@@ -80,6 +89,15 @@ function getPeriodDateRange(
     return {
       start: toUtcDateString(start),
       end: toUtcDateString(end),
+    };
+  }
+
+  if (period === "last-month") {
+    const lastMonthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+    const lastMonthStart = new Date(Date.UTC(lastMonthEnd.getUTCFullYear(), lastMonthEnd.getUTCMonth(), 1));
+    return {
+      start: toUtcDateString(lastMonthStart),
+      end: toUtcDateString(lastMonthEnd),
     };
   }
 
@@ -234,9 +252,11 @@ function buildPeriodUserRank(
 }
 
 async function fetchPeriodLeaderboardRows(
-  period: Exclude<Period, "all">
+  period: Exclude<Period, "all">,
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardPeriodRow[]> {
-  const dateRange = getPeriodDateRange(period);
+  const dateRange = getPeriodDateRange(period, new Date(), customFrom, customTo);
 
   if (!dateRange) {
     return [];
@@ -284,10 +304,12 @@ async function fetchLeaderboardData(
   page: number,
   limit: number,
   sortBy: SortBy = "tokens",
-  search: string = ""
+  search: string = "",
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardData> {
   if (period !== "all") {
-    const rows = await fetchPeriodLeaderboardRows(period);
+    const rows = await fetchPeriodLeaderboardRows(period, customFrom, customTo);
     return buildPeriodLeaderboardData(rows, page, limit, period, sortBy, search);
   }
 
@@ -478,11 +500,17 @@ export function getLeaderboardData(
   page: number = 1,
   limit: number = 50,
   sortBy: SortBy = "tokens",
-  search: string = ""
+  search: string = "",
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardData> {
+  const cacheKey = period === "custom"
+    ? `leaderboard:custom:${customFrom}:${customTo}:${page}:${limit}:${sortBy}:${search}`
+    : `leaderboard:${period}:${page}:${limit}:${sortBy}:${search}`;
+
   return unstable_cache(
-    () => fetchLeaderboardData(period, page, limit, sortBy, search),
-    [`leaderboard:${period}:${page}:${limit}:${sortBy}:${search}`],
+    () => fetchLeaderboardData(period, page, limit, sortBy, search, customFrom, customTo),
+    [cacheKey],
     {
       tags: ["leaderboard", `leaderboard:${period}`],
       revalidate: 60,
@@ -497,10 +525,12 @@ export function getLeaderboardData(
 async function fetchUserRank(
   username: string,
   period: Period,
-  sortBy: SortBy
+  sortBy: SortBy,
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardUser | null> {
   if (period !== "all") {
-    const rows = await fetchPeriodLeaderboardRows(period);
+    const rows = await fetchPeriodLeaderboardRows(period, customFrom, customTo);
     return buildPeriodUserRank(rows, username, sortBy);
   }
 
@@ -588,13 +618,16 @@ async function fetchUserRank(
 export function getUserRank(
   username: string,
   period: Period = "all",
-  sortBy: SortBy = "tokens"
+  sortBy: SortBy = "tokens",
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardUser | null> {
   const usernameCacheKey = normalizeUsernameCacheKey(username);
+  const periodKey = period === "custom" ? `custom:${customFrom}:${customTo}` : period;
 
   return unstable_cache(
-    () => fetchUserRank(username, period, sortBy),
-    [`user-rank:${usernameCacheKey}:${period}:${sortBy}`],
+    () => fetchUserRank(username, period, sortBy, customFrom, customTo),
+    [`user-rank:${usernameCacheKey}:${periodKey}:${sortBy}`],
     {
       tags: ["leaderboard", "user-rank", `user-rank:${usernameCacheKey}`],
       revalidate: 60,

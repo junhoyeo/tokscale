@@ -4,7 +4,7 @@ import type { Period, SortBy } from "@/lib/leaderboard/types";
 
 export const revalidate = 60;
 
-const VALID_PERIODS: Period[] = ["all", "month", "week"];
+const VALID_PERIODS: Period[] = ["all", "month", "last-month", "week", "custom"];
 const VALID_SORT_BY: SortBy[] = ["tokens", "cost"];
 
 function parseIntSafe(value: string | null, defaultValue: number): number {
@@ -13,12 +13,21 @@ function parseIntSafe(value: string | null, defaultValue: number): number {
   return Number.isFinite(parsed) ? Math.floor(parsed) : defaultValue;
 }
 
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidDateString(value: string | null): value is string {
+  if (!value || !DATE_REGEX.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
 
-    const periodParam = searchParams.get("period") || "all";
-    const period: Period = VALID_PERIODS.includes(periodParam as Period)
+    let periodParam = searchParams.get("period") || "all";
+    let period: Period = VALID_PERIODS.includes(periodParam as Period)
       ? (periodParam as Period)
       : "all";
 
@@ -32,7 +41,22 @@ export async function GET(request: Request) {
 
     const search = (searchParams.get("search") || "").trim();
 
-    const data = await getLeaderboardData(period, page, limit, sortBy, search);
+    const fromParam = searchParams.get("from");
+    const toParam = searchParams.get("to");
+
+    let customFrom: string | undefined;
+    let customTo: string | undefined;
+
+    if (period === "custom") {
+      if (isValidDateString(fromParam) && isValidDateString(toParam)) {
+        customFrom = fromParam;
+        customTo = toParam;
+      } else {
+        period = "all";
+      }
+    }
+
+    const data = await getLeaderboardData(period, page, limit, sortBy, search, customFrom, customTo);
 
     return NextResponse.json(data);
   } catch (error) {
