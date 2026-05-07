@@ -1,17 +1,23 @@
 //! Kiro session parser
 //!
-//! Parses session files from ~/.kiro/sessions/cli/*.json. Kiro writes a
-//! session metadata JSON record followed by JSONL message records. Turn-level
-//! token counts are currently zero, so usage is estimated from prompt and
-//! assistant text with a chars/4 approximation.
+//! Parses session data from two sources:
+//! 1. File-based: ~/.kiro/sessions/cli/*.json + *.jsonl
+//! 2. SQLite-based: ~/Library/Application Support/kiro-cli/data.sqlite3
+//!    (conversations_v2 table with history[*].request_metadata)
+//!
+//! Turn-level token counts are currently zero in both sources, so usage is
+//! estimated from context_usage_percentage * context_window (input) and
+//! response_size / 4 (output).
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
+use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
 const PROVIDER_ID: &str = "amazon-bedrock";
@@ -38,6 +44,7 @@ struct KiroRtsModelState {
 #[derive(Debug, Deserialize)]
 struct KiroModelInfo {
     model_id: Option<String>,
+    context_window_tokens: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +59,7 @@ struct KiroTurnMetadata {
     end_timestamp: Option<serde_json::Value>,
     total_request_count: Option<i32>,
     message_ids: Option<Vec<String>>,
+    context_usage_percentage: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +120,13 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         .to_string();
     let workspace_key = header.cwd.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+    let context_window = header
+        .session_state
+        .as_ref()
+        .and_then(|state| state.rts_model_state.as_ref())
+        .and_then(|state| state.model_info.as_ref())
+        .and_then(|info| info.context_window_tokens)
+        .unwrap_or(0);
     let turns = header
         .session_state
         .and_then(|state| state.conversation_metadata)
@@ -123,6 +138,8 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
 
     if let Ok(jsonl_file) = std::fs::File::open(&jsonl_path) {
         let reader = BufReader::new(jsonl_file);
+        let mut pending_prompt: Option<(usize, Option<i64>)> = None;
+
         for line in reader.lines().map_while(Result::ok) {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -143,22 +160,23 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
             };
 
             let text_chars = text_char_count(data.content.as_deref());
-            if text_chars == 0 {
-                continue;
-            }
 
-            let message = content_by_message_id.entry(message_id).or_default();
             match entry.kind.as_str() {
                 "Prompt" => {
-                    message.prompt_chars += text_chars;
-                    if message.prompt_timestamp_ms.is_none() {
-                        message.prompt_timestamp_ms = data
-                            .meta
-                            .and_then(|meta| meta.timestamp)
-                            .map(seconds_to_millis);
-                    }
+                    let timestamp_ms = data
+                        .meta
+                        .and_then(|meta| meta.timestamp)
+                        .map(seconds_to_millis);
+                    pending_prompt = Some((text_chars, timestamp_ms));
                 }
                 "AssistantMessage" => {
+                    let message = content_by_message_id.entry(message_id).or_default();
+                    if let Some((prompt_chars, prompt_ts)) = pending_prompt.take() {
+                        message.prompt_chars += prompt_chars;
+                        if message.prompt_timestamp_ms.is_none() {
+                            message.prompt_timestamp_ms = prompt_ts;
+                        }
+                    }
                     message.assistant_chars += text_chars;
                 }
                 _ => {}
@@ -190,6 +208,13 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
             let explicit_output = turn.output_token_count.unwrap_or(0).max(0);
             let input = if explicit_input > 0 {
                 explicit_input
+            } else if context_window > 0 {
+                let ctx_pct = turn.context_usage_percentage.unwrap_or(0.0);
+                if ctx_pct > 0.0 {
+                    ((context_window as f64) * ctx_pct / 100.0) as i64
+                } else {
+                    estimate_tokens(prompt_chars)
+                }
             } else {
                 estimate_tokens(prompt_chars)
             };
@@ -272,6 +297,147 @@ fn session_id_from_path(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("unknown")
         .to_string()
+}
+
+pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
+    let conn = match Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(c) => c,
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to open Kiro CLI database"
+            );
+            return Vec::new();
+        }
+    };
+
+    let query = "SELECT key, conversation_id, value FROM conversations_v2";
+    let mut stmt = match conn.prepare(query) {
+        Ok(s) => s,
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to prepare Kiro conversations query"
+            );
+            return Vec::new();
+        }
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(err) => {
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to execute Kiro conversations query"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut messages = Vec::new();
+
+    for row in rows.flatten() {
+        let (cwd, conversation_id, json_str) = row;
+        let parsed = match serde_json::from_str::<KiroDbConversation>(&json_str) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let context_window = parsed
+            .model_info
+            .as_ref()
+            .and_then(|info| info.context_window_tokens)
+            .unwrap_or(0);
+        let model_id = parsed
+            .model_info
+            .as_ref()
+            .and_then(|info| info.model_id.as_deref())
+            .filter(|m| !m.trim().is_empty() && *m != "auto")
+            .unwrap_or(UNKNOWN_MODEL)
+            .to_string();
+        let workspace_key = normalize_workspace_key(&cwd);
+        let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+
+        let history = parsed.history.unwrap_or_default();
+        for (index, turn) in history.into_iter().enumerate() {
+            let Some(meta) = turn.request_metadata else {
+                continue;
+            };
+
+            let ctx_pct = meta.context_usage_percentage.unwrap_or(0.0);
+            let response_size = meta.response_size.unwrap_or(0);
+
+            let input = if context_window > 0 && ctx_pct > 0.0 {
+                ((context_window as f64) * ctx_pct / 100.0) as i64
+            } else {
+                0
+            };
+            let output = estimate_tokens(response_size);
+
+            if input + output == 0 {
+                continue;
+            }
+
+            let timestamp = meta
+                .request_start_timestamp_ms
+                .or(meta.stream_end_timestamp_ms)
+                .unwrap_or(0);
+
+            let mut message = UnifiedMessage::new_with_dedup(
+                CLIENT_ID,
+                model_id.clone(),
+                PROVIDER_ID,
+                conversation_id.clone(),
+                timestamp,
+                TokenBreakdown {
+                    input,
+                    output,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+                Some(format!("{}:{}", conversation_id, index)),
+            );
+            message.message_count = 1;
+            message.is_turn_start = true;
+            message.set_workspace(workspace_key.clone(), workspace_label.clone());
+            messages.push(message);
+        }
+    }
+
+    messages
+}
+
+#[derive(Debug, Deserialize)]
+struct KiroDbConversation {
+    history: Option<Vec<KiroDbTurn>>,
+    model_info: Option<KiroModelInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KiroDbTurn {
+    request_metadata: Option<KiroDbRequestMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KiroDbRequestMetadata {
+    context_usage_percentage: Option<f64>,
+    response_size: Option<usize>,
+    request_start_timestamp_ms: Option<i64>,
+    stream_end_timestamp_ms: Option<i64>,
 }
 
 #[cfg(test)]
