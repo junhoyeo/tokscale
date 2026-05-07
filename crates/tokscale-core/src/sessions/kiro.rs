@@ -86,32 +86,16 @@ struct KiroMessageContent {
 }
 
 pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
+    let fallback_timestamp = file_modified_timestamp_ms(path);
+
+    let mut json_bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(_) => return Vec::new(),
     };
 
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
-
-    let header = loop {
-        let Some(line) = lines.next() else {
-            return Vec::new();
-        };
-        let Ok(line) = line else {
-            continue;
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let mut bytes = trimmed.as_bytes().to_vec();
-        break match simd_json::from_slice::<KiroSessionHeader>(&mut bytes) {
-            Ok(header) => header,
-            Err(_) => return Vec::new(),
-        };
+    let header = match simd_json::from_slice::<KiroSessionHeader>(&mut json_bytes) {
+        Ok(header) => header,
+        Err(_) => return Vec::new(),
     };
 
     let session_id = header
@@ -134,46 +118,51 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         .and_then(|metadata| metadata.user_turn_metadatas)
         .unwrap_or_default();
 
+    let jsonl_path = path.with_extension("jsonl");
     let mut content_by_message_id: HashMap<String, KiroMessageContent> = HashMap::new();
-    for line in lines.map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
 
-        let mut bytes = trimmed.as_bytes().to_vec();
-        let entry = match simd_json::from_slice::<KiroJsonlEntry>(&mut bytes) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+    if let Ok(jsonl_file) = std::fs::File::open(&jsonl_path) {
+        let reader = BufReader::new(jsonl_file);
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
 
-        let Some(data) = entry.data else {
-            continue;
-        };
-        let Some(message_id) = data.message_id else {
-            continue;
-        };
+            let mut bytes = trimmed.as_bytes().to_vec();
+            let entry = match simd_json::from_slice::<KiroJsonlEntry>(&mut bytes) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
 
-        let text_chars = text_char_count(data.content.as_deref());
-        if text_chars == 0 {
-            continue;
-        }
+            let Some(data) = entry.data else {
+                continue;
+            };
+            let Some(message_id) = data.message_id else {
+                continue;
+            };
 
-        let message = content_by_message_id.entry(message_id).or_default();
-        match entry.kind.as_str() {
-            "Prompt" => {
-                message.prompt_chars += text_chars;
-                if message.prompt_timestamp_ms.is_none() {
-                    message.prompt_timestamp_ms = data
-                        .meta
-                        .and_then(|meta| meta.timestamp)
-                        .map(seconds_to_millis);
+            let text_chars = text_char_count(data.content.as_deref());
+            if text_chars == 0 {
+                continue;
+            }
+
+            let message = content_by_message_id.entry(message_id).or_default();
+            match entry.kind.as_str() {
+                "Prompt" => {
+                    message.prompt_chars += text_chars;
+                    if message.prompt_timestamp_ms.is_none() {
+                        message.prompt_timestamp_ms = data
+                            .meta
+                            .and_then(|meta| meta.timestamp)
+                            .map(seconds_to_millis);
+                    }
                 }
+                "AssistantMessage" => {
+                    message.assistant_chars += text_chars;
+                }
+                _ => {}
             }
-            "AssistantMessage" => {
-                message.assistant_chars += text_chars;
-            }
-            _ => {}
         }
     }
 
@@ -289,23 +278,27 @@ fn session_id_from_path(path: &Path) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::TempDir;
 
-    fn create_test_file(content: &str) -> NamedTempFile {
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(content.as_bytes()).unwrap();
-        file.flush().unwrap();
-        file
+    fn create_session_files(dir: &TempDir, stem: &str, json: &str, jsonl: &str) -> std::path::PathBuf {
+        let json_path = dir.path().join(format!("{}.json", stem));
+        let jsonl_path = dir.path().join(format!("{}.jsonl", stem));
+        let mut f = std::fs::File::create(&json_path).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        let mut f = std::fs::File::create(&jsonl_path).unwrap();
+        f.write_all(jsonl.as_bytes()).unwrap();
+        json_path
     }
 
     #[test]
     fn test_parse_kiro_estimates_tokens_from_jsonl_content() {
-        let content = r#"{"session_id":"session-1","cwd":"/tmp/project","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"turn_duration":123,"end_timestamp":1770983427,"total_request_count":2,"message_ids":["prompt-1","assistant-1"]}]}}}
-{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-1","content":[{"kind":"text","data":"hello world"}],"meta":{"timestamp":1770983426.420942}}}
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-1","cwd":"/tmp/project","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"turn_duration":123,"end_timestamp":1770983427,"total_request_count":2,"message_ids":["prompt-1","assistant-1"]}]}}}"#;
+        let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-1","content":[{"kind":"text","data":"hello world"}],"meta":{"timestamp":1770983426.420942}}}
 {"version":"v1","kind":"AssistantMessage","data":{"message_id":"assistant-1","content":[{"kind":"text","data":"response text"}]}}"#;
-        let file = create_test_file(content);
+        let path = create_session_files(&dir, "session-1", json, jsonl);
 
-        let messages = parse_kiro_file(file.path());
+        let messages = parse_kiro_file(&path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "kiro");
@@ -323,10 +316,12 @@ mod tests {
 
     #[test]
     fn test_parse_kiro_skips_zero_content_turns() {
-        let content = r#"{"session_id":"session-2","cwd":"/tmp","session_state":{"rts_model_state":{"model_info":{"model_id":"model"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"message_ids":["missing"]}]}}}"#;
-        let file = create_test_file(content);
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-2","cwd":"/tmp","session_state":{"rts_model_state":{"model_info":{"model_id":"model"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"message_ids":["missing"]}]}}}"#;
+        let jsonl = "";
+        let path = create_session_files(&dir, "session-2", json, jsonl);
 
-        let messages = parse_kiro_file(file.path());
+        let messages = parse_kiro_file(&path);
 
         assert!(messages.is_empty());
     }
