@@ -4661,6 +4661,7 @@ mod tests {
             goose: true,
             antigravity: true,
             zed: true,
+            kiro: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -4693,6 +4694,7 @@ mod tests {
             "goose",
             "antigravity",
             "zed",
+            "kiro",
             "synthetic",
         ] {
             assert!(

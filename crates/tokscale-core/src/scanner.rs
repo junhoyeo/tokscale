@@ -71,6 +71,7 @@ pub struct ScanResult {
     pub hermes_db: Option<PathBuf>,
     pub goose_db: Option<PathBuf>,
     pub zed_db: Option<PathBuf>,
+    pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
@@ -86,6 +87,7 @@ impl Default for ScanResult {
             hermes_db: None,
             goose_db: None,
             zed_db: None,
+            kiro_db: None,
             crush_dbs: Vec::new(),
             opencode_json_dir: None,
         }
@@ -905,6 +907,25 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::Crush) {
         result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
+    }
+
+    if enabled.contains(&ClientId::Kiro) {
+        let xdg_path = PathBuf::from(format!(
+            "{}/.local/share/kiro-cli/data.sqlite3",
+            home_dir
+        ));
+        if xdg_path.is_file() {
+            result.kiro_db = Some(xdg_path);
+        }
+        if result.kiro_db.is_none() {
+            let macos_path = PathBuf::from(format!(
+                "{}/Library/Application Support/kiro-cli/data.sqlite3",
+                home_dir
+            ));
+            if macos_path.is_file() {
+                result.kiro_db = Some(macos_path);
+            }
+        }
     }
 
     if enabled.contains(&ClientId::Codebuff) {
