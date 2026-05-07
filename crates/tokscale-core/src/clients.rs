@@ -371,6 +371,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Kiro = 22 => {
+        id: "kiro",
+        root: PathRoot::Home,
+        relative: ".kiro/sessions/cli",
+        pattern: "*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -423,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 22);
+        assert_eq!(ClientId::COUNT, 23);
     }
 
     #[test]
@@ -710,5 +719,17 @@ mod tests {
     #[test]
     fn test_zed_submit_default_is_true() {
         assert!(ClientId::Zed.submit_default());
+    }
+
+    #[test]
+    fn test_kiro_data_dir_path() {
+        assert_eq!(
+            ClientId::Kiro.data().resolve_path("/tmp/home"),
+            "/tmp/home/.kiro/sessions/cli"
+        );
+        assert_eq!(ClientId::Kiro.data().pattern, "*.json");
+        assert!(ClientId::Kiro.parse_local());
+        assert!(ClientId::Kiro.submit_default());
+        assert!(!ClientId::Kiro.supports_headless());
     }
 }

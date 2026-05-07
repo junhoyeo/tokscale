@@ -703,6 +703,7 @@ pub enum ClientFilter {
     Codebuff,
     Antigravity,
     Zed,
+    Kiro,
     Synthetic,
 }
 
@@ -734,6 +735,7 @@ impl ClientFilter {
             Self::Codebuff => "codebuff",
             Self::Antigravity => "antigravity",
             Self::Zed => "zed",
+            Self::Kiro => "kiro",
             Self::Synthetic => "synthetic",
         }
     }
@@ -768,6 +770,7 @@ impl ClientFilter {
             Self::Codebuff => Some(ClientId::Codebuff),
             Self::Antigravity => Some(ClientId::Antigravity),
             Self::Zed => Some(ClientId::Zed),
+            Self::Kiro => Some(ClientId::Kiro),
             Self::Synthetic => None,
         }
     }
@@ -799,6 +802,7 @@ impl ClientFilter {
             ClientId::Codebuff => Self::Codebuff,
             ClientId::Antigravity => Self::Antigravity,
             ClientId::Zed => Self::Zed,
+            ClientId::Kiro => Self::Kiro,
         }
     }
 
@@ -896,6 +900,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub zed: bool,
     #[arg(long, hide = true)]
+    pub kiro: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -949,7 +955,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 23] = [
+    let legacy: [(bool, ClientFilter); 24] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -972,6 +978,7 @@ fn build_client_filter_with_defaults(
         (flags.goose, ClientFilter::Goose),
         (flags.antigravity, ClientFilter::Antigravity),
         (flags.zed, ClientFilter::Zed),
+        (flags.kiro, ClientFilter::Kiro),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 

@@ -37,6 +37,7 @@ const SUPPORTED_SOURCES = [
   "kilo",
   "mux",
   "crush",
+  "kiro",
   "synthetic",
 ] as const;
 const SourceSchema = z.enum(SUPPORTED_SOURCES);

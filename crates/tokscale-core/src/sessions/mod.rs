@@ -17,6 +17,7 @@ pub mod hermes;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
+pub mod kiro;
 pub mod mux;
 pub mod openclaw;
 pub mod opencode;

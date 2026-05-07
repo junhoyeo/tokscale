@@ -1083,6 +1083,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let kiro_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Kiro)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::kiro::parse_kiro_file(path)
+            })
+        })
+        .collect();
+    for outcome in kiro_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     for source in &scan_result.crush_dbs {
         let crush_messages: Vec<UnifiedMessage> =
             sessions::crush::parse_crush_sqlite(&source.db_path)
@@ -2023,6 +2039,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         counts.set(ClientId::Zed, count);
         messages.extend(zed_msgs);
     }
+
+    let kiro_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Kiro)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::kiro::parse_kiro_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let kiro_count = summed_parsed_message_count(&kiro_msgs);
+    counts.set(ClientId::Kiro, kiro_count);
+    messages.extend(kiro_msgs);
 
     let crush_msgs: Vec<ParsedMessage> = scan_result
         .crush_dbs
