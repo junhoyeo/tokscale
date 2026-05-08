@@ -58,7 +58,7 @@ struct KiroTurnMetadata {
     output_token_count: Option<i64>,
     end_timestamp: Option<serde_json::Value>,
     total_request_count: Option<i32>,
-    message_ids: Option<Vec<String>>,
+    message_ids: Option<Vec<Option<String>>>,
     context_usage_percentage: Option<f64>,
 }
 
@@ -193,7 +193,7 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
             let mut assistant_chars = 0;
             let mut prompt_timestamp_ms = None;
 
-            for message_id in &message_ids {
+            for message_id in message_ids.iter().flatten() {
                 let Some(content) = content_by_message_id.get(message_id) else {
                     continue;
                 };
