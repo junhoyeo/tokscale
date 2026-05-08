@@ -241,8 +241,11 @@ enum Commands {
         short: bool,
         #[arg(long, help = "Show Top OpenCode Agents (default)")]
         agents: bool,
-        #[arg(long, help = "Show Top Clients instead of Top OpenCode Agents")]
-        clients: bool,
+        #[arg(
+            long = "clients",
+            help = "Show Top Clients instead of Top OpenCode Agents"
+        )]
+        show_clients: bool,
         #[arg(long, help = "Disable pinning of Sisyphus agents in rankings")]
         disable_pinned: bool,
         #[arg(long, help = "Disable loading spinner (for scripting)")]
@@ -571,7 +574,7 @@ fn main() -> Result<()> {
             client_flags,
             short,
             agents,
-            clients,
+            show_clients,
             disable_pinned,
             no_spinner: _,
         }) => {
@@ -583,7 +586,7 @@ fn main() -> Result<()> {
                 client_filter,
                 short,
                 agents,
-                clients,
+                show_clients,
                 disable_pinned,
             )
         }
@@ -2539,7 +2542,7 @@ fn run_wrapped_command(
     client_filter: Option<Vec<String>>,
     short: bool,
     agents: bool,
-    clients: bool,
+    show_clients: bool,
     disable_pinned: bool,
 ) -> Result<()> {
     use colored::Colorize;
@@ -2549,7 +2552,7 @@ fn run_wrapped_command(
     println!("{}", "  Generating wrapped image...".bright_black());
     println!();
 
-    let include_agents = !clients || agents;
+    let include_agents = !show_clients || agents;
     let wrapped_options = commands::wrapped::WrappedOptions {
         output,
         year,
@@ -5021,6 +5024,56 @@ mod tests {
             cli.clients.clients,
             vec![ClientFilter::Opencode, ClientFilter::Claude]
         );
+    }
+
+    #[test]
+    fn test_wrapped_parses_clients_view_flag() {
+        let cli = Cli::try_parse_from(["tokscale", "wrapped"]).expect("parse ok");
+        let Some(Commands::Wrapped {
+            show_clients,
+            agents,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected wrapped command");
+        };
+        assert!(!show_clients);
+        assert!(!agents);
+
+        let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients"]).expect("parse ok");
+        let Some(Commands::Wrapped { show_clients, .. }) = cli.command else {
+            panic!("expected wrapped command");
+        };
+        assert!(show_clients);
+    }
+
+    #[test]
+    fn test_wrapped_client_filter_coexists_with_clients_view_flag() {
+        let cli =
+            Cli::try_parse_from(["tokscale", "wrapped", "--client", "opencode"]).expect("parse ok");
+        let Some(Commands::Wrapped {
+            client_flags,
+            show_clients,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected wrapped command");
+        };
+        assert_eq!(client_flags.clients, vec![ClientFilter::Opencode]);
+        assert!(!show_clients);
+
+        let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients", "--client", "opencode"])
+            .expect("parse ok");
+        let Some(Commands::Wrapped {
+            client_flags,
+            show_clients,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected wrapped command");
+        };
+        assert_eq!(client_flags.clients, vec![ClientFilter::Opencode]);
+        assert!(show_clients);
     }
 
     #[test]
