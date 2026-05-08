@@ -62,7 +62,7 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
       case "crush":
         return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png";
       case "kiro":
-        return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-kiro.png";
+        return "/assets/logos/kiro.ico";
       case "synthetic":
         return "/assets/logos/synthetic.png";
       default:
