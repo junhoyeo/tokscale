@@ -140,7 +140,7 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         let reader = BufReader::new(jsonl_file);
         let mut pending_prompt: Option<(usize, Option<i64>)> = None;
 
-        for line in reader.lines().map_while(Result::ok) {
+        for line in reader.lines().filter_map(Result::ok) {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
