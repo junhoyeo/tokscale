@@ -1100,14 +1100,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     if let Some(db_path) = &scan_result.kiro_db {
-        let kiro_db_messages: Vec<UnifiedMessage> =
-            sessions::kiro::parse_kiro_sqlite(db_path)
-                .into_iter()
-                .map(|mut msg| {
-                    apply_pricing_if_available(&mut msg, pricing);
-                    msg
-                })
-                .collect();
+        let kiro_db_messages: Vec<UnifiedMessage> = sessions::kiro::parse_kiro_sqlite(db_path)
+            .into_iter()
+            .map(|mut msg| {
+                apply_pricing_if_available(&mut msg, pricing);
+                msg
+            })
+            .collect();
         all_messages.extend(kiro_db_messages);
     }
 
