@@ -446,7 +446,12 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_session_files(dir: &TempDir, stem: &str, json: &str, jsonl: &str) -> std::path::PathBuf {
+    fn create_session_files(
+        dir: &TempDir,
+        stem: &str,
+        json: &str,
+        jsonl: &str,
+    ) -> std::path::PathBuf {
         let json_path = dir.path().join(format!("{}.json", stem));
         let jsonl_path = dir.path().join(format!("{}.jsonl", stem));
         let mut f = std::fs::File::create(&json_path).unwrap();

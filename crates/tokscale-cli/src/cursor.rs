@@ -51,6 +51,12 @@ const USAGE_CSV_ENDPOINT: &str =
     "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens";
 const USAGE_SUMMARY_ENDPOINT: &str = "https://cursor.com/api/usage-summary";
 
+/// Marker file touched at the end of every `sync_cursor_cache` run (even when
+/// some accounts fail). Its mtime gates secondary-account freshness checks so
+/// a permanently-stale secondary (expired token, removed account, network
+/// partition) does not force an implicit sync on every invocation.
+const CURSOR_SYNC_ATTEMPT_MARKER: &str = "usage.last-sync-attempt";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CursorCredentials {
     #[serde(rename = "sessionToken")]
@@ -703,15 +709,36 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
         return false;
     }
 
+    // The active account's cache is non-negotiable: if it is stale or missing,
+    // implicit sync must run so reports read current data.
+    let active_path = cache_dir.join("usage.csv");
+    if !cursor_usage_cache_file_is_fresh(&active_path, max_age) {
+        return false;
+    }
+
+    // For secondaries, a fresh sync-attempt marker is sufficient. This avoids
+    // forcing a sync on every invocation when a secondary account is
+    // permanently stale (expired token, removed account, persistent API
+    // failure). Without the marker, `.all(...)` would return `false` forever.
+    let marker_fresh =
+        cursor_usage_cache_file_is_fresh(&cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), max_age);
+
     expected_cursor_usage_cache_paths_in(home_dir)
         .iter()
-        .all(|path| cursor_usage_cache_file_is_fresh(path, max_age))
+        .filter(|p| *p != &active_path)
+        .all(|p| cursor_usage_cache_file_is_fresh(p, max_age) || marker_fresh)
 }
 
-/// True when every expected cursor usage cache file was refreshed within
-/// `max_age`. Used by the implicit pre-report sync path to avoid hitting the
-/// Cursor API on every invocation. The manual `tokscale cursor sync` CLI
-/// bypasses this — explicit user intent is always honored.
+/// True when the active cursor usage cache (`usage.csv`) was refreshed within
+/// `max_age` AND every secondary account cache is either fresh or a recent
+/// sync-attempt marker exists. The active cache is unconditionally required —
+/// a stale active means reports would show out-of-date data. Secondaries are
+/// best-effort: when a secondary is permanently stale (expired token, removed
+/// account, persistent API failure) the marker short-circuits the check so we
+/// don't force an implicit sync on every invocation. Used by the implicit
+/// pre-report sync path to avoid hitting the Cursor API on every invocation.
+/// The manual `tokscale cursor sync` CLI bypasses this — explicit user intent
+/// is always honored.
 pub fn cursor_usage_cache_is_fresh(max_age: Duration) -> bool {
     let Ok(home_dir) = home_dir() else {
         return false;
@@ -951,6 +978,18 @@ where
             }
         }
     }
+
+    // Touch the sync-attempt marker unconditionally after the per-account loop
+    // (regardless of partial failures). The marker's mtime short-circuits the
+    // secondary-account freshness check so a permanently-stale secondary
+    // doesn't force an implicit sync on every invocation. We ignore errors
+    // here — if the marker can't be written (e.g. disk full) the gate simply
+    // falls through to the CSV-freshness check as before.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER));
 
     if success_count == 0 {
         return SyncCursorResult {
@@ -1854,6 +1893,168 @@ mod tests {
         assert!(dst.exists());
         assert_eq!(fs::read_dir(&dst)?.count(), 0);
 
+        Ok(())
+    }
+
+    /// Helper: build a two-account credentials store in `home_dir`.
+    fn setup_two_account_store(home_dir: &std::path::Path) -> Result<()> {
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account".to_string(),
+            CursorCredentials {
+                session_token: "token-secondary".to_string(),
+                user_id: Some("team/account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("personal".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            home_dir,
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )
+    }
+
+    /// Helper: backdate a file's mtime by `secs` seconds. Returns `false` if
+    /// the platform refuses to set mtime (exotic FS), signalling the caller to
+    /// skip the test.
+    fn backdate_file(path: &std::path::Path, secs: u64) -> bool {
+        let f = match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        f.set_modified(SystemTime::now() - Duration::from_secs(secs))
+            .is_ok()
+    }
+
+    #[test]
+    fn test_freshness_gate_passes_when_active_fresh_and_marker_fresh_despite_stale_secondary(
+    ) -> Result<()> {
+        // Active CSV fresh + stale secondary CSV + fresh marker → gate passes.
+        // This is the key scenario: a permanently-stale secondary must not
+        // thrash implicit sync when the marker proves we already tried recently.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+
+        // Fresh active cache.
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n")?;
+
+        // Stale secondary cache.
+        let secondary = cache_dir.join("usage.team-account.csv");
+        fs::write(&secondary, "Date,Model\n")?;
+        if !backdate_file(&secondary, 3600) {
+            return Ok(()); // platform can't set mtime — skip
+        }
+
+        // Fresh sync-attempt marker.
+        fs::write(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+
+        assert!(
+            cursor_usage_cache_is_fresh_in(temp_dir.path(), Duration::from_secs(300)),
+            "fresh marker should short-circuit stale secondary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_freshness_gate_fails_when_active_fresh_but_no_marker_and_stale_secondary() -> Result<()>
+    {
+        // Active CSV fresh + stale secondary CSV + NO marker → gate fails so
+        // an implicit sync is triggered to try fetching the secondary again.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n")?;
+
+        let secondary = cache_dir.join("usage.team-account.csv");
+        fs::write(&secondary, "Date,Model\n")?;
+        if !backdate_file(&secondary, 3600) {
+            return Ok(());
+        }
+
+        // No marker written.
+
+        assert!(
+            !cursor_usage_cache_is_fresh_in(temp_dir.path(), Duration::from_secs(300)),
+            "without marker, stale secondary should trigger sync"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_freshness_gate_fails_when_active_stale_even_with_fresh_marker() -> Result<()> {
+        // Stale active CSV + fresh marker → gate still fails. The marker must
+        // never mask a stale active cache — the active data is what reports
+        // read from.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+
+        // Stale active cache.
+        let active = cache_dir.join("usage.csv");
+        fs::write(&active, "Date,Model\n")?;
+        if !backdate_file(&active, 3600) {
+            return Ok(());
+        }
+
+        // Fresh secondary and fresh marker.
+        fs::write(cache_dir.join("usage.team-account.csv"), "Date,Model\n")?;
+        fs::write(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+
+        assert!(
+            !cursor_usage_cache_is_fresh_in(temp_dir.path(), Duration::from_secs(300)),
+            "stale active cache must always trigger sync regardless of marker"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_writes_attempt_marker() -> Result<()> {
+        // After sync_cursor_cache_with_fetcher_in_home completes (even with a
+        // partial failure), the marker file must exist in the cache dir.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        let _result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |session_token| {
+                // Secondary deliberately fails to simulate a broken account.
+                let result: Result<String> = match session_token.as_str() {
+                    "token-active" => Ok("Date,Model,Tokens\n2026-01-01,gpt-5,10\n".to_string()),
+                    _ => Err(anyhow::anyhow!("simulated fetch failure")),
+                };
+                async move { result }
+            },
+        ));
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        assert!(
+            cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER).exists(),
+            "marker must be written even when a secondary account fetch fails"
+        );
         Ok(())
     }
 }
