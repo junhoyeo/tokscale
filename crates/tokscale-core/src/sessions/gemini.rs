@@ -174,6 +174,8 @@ fn build_gemini_token_message(
         tokens.total,
     );
 
+    let tool = tokens.tool.unwrap_or(0).max(0);
+
     UnifiedMessage::new(
         "gemini",
         model,
@@ -181,7 +183,7 @@ fn build_gemini_token_message(
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
-            input,
+            input: input.saturating_add(tool),
             output: tokens.output.unwrap_or(0).max(0),
             cache_read,
             cache_write: 0,
@@ -739,7 +741,7 @@ mod tests {
     #[test]
     fn test_parse_gemini_stream_jsonl_direct_tokens() {
         let content = r#"{"sessionId":"gemini-session-1","projectHash":"abc123","startTime":"2026-05-01T00:00:00.000Z","lastUpdated":"2026-05-01T00:01:00.000Z"}
-{"id":"msg-1","timestamp":"2026-05-01T00:01:00.000Z","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":14918,"output":60,"cached":0,"thoughts":863,"tool":0,"total":15841}}"#;
+{"id":"msg-1","timestamp":"2026-05-01T00:01:00.000Z","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":14918,"output":60,"cached":0,"thoughts":863,"tool":7,"total":15848}}"#;
         let dir = TempDir::new().unwrap();
         let chats_dir = dir.path().join(".gemini/tmp/123/chats");
         std::fs::create_dir_all(&chats_dir).unwrap();
@@ -752,11 +754,11 @@ mod tests {
         assert_eq!(messages[0].session_id, "gemini-session-1");
         assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
         assert_eq!(messages[0].provider_id, "google");
-        assert_eq!(messages[0].tokens.input, 14918);
+        assert_eq!(messages[0].tokens.input, 14925);
         assert_eq!(messages[0].tokens.output, 60);
         assert_eq!(messages[0].tokens.cache_read, 0);
         assert_eq!(messages[0].tokens.reasoning, 863);
-        assert_eq!(messages[0].tokens.total(), 15841);
+        assert_eq!(messages[0].tokens.total(), 15848);
     }
 
     #[test]
@@ -874,7 +876,7 @@ not-json\n\
 
     #[test]
     fn test_parse_gemini_json_direct_tokens() {
-        let json = r#"{"type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":20,"output":2,"cached":5,"thoughts":3,"tool":0,"total":25}}"#;
+        let json = r#"{"type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":20,"output":2,"cached":5,"thoughts":3,"tool":4,"total":29}}"#;
         let file = tempfile::Builder::new()
             .prefix("session-")
             .suffix(".json")
@@ -886,11 +888,11 @@ not-json\n\
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
-        assert_eq!(messages[0].tokens.input, 15);
+        assert_eq!(messages[0].tokens.input, 19);
         assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].tokens.cache_read, 5);
         assert_eq!(messages[0].tokens.reasoning, 3);
-        assert_eq!(messages[0].tokens.total(), 25);
+        assert_eq!(messages[0].tokens.total(), 29);
     }
 
     #[test]
