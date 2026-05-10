@@ -1068,9 +1068,10 @@ fn auto_sync_cursor_for_local_report(
         return None;
     }
 
-    // Skip the implicit refresh when the cache is recent enough — running
-    // `tokscale models` 30× in a script must not produce 30 Cursor API
-    // calls. The manual `tokscale cursor sync` command bypasses this gate.
+    // Skip the implicit refresh when each expected Cursor account cache is
+    // recent enough — running `tokscale models` 30× in a script must not
+    // produce 30 Cursor API calls. The manual `tokscale cursor sync` command
+    // bypasses this gate.
     if cursor::cursor_usage_cache_is_fresh(cursor::CURSOR_AUTO_SYNC_FRESHNESS) {
         return None;
     }

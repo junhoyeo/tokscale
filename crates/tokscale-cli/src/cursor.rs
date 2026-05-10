@@ -13,10 +13,11 @@ use std::time::{Duration, SystemTime};
 /// proceeds against cached data after this timeout instead of stalling forever.
 const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Skip implicit pre-report sync when the active account's `usage.csv` was
-/// modified within this window. Prevents `tokscale models` (and its siblings)
-/// from issuing a Cursor API call on every invocation. The manual `tokscale
-/// cursor sync` command bypasses this — explicit user intent is always honored.
+/// Skip implicit pre-report sync when every expected Cursor account cache file
+/// was modified within this window. Prevents `tokscale models` (and its
+/// siblings) from issuing a Cursor API call on every invocation. The manual
+/// `tokscale cursor sync` command bypasses this — explicit user intent is
+/// always honored.
 pub const CURSOR_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 
 fn build_cursor_http_client() -> Result<reqwest::Client> {
@@ -655,33 +656,36 @@ pub fn has_cursor_usage_cache() -> bool {
     }
 }
 
-/// Returns the freshest mtime across all cached `usage*.csv` files in the
-/// given home directory. Returns `None` when the cache dir is missing, no
-/// cache files exist, or all mtime reads fail (callers should treat that as
-/// stale and re-sync).
-fn cursor_usage_cache_mtime_in(home_dir: &Path) -> Option<SystemTime> {
+fn expected_cursor_usage_cache_paths_in(home_dir: &Path) -> Vec<PathBuf> {
     let cache_dir = cursor_cache_dir(home_dir);
-    if !cache_dir.exists() {
-        return None;
+
+    if let Some(store) = load_credentials_store_from_home(home_dir) {
+        if !store.accounts.is_empty() {
+            let mut paths = store
+                .accounts
+                .keys()
+                .map(|account_id| {
+                    if account_id == &store.active_account_id {
+                        cache_dir.join("usage.csv")
+                    } else {
+                        cache_dir.join(format!(
+                            "usage.{}.csv",
+                            sanitize_account_id_for_filename(account_id)
+                        ))
+                    }
+                })
+                .collect::<Vec<_>>();
+            paths.sort_unstable();
+            paths.dedup();
+            return paths;
+        }
     }
 
-    fs::read_dir(&cache_dir)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_name()
-                .into_string()
-                .ok()
-                .is_some_and(|name| is_cursor_usage_csv_filename(&name))
-        })
-        .filter_map(|entry| entry.metadata().ok())
-        .filter_map(|meta| meta.modified().ok())
-        .max()
+    vec![cache_dir.join("usage.csv")]
 }
 
-fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
-    let Some(mtime) = cursor_usage_cache_mtime_in(home_dir) else {
+fn cursor_usage_cache_file_is_fresh(path: &Path, max_age: Duration) -> bool {
+    let Ok(mtime) = path.metadata().and_then(|meta| meta.modified()) else {
         return false;
     };
     match SystemTime::now().duration_since(mtime) {
@@ -693,10 +697,21 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
     }
 }
 
-/// True when the cursor usage cache was refreshed within `max_age`. Used by
-/// the implicit pre-report sync path to avoid hitting the Cursor API on every
-/// invocation. The manual `tokscale cursor sync` CLI bypasses this — explicit
-/// user intent is always honored.
+fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
+    let cache_dir = cursor_cache_dir(home_dir);
+    if !cache_dir.exists() {
+        return false;
+    }
+
+    expected_cursor_usage_cache_paths_in(home_dir)
+        .iter()
+        .all(|path| cursor_usage_cache_file_is_fresh(path, max_age))
+}
+
+/// True when every expected cursor usage cache file was refreshed within
+/// `max_age`. Used by the implicit pre-report sync path to avoid hitting the
+/// Cursor API on every invocation. The manual `tokscale cursor sync` CLI
+/// bypasses this — explicit user intent is always honored.
 pub fn cursor_usage_cache_is_fresh(max_age: Duration) -> bool {
     let Ok(home_dir) = home_dir() else {
         return false;
@@ -1441,10 +1456,10 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_usage_cache_is_fresh_uses_freshest_csv() {
-        // When multiple usage*.csv files exist the freshest mtime wins, so
-        // a recently-synced secondary account keeps the active stale file
-        // from triggering a refresh.
+    fn test_cursor_usage_cache_is_fresh_requires_active_usage_csv_when_secondary_is_fresh() {
+        // A recently-synced secondary account must not mask a stale active
+        // account cache. The implicit sync gate should refresh the cache that
+        // local reports read from `usage.csv`.
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = cursor_cache_dir(temp.path());
         fs::create_dir_all(&cache_dir).unwrap();
@@ -1460,10 +1475,129 @@ mod tests {
         drop(stale);
         // Secondary account written just now.
         fs::write(cache_dir.join("usage.team-a.csv"), "Date,Model\n").unwrap();
-        assert!(cursor_usage_cache_is_fresh_in(
+        assert!(!cursor_usage_cache_is_fresh_in(
             temp.path(),
             Duration::from_secs(300)
         ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_when_active_cache_missing() {
+        // A fresh secondary account cache alone is not enough: without the
+        // active account's `usage.csv`, the next report would use stale/missing
+        // active data unless the implicit sync runs.
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("usage.team-a.csv"), "Date,Model\n").unwrap();
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_requires_all_expected_account_files() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account".to_string(),
+            CursorCredentials {
+                session_token: "token-secondary".to_string(),
+                user_id: Some("team/account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("personal".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n")?;
+
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp_dir.path(),
+            Duration::from_secs(300)
+        ));
+
+        fs::write(cache_dir.join("usage.team-account.csv"), "Date,Model\n")?;
+        assert!(cursor_usage_cache_is_fresh_in(
+            temp_dir.path(),
+            Duration::from_secs(300)
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cursor_expected_cache_paths_dedupes_sanitized_account_collisions() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("active".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account-a".to_string(),
+            CursorCredentials {
+                session_token: "token-team-a".to_string(),
+                user_id: Some("team/account-a".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("team-a".to_string()),
+            },
+        );
+        accounts.insert(
+            "team@account-a".to_string(),
+            CursorCredentials {
+                session_token: "token-team-b".to_string(),
+                user_id: Some("team@account-a".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("team-b".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )
+        .unwrap();
+
+        let paths = expected_cursor_usage_cache_paths_in(temp_dir.path());
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        let expected = vec![
+            cache_dir.join("usage.csv"),
+            cache_dir.join("usage.team-account-a.csv"),
+        ];
+        assert_eq!(paths, expected);
     }
 
     #[test]
