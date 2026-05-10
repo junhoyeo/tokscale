@@ -425,23 +425,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         messages
     }
 
-    fn parse_uncached_messages<F>(
-        path: &Path,
-        pricing: Option<&pricing::PricingService>,
-        parse: F,
-    ) -> CachedParseOutcome
-    where
-        F: Fn(&Path) -> Vec<UnifiedMessage>,
-    {
-        let mut messages = parse(path);
-        apply_pricing_to_messages(&mut messages, pricing);
-        CachedParseOutcome {
-            messages,
-            cache_entry: None,
-            invalidate_cache: false,
-        }
-    }
-
     fn parse_full_log_source(
         path: &Path,
         pricing: Option<&pricing::PricingService>,
@@ -534,7 +517,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         ))
     }
 
-    fn load_or_parse_source_with_fingerprint<F>(
+    fn load_or_parse_source_with_fingerprint_and_policy<F>(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
@@ -542,10 +525,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         parse: F,
     ) -> CachedParseOutcome
     where
-        F: Fn(&Path) -> Vec<UnifiedMessage>,
+        F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
     {
         let Some(fingerprint) = fingerprint_from_path(path) else {
-            return parse_uncached_messages(path, pricing, parse);
+            let (mut messages, _) = parse(path);
+            apply_pricing_to_messages(&mut messages, pricing);
+            return CachedParseOutcome {
+                messages,
+                cache_entry: None,
+                invalidate_cache: false,
+            };
         };
 
         if let Some(cached) = source_cache.get(path) {
@@ -558,9 +547,8 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             }
         }
 
-        let messages = parse(path);
-        let mut messages = messages;
-        let cache_entry = if messages.is_empty() {
+        let (mut messages, cacheable) = parse(path);
+        let cache_entry = if messages.is_empty() || !cacheable {
             None
         } else {
             Some(message_cache::CachedSourceEntry::new(
@@ -576,8 +564,27 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         CachedParseOutcome {
             messages,
             cache_entry,
-            invalidate_cache: false,
+            invalidate_cache: !cacheable,
         }
+    }
+
+    fn load_or_parse_source_with_fingerprint<F>(
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        fingerprint_from_path: fn(&Path) -> Option<message_cache::SourceFingerprint>,
+        parse: F,
+    ) -> CachedParseOutcome
+    where
+        F: Fn(&Path) -> Vec<UnifiedMessage>,
+    {
+        load_or_parse_source_with_fingerprint_and_policy(
+            path,
+            source_cache,
+            pricing,
+            fingerprint_from_path,
+            |path| (parse(path), true),
+        )
     }
 
     fn load_or_parse_source<F>(
@@ -844,19 +851,29 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let gemini_outcomes: Vec<CachedParseOutcome> = scan_result
+    let gemini_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Gemini)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::gemini::parse_gemini_file(path)
-            })
+            let outcome = load_or_parse_source_with_fingerprint_and_policy(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_path,
+                |path| {
+                    let parsed = sessions::gemini::parse_gemini_file_with_cache_status(path);
+                    (parsed.messages, parsed.cacheable)
+                },
+            );
+            (path.clone(), outcome)
         })
         .collect();
-    for outcome in gemini_outcomes {
+    for (path, outcome) in gemini_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
+        } else if outcome.invalidate_cache {
+            source_cache.remove(&path);
         }
     }
 
