@@ -911,10 +911,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Kiro) {
-        let xdg_path = PathBuf::from(format!(
-            "{}/.local/share/kiro-cli/data.sqlite3",
-            home_dir
-        ));
+        let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
         if xdg_path.is_file() {
             result.kiro_db = Some(xdg_path);
         }
