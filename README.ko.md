@@ -161,8 +161,8 @@ npx tokscale@latest
 # 또는 bunx 사용
 bunx tokscale@latest
 
-# 또는 deno dx 사용
-dx tokscale@latest
+# 별칭 설치 없이 Deno 사용
+deno x npm:tokscale@latest
 
 # 라이트 모드 (테이블 렌더링만)
 npx tokscale@latest --light

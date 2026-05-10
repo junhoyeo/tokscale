@@ -161,8 +161,8 @@ npx tokscale@latest
 # 或使用 bunx
 bunx tokscale@latest
 
-# 或使用 deno dx
-dx tokscale@latest
+# 或使用 Deno（无需安装别名）
+deno x npm:tokscale@latest
 
 # 轻量模式（仅表格渲染）
 npx tokscale@latest --light
