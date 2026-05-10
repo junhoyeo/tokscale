@@ -143,6 +143,13 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(data.contributions[0].clients[0].client).toBe('hermes');
     });
 
+    it('should support zed client in submission payload', () => {
+      const data = createMockSubmissionData({ clients: ['zed'] });
+
+      expect(data.summary.clients).toContain('zed');
+      expect(data.contributions[0].clients[0].client).toBe('zed');
+    });
+
     it('should pass validation for kilo client submissions', () => {
       const payload = {
         meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
@@ -176,6 +183,44 @@ describe('POST /api/submit - Client-Level Merge', () => {
             { client: 'kilo' as const, modelId: 'claude-sonnet-4', tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 5 },
             { client: 'kilocode' as const, modelId: 'claude-sonnet-4', tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 5 },
           ],
+        }],
+      };
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should pass validation for zed client submissions', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 1500, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, clients: ['zed' as const], models: ['claude-sonnet-4'] },
+        years: [{ year: '2024', totalTokens: 1500, totalCost: 1.5, range: { start: '2024-12-01', end: '2024-12-01' } }],
+        contributions: [{
+          date: '2024-12-01',
+          totals: { tokens: 1500, cost: 1.5, messages: 5 },
+          intensity: 2 as const,
+          tokenBreakdown: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          clients: [{ client: 'zed' as const, modelId: 'claude-sonnet-4', tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 5 }],
+        }],
+      };
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should pass validation for legacy zed source submissions', () => {
+      const payload = {
+        meta: { generatedAt: new Date().toISOString(), version: '1.0.0', dateRange: { start: '2024-12-01', end: '2024-12-01' } },
+        summary: { totalTokens: 1500, totalCost: 1.5, totalDays: 1, activeDays: 1, averagePerDay: 1.5, maxCostInSingleDay: 1.5, sources: ['zed'], models: ['claude-sonnet-4'] },
+        years: [{ year: '2024', totalTokens: 1500, totalCost: 1.5, range: { start: '2024-12-01', end: '2024-12-01' } }],
+        contributions: [{
+          date: '2024-12-01',
+          totals: { tokens: 1500, cost: 1.5, messages: 5 },
+          intensity: 2 as const,
+          tokenBreakdown: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          sources: [{ source: 'zed', modelId: 'claude-sonnet-4', tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, cost: 1.5, messages: 5 }],
         }],
       };
       const result = validateSubmission(payload);
