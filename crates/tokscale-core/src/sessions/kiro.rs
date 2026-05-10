@@ -140,7 +140,11 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         let reader = BufReader::new(jsonl_file);
         let mut pending_prompt: Option<(usize, Option<i64>)> = None;
 
-        for line in reader.lines().filter_map(Result::ok) {
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -446,7 +450,12 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_session_files(dir: &TempDir, stem: &str, json: &str, jsonl: &str) -> std::path::PathBuf {
+    fn create_session_files(
+        dir: &TempDir,
+        stem: &str,
+        json: &str,
+        jsonl: &str,
+    ) -> std::path::PathBuf {
         let json_path = dir.path().join(format!("{}.json", stem));
         let jsonl_path = dir.path().join(format!("{}.jsonl", stem));
         let mut f = std::fs::File::create(&json_path).unwrap();
@@ -490,5 +499,20 @@ mod tests {
         let messages = parse_kiro_file(&path);
 
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_kiro_skips_malformed_jsonl_lines() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-3","cwd":"/tmp/project","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"turn_duration":100,"end_timestamp":1770983427,"total_request_count":2,"message_ids":["prompt-3","assistant-3"]}]}}}"#;
+        let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-3","content":[{"kind":"text","data":"hello world"}],"meta":{"timestamp":1770983426.420942}}}
+not valid json at all
+{"version":"v1","kind":"AssistantMessage","data":{"message_id":"assistant-3","content":[{"kind":"text","data":"response text"}]}}"#;
+        let path = create_session_files(&dir, "session-3", json, jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].tokens.input > 0 || messages[0].tokens.output > 0);
     }
 }
