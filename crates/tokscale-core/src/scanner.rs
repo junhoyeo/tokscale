@@ -1318,6 +1318,7 @@ mod tests {
         zed_db
     }
 
+    #[cfg(target_os = "macos")]
     fn setup_mock_zed_macos_db(base: &std::path::Path) -> PathBuf {
         let zed_db = base.join("Library/Application Support/Zed/threads/threads.db");
         fs::create_dir_all(zed_db.parent().unwrap()).unwrap();
@@ -1961,6 +1962,7 @@ mod tests {
         restore_env("XDG_DATA_HOME", previous_xdg);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     #[serial]
     fn test_scan_all_clients_zed_macos_fallback() {

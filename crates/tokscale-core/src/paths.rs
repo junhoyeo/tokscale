@@ -111,6 +111,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::env;
+    use std::path::Path;
 
     fn save_env() -> (
         Option<std::ffi::OsString>,
@@ -253,7 +254,7 @@ mod tests {
             "empty override must not resolve to the empty path"
         );
         assert!(
-            resolved.is_absolute() || resolved == PathBuf::from(".tokscale"),
+            resolved.is_absolute() || resolved == Path::new(".tokscale"),
             "empty override must fall through to platform default, got {resolved:?}"
         );
         restore_env(prev);

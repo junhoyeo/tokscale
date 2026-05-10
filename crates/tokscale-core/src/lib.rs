@@ -2311,6 +2311,7 @@ mod tests {
         msg
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_opencode_sqlite_payload(
         created_ms: f64,
         completed_ms: f64,
