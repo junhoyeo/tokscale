@@ -929,7 +929,7 @@ Tokscale 将配置存储在：
 | 平台 | 默认值 | 配置文件 | 禁用设置 | 来源 |
 |----------|---------|-------------|-------------------|--------|
 | Claude Code | **⚠️ 30 天** | `~/.claude/settings.json` | `"cleanupPeriodDays": 9999999999` | [文档](https://docs.anthropic.com/en/docs/claude-code/settings) |
-| Gemini CLI | 禁用 | `~/.gemini/settings.json` | `"general.sessionRetention.enabled": false` | [文档](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md) |
+| Gemini CLI | 禁用 | `$GEMINI_CLI_HOME/settings.json`（回退：`~/.gemini/settings.json`） | `"general.sessionRetention.enabled": false` | [文档](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md) |
 | Codex CLI | 禁用 | N/A | 无清理功能 | [#6015](https://github.com/openai/codex/issues/6015) |
 | OpenCode | 禁用 | N/A | 无清理功能 | [#4980](https://github.com/sst/opencode/issues/4980) |
 
@@ -950,7 +950,7 @@ Tokscale 将配置存储在：
 
 **默认**：清理已禁用（会话永久保留）
 
-如果您已启用清理并想禁用它，请在 `~/.gemini/settings.json` 中删除或设置 `enabled: false`：
+如果您已启用清理并想禁用它，请在 `$GEMINI_CLI_HOME/settings.json`（回退：`~/.gemini/settings.json`）中删除或设置 `enabled: false`：
 ```json
 {
   "general": {

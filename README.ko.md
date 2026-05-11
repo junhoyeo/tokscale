@@ -928,7 +928,7 @@ Tokscale은 다음 위치에 설정을 저장합니다:
 | 플랫폼 | 기본값 | 설정 파일 | 비활성화 설정 | 출처 |
 |----------|---------|-------------|-------------------|--------|
 | Claude Code | **⚠️ 30일** | `~/.claude/settings.json` | `"cleanupPeriodDays": 9999999999` | [문서](https://docs.anthropic.com/en/docs/claude-code/settings) |
-| Gemini CLI | 비활성화됨 | `~/.gemini/settings.json` | `"general.sessionRetention.enabled": false` | [문서](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md) |
+| Gemini CLI | 비활성화됨 | `$GEMINI_CLI_HOME/settings.json` (폴백: `~/.gemini/settings.json`) | `"general.sessionRetention.enabled": false` | [문서](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md) |
 | Codex CLI | 비활성화됨 | N/A | 정리 기능 없음 | [#6015](https://github.com/openai/codex/issues/6015) |
 | OpenCode | 비활성화됨 | N/A | 정리 기능 없음 | [#4980](https://github.com/sst/opencode/issues/4980) |
 
@@ -949,7 +949,7 @@ Tokscale은 다음 위치에 설정을 저장합니다:
 
 **기본값**: 정리 비활성화됨 (세션이 영구 보존)
 
-정리를 활성화했다가 비활성화하려면 `~/.gemini/settings.json`에서 제거하거나 `enabled: false`로 설정:
+정리를 활성화했다가 비활성화하려면 `$GEMINI_CLI_HOME/settings.json` (폴백: `~/.gemini/settings.json`)에서 제거하거나 `enabled: false`로 설정:
 ```json
 {
   "general": {

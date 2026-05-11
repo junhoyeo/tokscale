@@ -929,7 +929,7 @@ Tokscaleは以下の場所に設定を保存します：
 | プラットフォーム | デフォルト | 設定ファイル | 無効化設定 | ソース |
 |----------|---------|-------------|-------------------|--------|
 | Claude Code | **⚠️ 30日** | `~/.claude/settings.json` | `"cleanupPeriodDays": 9999999999` | [ドキュメント](https://docs.anthropic.com/en/docs/claude-code/settings) |
-| Gemini CLI | 無効 | `~/.gemini/settings.json` | `"general.sessionRetention.enabled": false` | [ドキュメント](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md) |
+| Gemini CLI | 無効 | `$GEMINI_CLI_HOME/settings.json`（フォールバック: `~/.gemini/settings.json`） | `"general.sessionRetention.enabled": false` | [ドキュメント](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md) |
 | Codex CLI | 無効 | N/A | クリーンアップ機能なし | [#6015](https://github.com/openai/codex/issues/6015) |
 | OpenCode | 無効 | N/A | クリーンアップ機能なし | [#4980](https://github.com/sst/opencode/issues/4980) |
 
@@ -950,7 +950,7 @@ Tokscaleは以下の場所に設定を保存します：
 
 **デフォルト**: クリーンアップ無効（セッションは永久に保持）
 
-クリーンアップを有効にしてから無効にしたい場合は、`~/.gemini/settings.json`で削除するか`enabled: false`に設定：
+クリーンアップを有効にしてから無効にしたい場合は、`$GEMINI_CLI_HOME/settings.json`（フォールバック: `~/.gemini/settings.json`）で削除するか`enabled: false`に設定：
 ```json
 {
   "general": {

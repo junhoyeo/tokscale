@@ -39,25 +39,55 @@ pub struct GeminiMessage {
     pub timestamp: Option<String>,
     #[serde(rename = "type")]
     pub message_type: String,
-    pub tokens: Option<GeminiTokens>,
+    pub tokens: Option<Value>,
     pub model: Option<String>,
 }
 
-/// Gemini token structure
-#[derive(Debug, Deserialize)]
+fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|k| value.get(k).and_then(|v| v.as_i64()))
+}
+
+fn deserialize_tokens(value: &Value) -> Option<GeminiTokens> {
+    Some(GeminiTokens {
+        input: first_i64(
+            value,
+            &[
+                "input",
+                "prompt",
+                "input_tokens",
+                "prompt_tokens",
+                "promptTokenCount",
+            ],
+        ),
+        output: first_i64(
+            value,
+            &[
+                "output",
+                "candidates",
+                "output_tokens",
+                "completion_tokens",
+                "candidatesTokenCount",
+            ],
+        ),
+        cached: first_i64(
+            value,
+            &["cached", "cached_tokens", "cachedContentTokenCount"],
+        ),
+        thoughts: first_i64(value, &["thoughts", "reasoning", "thoughts_tokens"]),
+        tool: first_i64(value, &["tool", "tool_tokens"]),
+        total: first_i64(value, &["total", "totalTokenCount", "total_tokens"]),
+    })
+}
+
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct GeminiTokens {
-    #[serde(alias = "prompt", alias = "input_tokens", alias = "prompt_tokens", alias = "promptTokenCount")]
     pub input: Option<i64>,
-    #[serde(alias = "candidates", alias = "output_tokens", alias = "completion_tokens", alias = "candidatesTokenCount")]
     pub output: Option<i64>,
-    #[serde(alias = "cached_tokens", alias = "cachedContentTokenCount")]
     pub cached: Option<i64>,
-    #[serde(alias = "reasoning", alias = "thoughts_tokens")]
     pub thoughts: Option<i64>,
-    #[serde(alias = "tool_tokens")]
     pub tool: Option<i64>,
-    #[serde(alias = "totalTokenCount", alias = "total_tokens")]
     pub total: Option<i64>,
 }
 
@@ -155,7 +185,7 @@ fn parse_gemini_session(session: GeminiSession, fallback_timestamp: i64) -> Vec<
 
     for msg in session.messages {
         // Only process messages with token data
-        let tokens = match msg.tokens {
+        let tokens = match msg.tokens.as_ref().and_then(deserialize_tokens) {
             Some(t) => t,
             None => continue,
         };
@@ -223,7 +253,7 @@ fn parse_direct_gemini_token_message(
 ) -> Option<UnifiedMessage> {
     let model = extract_string(value.get("model")).or(model_hint)?;
     let tokens_value = value.get("tokens")?;
-    let tokens: GeminiTokens = serde_json::from_value(tokens_value.clone()).ok()?;
+    let tokens = deserialize_tokens(tokens_value)?;
     let timestamp = extract_timestamp_from_value(value).unwrap_or(fallback_timestamp);
 
     Some(build_gemini_token_message(
@@ -366,7 +396,9 @@ fn parse_gemini_headless_value(
     session_id: &str,
     fallback_timestamp: i64,
 ) -> Vec<UnifiedMessage> {
-    if value.get("type").and_then(|val| val.as_str()) == Some("gemini") || value.get("tokens").is_some() {
+    if value.get("type").and_then(|val| val.as_str()) == Some("gemini")
+        || value.get("tokens").is_some()
+    {
         if let Some(message) =
             parse_direct_gemini_token_message(value, None, session_id, fallback_timestamp)
         {
@@ -1218,5 +1250,45 @@ not-json\n\
         assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 10);
         assert_eq!(messages[0].tokens.total(), 125);
+    }
+
+    #[test]
+    fn test_parse_gemini_tokens_with_mixed_duplicate_fields() {
+        let json = r#"{
+            "sessionId": "ses_dup",
+            "projectHash": "abc123",
+            "startTime": "2025-06-15T12:00:00Z",
+            "lastUpdated": "2025-06-15T12:30:00Z",
+            "messages": [
+                {
+                    "id": "msg_1",
+                    "timestamp": "2025-06-15T12:01:00Z",
+                    "type": "gemini",
+                    "model": "gemini-3-flash-preview",
+                    "tokens": {
+                        "input": 100,
+                        "prompt": 200,
+                        "output": 50,
+                        "candidates": 60,
+                        "cached": 5,
+                        "total": 215
+                    }
+                }
+            ]
+        }"#;
+        let file = tempfile::Builder::new()
+            .prefix("session-")
+            .suffix(".json")
+            .tempfile()
+            .unwrap();
+        std::fs::write(file.path(), json).unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 5);
     }
 }
