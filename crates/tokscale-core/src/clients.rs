@@ -56,8 +56,12 @@ impl PathRoot {
                 fallback_relative,
             } => {
                 if use_env_roots {
-                    std::env::var(var)
-                        .unwrap_or_else(|_| format!("{}/{}", home_dir, fallback_relative))
+                    let val = std::env::var(var).unwrap_or_default();
+                    if val.trim().is_empty() {
+                        format!("{}/{}", home_dir, fallback_relative)
+                    } else {
+                        val
+                    }
                 } else {
                     format!("{}/{}", home_dir, fallback_relative)
                 }
@@ -206,8 +210,11 @@ define_clients!(
     },
     Gemini = 4 => {
         id: "gemini",
-        root: PathRoot::Home,
-        relative: ".gemini/tmp",
+        root: PathRoot::EnvVar {
+            var: "GEMINI_CLI_HOME",
+            fallback_relative: ".gemini",
+        },
+        relative: "tmp",
         pattern: "*.json|*.jsonl",
         headless: false,
         parse_local: true,
