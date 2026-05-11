@@ -42,3 +42,27 @@ export function formatCurrency(value: number, compact = false): string {
     maximumFractionDigits: 2,
   }).format(Math.max(0, safeNumber(value)));
 }
+
+/**
+ * Format milliseconds into a human-readable duration string.
+ * e.g. 3661000 → "1h 1m", 90000 → "1m 30s", 500 → "<1s"
+ */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return "—";
+
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  if (minutes > 0) {
+    return seconds > 0 && minutes < 10 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+  if (seconds > 0) {
+    return `${seconds}s`;
+  }
+  return "<1s";
+}

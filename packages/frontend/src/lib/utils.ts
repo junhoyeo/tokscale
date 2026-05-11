@@ -327,3 +327,5 @@ export function groupClientsByType(clients: ClientContribution[]): Map<ClientTyp
 export function sortClientsByCost(clients: ClientContribution[]): ClientContribution[] {
   return [...clients].sort((a, b) => b.cost - a.cost);
 }
+
+export { formatDuration } from "./format";

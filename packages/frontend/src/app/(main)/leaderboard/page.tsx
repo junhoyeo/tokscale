@@ -31,6 +31,7 @@ function createEmptyLeaderboardData(sortBy: SortBy): LeaderboardData {
     stats: {
       totalTokens: 0,
       totalCost: 0,
+      totalActiveTimeMs: null,
       totalSubmissions: null,
       uniqueUsers: 0,
     },

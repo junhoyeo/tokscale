@@ -286,6 +286,19 @@ enum Commands {
     },
     #[command(about = "Delete all submitted usage data from the server")]
     DeleteSubmittedData,
+    #[command(
+        about = "Show session time metrics (usage time, longest continuous, max concurrent)"
+    )]
+    TimeMetrics {
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
+        #[arg(long, help = "Disable spinner")]
+        no_spinner: bool,
+    },
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
 }
@@ -664,6 +677,28 @@ fn main() -> Result<()> {
         Some(Commands::DeleteSubmittedData) => {
             reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
             run_delete_data_command()
+        }
+        Some(Commands::TimeMetrics {
+            json,
+            clients,
+            date,
+            no_spinner,
+        }) => {
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let year = normalize_year_filter(today, week, month, date.year);
+            let clients = build_client_filter(clients);
+            run_time_metrics_report(
+                json,
+                cli.home.clone(),
+                clients,
+                since,
+                until,
+                year,
+                no_spinner,
+            )
         }
         Some(Commands::WarmTuiCache) => run_warm_tui_cache(),
         None => {
@@ -3682,6 +3717,8 @@ struct TsDailyContribution {
     intensity: u8,
     token_breakdown: TsTokenBreakdown,
     clients: Vec<TsSourceContribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_time_ms: Option<i64>,
 }
 
 #[derive(serde::Serialize)]
@@ -3730,6 +3767,15 @@ struct TsSubmitDevice {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TsTimeMetrics {
+    total_active_time_ms: i64,
+    longest_continuous_ms: i64,
+    max_concurrent_sessions: u32,
+    session_count: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TsTokenContributionData {
     meta: TsExportMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3737,6 +3783,8 @@ struct TsTokenContributionData {
     summary: TsDataSummary,
     years: Vec<TsYearSummary>,
     contributions: Vec<TsDailyContribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time_metrics: Option<TsTimeMetrics>,
 }
 
 fn to_ts_token_contribution_data(
@@ -3819,8 +3867,15 @@ fn to_ts_token_contribution_data(
                         messages: s.messages,
                     })
                     .collect(),
+                active_time_ms: d.active_time_ms,
             })
             .collect(),
+        time_metrics: graph.time_metrics.as_ref().map(|tm| TsTimeMetrics {
+            total_active_time_ms: tm.total_active_time_ms,
+            longest_continuous_ms: tm.longest_continuous_ms,
+            max_concurrent_sessions: tm.max_concurrent_sessions,
+            session_count: tm.session_count,
+        }),
     }
 }
 
@@ -4147,6 +4202,92 @@ fn prompt_star_repo(username: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_time_metrics_report(
+    json: bool,
+    home_dir: Option<String>,
+    clients: Option<Vec<String>>,
+    since: Option<String>,
+    until: Option<String>,
+    year: Option<String>,
+    no_spinner: bool,
+) -> Result<()> {
+    use tokio::runtime::Runtime;
+    use tokscale_core::{get_time_metrics_report, GroupBy, ReportOptions};
+
+    let spinner = if no_spinner {
+        None
+    } else {
+        Some(LightSpinner::start("Computing time metrics..."))
+    };
+    let use_env_roots = use_env_roots(&home_dir);
+    let rt = Runtime::new()?;
+    let report = rt
+        .block_on(async {
+            get_time_metrics_report(ReportOptions {
+                home_dir,
+                use_env_roots,
+                clients,
+                since,
+                until,
+                year,
+                group_by: GroupBy::default(),
+                scanner_settings: tui::settings::load_scanner_settings(),
+            })
+            .await
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    if let Some(spinner) = spinner {
+        spinner.stop();
+    }
+
+    let m = &report.metrics;
+
+    if json {
+        let output = serde_json::to_string_pretty(&report).unwrap_or_default();
+        println!("{}", output);
+    } else {
+        println!("Session Time Metrics");
+        println!("====================");
+        println!(
+            "Total active time:       {}",
+            format_duration_ms(m.total_active_time_ms)
+        );
+        println!(
+            "Total wall-clock time:   {}",
+            format_duration_ms(m.total_wall_time_ms)
+        );
+        println!(
+            "Longest continuous use:  {}",
+            format_duration_ms(m.longest_continuous_ms)
+        );
+        println!("Max concurrent sessions: {}", m.max_concurrent_sessions);
+        println!("Total sessions:          {}", m.session_count);
+        println!("Processing time:         {}ms", report.processing_time_ms);
+    }
+
+    Ok(())
+}
+
+fn format_duration_ms(ms: i64) -> String {
+    if ms <= 0 {
+        return "0s".to_string();
+    }
+    let total_secs = ms / 1000;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m {}s", hours, minutes, secs)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, secs)
+    } else {
+        format!("{}s", secs)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5164,6 +5305,7 @@ mod tests {
                 cost: total_cost,
                 messages: 1,
             }],
+            active_time_ms: None,
         }
     }
 
@@ -5185,6 +5327,7 @@ mod tests {
             summary: calculate_summary(&contributions),
             years: calculate_years(&contributions),
             contributions,
+            time_metrics: None,
         }
     }
 

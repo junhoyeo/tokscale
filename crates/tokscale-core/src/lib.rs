@@ -9,12 +9,17 @@ pub mod paths;
 pub mod pricing;
 mod provider_identity;
 pub mod scanner;
+pub mod sessionize;
 pub mod sessions;
 
 pub use aggregator::*;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
 pub use parser::*;
 pub use scanner::*;
+pub use sessionize::{
+    compute_daily_active_time, compute_time_metrics, sessionize, SessionInterval, TimeMetrics,
+    DEFAULT_IDLE_GAP_MS,
+};
 pub use sessions::UnifiedMessage;
 
 use rayon::prelude::*;
@@ -319,6 +324,8 @@ pub struct DailyContribution {
     pub intensity: u8,
     pub token_breakdown: TokenBreakdown,
     pub clients: Vec<ClientContribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_time_ms: Option<i64>,
 }
 
 /// Per-session aggregate of token usage, cost, and timing — keyed on
@@ -375,6 +382,8 @@ pub struct GraphResult {
     pub summary: DataSummary,
     pub years: Vec<YearSummary>,
     pub contributions: Vec<DailyContribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_metrics: Option<sessionize::TimeMetrics>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1725,12 +1734,63 @@ async fn generate_graph_with_loaded_pricing(
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
+    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
+    let time_metrics =
+        sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
+
+    let daily_active_time = sessionize::compute_daily_active_time(&intervals);
     let contributions = aggregator::aggregate_by_date(filtered);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
-    let result = aggregator::generate_graph_result(contributions, processing_time_ms);
+    let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
+    result.time_metrics = Some(time_metrics);
+
+    for contribution in &mut result.contributions {
+        if let Some(&ms) = daily_active_time.get(&contribution.date) {
+            contribution.active_time_ms = Some(ms);
+        }
+    }
 
     Ok(result)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimeMetricsReport {
+    pub metrics: sessionize::TimeMetrics,
+    pub processing_time_ms: u32,
+}
+
+pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetricsReport, String> {
+    let start = Instant::now();
+
+    let home_dir = get_home_dir_string(&options.home_dir)?;
+
+    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
+        let mut clients: Vec<String> = ClientId::ALL
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+        clients
+    });
+
+    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+        &home_dir,
+        &clients,
+        None,
+        options.use_env_roots,
+        &options.scanner_settings,
+    );
+
+    let filtered = filter_messages_for_report(all_messages, &options);
+
+    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
+    let metrics = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
+
+    Ok(TimeMetricsReport {
+        metrics,
+        processing_time_ms: start.elapsed().as_millis() as u32,
+    })
 }
 
 pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {

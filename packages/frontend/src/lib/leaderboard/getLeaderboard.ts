@@ -19,6 +19,7 @@ interface LeaderboardPeriodRow {
   avatarUrl: string | null;
   tokens: number;
   cost: number;
+  activeTimeMs: number | null;
   updatedAt: string;
   cliVersion: string | null;
   schemaVersion: number;
@@ -36,6 +37,7 @@ interface PeriodLeaderboardDbRow {
   avatarUrl: string | null;
   tokens: number | string | null;
   cost: number | string | null;
+  activeTimeMs: number | string | null;
   updatedAt: Date | string;
   cliVersion: string | null;
   schemaVersion: number | null;
@@ -48,6 +50,7 @@ interface AllTimeLeaderboardDbRow {
   avatarUrl: string | null;
   totalTokens: number | string | null;
   totalCost: number | string | null;
+  totalActiveTimeMs: number | string | null;
   submissionCount: number | string | null;
   lastSubmission: string;
   cliVersion: string | null;
@@ -113,6 +116,16 @@ function compareLeaderboardUsers(
   right: Omit<LeaderboardUser, "rank">,
   sortBy: SortBy
 ): number {
+  if (sortBy === "time") {
+    const leftTime = left.totalActiveTimeMs || 0;
+    const rightTime = right.totalActiveTimeMs || 0;
+    const primary = rightTime - leftTime;
+    if (primary !== 0) return primary;
+    const secondary = right.totalTokens - left.totalTokens;
+    if (secondary !== 0) return secondary;
+    return left.username.localeCompare(right.username);
+  }
+
   const primary = sortBy === "cost"
     ? right.totalCost - left.totalCost
     : right.totalTokens - left.totalTokens;
@@ -144,6 +157,9 @@ function aggregatePeriodRows(
     if (existing) {
       existing.totalTokens += row.tokens;
       existing.totalCost += row.cost;
+      if (row.activeTimeMs != null) {
+        existing.totalActiveTimeMs = (existing.totalActiveTimeMs || 0) + row.activeTimeMs;
+      }
       if (row.updatedAt > existing.lastSubmission) {
         existing.lastSubmission = row.updatedAt;
         existing.submissionFreshness = buildSubmissionFreshness({
@@ -162,6 +178,7 @@ function aggregatePeriodRows(
       avatarUrl: row.avatarUrl,
       totalTokens: row.tokens,
       totalCost: row.cost,
+      totalActiveTimeMs: row.activeTimeMs,
       submissionCount: null,
       lastSubmission: row.updatedAt,
       submissionFreshness: buildSubmissionFreshness({
@@ -227,6 +244,7 @@ function buildPeriodLeaderboardData(
     stats: {
       totalTokens: aggregatedUsers.reduce((sum, user) => sum + user.totalTokens, 0),
       totalCost: aggregatedUsers.reduce((sum, user) => sum + user.totalCost, 0),
+      totalActiveTimeMs: aggregatedUsers.reduce((sum, user) => sum + (user.totalActiveTimeMs || 0), 0) || null,
       // submitCount lives on the all-time submission row, so period-scoped submit totals are unavailable here.
       totalSubmissions: null,
       uniqueUsers: aggregatedUsers.length,
@@ -277,6 +295,7 @@ async function fetchPeriodLeaderboardRows(
       avatarUrl: users.avatarUrl,
       tokens: dailyBreakdown.tokens,
       cost: dailyBreakdown.cost,
+      activeTimeMs: dailyBreakdown.activeTimeMs,
       updatedAt: submissions.updatedAt,
       cliVersion: submissions.cliVersion,
       schemaVersion: submissions.schemaVersion,
@@ -298,6 +317,7 @@ async function fetchPeriodLeaderboardRows(
     avatarUrl: row.avatarUrl,
     tokens: Number(row.tokens) || 0,
     cost: Number(row.cost) || 0,
+    activeTimeMs: row.activeTimeMs != null ? Number(row.activeTimeMs) : null,
     updatedAt: row.updatedAt instanceof Date
       ? row.updatedAt.toISOString()
       : new Date(row.updatedAt).toISOString(),
@@ -324,6 +344,8 @@ async function fetchLeaderboardData(
 
   const orderByColumn = sortBy === "cost"
     ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    : sortBy === "time"
+    ? sql`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`
     : sql`SUM(${submissions.totalTokens})`;
 
   if (search) {
@@ -338,6 +360,7 @@ async function fetchLeaderboardData(
         avatarUrl: users.avatarUrl,
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
         totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+        totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`.as("total_active_time_ms"),
         submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
         lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
         cliVersion: sql<string | null>`(
@@ -394,6 +417,7 @@ async function fetchLeaderboardData(
         avatarUrl: row.avatarUrl,
         totalTokens: Number(row.totalTokens) || 0,
         totalCost: Number(row.totalCost) || 0,
+        totalActiveTimeMs: Number((row as AllTimeLeaderboardDbRow).totalActiveTimeMs) || null,
         submissionCount: Number(row.submissionCount) || 0,
         lastSubmission: row.lastSubmission,
         submissionFreshness: buildSubmissionFreshness({
@@ -413,6 +437,7 @@ async function fetchLeaderboardData(
       stats: {
         totalTokens: Number(globalStats[0]?.totalTokens) || 0,
         totalCost: Number(globalStats[0]?.totalCost) || 0,
+        totalActiveTimeMs: null,
         totalSubmissions: Number(globalStats[0]?.totalSubmissions) || 0,
         uniqueUsers: Number(globalStats[0]?.uniqueUsers) || 0,
       },
@@ -431,6 +456,7 @@ async function fetchLeaderboardData(
       avatarUrl: users.avatarUrl,
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
       totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+      totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`.as("total_active_time_ms"),
       submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
       lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
       cliVersion: sql<string | null>`(
@@ -475,6 +501,7 @@ async function fetchLeaderboardData(
       avatarUrl: row.avatarUrl,
       totalTokens: Number(row.totalTokens) || 0,
       totalCost: Number(row.totalCost) || 0,
+      totalActiveTimeMs: Number(row.totalActiveTimeMs) || null,
       submissionCount: Number(row.submissionCount) || 0,
       lastSubmission: row.lastSubmission,
       submissionFreshness: buildSubmissionFreshness({
@@ -494,6 +521,7 @@ async function fetchLeaderboardData(
     stats: {
       totalTokens: Number(globalStats[0]?.totalTokens) || 0,
       totalCost: Number(globalStats[0]?.totalCost) || 0,
+      totalActiveTimeMs: null,
       totalSubmissions: Number(globalStats[0]?.totalSubmissions) || 0,
       uniqueUsers: Number(globalStats[0]?.uniqueUsers) || 0,
     },
@@ -557,6 +585,7 @@ async function fetchUserRank(
     .select({
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
       totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+      totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`.as("total_active_time_ms"),
       submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
       lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
       cliVersion: sql<string | null>`(
@@ -580,10 +609,17 @@ async function fetchUserRank(
   const userStats = userStatsResult[0];
   const userTotalTokens = Number(userStats.totalTokens);
   const userTotalCost = userStats.totalCost != null ? Number(userStats.totalCost) : 0;
+  const userTotalActiveTimeMs = Number(userStats.totalActiveTimeMs) || 0;
 
-  const userCompareValue = sortBy === "cost" ? userTotalCost : userTotalTokens;
+  const userCompareValue = sortBy === "cost"
+    ? userTotalCost
+    : sortBy === "time"
+    ? userTotalActiveTimeMs
+    : userTotalTokens;
   const compareColumn = sortBy === "cost"
     ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    : sortBy === "time"
+    ? sql`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`
     : sql`SUM(${submissions.totalTokens})`;
 
   const higherRankedResult = await db
@@ -612,6 +648,7 @@ async function fetchUserRank(
     avatarUrl: user.avatarUrl,
     totalTokens: userTotalTokens,
     totalCost: userTotalCost,
+    totalActiveTimeMs: userTotalActiveTimeMs || null,
     submissionCount: Number(userStats.submissionCount) || 0,
     lastSubmission: userStats.lastSubmission,
     submissionFreshness: buildSubmissionFreshness({

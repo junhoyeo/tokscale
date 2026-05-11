@@ -10,10 +10,13 @@ import {
   findBestDay,
 } from "@/lib/utils";
 import { formatContributionDate } from "@/lib/date-utils";
+import { formatDuration } from "@/lib/format";
 
 interface StatsPanelProps {
   data: TokenContributionData;
   palette: GraphColorPalette;
+  totalActiveTimeMs?: number | null;
+  sessionCount?: number | null;
 }
 
 const Container = styled.div`
@@ -140,7 +143,7 @@ const StatItemSubValue = styled.div`
   color: var(--color-fg-muted);
 `;
 
-export function StatsPanel({ data, palette }: StatsPanelProps) {
+export function StatsPanel({ data, palette, totalActiveTimeMs, sessionCount }: StatsPanelProps) {
   const { summary, contributions } = data;
   const currentStreak = calculateCurrentStreak(contributions);
   const longestStreak = calculateLongestStreak(contributions);
@@ -161,6 +164,12 @@ export function StatsPanel({ data, palette }: StatsPanelProps) {
           <StatItem label="Best Day" value={formatContributionDate(bestDay)} subValue={formatCurrency(bestDay.totals.cost)} />
         )}
         <StatItem label="Models" value={summary.models.length.toString()} />
+        {totalActiveTimeMs != null && totalActiveTimeMs > 0 && (
+          <StatItem label="Active Time" value={formatDuration(totalActiveTimeMs)} />
+        )}
+        {sessionCount != null && sessionCount > 0 && (
+          <StatItem label="Sessions" value={sessionCount.toString()} />
+        )}
       </Grid>
 
       <SourcesContainer>

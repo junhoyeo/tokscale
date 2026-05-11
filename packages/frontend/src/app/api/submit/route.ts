@@ -232,6 +232,7 @@ export async function POST(request: Request) {
           id: dailyBreakdown.id,
           date: dailyBreakdown.date,
           timestampMs: dailyBreakdown.timestampMs,
+          activeTimeMs: dailyBreakdown.activeTimeMs,
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
         })
         .from(dailyBreakdown)
@@ -259,6 +260,7 @@ export async function POST(request: Request) {
         inputTokens: number;
         outputTokens: number;
         timestampMs: number | null;
+        activeTimeMs: number | null;
         sourceBreakdown: Record<string, ClientBreakdownData>;
         modelBreakdown: Record<string, number>;
       }> = [];
@@ -270,6 +272,7 @@ export async function POST(request: Request) {
         inputTokens: number;
         outputTokens: number;
         timestampMs: number | null;
+        activeTimeMs: number | null;
         sourceBreakdown: Record<string, ClientBreakdownData>;
         modelBreakdown: Record<string, number>;
       }> = [];
@@ -328,6 +331,7 @@ export async function POST(request: Request) {
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestampMs ?? null),
+            activeTimeMs: incomingDay.activeTimeMs ?? existingDay.activeTimeMs ?? null,
             sourceBreakdown: mergedClientBreakdown,
             modelBreakdown,
           });
@@ -344,6 +348,7 @@ export async function POST(request: Request) {
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: incomingDay.timestampMs ?? null,
+            activeTimeMs: incomingDay.activeTimeMs ?? null,
             sourceBreakdown: incomingClientBreakdown,
             modelBreakdown,
           });
@@ -359,7 +364,7 @@ export async function POST(request: Request) {
       if (toUpdate.length > 0) {
         const valuesClauses = toUpdate.map(
           (row) =>
-            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb, ${JSON.stringify(row.modelBreakdown)}::jsonb)`
+            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb, ${JSON.stringify(row.modelBreakdown)}::jsonb)`
         );
 
         const valuesList = sql.join(valuesClauses, sql`, `);
@@ -371,10 +376,11 @@ export async function POST(request: Request) {
             input_tokens = batch.input_tokens,
             output_tokens = batch.output_tokens,
             timestamp_ms = batch.timestamp_ms,
+            active_time_ms = batch.active_time_ms,
             source_breakdown = batch.source_breakdown,
             model_breakdown = batch.model_breakdown
           FROM (VALUES ${valuesList})
-            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, source_breakdown, model_breakdown)
+            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown, model_breakdown)
           WHERE d.id = batch.id
         `);
       }
@@ -450,6 +456,12 @@ export async function POST(request: Request) {
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
           schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
+          ...(data.timeMetrics ? {
+            totalActiveTimeMs: data.timeMetrics.totalActiveTimeMs,
+            longestContinuousMs: data.timeMetrics.longestContinuousMs,
+            maxConcurrentSessions: data.timeMetrics.maxConcurrentSessions,
+            sessionCount: data.timeMetrics.sessionCount,
+          } : {}),
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));

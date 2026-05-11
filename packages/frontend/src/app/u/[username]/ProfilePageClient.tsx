@@ -37,6 +37,8 @@ interface ProfileData {
     cacheWriteTokens: number;
     submissionCount: number;
     activeDays: number;
+    totalActiveTimeMs: number;
+    sessionCount: number;
   };
   dateRange: {
     start: string | null;
@@ -134,6 +136,8 @@ export default function ProfilePageClient({ initialData, username }: ProfilePage
     cacheWriteTokens: data.stats.cacheWriteTokens,
     activeDays: data.stats.activeDays,
     submissionCount: data.stats.submissionCount,
+    totalActiveTimeMs: data.stats.totalActiveTimeMs,
+    sessionCount: data.stats.sessionCount,
   }), [data]);
 
 const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
@@ -174,7 +178,11 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
             >
               {graphData ? (
                 <ActivitySection>
-                  <ProfileActivity data={graphData} />
+                  <ProfileActivity
+                    data={graphData}
+                    totalActiveTimeMs={data.stats.totalActiveTimeMs}
+                    sessionCount={data.stats.sessionCount}
+                  />
                   <ProfileStats
                     stats={stats}
                     favoriteModel={

@@ -62,9 +62,11 @@ const GraphWrapper = styled.div`
 
 interface GraphContainerProps {
   data: TokenContributionData;
+  totalActiveTimeMs?: number | null;
+  sessionCount?: number | null;
 }
 
-export function GraphContainer({ data }: GraphContainerProps) {
+export function GraphContainer({ data, totalActiveTimeMs, sessionCount }: GraphContainerProps) {
   const { paletteName, setPalette } = useSettings();
 
   const [view, setView] = useState<ViewMode>("2d");
@@ -179,7 +181,7 @@ export function GraphContainer({ data }: GraphContainerProps) {
       </GraphCard>
 
       {selectedDay && <BreakdownPanel day={selectedDay} onClose={() => setSelectedDay(null)} palette={palette} />}
-      {view === "2d" && <StatsPanel data={filteredByClient} palette={palette} />}
+      {view === "2d" && <StatsPanel data={filteredByClient} palette={palette} totalActiveTimeMs={clientFilter.length === 0 ? totalActiveTimeMs : null} sessionCount={clientFilter.length === 0 ? sessionCount : null} />}
       <Tooltip day={hoveredDay} position={tooltipPosition} visible={hoveredDay !== null} palette={palette} />
     </Container>
   );

@@ -7,9 +7,9 @@ import styled from "styled-components";
 import { CopyIcon, CheckIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
 import { TabBar } from "@/components/TabBar";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
-import { formatCurrency, formatNumber } from "@/lib/utils";
+import { formatCurrency, formatNumber, formatDuration } from "@/lib/utils";
 import { useSettings } from "@/lib/useSettings";
-import { Switch } from "@/components/Switch";
+import type { LeaderboardSortBy } from "@/lib/leaderboard/constants";
 
 const Section = styled.div`
   margin-bottom: 40px;
@@ -790,6 +790,33 @@ const DateApplyButton = styled.button`
   }
 `;
 
+const SortOptions = styled.div`
+  display: inline-flex;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  overflow: hidden;
+`;
+
+const SortOption = styled.button<{ $active: boolean }>`
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: ${({ $active }) => ($active ? 600 : 400)};
+  color: ${({ $active }) => ($active ? '#fff' : 'var(--color-fg-muted)')};
+  background-color: ${({ $active }) => ($active ? '#0073FF' : 'transparent')};
+  border: none;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover:not([disabled]) {
+    color: ${({ $active }) => ($active ? '#fff' : 'var(--color-fg-default)')};
+    background-color: ${({ $active }) => ($active ? '#0073FF' : 'var(--color-bg-subtle)')};
+  }
+
+  & + & {
+    border-left: 1px solid var(--color-border-default);
+  }
+`;
+
 const HoverTooltip = styled.span`
   position: relative;
   cursor: default;
@@ -882,6 +909,7 @@ export interface LeaderboardUser {
   avatarUrl: string | null;
   totalTokens: number;
   totalCost: number;
+  totalActiveTimeMs: number | null;
   submissionCount: number | null;
   lastSubmission: string;
 }
@@ -899,17 +927,18 @@ export interface LeaderboardData {
   stats: {
     totalTokens: number;
     totalCost: number;
+    totalActiveTimeMs: number | null;
     totalSubmissions: number | null;
     uniqueUsers: number;
   };
   period: Period;
-  sortBy?: 'tokens' | 'cost';
+  sortBy?: 'tokens' | 'cost' | 'time';
 }
 
 interface LeaderboardClientProps {
   initialData: LeaderboardData;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
-  initialSortBy: 'tokens' | 'cost';
+  initialSortBy: 'tokens' | 'cost' | 'time';
   initialUserRank: LeaderboardUser | null;
 }
 
@@ -929,6 +958,7 @@ interface LeaderboardRowProps {
   isCurrentUser: boolean;
   isLastRow: boolean;
   showSubmissionCount: boolean;
+  showTime: boolean;
   onRowClick: (username: string) => void;
 }
 
@@ -937,6 +967,7 @@ const LeaderboardRow = memo(function LeaderboardRow({
   isCurrentUser,
   isLastRow,
   showSubmissionCount,
+  showTime,
   onRowClick,
 }: LeaderboardRowProps) {
   const formattedTokens = useMemo(() => user.totalTokens.toLocaleString('en-US'), [user.totalTokens]);
@@ -988,6 +1019,11 @@ const LeaderboardRow = memo(function LeaderboardRow({
           </CostValue>
         </CombinedValueContainer>
       </TableCell>
+      {showTime && (
+        <TableCell className="text-right hidden-mobile w-24">
+          <StatSpan>{formatDuration(user.totalActiveTimeMs)}</StatSpan>
+        </TableCell>
+      )}
       {showSubmissionCount && (
         <TableCell className="text-right hidden-mobile w-24">
           <SubmitCount>{user.submissionCount ?? "—"}</SubmitCount>
@@ -1129,7 +1165,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   const fetchData = useCallback((
     targetPeriod: Period,
     targetPage: number,
-    targetSortBy: "tokens" | "cost",
+    targetSortBy: LeaderboardSortBy,
     targetSearch: string,
     targetRetryToken: number,
     signal?: AbortSignal,
@@ -1193,6 +1229,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   const sortedUsers = data.users || [];
   const showSubmissionCount = period === "all";
+  const showTime = true;
 
   const handleCopyCommand = (command: string) => {
     navigator.clipboard.writeText(command);
@@ -1357,15 +1394,35 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         </SearchInputWrapper>
         <SortToggleInner>
           <SortLabel>Sort by:</SortLabel>
-          <Switch
-            checked={effectiveSortBy === 'cost'}
-            onChange={(checked) => {
-              userHasToggledSort.current = true;
-              setLeaderboardSort(checked ? 'cost' : 'tokens');
-            }}
-            leftLabel="Tokens"
-            rightLabel="Cost"
-          />
+          <SortOptions>
+            <SortOption
+              $active={effectiveSortBy === 'tokens'}
+              onClick={() => {
+                userHasToggledSort.current = true;
+                setLeaderboardSort('tokens');
+              }}
+            >
+              Tokens
+            </SortOption>
+            <SortOption
+              $active={effectiveSortBy === 'cost'}
+              onClick={() => {
+                userHasToggledSort.current = true;
+                setLeaderboardSort('cost');
+              }}
+            >
+              Cost
+            </SortOption>
+            <SortOption
+              $active={effectiveSortBy === 'time'}
+              onClick={() => {
+                userHasToggledSort.current = true;
+                setLeaderboardSort('time');
+              }}
+            >
+              Time
+            </SortOption>
+          </SortOptions>
         </SortToggleInner>
       </SearchSortRow>
 
@@ -1409,6 +1466,9 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                       <TableHeaderCell>User</TableHeaderCell>
                       <TableHeaderCell className="text-right hidden-cost-mobile">Cost</TableHeaderCell>
                       <TableHeaderCell className="text-right">Tokens</TableHeaderCell>
+                      {showTime && (
+                        <TableHeaderCell className="text-right hidden-mobile w-24">Time</TableHeaderCell>
+                      )}
                       {showSubmissionCount && (
                         <TableHeaderCell className="text-right hidden-mobile w-24">Submits</TableHeaderCell>
                       )}
@@ -1422,6 +1482,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                         isCurrentUser={!!(currentUser && user.username === currentUser.username)}
                         isLastRow={index === sortedUsers.length - 1}
                         showSubmissionCount={showSubmissionCount}
+                        showTime={showTime}
                         onRowClick={handleRowClick}
                       />
                     ))}

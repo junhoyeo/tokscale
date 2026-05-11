@@ -5,7 +5,7 @@ import type { Period, SortBy } from "@/lib/leaderboard/types";
 export const revalidate = 60;
 
 const VALID_PERIODS: Period[] = ["all", "month", "last-month", "week", "custom"];
-const VALID_SORT_BY: SortBy[] = ["tokens", "cost"];
+const VALID_SORT_BY: SortBy[] = ["tokens", "cost", "time"];
 
 function parseIntSafe(value: string | null, defaultValue: number): number {
   if (!value) return defaultValue;

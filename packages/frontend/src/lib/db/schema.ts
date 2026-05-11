@@ -182,6 +182,11 @@ export const submissions = pgTable(
     /** 0=legacy (no timestamps), 1=timestamp-aware CLI */
     schemaVersion: integer("schema_version").notNull().default(0),
 
+    totalActiveTimeMs: bigint("total_active_time_ms", { mode: "number" }),
+    longestContinuousMs: bigint("longest_continuous_ms", { mode: "number" }),
+    maxConcurrentSessions: integer("max_concurrent_sessions"),
+    sessionCount: integer("session_count"),
+
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -295,6 +300,8 @@ export const dailyBreakdown = pgTable(
       >
     >(),
     modelBreakdown: jsonb("model_breakdown").$type<Record<string, number>>(),
+    /** Total active coding time in this UTC day bucket (milliseconds). NULL for legacy data. */
+    activeTimeMs: bigint("active_time_ms", { mode: "number" }),
   },
   (table) => [
     index("idx_daily_breakdown_submission_id").on(table.submissionId),

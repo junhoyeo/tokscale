@@ -57,6 +57,13 @@
       "when": 1778025601000,
       "tag": "0007_add_submitted_devices",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1778112000000,
+      "tag": "0008_add_time_metrics_to_submissions",
+      "breakpoints": true
     }
   ]
 }
