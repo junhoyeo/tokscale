@@ -14,7 +14,8 @@ use crate::ClientFilter;
 use ratatui::style::Color;
 
 use super::data::{
-    AgentUsage, DailyUsage, DataLoader, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
+    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, TokenBreakdown,
+    UsageData,
 };
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
@@ -39,6 +40,7 @@ pub enum Tab {
     Models,
     Daily,
     Hourly,
+    Minutely,
     Stats,
     Agents,
 }
@@ -50,6 +52,7 @@ impl Tab {
             Tab::Models,
             Tab::Daily,
             Tab::Hourly,
+            Tab::Minutely,
             Tab::Stats,
             Tab::Agents,
         ]
@@ -61,6 +64,7 @@ impl Tab {
             Tab::Models => "Models",
             Tab::Daily => "Daily",
             Tab::Hourly => "Hourly",
+            Tab::Minutely => "Minutely",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
         }
@@ -72,6 +76,7 @@ impl Tab {
             Tab::Models => "Mod",
             Tab::Daily => "Day",
             Tab::Hourly => "Hr",
+            Tab::Minutely => "Min",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
         }
@@ -82,7 +87,8 @@ impl Tab {
             Tab::Overview => Tab::Models,
             Tab::Models => Tab::Daily,
             Tab::Daily => Tab::Hourly,
-            Tab::Hourly => Tab::Stats,
+            Tab::Hourly => Tab::Minutely,
+            Tab::Minutely => Tab::Stats,
             Tab::Stats => Tab::Agents,
             Tab::Agents => Tab::Overview,
         }
@@ -94,7 +100,8 @@ impl Tab {
             Tab::Models => Tab::Overview,
             Tab::Daily => Tab::Models,
             Tab::Hourly => Tab::Daily,
-            Tab::Stats => Tab::Hourly,
+            Tab::Minutely => Tab::Hourly,
+            Tab::Stats => Tab::Minutely,
             Tab::Agents => Tab::Stats,
         }
     }
@@ -638,7 +645,7 @@ impl App {
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
-        if tab == Tab::Hourly {
+        if matches!(tab, Tab::Hourly | Tab::Minutely) {
             (SortField::Date, SortDirection::Descending)
         } else {
             (SortField::Cost, SortDirection::Descending)
@@ -766,6 +773,7 @@ impl App {
             }
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
+            Tab::Minutely => self.data.minutely.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
                     self.stats_breakdown_total_lines
@@ -1023,6 +1031,17 @@ impl App {
                     h.cost
                 )
             }),
+            Tab::Minutely => self
+                .get_sorted_minutely()
+                .get(self.selected_index)
+                .map(|m| {
+                    format!(
+                        "{}: {} tokens, ${:.4}",
+                        m.datetime.format("%Y-%m-%d %H:%M"),
+                        m.tokens.total(),
+                        m.cost
+                    )
+                }),
             Tab::Stats => None,
         };
 
@@ -1268,6 +1287,41 @@ impl App {
         hourly
     }
 
+    pub fn get_sorted_minutely(&self) -> Vec<&MinutelyUsage> {
+        let mut minutely: Vec<&MinutelyUsage> = self.data.minutely.iter().collect();
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => minutely.sort_by(|a, b| {
+                b.cost
+                    .total_cmp(&a.cost)
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => minutely.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => minutely.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => minutely.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Date, SortDirection::Descending) => {
+                minutely.sort_by_key(|b| std::cmp::Reverse(b.datetime))
+            }
+            (SortField::Date, SortDirection::Ascending) => minutely.sort_by_key(|a| a.datetime),
+        }
+
+        minutely
+    }
+
     pub fn is_narrow(&self) -> bool {
         self.terminal_width < 80
     }
@@ -1288,13 +1342,14 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 6);
+        assert_eq!(tabs.len(), 7);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Models);
         assert_eq!(tabs[2], Tab::Daily);
         assert_eq!(tabs[3], Tab::Hourly);
-        assert_eq!(tabs[4], Tab::Stats);
-        assert_eq!(tabs[5], Tab::Agents);
+        assert_eq!(tabs[4], Tab::Minutely);
+        assert_eq!(tabs[5], Tab::Stats);
+        assert_eq!(tabs[6], Tab::Agents);
     }
 
     #[test]
@@ -1302,7 +1357,8 @@ mod tests {
         assert_eq!(Tab::Overview.next(), Tab::Models);
         assert_eq!(Tab::Models.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
-        assert_eq!(Tab::Hourly.next(), Tab::Stats);
+        assert_eq!(Tab::Hourly.next(), Tab::Minutely);
+        assert_eq!(Tab::Minutely.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
         assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
@@ -1313,7 +1369,8 @@ mod tests {
         assert_eq!(Tab::Models.prev(), Tab::Overview);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
-        assert_eq!(Tab::Stats.prev(), Tab::Hourly);
+        assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
+        assert_eq!(Tab::Stats.prev(), Tab::Minutely);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
@@ -1323,6 +1380,8 @@ mod tests {
         assert_eq!(Tab::Models.as_str(), "Models");
         assert_eq!(Tab::Agents.as_str(), "Agents");
         assert_eq!(Tab::Daily.as_str(), "Daily");
+        assert_eq!(Tab::Hourly.as_str(), "Hourly");
+        assert_eq!(Tab::Minutely.as_str(), "Minutely");
         assert_eq!(Tab::Stats.as_str(), "Stats");
     }
 
@@ -1332,6 +1391,8 @@ mod tests {
         assert_eq!(Tab::Models.short_name(), "Mod");
         assert_eq!(Tab::Agents.short_name(), "Agt");
         assert_eq!(Tab::Daily.short_name(), "Day");
+        assert_eq!(Tab::Hourly.short_name(), "Hr");
+        assert_eq!(Tab::Minutely.short_name(), "Min");
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
 
@@ -1692,6 +1753,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Hourly);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Minutely);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -1711,6 +1775,9 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Stats);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Minutely);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Hourly);
