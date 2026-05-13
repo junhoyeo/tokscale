@@ -156,10 +156,14 @@ enum Commands {
     },
     #[command(about = "Show pricing for a model")]
     Pricing {
+        #[arg(help = "Model ID to look up, or `list-overrides`")]
         model_id: String,
         #[arg(long, help = "Output as JSON")]
         json: bool,
-        #[arg(long, help = "Force specific provider (litellm or openrouter)")]
+        #[arg(
+            long,
+            help = "Force specific provider (custom, litellm, or openrouter)"
+        )]
         provider: Option<String>,
         #[arg(long, help = "Disable spinner")]
         no_spinner: bool,
@@ -2599,16 +2603,20 @@ fn run_pricing_lookup(
     use tokio::runtime::Runtime;
     use tokscale_core::pricing::PricingService;
 
+    if model_id.eq_ignore_ascii_case("list-overrides") {
+        return run_pricing_list_overrides(json);
+    }
+
     let provider_normalized = provider.map(|p| p.to_lowercase());
     if let Some(ref p) = provider_normalized {
-        if p != "litellm" && p != "openrouter" {
+        if p != "custom" && p != "litellm" && p != "openrouter" {
             println!(
                 "\n  {}",
                 format!("Invalid provider: {}", provider.unwrap_or("")).red()
             );
             println!(
                 "{}\n",
-                "  Valid providers: litellm, openrouter".bright_black()
+                "  Valid providers: custom, litellm, openrouter".bright_black()
             );
             std::process::exit(1);
         }
@@ -2720,10 +2728,11 @@ fn run_pricing_lookup(
             Some(pricing) => {
                 println!("\n  Pricing for: {}", model_id.bold());
                 println!("  Matched key: {}", pricing.matched_key);
-                let source_label = if pricing.source.eq_ignore_ascii_case("litellm") {
-                    "LiteLLM"
-                } else {
-                    "OpenRouter"
+                let source_label = match pricing.source.to_lowercase().as_str() {
+                    "custom" => "Custom",
+                    "litellm" => "LiteLLM",
+                    "openrouter" => "OpenRouter",
+                    _ => pricing.source.as_str(),
                 };
                 println!("  Source: {}", source_label);
                 println!();
@@ -2751,6 +2760,105 @@ fn run_pricing_lookup(
             }
         }
     }
+
+    Ok(())
+}
+
+fn run_pricing_list_overrides(json: bool) -> Result<()> {
+    use colored::Colorize;
+    use tokscale_core::pricing::custom::CustomPricing;
+    use tokscale_core::pricing::ModelPricing;
+
+    fn per_million(value: Option<f64>) -> Option<f64> {
+        value.map(|v| v * 1_000_000.0)
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OverrideEntry {
+        model_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_cost_per_million_tokens: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_cost_per_million_tokens: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_read_input_token_cost_per_million_tokens: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_creation_input_token_cost_per_million_tokens: Option<f64>,
+    }
+
+    fn entry(model_id: &str, pricing: &ModelPricing) -> OverrideEntry {
+        OverrideEntry {
+            model_id: model_id.to_string(),
+            input_cost_per_million_tokens: per_million(pricing.input_cost_per_token),
+            output_cost_per_million_tokens: per_million(pricing.output_cost_per_token),
+            cache_read_input_token_cost_per_million_tokens: per_million(
+                pricing.cache_read_input_token_cost,
+            ),
+            cache_creation_input_token_cost_per_million_tokens: per_million(
+                pricing.cache_creation_input_token_cost,
+            ),
+        }
+    }
+
+    let path = CustomPricing::default_path();
+    let overrides = CustomPricing::load_from_path(&path);
+    let mut entries: Vec<OverrideEntry> = overrides
+        .entries()
+        .map(|(model_id, pricing)| entry(model_id, pricing))
+        .collect();
+    entries.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+
+    if json {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Output {
+            path: String,
+            count: usize,
+            models: Vec<OverrideEntry>,
+        }
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Output {
+                path: path.display().to_string(),
+                count: entries.len(),
+                models: entries,
+            })?
+        );
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!(
+            "\n  {}\n  Tried: {}\n",
+            "No custom pricing overrides loaded".yellow(),
+            path.display()
+        );
+        return Ok(());
+    }
+
+    println!("\n  {}", "Custom pricing overrides".bold());
+    println!("  Path: {}", path.display());
+    println!("  Loaded once at startup; restart tokscale after editing this file.");
+    println!();
+
+    for entry in entries {
+        println!("  {}", entry.model_id.bold());
+        if let Some(input) = entry.input_cost_per_million_tokens {
+            println!("    Input:  ${:.2} / 1M tokens", input);
+        }
+        if let Some(output) = entry.output_cost_per_million_tokens {
+            println!("    Output: ${:.2} / 1M tokens", output);
+        }
+        if let Some(cache_read) = entry.cache_read_input_token_cost_per_million_tokens {
+            println!("    Cache Read:  ${:.2} / 1M tokens", cache_read);
+        }
+        if let Some(cache_write) = entry.cache_creation_input_token_cost_per_million_tokens {
+            println!("    Cache Write: ${:.2} / 1M tokens", cache_write);
+        }
+    }
+    println!();
 
     Ok(())
 }

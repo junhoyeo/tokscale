@@ -357,19 +357,55 @@ tokscale pricing "grok-code"
 # Force specific provider source
 tokscale pricing "grok-code" --provider openrouter
 tokscale pricing "claude-3-5-sonnet" --provider litellm
+
+# Inspect custom pricing overrides
+tokscale pricing list-overrides
 ```
 
 **Lookup Strategy:**
 
 The pricing lookup uses a multi-step resolution strategy:
 
-1. **Exact Match** - Direct lookup in LiteLLM/OpenRouter databases
-2. **Alias Resolution** - Resolves friendly names (e.g., `big-pickle` → `glm-4.7`)
-3. **Tier Suffix Stripping** - Removes quality tiers (`gpt-5.2-xhigh` → `gpt-5.2`)
-4. **Version Normalization** - Handles version formats (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
-5. **Provider Prefix Matching** - Tries common prefixes (`anthropic/`, `openai/`, etc.)
-6. **Cursor Model Pricing** - Hardcoded pricing for models not yet in LiteLLM/OpenRouter (e.g., `gpt-5.3-codex`)
-7. **Fuzzy Matching** - Word-boundary matching for partial model names
+1. **Custom Pricing Overrides** - Exact user-defined entries from `~/.config/tokscale/custom-pricing.json`
+2. **Exact Match** - Direct lookup in LiteLLM/OpenRouter databases
+3. **Alias Resolution** - Resolves friendly names (e.g., `big-pickle` → `glm-4.7`)
+4. **Tier Suffix Stripping** - Removes quality tiers (`gpt-5.2-xhigh` → `gpt-5.2`)
+5. **Version Normalization** - Handles version formats (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
+6. **Provider Prefix Matching** - Tries common prefixes (`anthropic/`, `openai/`, etc.)
+7. **Cursor Model Pricing** - Hardcoded pricing for models not yet in LiteLLM/OpenRouter (e.g., `gpt-5.3-codex`)
+8. **Fuzzy Matching** - Word-boundary matching for partial model names
+
+### Custom Pricing Overrides
+
+Create `custom-pricing.json` in Tokscale's config directory (`~/.config/tokscale/custom-pricing.json` on macOS/Linux by default; the same directory resolved by `TOKSCALE_CONFIG_DIR` when set) to override prices for model IDs that upstream pricing databases do not yet cover correctly.
+
+```json
+{
+  "$schema": "https://tokscale.dev/custom-pricing.schema.json",
+  "models": {
+    "accounts/fireworks/routers/kimi-k2p6-turbo": {
+      "input_cost_per_million_tokens": 2.00,
+      "output_cost_per_million_tokens": 8.00,
+      "cache_read_input_token_cost_per_million_tokens": 0.30,
+      "source": "https://docs.fireworks.ai/serverless/pricing",
+      "notes": "Fireworks Kimi K2.6 Turbo (preview)"
+    },
+    "accounts/fireworks/models/kimi-k2p6": {
+      "input_cost_per_million_tokens": 0.95,
+      "output_cost_per_million_tokens": 4.00,
+      "cache_read_input_token_cost_per_million_tokens": 0.16
+    },
+    "kimi-k2p6-turbo": {
+      "input_cost_per_million_tokens": 2.00,
+      "output_cost_per_million_tokens": 8.00
+    }
+  }
+}
+```
+
+Override prices are entered in dollars per million tokens, matching how most API providers publish pricing; Tokscale converts them to per-token rates internally. At least one of `input_cost_per_million_tokens` or `output_cost_per_million_tokens` must be present and positive, and cache-read/cache-creation fields are optional. LiteLLM-style per-token field names such as `input_cost_per_token`, `output_cost_per_token`, and `cache_read_input_token_cost` are also accepted for copy/paste compatibility, but the per-million names are the recommended user-facing form. To omit a tier or cache price, leave the field out; negative or non-finite values are treated as invalid and the whole model entry is skipped so typos do not silently alter accounting. Optional `source` and `notes` fields are ignored by Tokscale and can be used for your own bookkeeping.
+
+Overrides are exact-only and case-insensitive. Tokscale checks the raw model ID first, then the existing synthetic `/models/` normalization, then falls through to LiteLLM, OpenRouter, Cursor pricing, and fuzzy matching if no override matches. Raw exact matches beat normalized exact matches, so `accounts/fireworks/routers/kimi-k2p6-turbo` can override one gateway-specific model while `kimi-k2p6-turbo` can cover normalized `/models/` paths. Overrides are loaded once at startup; restart the command after editing the file. This is the recommended local fix for wrong-model pricing bugs while waiting on upstream LiteLLM pricing updates.
 
 **Provider Preference:**
 
