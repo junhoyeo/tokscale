@@ -152,7 +152,8 @@ describe("POST /api/auth/device/poll", () => {
     expect(response.status).toBe(200);
     expect(mockState.db.transaction).toHaveBeenCalledTimes(1);
     expect(mockState.forUpdateCalls).toEqual(["update"]);
-    expect(issuePersonalTokenInTransaction).toHaveBeenCalledWith(expect.anything(), {
+    expect(issuePersonalTokenInTransaction).toHaveBeenCalledTimes(1);
+    expect(issuePersonalTokenInTransaction).toHaveBeenNthCalledWith(1, expect.anything(), {
       userId: "user-1",
       name: "CLI on macbook",
       ensureUniqueName: true,
