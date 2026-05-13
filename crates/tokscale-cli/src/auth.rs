@@ -454,6 +454,54 @@ pub fn whoami() -> Result<()> {
     Ok(())
 }
 
+pub fn show_qr() -> Result<()> {
+    use colored::Colorize;
+    use qrcode::render::unicode;
+    use qrcode::QrCode;
+
+    let Some(creds) = load_credentials() else {
+        println!("\n  {}", "Not logged in.".yellow());
+        println!(
+            "{}",
+            "  Run 'bunx tokscale@latest login' to authenticate.\n".bright_black()
+        );
+        return Ok(());
+    };
+
+    let payload = format!(
+        r#"{{"token":"{}","username":"{}"}}"#,
+        creds.token, creds.username
+    );
+    let code = QrCode::new(payload.as_bytes()).context("Failed to generate QR code")?;
+
+    let image = code
+        .render::<unicode::Dense1x2>()
+        .dark_color(unicode::Dense1x2::Light)
+        .light_color(unicode::Dense1x2::Dark)
+        .quiet_zone(true)
+        .build();
+
+    println!("\n  {}\n", "Tokscale - API Token QR Code".cyan());
+    println!("  {}\n", "Scan to get your API token:".bright_black());
+
+    for line in image.lines() {
+        println!("  {}", line);
+    }
+
+    println!(
+        "\n  {}: {}",
+        "Token".bright_black(),
+        creds.token.bold()
+    );
+    println!(
+        "  {}: {}\n",
+        "User".bright_black(),
+        creds.username.bold()
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

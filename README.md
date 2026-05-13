@@ -472,6 +472,10 @@ tokscale login --token tt_xxx
 # Check who you're logged in as
 tokscale whoami
 
+# Display your saved API token as a QR code (useful for sharing to another device)
+# Encodes {"token":"tt_xxx","username":"..."} — scan with any QR reader
+tokscale qr
+
 # Submit your usage data to the leaderboard
 tokscale submit
 

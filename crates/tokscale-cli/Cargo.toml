@@ -37,6 +37,7 @@ ab_glyph = "0.2"
 resvg = "0.43"
 usvg = "0.43"
 hostname = "0.4"
+qrcode = "0.14"
 uuid = { version = "1.0", features = ["v4"] }
 rpassword = "7.0"
 sha2 = "0.10"
