@@ -201,6 +201,40 @@ describe("POST /api/submit auth path", () => {
     });
   });
 
+  it("accepts the bearer scheme case-insensitively", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+      expiresAt: null,
+    });
+    mockState.validateSubmission.mockReturnValue({
+      valid: false,
+      data: null,
+      errors: ["bad payload"],
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockState.authenticatePersonalToken).toHaveBeenCalledWith("tt_valid", {
+      touchLastUsedAt: false,
+    });
+  });
+
   it("revalidates username ISR paths after a successful submit", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",
@@ -330,8 +364,11 @@ describe("POST /api/submit auth path", () => {
       }),
       execute: vi.fn(() => Promise.resolve()),
     };
+    type MockTransaction = typeof tx;
 
-    mockState.db.transaction.mockImplementation(async (callback: (tx: typeof tx) => Promise<unknown>) => callback(tx));
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
 
     const response = await POST(
       new Request("http://localhost:3000/api/submit", {

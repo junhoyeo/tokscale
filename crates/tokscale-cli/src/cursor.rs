@@ -4,15 +4,58 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// Timeout for every Cursor HTTP request. Picked to bound the worst case for
+/// auto-sync (which runs synchronously before local reports and the TUI) while
+/// still tolerating routine API latency. If the network is hung, the report
+/// proceeds against cached data after this timeout instead of stalling forever.
+const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Skip implicit pre-report sync when every expected Cursor account cache file
+/// was modified within this window. Prevents `tokscale models` (and its
+/// siblings) from issuing a Cursor API call on every invocation. The manual
+/// `tokscale cursor sync` command bypasses this — explicit user intent is
+/// always honored.
+pub const CURSOR_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(5 * 60);
+
+fn build_cursor_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(CURSOR_HTTP_TIMEOUT)
+        .build()
+        .context("Failed to build Cursor HTTP client")
+}
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
 
+fn cursor_credentials_path(home_dir: &Path) -> PathBuf {
+    home_dir.join(".config/tokscale/cursor-credentials.json")
+}
+
+fn old_cursor_credentials_path(home_dir: &Path) -> PathBuf {
+    home_dir.join(".tokscale/cursor-credentials.json")
+}
+
+fn cursor_cache_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".config/tokscale/cursor-cache")
+}
+
+fn old_cursor_cache_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".tokscale/cursor-cache")
+}
+
 const USAGE_CSV_ENDPOINT: &str =
     "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens";
 const USAGE_SUMMARY_ENDPOINT: &str = "https://cursor.com/api/usage-summary";
+
+/// Marker file touched at the end of every `sync_cursor_cache` run (even when
+/// some accounts fail). Its mtime gates secondary-account freshness checks so
+/// a permanently-stale secondary (expired token, removed account, network
+/// partition) does not force an implicit sync on every invocation.
+const CURSOR_SYNC_ATTEMPT_MARKER: &str = "usage.last-sync-attempt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CursorCredentials {
@@ -49,7 +92,7 @@ pub struct AccountInfo {
     pub is_active: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct SyncCursorResult {
     pub synced: bool,
     pub rows: usize,
@@ -57,28 +100,16 @@ pub struct SyncCursorResult {
 }
 
 pub fn get_cursor_credentials_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".config/tokscale/cursor-credentials.json"))
-}
-
-fn get_old_cursor_credentials_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".tokscale/cursor-credentials.json"))
+    Ok(cursor_credentials_path(&home_dir()?))
 }
 
 pub fn get_cursor_cache_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".config/tokscale/cursor-cache"))
+    Ok(cursor_cache_dir(&home_dir()?))
 }
 
-fn get_old_cursor_cache_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".tokscale/cursor-cache"))
-}
-
-fn migrate_cache_dir_from_old_path() {
-    let Ok(old_dir) = get_old_cursor_cache_dir() else {
-        return;
-    };
-    let Ok(new_dir) = get_cursor_cache_dir() else {
-        return;
-    };
+fn migrate_cache_dir_from_old_path_in_home(home_dir: &Path) {
+    let old_dir = old_cursor_cache_dir(home_dir);
+    let new_dir = cursor_cache_dir(home_dir);
     if !new_dir.exists()
         && old_dir.exists()
         && fs::create_dir_all(&new_dir).is_ok()
@@ -193,8 +224,8 @@ fn atomic_write_file(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_config_dir() -> Result<()> {
-    let config_dir = home_dir()?.join(".config/tokscale");
+fn ensure_config_dir_in_home(home_dir: &Path) -> Result<()> {
+    let config_dir = home_dir.join(".config/tokscale");
 
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir)?;
@@ -264,8 +295,13 @@ fn sanitize_account_id_for_filename(account_id: &str) -> String {
 }
 
 pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
-    let path = get_cursor_credentials_path().ok()?;
-    let old_path = get_old_cursor_credentials_path().ok()?;
+    let home_dir = home_dir().ok()?;
+    load_credentials_store_from_home(&home_dir)
+}
+
+fn load_credentials_store_from_home(home_dir: &Path) -> Option<CursorCredentialsStore> {
+    let path = cursor_credentials_path(home_dir);
+    let old_path = old_cursor_credentials_path(home_dir);
     let read_path = if path.exists() {
         path.clone()
     } else if old_path.exists() {
@@ -286,12 +322,10 @@ pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
                 }
             }
             if changed || read_path != path {
-                let _ = save_credentials_store(&store);
+                let _ = save_credentials_store_in_home(home_dir, &store);
             }
             if read_path != path {
-                if let Ok(old) = get_old_cursor_credentials_path() {
-                    let _ = fs::remove_file(old);
-                }
+                let _ = fs::remove_file(old_cursor_credentials_path(home_dir));
             }
             return Some(store);
         }
@@ -307,11 +341,9 @@ pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
             accounts,
         };
 
-        let _ = save_credentials_store(&migrated);
+        let _ = save_credentials_store_in_home(home_dir, &migrated);
         if read_path != path {
-            if let Ok(old) = get_old_cursor_credentials_path() {
-                let _ = fs::remove_file(old);
-            }
+            let _ = fs::remove_file(old_cursor_credentials_path(home_dir));
         }
         return Some(migrated);
     }
@@ -320,8 +352,12 @@ pub fn load_credentials_store() -> Option<CursorCredentialsStore> {
 }
 
 pub fn save_credentials_store(store: &CursorCredentialsStore) -> Result<()> {
-    ensure_config_dir()?;
-    let path = get_cursor_credentials_path()?;
+    save_credentials_store_in_home(&home_dir()?, store)
+}
+
+fn save_credentials_store_in_home(home_dir: &Path, store: &CursorCredentialsStore) -> Result<()> {
+    ensure_config_dir_in_home(home_dir)?;
+    let path = cursor_credentials_path(home_dir);
     let json = serde_json::to_string_pretty(store)?;
     atomic_write_file(&path, &json)?;
 
@@ -607,11 +643,12 @@ fn is_cursor_usage_csv_filename(name: &str) -> bool {
 }
 
 pub fn has_cursor_usage_cache() -> bool {
-    migrate_cache_dir_from_old_path();
-    let cache_dir = match get_cursor_cache_dir() {
-        Ok(d) => d,
+    let home_dir = match home_dir() {
+        Ok(home_dir) => home_dir,
         Err(_) => return false,
     };
+    migrate_cache_dir_from_old_path_in_home(&home_dir);
+    let cache_dir = cursor_cache_dir(&home_dir);
     if !cache_dir.exists() {
         return false;
     }
@@ -623,6 +660,90 @@ pub fn has_cursor_usage_cache() -> bool {
             .any(|name| is_cursor_usage_csv_filename(&name)),
         Err(_) => false,
     }
+}
+
+fn expected_cursor_usage_cache_paths_in(home_dir: &Path) -> Vec<PathBuf> {
+    let cache_dir = cursor_cache_dir(home_dir);
+
+    if let Some(store) = load_credentials_store_from_home(home_dir) {
+        if !store.accounts.is_empty() {
+            let mut paths = store
+                .accounts
+                .keys()
+                .map(|account_id| {
+                    if account_id == &store.active_account_id {
+                        cache_dir.join("usage.csv")
+                    } else {
+                        cache_dir.join(format!(
+                            "usage.{}.csv",
+                            sanitize_account_id_for_filename(account_id)
+                        ))
+                    }
+                })
+                .collect::<Vec<_>>();
+            paths.sort_unstable();
+            paths.dedup();
+            return paths;
+        }
+    }
+
+    vec![cache_dir.join("usage.csv")]
+}
+
+fn cursor_usage_cache_file_is_fresh(path: &Path, max_age: Duration) -> bool {
+    let Ok(mtime) = path.metadata().and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    match SystemTime::now().duration_since(mtime) {
+        Ok(age) => age < max_age,
+        // mtime is in the future (clock skew) — treat as fresh; a clock-skew
+        // cache is no less authoritative than a freshly-fetched one, and we'd
+        // rather not thrash the API while the system clock recovers.
+        Err(_) => true,
+    }
+}
+
+fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
+    let cache_dir = cursor_cache_dir(home_dir);
+    if !cache_dir.exists() {
+        return false;
+    }
+
+    // The active account's cache is non-negotiable: if it is stale or missing,
+    // implicit sync must run so reports read current data.
+    let active_path = cache_dir.join("usage.csv");
+    if !cursor_usage_cache_file_is_fresh(&active_path, max_age) {
+        return false;
+    }
+
+    // For secondaries, a fresh sync-attempt marker is sufficient. This avoids
+    // forcing a sync on every invocation when a secondary account is
+    // permanently stale (expired token, removed account, persistent API
+    // failure). Without the marker, `.all(...)` would return `false` forever.
+    let marker_fresh =
+        cursor_usage_cache_file_is_fresh(&cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), max_age);
+
+    expected_cursor_usage_cache_paths_in(home_dir)
+        .iter()
+        .filter(|p| *p != &active_path)
+        .all(|p| cursor_usage_cache_file_is_fresh(p, max_age) || marker_fresh)
+}
+
+/// True when the active cursor usage cache (`usage.csv`) was refreshed within
+/// `max_age` AND every secondary account cache is either fresh or a recent
+/// sync-attempt marker exists. The active cache is unconditionally required —
+/// a stale active means reports would show out-of-date data. Secondaries are
+/// best-effort: when a secondary is permanently stale (expired token, removed
+/// account, persistent API failure) the marker short-circuits the check so we
+/// don't force an implicit sync on every invocation. Used by the implicit
+/// pre-report sync path to avoid hitting the Cursor API on every invocation.
+/// The manual `tokscale cursor sync` CLI bypasses this — explicit user intent
+/// is always honored.
+pub fn cursor_usage_cache_is_fresh(max_age: Duration) -> bool {
+    let Ok(home_dir) = home_dir() else {
+        return false;
+    };
+    cursor_usage_cache_is_fresh_in(&home_dir, max_age)
 }
 
 pub fn is_cursor_logged_in() -> bool {
@@ -643,7 +764,16 @@ pub struct ValidateSessionResult {
 }
 
 pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
-    let client = reqwest::Client::new();
+    let client = match build_cursor_http_client() {
+        Ok(client) => client,
+        Err(e) => {
+            return ValidateSessionResult {
+                valid: false,
+                membership_type: None,
+                error: Some(format!("Failed to build HTTP client: {}", e)),
+            };
+        }
+    };
     let response = match client
         .get(USAGE_SUMMARY_ENDPOINT)
         .headers(build_cursor_headers(token))
@@ -718,7 +848,7 @@ pub async fn validate_cursor_session(token: &str) -> ValidateSessionResult {
 }
 
 pub async fn fetch_cursor_usage_csv(session_token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = build_cursor_http_client()?;
     let response = client
         .get(USAGE_CSV_ENDPOINT)
         .headers(build_cursor_headers(session_token))
@@ -746,10 +876,36 @@ pub async fn fetch_cursor_usage_csv(session_token: &str) -> Result<String> {
     Ok(text)
 }
 
-pub async fn sync_cursor_cache() -> SyncCursorResult {
-    migrate_cache_dir_from_old_path();
+async fn sync_cursor_cache_with_fetcher<F, Fut>(fetch_usage_csv: F) -> SyncCursorResult
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let home_dir = match home_dir() {
+        Ok(home_dir) => home_dir,
+        Err(e) => {
+            return SyncCursorResult {
+                synced: false,
+                rows: 0,
+                error: Some(format!("Failed to get home dir: {}", e)),
+            };
+        }
+    };
 
-    let store = match load_credentials_store() {
+    sync_cursor_cache_with_fetcher_in_home(&home_dir, fetch_usage_csv).await
+}
+
+async fn sync_cursor_cache_with_fetcher_in_home<F, Fut>(
+    home_dir: &Path,
+    fetch_usage_csv: F,
+) -> SyncCursorResult
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    migrate_cache_dir_from_old_path_in_home(home_dir);
+
+    let store = match load_credentials_store_from_home(home_dir) {
         Some(s) => s,
         None => {
             return SyncCursorResult {
@@ -768,16 +924,7 @@ pub async fn sync_cursor_cache() -> SyncCursorResult {
         };
     }
 
-    let cache_dir = match get_cursor_cache_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            return SyncCursorResult {
-                synced: false,
-                rows: 0,
-                error: Some(format!("Failed to get cache dir: {}", e)),
-            };
-        }
-    };
+    let cache_dir = cursor_cache_dir(home_dir);
     if let Err(e) = fs::create_dir_all(&cache_dir) {
         return SyncCursorResult {
             synced: false,
@@ -806,7 +953,7 @@ pub async fn sync_cursor_cache() -> SyncCursorResult {
     for (account_id, credentials) in &store.accounts {
         let is_active = account_id == &store.active_account_id;
 
-        match fetch_cursor_usage_csv(&credentials.session_token).await {
+        match fetch_usage_csv(credentials.session_token.clone()).await {
             Ok(csv_text) => {
                 let file_path = if is_active {
                     cache_dir.join("usage.csv")
@@ -831,6 +978,18 @@ pub async fn sync_cursor_cache() -> SyncCursorResult {
             }
         }
     }
+
+    // Touch the sync-attempt marker unconditionally after the per-account loop
+    // (regardless of partial failures). The marker's mtime short-circuits the
+    // secondary-account freshness check so a permanently-stale secondary
+    // doesn't force an implicit sync on every invocation. We ignore errors
+    // here — if the marker can't be written (e.g. disk full) the gate simply
+    // falls through to the CSV-freshness check as before.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER));
 
     if success_count == 0 {
         return SyncCursorResult {
@@ -858,6 +1017,13 @@ pub async fn sync_cursor_cache() -> SyncCursorResult {
             ))
         },
     }
+}
+
+pub async fn sync_cursor_cache() -> SyncCursorResult {
+    sync_cursor_cache_with_fetcher(|session_token| async move {
+        fetch_cursor_usage_csv(&session_token).await
+    })
+    .await
 }
 
 fn archive_cache_file(file_path: &std::path::Path, label: &str) -> Result<()> {
@@ -1088,6 +1254,37 @@ pub fn run_cursor_accounts(json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn run_cursor_sync(json: bool) -> Result<()> {
+    use colored::Colorize;
+    use tokio::runtime::Runtime;
+
+    let rt = Runtime::new()?;
+    let result = rt.block_on(sync_cursor_cache());
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    println!("\n  {}\n", "Cursor IDE - Sync".cyan());
+    if result.synced {
+        println!(
+            "{}",
+            format!("  Synced {} Cursor usage event(s).", result.rows).green()
+        );
+        if let Some(error) = result.error {
+            println!("{}", format!("  Warning: {}", error).yellow());
+        }
+    } else if let Some(error) = result.error {
+        println!("{}", format!("  Sync failed: {}", error).red());
+    } else {
+        println!("{}", "  Sync failed.".red());
+    }
+    println!();
+
+    Ok(())
+}
+
 pub fn run_cursor_switch(name: &str) -> Result<()> {
     use colored::Colorize;
 
@@ -1103,6 +1300,7 @@ pub fn run_cursor_switch(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -1228,6 +1426,220 @@ mod tests {
     }
 
     #[test]
+    fn test_build_cursor_http_client_applies_timeout() {
+        // Constructing the client must succeed and surface no panics; the
+        // configured timeout is the property the HIGH finding flagged.
+        let client = build_cursor_http_client().expect("client builds");
+        // reqwest::Client doesn't expose its timeout publicly, but we can at
+        // least confirm the const wired into the builder is the documented
+        // 8s value — a future change to the constant must be deliberate.
+        assert_eq!(CURSOR_HTTP_TIMEOUT, std::time::Duration::from_secs(8));
+        // Use the client briefly to ensure it's structurally valid.
+        let _ = client.get("https://example.invalid").build();
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_when_cache_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        // No cache dir created yet.
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_when_no_csv_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        // Unrelated file present, but no usage*.csv.
+        fs::write(cache_dir.join("README.txt"), "noise").unwrap();
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_true_for_recent_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n").unwrap();
+        // Just-written file is fresh under any reasonable window.
+        assert!(cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_for_old_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        let path = cache_dir.join("usage.csv");
+        fs::write(&path, "Date,Model\n").unwrap();
+        // Backdate the mtime by an hour. Skip the test if the platform refuses
+        // to set mtime (rare on POSIX/Windows but possible on exotic FS).
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let Ok(()) = f.set_modified(SystemTime::now() - Duration::from_secs(3600)) else {
+            return;
+        };
+        drop(f);
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_requires_active_usage_csv_when_secondary_is_fresh() {
+        // A recently-synced secondary account must not mask a stale active
+        // account cache. The implicit sync gate should refresh the cache that
+        // local reports read from `usage.csv`.
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        let stale_path = cache_dir.join("usage.csv");
+        fs::write(&stale_path, "Date,Model\n").unwrap();
+        let stale = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale_path)
+            .unwrap();
+        let Ok(()) = stale.set_modified(SystemTime::now() - Duration::from_secs(3600)) else {
+            return;
+        };
+        drop(stale);
+        // Secondary account written just now.
+        fs::write(cache_dir.join("usage.team-a.csv"), "Date,Model\n").unwrap();
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_returns_false_when_active_cache_missing() {
+        // A fresh secondary account cache alone is not enough: without the
+        // active account's `usage.csv`, the next report would use stale/missing
+        // active data unless the implicit sync runs.
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = cursor_cache_dir(temp.path());
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("usage.team-a.csv"), "Date,Model\n").unwrap();
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp.path(),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn test_cursor_usage_cache_is_fresh_requires_all_expected_account_files() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account".to_string(),
+            CursorCredentials {
+                session_token: "token-secondary".to_string(),
+                user_id: Some("team/account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("personal".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n")?;
+
+        assert!(!cursor_usage_cache_is_fresh_in(
+            temp_dir.path(),
+            Duration::from_secs(300)
+        ));
+
+        fs::write(cache_dir.join("usage.team-account.csv"), "Date,Model\n")?;
+        assert!(cursor_usage_cache_is_fresh_in(
+            temp_dir.path(),
+            Duration::from_secs(300)
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cursor_expected_cache_paths_dedupes_sanitized_account_collisions() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("active".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account-a".to_string(),
+            CursorCredentials {
+                session_token: "token-team-a".to_string(),
+                user_id: Some("team/account-a".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("team-a".to_string()),
+            },
+        );
+        accounts.insert(
+            "team@account-a".to_string(),
+            CursorCredentials {
+                session_token: "token-team-b".to_string(),
+                user_id: Some("team@account-a".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("team-b".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )
+        .unwrap();
+
+        let paths = expected_cursor_usage_cache_paths_in(temp_dir.path());
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        let expected = vec![
+            cache_dir.join("usage.csv"),
+            cache_dir.join("usage.team-account-a.csv"),
+        ];
+        assert_eq!(paths, expected);
+    }
+
+    #[test]
     fn test_count_cursor_csv_rows_valid() {
         // Valid CSV with header
         let csv = "Date,Model,Tokens\n2024-01-01,gpt-4,100\n2024-01-02,gpt-4,200\n";
@@ -1255,6 +1667,74 @@ mod tests {
         // This test verifies the actual behavior: all parseable rows are counted
         let csv = "Date,Model,Tokens\n2024-01-01,gpt-4,100\ninvalid,row\n2024-01-02,gpt-4,200\n";
         assert_eq!(count_cursor_csv_rows(csv), 3);
+    }
+
+    #[test]
+    fn test_sync_cursor_cache_writes_active_and_secondary_account_files() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account".to_string(),
+            CursorCredentials {
+                session_token: "token-secondary".to_string(),
+                user_id: Some("team/account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("personal".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            temp_dir.path(),
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |session_token| {
+                let csv = match session_token.as_str() {
+                    "token-active" => "Date,Model,Tokens\n2026-01-01,gpt-5,100\n",
+                    "token-secondary" => {
+                        "Date,Model,Tokens\n2026-01-02,gpt-5,200\n2026-01-03,gpt-5,300\n"
+                    }
+                    _ => "Date,Model,Tokens\n",
+                }
+                .to_string();
+                async move { Ok(csv) }
+            },
+        ));
+
+        assert!(result.synced);
+        assert_eq!(result.rows, 3);
+        assert_eq!(result.error, None);
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        assert_eq!(
+            fs::read_to_string(cache_dir.join("usage.csv"))?,
+            "Date,Model,Tokens\n2026-01-01,gpt-5,100\n"
+        );
+        assert_eq!(
+            fs::read_to_string(cache_dir.join("usage.team-account.csv"))?,
+            "Date,Model,Tokens\n2026-01-02,gpt-5,200\n2026-01-03,gpt-5,300\n"
+        );
+        assert!(!cache_dir.join("usage.active-account.csv").exists());
+
+        Ok(())
     }
 
     #[test]
@@ -1413,6 +1893,168 @@ mod tests {
         assert!(dst.exists());
         assert_eq!(fs::read_dir(&dst)?.count(), 0);
 
+        Ok(())
+    }
+
+    /// Helper: build a two-account credentials store in `home_dir`.
+    fn setup_two_account_store(home_dir: &std::path::Path) -> Result<()> {
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "active-account".to_string(),
+            CursorCredentials {
+                session_token: "token-active".to_string(),
+                user_id: Some("active-account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "team/account".to_string(),
+            CursorCredentials {
+                session_token: "token-secondary".to_string(),
+                user_id: Some("team/account".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: Some("personal".to_string()),
+            },
+        );
+        save_credentials_store_in_home(
+            home_dir,
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "active-account".to_string(),
+                accounts,
+            },
+        )
+    }
+
+    /// Helper: backdate a file's mtime by `secs` seconds. Returns `false` if
+    /// the platform refuses to set mtime (exotic FS), signalling the caller to
+    /// skip the test.
+    fn backdate_file(path: &std::path::Path, secs: u64) -> bool {
+        let f = match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        f.set_modified(SystemTime::now() - Duration::from_secs(secs))
+            .is_ok()
+    }
+
+    #[test]
+    fn test_freshness_gate_passes_when_active_fresh_and_marker_fresh_despite_stale_secondary(
+    ) -> Result<()> {
+        // Active CSV fresh + stale secondary CSV + fresh marker → gate passes.
+        // This is the key scenario: a permanently-stale secondary must not
+        // thrash implicit sync when the marker proves we already tried recently.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+
+        // Fresh active cache.
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n")?;
+
+        // Stale secondary cache.
+        let secondary = cache_dir.join("usage.team-account.csv");
+        fs::write(&secondary, "Date,Model\n")?;
+        if !backdate_file(&secondary, 3600) {
+            return Ok(()); // platform can't set mtime — skip
+        }
+
+        // Fresh sync-attempt marker.
+        fs::write(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+
+        assert!(
+            cursor_usage_cache_is_fresh_in(temp_dir.path(), Duration::from_secs(300)),
+            "fresh marker should short-circuit stale secondary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_freshness_gate_fails_when_active_fresh_but_no_marker_and_stale_secondary() -> Result<()>
+    {
+        // Active CSV fresh + stale secondary CSV + NO marker → gate fails so
+        // an implicit sync is triggered to try fetching the secondary again.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+
+        fs::write(cache_dir.join("usage.csv"), "Date,Model\n")?;
+
+        let secondary = cache_dir.join("usage.team-account.csv");
+        fs::write(&secondary, "Date,Model\n")?;
+        if !backdate_file(&secondary, 3600) {
+            return Ok(());
+        }
+
+        // No marker written.
+
+        assert!(
+            !cursor_usage_cache_is_fresh_in(temp_dir.path(), Duration::from_secs(300)),
+            "without marker, stale secondary should trigger sync"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_freshness_gate_fails_when_active_stale_even_with_fresh_marker() -> Result<()> {
+        // Stale active CSV + fresh marker → gate still fails. The marker must
+        // never mask a stale active cache — the active data is what reports
+        // read from.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        fs::create_dir_all(&cache_dir)?;
+
+        // Stale active cache.
+        let active = cache_dir.join("usage.csv");
+        fs::write(&active, "Date,Model\n")?;
+        if !backdate_file(&active, 3600) {
+            return Ok(());
+        }
+
+        // Fresh secondary and fresh marker.
+        fs::write(cache_dir.join("usage.team-account.csv"), "Date,Model\n")?;
+        fs::write(cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER), "")?;
+
+        assert!(
+            !cursor_usage_cache_is_fresh_in(temp_dir.path(), Duration::from_secs(300)),
+            "stale active cache must always trigger sync regardless of marker"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_writes_attempt_marker() -> Result<()> {
+        // After sync_cursor_cache_with_fetcher_in_home completes (even with a
+        // partial failure), the marker file must exist in the cache dir.
+        let temp_dir = TempDir::new()?;
+        setup_two_account_store(temp_dir.path())?;
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        let _result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
+            temp_dir.path(),
+            |session_token| {
+                // Secondary deliberately fails to simulate a broken account.
+                let result: Result<String> = match session_token.as_str() {
+                    "token-active" => Ok("Date,Model,Tokens\n2026-01-01,gpt-5,10\n".to_string()),
+                    _ => Err(anyhow::anyhow!("simulated fetch failure")),
+                };
+                async move { result }
+            },
+        ));
+
+        let cache_dir = cursor_cache_dir(temp_dir.path());
+        assert!(
+            cache_dir.join(CURSOR_SYNC_ATTEMPT_MARKER).exists(),
+            "marker must be written even when a secondary account fetch fails"
+        );
         Ok(())
     }
 }

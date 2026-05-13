@@ -1,4 +1,4 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db, apiTokens, users } from "@/lib/db";
 import { generateApiToken, hashToken } from "@/lib/auth/utils";
 
@@ -171,10 +171,13 @@ export async function authenticatePersonalToken(
 
   const tokenHashed = hashToken(token);
 
+  // All rows are SHA-256 hashed at rest. Migration
+  // 0006_rehash_plaintext_personal_tokens.sql rehashed any pre-#512
+  // plaintext rows in place; the prior transitional OR-clause that also
+  // matched the raw token value has been removed.
   const result = await db
     .select({
       tokenId: apiTokens.id,
-      tokenValue: apiTokens.token,
       userId: apiTokens.userId,
       username: users.username,
       displayName: users.displayName,
@@ -184,7 +187,7 @@ export async function authenticatePersonalToken(
     })
     .from(apiTokens)
     .innerJoin(users, eq(apiTokens.userId, users.id))
-    .where(or(eq(apiTokens.token, tokenHashed), eq(apiTokens.token, token)))
+    .where(eq(apiTokens.token, tokenHashed))
     .limit(1);
 
   if (result.length === 0) {
@@ -192,23 +195,15 @@ export async function authenticatePersonalToken(
   }
 
   const record = result[0];
-  const isLegacyPlaintext = record.tokenValue === token;
 
   if (record.expiresAt && record.expiresAt <= new Date()) {
     return { status: "expired" };
   }
 
-  const updates: Record<string, unknown> = {};
   if (options.touchLastUsedAt !== false) {
-    updates.lastUsedAt = new Date();
-  }
-  if (isLegacyPlaintext) {
-    updates.token = tokenHashed;
-  }
-  if (Object.keys(updates).length > 0) {
     await db
       .update(apiTokens)
-      .set(updates)
+      .set({ lastUsedAt: new Date() })
       .where(eq(apiTokens.id, record.tokenId));
   }
 

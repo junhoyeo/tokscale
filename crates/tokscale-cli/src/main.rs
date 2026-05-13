@@ -170,7 +170,13 @@ enum Commands {
         json: bool,
     },
     #[command(about = "Login to Tokscale (opens browser for GitHub auth)")]
-    Login,
+    Login {
+        #[arg(
+            long,
+            help = "Save an existing Tokscale API token without browser auth"
+        )]
+        token: Option<String>,
+    },
     #[command(about = "Logout from Tokscale")]
     Logout,
     #[command(about = "Show current logged in user")]
@@ -235,8 +241,11 @@ enum Commands {
         short: bool,
         #[arg(long, help = "Show Top OpenCode Agents (default)")]
         agents: bool,
-        #[arg(long, help = "Show Top Clients instead of Top OpenCode Agents")]
-        clients: bool,
+        #[arg(
+            long = "clients",
+            help = "Show Top Clients instead of Top OpenCode Agents"
+        )]
+        show_clients: bool,
         #[arg(long, help = "Disable pinning of Sisyphus agents in rankings")]
         disable_pinned: bool,
         #[arg(long, help = "Disable loading spinner (for scripting)")]
@@ -288,6 +297,11 @@ enum CursorSubcommand {
     },
     #[command(about = "List saved Cursor accounts")]
     Accounts {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Sync Cursor usage into the local cache")]
+    Sync {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
@@ -364,6 +378,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -406,6 +421,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -448,6 +464,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -473,9 +490,9 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "clients")?;
             run_clients_command(json)
         }
-        Some(Commands::Login) => {
+        Some(Commands::Login { token }) => {
             reject_unsupported_home_override(&cli.home, "login")?;
-            run_login_command()
+            run_login_command(token)
         }
         Some(Commands::Logout) => {
             reject_unsupported_home_override(&cli.home, "logout")?;
@@ -517,6 +534,7 @@ fn main() -> Result<()> {
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients);
+            auto_sync_cursor_before_tui(&cli.home, &clients)?;
             tui::run(
                 &cli.theme,
                 cli.refresh,
@@ -563,7 +581,7 @@ fn main() -> Result<()> {
             client_flags,
             short,
             agents,
-            clients,
+            show_clients,
             disable_pinned,
             no_spinner: _,
         }) => {
@@ -575,7 +593,7 @@ fn main() -> Result<()> {
                 client_filter,
                 short,
                 agents,
-                clients,
+                show_clients,
                 disable_pinned,
             )
         }
@@ -645,6 +663,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 ensure_home_supported_for_tui(&cli.home)?;
+                auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
                     &cli.theme,
                     cli.refresh,
@@ -697,6 +716,8 @@ pub enum ClientFilter {
     Goose,
     Codebuff,
     Antigravity,
+    Zed,
+    Kiro,
     Synthetic,
 }
 
@@ -727,6 +748,8 @@ impl ClientFilter {
             Self::Goose => "goose",
             Self::Codebuff => "codebuff",
             Self::Antigravity => "antigravity",
+            Self::Zed => "zed",
+            Self::Kiro => "kiro",
             Self::Synthetic => "synthetic",
         }
     }
@@ -760,6 +783,8 @@ impl ClientFilter {
             Self::Goose => Some(ClientId::Goose),
             Self::Codebuff => Some(ClientId::Codebuff),
             Self::Antigravity => Some(ClientId::Antigravity),
+            Self::Zed => Some(ClientId::Zed),
+            Self::Kiro => Some(ClientId::Kiro),
             Self::Synthetic => None,
         }
     }
@@ -790,6 +815,8 @@ impl ClientFilter {
             ClientId::Goose => Self::Goose,
             ClientId::Codebuff => Self::Codebuff,
             ClientId::Antigravity => Self::Antigravity,
+            ClientId::Zed => Self::Zed,
+            ClientId::Kiro => Self::Kiro,
         }
     }
 
@@ -885,6 +912,10 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub antigravity: bool,
     #[arg(long, hide = true)]
+    pub zed: bool,
+    #[arg(long, hide = true)]
+    pub kiro: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -938,7 +969,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 22] = [
+    let legacy: [(bool, ClientFilter); 24] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -960,6 +991,8 @@ fn build_client_filter_with_defaults(
         (flags.copilot, ClientFilter::Copilot),
         (flags.goose, ClientFilter::Goose),
         (flags.antigravity, ClientFilter::Antigravity),
+        (flags.zed, ClientFilter::Zed),
+        (flags.kiro, ClientFilter::Kiro),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -1015,6 +1048,104 @@ fn emit_legacy_client_flag_warning(used: &[&'static str]) {
         pretty.join(", "),
         replacement
     );
+}
+
+fn client_filter_includes_cursor(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_none_or(|sources| sources.iter().any(|source| source == "cursor"))
+}
+
+fn client_filter_explicitly_requests_cursor(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_some_and(|sources| sources.iter().any(|source| source == "cursor"))
+}
+
+fn should_auto_sync_cursor_for_local_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> bool {
+    home_dir.is_none() && client_filter_includes_cursor(clients)
+}
+
+fn auto_sync_cursor_for_local_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Option<cursor::SyncCursorResult> {
+    if !should_auto_sync_cursor_for_local_report(home_dir, clients)
+        || !cursor::is_cursor_logged_in()
+    {
+        return None;
+    }
+
+    // Skip the implicit refresh when each expected Cursor account cache is
+    // recent enough — running `tokscale models` 30× in a script must not
+    // produce 30 Cursor API calls. The manual `tokscale cursor sync` command
+    // bypasses this gate.
+    if cursor::cursor_usage_cache_is_fresh(cursor::CURSOR_AUTO_SYNC_FRESHNESS) {
+        return None;
+    }
+
+    Some(run_best_effort_cursor_sync_with_runtime_factory(
+        tokio::runtime::Runtime::new,
+    ))
+}
+
+fn run_best_effort_cursor_sync_with_runtime_factory<F>(build_runtime: F) -> cursor::SyncCursorResult
+where
+    F: FnOnce() -> std::io::Result<tokio::runtime::Runtime>,
+{
+    match build_runtime() {
+        Ok(rt) => rt.block_on(async { cursor::sync_cursor_cache().await }),
+        Err(error) => cursor::SyncCursorResult {
+            synced: false,
+            rows: 0,
+            error: Some(format!(
+                "Failed to initialize Cursor sync runtime: {}",
+                error
+            )),
+        },
+    }
+}
+
+fn auto_sync_cursor_before_tui(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Result<()> {
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(clients);
+    let cursor_sync_result = auto_sync_cursor_for_local_report(home_dir, clients);
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
+    Ok(())
+}
+
+fn emit_cursor_sync_warning(
+    sync: Option<&cursor::SyncCursorResult>,
+    had_cursor_cache: bool,
+    explicit_cursor_filter: bool,
+) {
+    let Some(sync) = sync else {
+        return;
+    };
+    let Some(error) = sync.error.as_ref() else {
+        return;
+    };
+    if sync.synced || had_cursor_cache || explicit_cursor_filter {
+        use colored::Colorize;
+        let prefix = if sync.synced {
+            "Cursor sync warning"
+        } else if had_cursor_cache {
+            "Cursor sync failed; using cached data"
+        } else {
+            "Cursor sync failed"
+        };
+        eprintln!("{}", format!("  {}: {}", prefix, error).yellow());
+    }
 }
 
 fn default_submit_clients() -> Vec<String> {
@@ -1304,11 +1435,14 @@ fn run_models_report(
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -1331,6 +1465,11 @@ fn run_models_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
 
     let processing_time_ms = start.elapsed().as_millis();
 
@@ -1862,11 +2001,14 @@ fn run_monthly_report(
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -1889,6 +2031,11 @@ fn run_monthly_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
 
     let processing_time_ms = start.elapsed().as_millis();
 
@@ -2148,11 +2295,14 @@ fn run_hourly_report(
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
+    let had_cursor_cache = cursor::has_cursor_usage_cache();
+    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -2175,6 +2325,11 @@ fn run_hourly_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
+    emit_cursor_sync_warning(
+        cursor_sync_result.as_ref(),
+        had_cursor_cache,
+        explicit_cursor_filter,
+    );
 
     let processing_time_ms = start.elapsed().as_millis();
 
@@ -2406,7 +2561,7 @@ fn run_wrapped_command(
     client_filter: Option<Vec<String>>,
     short: bool,
     agents: bool,
-    clients: bool,
+    show_clients: bool,
     disable_pinned: bool,
 ) -> Result<()> {
     use colored::Colorize;
@@ -2416,7 +2571,7 @@ fn run_wrapped_command(
     println!("{}", "  Generating wrapped image...".bright_black());
     println!();
 
-    let include_agents = !clients || agents;
+    let include_agents = !show_clients || agents;
     let wrapped_options = commands::wrapped::WrappedOptions {
         output,
         year,
@@ -2696,7 +2851,10 @@ fn capitalize_client(client: &str) -> String {
 }
 
 fn run_clients_command(json: bool) -> Result<()> {
-    use tokscale_core::{extra_scan_paths_for, parse_local_clients, ClientId, LocalParseOptions};
+    use tokscale_core::{
+        built_in_extra_scan_paths_for, extra_scan_paths_for, parse_local_clients, ClientId,
+        LocalParseOptions,
+    };
 
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -2733,6 +2891,8 @@ fn run_clients_command(json: bool) -> Result<()> {
         sessions_path: String,
         sessions_path_exists: bool,
         #[serde(skip_serializing_if = "Vec::is_empty")]
+        additional_paths: Vec<AdditionalPath>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         legacy_paths: Vec<LegacyPath>,
         message_count: i32,
         headless_supported: bool,
@@ -2743,6 +2903,13 @@ fn run_clients_command(json: bool) -> Result<()> {
         exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AdditionalPath {
+        path: String,
+        exists: bool,
     }
 
     #[derive(serde::Serialize)]
@@ -2772,6 +2939,8 @@ fn run_clients_command(json: bool) -> Result<()> {
     let all_clients: std::collections::HashSet<ClientId> = ClientId::iter().collect();
     let extra_dirs: Vec<(ClientId, String)> =
         tokscale_core::parse_extra_dirs(&extra_dirs_val, &all_clients);
+    let built_in_extra_paths =
+        built_in_extra_scan_paths_for(&home_dir.to_string_lossy(), &all_clients);
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients);
     let copilot_exporter_path = tokscale_core::copilot_exporter_path();
 
@@ -2780,6 +2949,14 @@ fn run_clients_command(json: bool) -> Result<()> {
             .map(|client| {
                 let sessions_path = client.data().resolve_path(&home_dir.to_string_lossy());
                 let sessions_path_exists = Path::new(&sessions_path).exists();
+                let additional_paths: Vec<AdditionalPath> = built_in_extra_paths
+                    .iter()
+                    .filter(|(c, _)| *c == client)
+                    .map(|(_, path)| AdditionalPath {
+                        path: path.to_string_lossy().to_string(),
+                        exists: path.exists(),
+                    })
+                    .collect();
                 let legacy_paths = if client == ClientId::OpenClaw {
                     vec![
                         LegacyPath {
@@ -2860,6 +3037,7 @@ fn run_clients_command(json: bool) -> Result<()> {
                     label,
                     sessions_path,
                     sessions_path_exists,
+                    additional_paths,
                     legacy_paths,
                     message_count: parsed.counts.get(client),
                     headless_supported,
@@ -2920,6 +3098,18 @@ fn run_clients_command(json: bool) -> Result<()> {
                 )
                 .bright_black()
             );
+
+            if !row.additional_paths.is_empty() {
+                let additional_desc: Vec<String> = row
+                    .additional_paths
+                    .iter()
+                    .map(|ap| describe_path(&ap.path, ap.exists))
+                    .collect();
+                println!(
+                    "  {}",
+                    format!("additional: {}", additional_desc.join(", ")).bright_black()
+                );
+            }
 
             if !row.legacy_paths.is_empty() {
                 let legacy_desc: Vec<String> = row
@@ -3210,11 +3400,16 @@ fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenC
     }
 }
 
-fn run_login_command() -> Result<()> {
+fn run_login_command(token: Option<String>) -> Result<()> {
     use tokio::runtime::Runtime;
 
     let rt = Runtime::new()?;
-    rt.block_on(async { auth::login().await })
+    rt.block_on(async {
+        match token {
+            Some(token) => auth::login_with_token(&token).await,
+            None => auth::login().await,
+        }
+    })
 }
 
 fn run_logout_command() -> Result<()> {
@@ -3230,8 +3425,9 @@ fn run_delete_data_command() -> Result<()> {
     use std::io::{self, Write};
     use tokio::runtime::Runtime;
 
-    let credentials = auth::load_credentials()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `tokscale login` first."))?;
+    let auth_token = auth::resolve_api_token().ok_or_else(|| {
+        anyhow::anyhow!("Not logged in. Run `tokscale login` or set TOKSCALE_API_TOKEN.")
+    })?;
 
     println!("\n{}", "  ⚠ Delete all submitted usage data".red().bold());
     println!("{}", "  This will permanently remove:".bright_black());
@@ -3285,7 +3481,7 @@ fn run_delete_data_command() -> Result<()> {
     let response = rt.block_on(async {
         reqwest::Client::new()
             .delete(format!("{}/api/settings/submitted-data", api_url))
-            .header("Authorization", format!("Bearer {}", credentials.token))
+            .header("Authorization", format!("Bearer {}", auth_token.token))
             .send()
             .await
     });
@@ -3702,20 +3898,25 @@ fn run_submit_command(
     use tokio::runtime::Runtime;
     use tokscale_core::{generate_graph, GroupBy, ReportOptions};
 
-    let credentials = match auth::load_credentials() {
-        Some(creds) => creds,
+    let auth_token = match auth::resolve_api_token() {
+        Some(token) => token,
         None => {
             eprintln!("\n  {}", "Not logged in.".yellow());
             eprintln!(
                 "{}",
-                "  Run 'bunx tokscale@latest login' first.\n".bright_black()
+                "  Run 'bunx tokscale@latest login' or set TOKSCALE_API_TOKEN.\n".bright_black()
             );
             std::process::exit(1);
         }
     };
 
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        let _ = prompt_star_repo(&credentials.username);
+    if auth_token.source == auth::ApiTokenSource::StoredCredentials
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+    {
+        if let Some(username) = auth_token.username.as_deref() {
+            let _ = prompt_star_repo(username);
+        }
     }
 
     println!("\n  {}\n", "Tokscale - Submit Usage Data".cyan());
@@ -3834,7 +4035,7 @@ fn run_submit_command(
         reqwest::Client::new()
             .post(format!("{}/api/submit", api_url))
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", credentials.token))
+            .header("Authorization", format!("Bearer {}", auth_token.token))
             .json(&submit_payload)
             .send()
             .await
@@ -3900,19 +4101,22 @@ fn run_submit_command(
                     println!("{}", format!("    Active days: {}", days).bright_black());
                 }
             }
-            println!();
-            println!(
-                "{}",
-                osc8_link_with_text(
-                    &format!("{}/u/{}", api_url, credentials.username),
-                    &format!(
-                        "  View your profile: {}/u/{}",
-                        api_url, credentials.username
-                    ),
-                )
-                .cyan()
-            );
-            println!();
+            if let Some(username) = body
+                .username
+                .clone()
+                .or_else(|| auth_token.username.clone())
+            {
+                println!();
+                println!(
+                    "{}",
+                    osc8_link_with_text(
+                        &format!("{}/u/{}", api_url, username),
+                        &format!("  View your profile: {}/u/{}", api_url, username),
+                    )
+                    .cyan()
+                );
+                println!();
+            }
 
             if let Some(warnings) = body.warnings {
                 if !warnings.is_empty() {
@@ -4108,6 +4312,7 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
         } => cursor::run_cursor_logout(name, all, purge_cache),
         CursorSubcommand::Status { name } => cursor::run_cursor_status(name),
         CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
+        CursorSubcommand::Sync { json } => cursor::run_cursor_sync(json),
         CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
     }
 }
@@ -4470,6 +4675,8 @@ mod tests {
             crush: true,
             goose: true,
             antigravity: true,
+            zed: true,
+            kiro: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -4501,6 +4708,8 @@ mod tests {
             "crush",
             "goose",
             "antigravity",
+            "zed",
+            "kiro",
             "synthetic",
         ] {
             assert!(
@@ -4839,6 +5048,56 @@ mod tests {
     }
 
     #[test]
+    fn test_wrapped_parses_clients_view_flag() {
+        let cli = Cli::try_parse_from(["tokscale", "wrapped"]).expect("parse ok");
+        let Some(Commands::Wrapped {
+            show_clients,
+            agents,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected wrapped command");
+        };
+        assert!(!show_clients);
+        assert!(!agents);
+
+        let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients"]).expect("parse ok");
+        let Some(Commands::Wrapped { show_clients, .. }) = cli.command else {
+            panic!("expected wrapped command");
+        };
+        assert!(show_clients);
+    }
+
+    #[test]
+    fn test_wrapped_client_filter_coexists_with_clients_view_flag() {
+        let cli =
+            Cli::try_parse_from(["tokscale", "wrapped", "--client", "opencode"]).expect("parse ok");
+        let Some(Commands::Wrapped {
+            client_flags,
+            show_clients,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected wrapped command");
+        };
+        assert_eq!(client_flags.clients, vec![ClientFilter::Opencode]);
+        assert!(!show_clients);
+
+        let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients", "--client", "opencode"])
+            .expect("parse ok");
+        let Some(Commands::Wrapped {
+            client_flags,
+            show_clients,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected wrapped command");
+        };
+        assert_eq!(client_flags.clients, vec![ClientFilter::Opencode]);
+        assert!(show_clients);
+    }
+
+    #[test]
     fn test_client_flags_legacy_still_parses() {
         // Legacy `--claude` keeps working even though it is hidden in --help.
         let cli = Cli::try_parse_from(["tokscale", "--claude"]).expect("parse ok");
@@ -4879,6 +5138,7 @@ mod tests {
     fn test_default_submit_clients_excludes_crush() {
         let clients = default_submit_clients();
         assert!(clients.contains(&"synthetic".to_string()));
+        assert!(clients.contains(&"zed".to_string()));
         assert!(!clients.contains(&"crush".to_string()));
     }
 
@@ -4916,6 +5176,23 @@ mod tests {
     }
 
     #[test]
+    fn test_client_filter_zed_round_trip() {
+        assert_eq!(
+            ClientFilter::from_filter_str("zed"),
+            Some(ClientFilter::Zed)
+        );
+        assert_eq!(ClientFilter::Zed.as_filter_str(), "zed");
+        assert_eq!(
+            ClientFilter::Zed.to_client_id(),
+            Some(tokscale_core::ClientId::Zed)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Zed),
+            ClientFilter::Zed
+        );
+    }
+
+    #[test]
     fn test_client_filter_default_set_includes_goose() {
         let default = ClientFilter::default_set();
         assert!(
@@ -4928,6 +5205,17 @@ mod tests {
     fn test_delete_submitted_data_command_parses() {
         let cli = Cli::try_parse_from(["tokscale", "delete-submitted-data"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
+    }
+
+    #[test]
+    fn test_login_token_option_parses() {
+        let cli = Cli::try_parse_from(["tokscale", "login", "--token", "tt_ci_token"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Login {
+                token: Some(token)
+            }) if token == "tt_ci_token"
+        ));
     }
 
     #[test]
@@ -5529,6 +5817,59 @@ mod tests {
     #[test]
     fn clap_accepts_models_light_write_cache_after_subcommand() {
         assert!(Cli::try_parse_from(["tokscale", "models", "--light", "--write-cache"]).is_ok());
+    }
+
+    #[test]
+    fn clap_accepts_cursor_sync_command() {
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn cursor_auto_sync_enabled_for_default_report() {
+        assert!(should_auto_sync_cursor_for_local_report(&None, &None));
+    }
+
+    #[test]
+    fn cursor_auto_sync_enabled_when_cursor_filter_is_explicit() {
+        assert!(should_auto_sync_cursor_for_local_report(
+            &None,
+            &Some(vec!["cursor".to_string()])
+        ));
+    }
+
+    #[test]
+    fn cursor_auto_sync_disabled_when_filter_excludes_cursor() {
+        assert!(!should_auto_sync_cursor_for_local_report(
+            &None,
+            &Some(vec!["codex".to_string()])
+        ));
+    }
+
+    #[test]
+    fn cursor_auto_sync_disabled_for_home_override() {
+        assert!(!should_auto_sync_cursor_for_local_report(
+            &Some("/tmp/other-home".to_string()),
+            &None
+        ));
+        assert!(!should_auto_sync_cursor_for_local_report(
+            &Some("/tmp/other-home".to_string()),
+            &Some(vec!["cursor".to_string()])
+        ));
+    }
+
+    #[test]
+    fn cursor_auto_sync_runtime_init_failure_is_best_effort() {
+        let result = run_best_effort_cursor_sync_with_runtime_factory(|| {
+            Err(std::io::Error::other("runtime unavailable"))
+        });
+
+        assert!(!result.synced);
+        assert_eq!(result.rows, 0);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("runtime unavailable")));
     }
 
     #[test]

@@ -43,6 +43,13 @@
       "when": 1777404000000,
       "tag": "0005_add_case_insensitive_username_index",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1778025600000,
+      "tag": "0006_rehash_plaintext_personal_tokens",
+      "breakpoints": true
     }
   ]
 }

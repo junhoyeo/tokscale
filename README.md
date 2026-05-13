@@ -56,7 +56,7 @@
 | Logo | Client | Data Location | Supported |
 |------|----------|---------------|-----------|
 | <img width="48px" src=".github/assets/client-opencode.png" alt="OpenCode" /> | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` (1.2+, all channels including `opencode-stable.db`) or/and `~/.local/share/opencode/storage/message/` (legacy/unmigrated) | ✅ Yes |
-| <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` and `~/.claude/transcripts/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ legacy: `.clawdbot`, `.moltbot`, `.moldbot`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ Yes |
@@ -76,6 +76,7 @@
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (project registry; fallback: `~/.local/share/crush/projects.json`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support, legacy Block/goose paths; override via `GOOSE_PATH_ROOT`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | Cached via `tokscale antigravity sync` to `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` (live RPC against the local language server) | ✅ Yes |
+| <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; hosted Zed models only, not external ACP agents) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | Re-attributed from other sources via `hf:` model prefix or `synthetic` provider (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ Yes |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
@@ -163,8 +164,8 @@ npx tokscale@latest
 # Or use bunx
 bunx tokscale@latest
 
-# Or use deno dx
-dx tokscale@latest
+# Or use Deno without installing an alias
+deno x npm:tokscale@latest
 
 # Light mode (table rendering only)
 npx tokscale@latest --light
@@ -391,11 +392,24 @@ Example: `grok-code` matches `xai/grok-code-fast-1` ($0.20/$1.50) instead of `az
 # Login to Tokscale (opens browser for GitHub auth)
 tokscale login
 
+# Save an existing Tokscale API token without browser auth
+tokscale login --token tt_xxx
+
 # Check who you're logged in as
 tokscale whoami
 
 # Submit your usage data to the leaderboard
 tokscale submit
+
+# Submit in CI/headless environments without writing credentials
+# Precedence: TOKSCALE_API_TOKEN env > saved credentials file (~/.config/tokscale/credentials.json).
+# When the env var is set, the saved file is ignored for that invocation.
+TOKSCALE_API_TOKEN=tt_xxx tokscale submit
+
+# Revoke a token: visit Settings > API Tokens on the leaderboard site
+# (https://tokscale.com/settings) and click "Revoke" on the token row.
+# Revocation takes effect immediately — subsequent requests with that
+# token will get HTTP 401 "Invalid API token".
 
 # Submit with filters
 tokscale submit --client opencode,claude --since 2024-01-01
@@ -423,6 +437,9 @@ tokscale cursor status
 
 # List saved Cursor accounts
 tokscale cursor accounts
+
+# Manually refresh cached Cursor usage
+tokscale cursor sync
 
 # Switch active account (controls which account syncs to cursor-cache/usage.csv)
 tokscale cursor switch work
@@ -578,6 +595,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
+| `TOKSCALE_API_TOKEN` | unset | Tokscale personal API token for non-interactive `submit` and `delete-submitted-data` runs. Create one from Settings > API Tokens or save it locally with `tokscale login --token tt_xxx`. |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
 | `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, and `antigravity-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
 
@@ -587,6 +605,9 @@ TOKSCALE_NATIVE_TIMEOUT_MS=600000 tokscale graph --output data.json
 
 # Example: one-off extra scan roots
 TOKSCALE_EXTRA_DIRS='codex:/Users/me/workspace/project-a/.codex/sessions,gemini:/Users/me/imports/imac/gemini/tmp' tokscale
+
+# Example: submit from CI without an interactive browser login
+TOKSCALE_API_TOKEN=tt_xxx tokscale submit
 ```
 
 > **Note**: For persistent extra roots, prefer `scanner.extraScanPaths` in `~/.config/tokscale/settings.json`. `TOKSCALE_EXTRA_DIRS` is best for one-off overrides or CI/CD.
@@ -729,7 +750,7 @@ You can also use a shields.io-style badge for a more compact display:
 
 ### Getting Started
 
-1. **Login** - Run `tokscale login` to authenticate via GitHub
+1. **Login** - Run `tokscale login` to authenticate via GitHub, or create an API token in Settings for CI/headless use
 2. **Submit** - Run `tokscale submit` to upload your usage data
 3. **View** - Visit the web platform to see your profile and the leaderboard
 
@@ -1120,12 +1141,14 @@ Each message contains:
 
 ### Claude Code
 
-Location: `~/.claude/projects/{projectPath}/*.jsonl`
+Location: `~/.claude/projects/{projectPath}/*.jsonl` and `~/.claude/transcripts/*.jsonl`
 
 JSONL format with assistant messages containing usage data:
 ```json
 {"type": "assistant", "message": {"model": "claude-sonnet-4-20250514", "usage": {"input_tokens": 1234, "output_tokens": 567, "cache_read_input_tokens": 890}}, "timestamp": "2024-01-01T00:00:00Z"}
 ```
+
+Wrapper transcript files under `~/.claude/transcripts/` are counted only when they contain real Claude usage metadata. Files with user/tool events but no `usage` block are skipped rather than estimated.
 
 ### Codex CLI
 

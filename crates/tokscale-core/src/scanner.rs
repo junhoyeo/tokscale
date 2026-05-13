@@ -70,6 +70,8 @@ pub struct ScanResult {
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
     pub goose_db: Option<PathBuf>,
+    pub zed_db: Option<PathBuf>,
+    pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
@@ -84,6 +86,8 @@ impl Default for ScanResult {
             kilo_db: None,
             hermes_db: None,
             goose_db: None,
+            zed_db: None,
+            kiro_db: None,
             crush_dbs: Vec::new(),
             opencode_json_dir: None,
         }
@@ -296,6 +300,22 @@ pub fn extra_scan_paths_for(
         .collect()
 }
 
+pub fn built_in_extra_scan_paths_for(
+    home_dir: &str,
+    enabled: &HashSet<ClientId>,
+) -> Vec<(ClientId, PathBuf)> {
+    let mut paths = Vec::new();
+
+    if enabled.contains(&ClientId::Claude) {
+        paths.push((
+            ClientId::Claude,
+            PathBuf::from(format!("{}/.claude/transcripts", home_dir)),
+        ));
+    }
+
+    paths
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct CrushProjectList {
     #[serde(default)]
@@ -438,7 +458,7 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // registry rather than scanned file paths.
     !matches!(
         client_id,
-        ClientId::Kilo | ClientId::Crush | ClientId::Hermes | ClientId::Goose
+        ClientId::Kilo | ClientId::Crush | ClientId::Hermes | ClientId::Goose | ClientId::Zed
     )
 }
 
@@ -576,6 +596,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Kilo
                 | ClientId::Hermes
                 | ClientId::Goose
+                | ClientId::Zed
                 | ClientId::Crush
                 | ClientId::Codebuff
         ) {
@@ -588,6 +609,10 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
+    }
+
+    for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
@@ -852,8 +877,53 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
+    if enabled.contains(&ClientId::Zed) {
+        let zed_db_path = ClientId::Zed
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let xdg = PathBuf::from(zed_db_path);
+        if xdg.is_file() {
+            result.zed_db = Some(xdg);
+        }
+        #[cfg(target_os = "macos")]
+        if result.zed_db.is_none() {
+            let macos_path = PathBuf::from(format!(
+                "{}/Library/Application Support/Zed/threads/threads.db",
+                home_dir
+            ));
+            if macos_path.is_file() {
+                result.zed_db = Some(macos_path);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if result.zed_db.is_none() {
+            if let Some(local_app_data) = dirs::data_local_dir() {
+                let windows_path = local_app_data.join("Zed/threads/threads.db");
+                if windows_path.is_file() {
+                    result.zed_db = Some(windows_path);
+                }
+            }
+        }
+    }
+
     if enabled.contains(&ClientId::Crush) {
         result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
+    }
+
+    if enabled.contains(&ClientId::Kiro) {
+        let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
+        if xdg_path.is_file() {
+            result.kiro_db = Some(xdg_path);
+        }
+        if result.kiro_db.is_none() {
+            let macos_path = PathBuf::from(format!(
+                "{}/Library/Application Support/kiro-cli/data.sqlite3",
+                home_dir
+            ));
+            if macos_path.is_file() {
+                result.kiro_db = Some(macos_path);
+            }
+        }
     }
 
     if enabled.contains(&ClientId::Codebuff) {
@@ -1196,6 +1266,15 @@ mod tests {
         file.write_all(b"").unwrap();
     }
 
+    fn setup_mock_claude_transcripts_dir(base: &std::path::Path) -> PathBuf {
+        let transcript_path = base.join(".claude/transcripts");
+        fs::create_dir_all(&transcript_path).unwrap();
+        let file_path = transcript_path.join("ses_123456789012345678901234567.jsonl");
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(b"").unwrap();
+        file_path
+    }
+
     fn setup_mock_codex_dir(base: &std::path::Path) {
         let codex_path = base.join(".codex/sessions");
         fs::create_dir_all(&codex_path).unwrap();
@@ -1230,6 +1309,21 @@ mod tests {
         let mut file =
             File::create(omp_path.join("2026-04-06T03-04-28Z_omp_ses_001.jsonl")).unwrap();
         file.write_all(b"{}").unwrap();
+    }
+
+    fn setup_mock_zed_xdg_db(base: &std::path::Path) -> PathBuf {
+        let zed_db = base.join(".local/share/zed/threads/threads.db");
+        fs::create_dir_all(zed_db.parent().unwrap()).unwrap();
+        File::create(&zed_db).unwrap();
+        zed_db
+    }
+
+    #[cfg(target_os = "macos")]
+    fn setup_mock_zed_macos_db(base: &std::path::Path) -> PathBuf {
+        let zed_db = base.join("Library/Application Support/Zed/threads/threads.db");
+        fs::create_dir_all(zed_db.parent().unwrap()).unwrap();
+        File::create(&zed_db).unwrap();
+        zed_db
     }
 
     fn setup_mock_kimi_dir(base: &std::path::Path) {
@@ -1853,6 +1947,39 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_scan_all_clients_zed_xdg_db() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let zed_db = setup_mock_zed_xdg_db(home);
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["zed".to_string()]);
+
+        assert_eq!(result.zed_db.as_ref(), Some(&zed_db));
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_zed_macos_fallback() {
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let zed_db = setup_mock_zed_macos_db(home);
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["zed".to_string()]);
+
+        assert_eq!(result.zed_db.as_ref(), Some(&zed_db));
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
     fn test_scan_all_clients_claude() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1860,6 +1987,40 @@ mod tests {
 
         let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
         assert_eq!(result.get(ClientId::Claude).len(), 1);
+        assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_claude_transcripts() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_claude_dir(home);
+        let transcript = setup_mock_claude_transcripts_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+
+        assert_eq!(result.get(ClientId::Claude).len(), 2);
+        assert!(
+            result
+                .get(ClientId::Claude)
+                .iter()
+                .any(|path| path == &transcript),
+            "expected Claude transcript {} in {:?}",
+            transcript.display(),
+            result.get(ClientId::Claude)
+        );
+        assert!(result.get(ClientId::OpenCode).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_claude_transcripts_without_projects_dir() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let transcript = setup_mock_claude_transcripts_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+
+        assert_eq!(result.get(ClientId::Claude), &vec![transcript]);
         assert!(result.get(ClientId::OpenCode).is_empty());
     }
 

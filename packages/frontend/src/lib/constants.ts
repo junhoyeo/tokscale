@@ -43,9 +43,11 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   kilocode: "Kilo",
   kilo: "Kilo",
   mux: "Mux",
+  kiro: "Kiro",
   crush: "Crush",
   goose: "Goose",
   antigravity: "Antigravity",
+  zed: "Zed Agent",
   synthetic: "Synthetic",
 };
 
@@ -70,9 +72,11 @@ export const SOURCE_LOGOS: Record<string, string> = {
   kilocode: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   kilo: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   mux: `${GITHUB_CDN_BASE}/client-mux.png`,
+  kiro: "/assets/logos/kiro.ico",
   crush: `${GITHUB_CDN_BASE}/client-crush.png`,
   goose: `${GITHUB_CDN_BASE}/client-goose.png`,
   antigravity: `${GITHUB_CDN_BASE}/client-antigravity.png`,
+  zed: `${GITHUB_CDN_BASE}/client-zed.webp`,
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
 };
 
@@ -95,9 +99,11 @@ export const SOURCE_COLORS: Record<string, string> = {
   kilocode: "#F59E0B",
   kilo: "#F59E0B",
   mux: "#171717",
+  kiro: "#00A67D",
   crush: "#DC2626",
   goose: "#64B4DC",
   antigravity: "#6366F1",
+  zed: "#084CCF",
   synthetic: "#4ADE80",
 };
 

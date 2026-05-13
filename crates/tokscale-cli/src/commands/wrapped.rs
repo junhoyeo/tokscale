@@ -1441,6 +1441,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "crush" => Some("Crush"),
         "goose" => Some("Goose"),
         "antigravity" => Some("Antigravity"),
+        "zed" => Some("Zed Agent"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -1478,6 +1479,9 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         ),
         "Antigravity" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
+        ),
+        "Zed Agent" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
         ),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
@@ -2426,6 +2430,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_zed() {
+        assert_eq!(client_display_name("zed"), Some("Zed Agent"));
+    }
+
+    #[test]
     fn test_client_display_name_unknown() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
@@ -2586,6 +2595,16 @@ mod tests {
             client_logo_url("Antigravity"),
             Some(
                 "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"
+            )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_zed() {
+        assert_eq!(
+            client_logo_url("Zed Agent"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp"
             )
         );
     }
