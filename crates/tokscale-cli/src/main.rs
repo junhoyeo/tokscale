@@ -707,6 +707,7 @@ pub enum ClientFilter {
     Antigravity,
     Zed,
     Kiro,
+    Cursorcli,
     Synthetic,
 }
 
@@ -739,6 +740,7 @@ impl ClientFilter {
             Self::Antigravity => "antigravity",
             Self::Zed => "zed",
             Self::Kiro => "kiro",
+            Self::Cursorcli => "cursorcli",
             Self::Synthetic => "synthetic",
         }
     }
@@ -774,6 +776,7 @@ impl ClientFilter {
             Self::Antigravity => Some(ClientId::Antigravity),
             Self::Zed => Some(ClientId::Zed),
             Self::Kiro => Some(ClientId::Kiro),
+            Self::Cursorcli => Some(ClientId::CursorCli),
             Self::Synthetic => None,
         }
     }
@@ -806,6 +809,7 @@ impl ClientFilter {
             ClientId::Antigravity => Self::Antigravity,
             ClientId::Zed => Self::Zed,
             ClientId::Kiro => Self::Kiro,
+            ClientId::CursorCli => Self::Cursorcli,
         }
     }
 
@@ -905,6 +909,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub kiro: bool,
     #[arg(long, hide = true)]
+    pub cursorcli: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -958,7 +964,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 24] = [
+    let legacy: [(bool, ClientFilter); 25] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -982,6 +988,7 @@ fn build_client_filter_with_defaults(
         (flags.antigravity, ClientFilter::Antigravity),
         (flags.zed, ClientFilter::Zed),
         (flags.kiro, ClientFilter::Kiro),
+        (flags.cursorcli, ClientFilter::Cursorcli),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -4666,6 +4673,7 @@ mod tests {
             antigravity: true,
             zed: true,
             kiro: true,
+            cursorcli: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -4699,6 +4707,7 @@ mod tests {
             "antigravity",
             "zed",
             "kiro",
+            "cursorcli",
             "synthetic",
         ] {
             assert!(

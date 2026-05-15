@@ -380,6 +380,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    CursorCli = 23 => {
+        id: "cursorcli",
+        root: PathRoot::Home,
+        relative: ".config/Cursor/User/globalStorage",
+        pattern: "state.vscdb",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -432,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 23);
+        assert_eq!(ClientId::COUNT, 24);
     }
 
     #[test]

@@ -233,6 +233,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
+                "state.vscdb" => file_name == "state.vscdb",
                 _ => false,
             }
         })
@@ -314,6 +315,61 @@ pub fn built_in_extra_scan_paths_for(
     }
 
     paths
+}
+
+fn discover_cursorcli_state_dbs(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from(format!("{home_dir}/.config/Cursor/User/globalStorage")),
+        PathBuf::from(format!("{home_dir}/.config/cursor/User/globalStorage")),
+        PathBuf::from(format!(
+            "{home_dir}/Library/Application Support/Cursor/User/globalStorage"
+        )),
+    ];
+
+    if use_env_roots {
+        if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+            candidates.push(PathBuf::from(format!(
+                "{xdg_config_home}/Cursor/User/globalStorage"
+            )));
+            candidates.push(PathBuf::from(format!(
+                "{xdg_config_home}/cursor/User/globalStorage"
+            )));
+        }
+
+        #[cfg(target_os = "windows")]
+        if let Some(config_dir) = dirs::config_dir() {
+            candidates.push(config_dir.join("Cursor/User/globalStorage"));
+        }
+    }
+
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .filter(|base| path_has_no_symlink_components(base))
+        .map(|base| base.join("state.vscdb"))
+        .filter(|path| is_regular_file_without_symlink(path))
+        .collect()
+}
+
+fn is_regular_file_without_symlink(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        Err(_) => false,
+    }
+}
+
+fn path_has_no_symlink_components(path: &Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return false,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -452,13 +508,17 @@ fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource>
 }
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
-    // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
-    // Kilo CLI and Hermes use SQLite database paths, Roo/KiloCode require local + remote
-    // and server task roots, and Crush discovers SQLite DBs via the project
-    // registry rather than scanned file paths.
+    // SQLite-backed clients with exact DB discovery should not accept recursive
+    // extra scan roots. Cursor CLI reads an internal Cursor state DB, so keep it
+    // constrained to known exact paths instead of arbitrary roots.
     !matches!(
         client_id,
-        ClientId::Kilo | ClientId::Crush | ClientId::Hermes | ClientId::Goose | ClientId::Zed
+        ClientId::Kilo
+            | ClientId::Crush
+            | ClientId::Hermes
+            | ClientId::Goose
+            | ClientId::Zed
+            | ClientId::CursorCli
     )
 }
 
@@ -599,6 +659,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Zed
                 | ClientId::Crush
                 | ClientId::Codebuff
+                | ClientId::CursorCli
         ) {
             continue;
         }
@@ -979,6 +1040,15 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
+    if enabled.contains(&ClientId::CursorCli) {
+        for path in discover_cursorcli_state_dbs(home_dir, use_env_roots) {
+            if seen.insert(path.clone()) {
+                result.get_mut(ClientId::CursorCli).push(path);
+            }
+        }
+        result.get_mut(ClientId::CursorCli).sort_unstable();
+    }
+
     if enabled.contains(&ClientId::Copilot) {
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
             if path.is_file() && seen.insert(path.clone()) {
@@ -1021,6 +1091,14 @@ mod tests {
         let file_path = sessions_dir.join("copilot.jsonl");
         let mut file = File::create(file_path).unwrap();
         writeln!(file, "{{\"type\":\"span\",\"name\":\"chat gpt-5.4-mini\"}}").unwrap();
+    }
+
+    fn setup_mock_cursorcli_db(home: &Path) -> PathBuf {
+        let db_dir = home.join(".config/Cursor/User/globalStorage");
+        fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("state.vscdb");
+        File::create(&db_path).unwrap();
+        db_path
     }
 
     #[test]
@@ -1070,6 +1148,69 @@ mod tests {
         assert_eq!(all[3], (ClientId::Cursor, PathBuf::from("e.csv")));
         assert_eq!(all[4], (ClientId::Gemini, PathBuf::from("d.json")));
         assert_eq!(all[5], (ClientId::Pi, PathBuf::from("f.jsonl")));
+    }
+
+    #[test]
+    fn test_scan_all_clients_cursorcli_exact_state_db() {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path();
+        let expected = setup_mock_cursorcli_db(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cursorcli".to_string()],
+            false,
+        );
+
+        assert_eq!(result.get(ClientId::CursorCli), &vec![expected]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_scan_all_clients_cursorcli_rejects_symlinked_state_db() {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path();
+        let db_dir = home.join(".config/Cursor/User/globalStorage");
+        fs::create_dir_all(&db_dir).unwrap();
+        let target = temp_dir.path().join("elsewhere.vscdb");
+        File::create(&target).unwrap();
+        std::os::unix::fs::symlink(&target, db_dir.join("state.vscdb")).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cursorcli".to_string()],
+            false,
+        );
+
+        assert!(result.get(ClientId::CursorCli).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_scan_all_clients_cursorcli_rejects_symlinked_parent() {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path();
+        let real_dir = temp_dir.path().join("real-global-storage");
+        fs::create_dir_all(&real_dir).unwrap();
+        File::create(real_dir.join("state.vscdb")).unwrap();
+        let parent = home.join(".config/Cursor/User");
+        fs::create_dir_all(&parent).unwrap();
+        std::os::unix::fs::symlink(&real_dir, parent.join("globalStorage")).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cursorcli".to_string()],
+            false,
+        );
+
+        assert!(result.get(ClientId::CursorCli).is_empty());
+    }
+
+    #[test]
+    fn test_parse_extra_dirs_skips_cursorcli() {
+        let enabled: HashSet<ClientId> = [ClientId::CursorCli].into_iter().collect();
+        let dirs = parse_extra_dirs("cursorcli:/tmp/cursor", &enabled);
+        assert!(dirs.is_empty());
     }
 
     #[test]

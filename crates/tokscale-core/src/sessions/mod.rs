@@ -10,6 +10,7 @@ pub mod codex;
 pub mod copilot;
 pub mod crush;
 pub mod cursor;
+pub mod cursorcli;
 pub mod droid;
 pub mod gemini;
 pub mod goose;

@@ -893,6 +893,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let cursorcli_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::CursorCli)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_sqlite_source(path, &source_cache, pricing, |path| {
+                sessions::cursorcli::parse_cursorcli_sqlite(path)
+            })
+        })
+        .collect();
+    for outcome in cursorcli_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let amp_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Amp)
         .par_iter()
@@ -1889,6 +1905,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let gemini_count = gemini_msgs.len() as i32;
     counts.set(ClientId::Gemini, gemini_count);
     messages.extend(gemini_msgs);
+
+    let cursorcli_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::CursorCli)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::cursorcli::parse_cursorcli_sqlite(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let cursorcli_count = summed_parsed_message_count(&cursorcli_msgs);
+    counts.set(ClientId::CursorCli, cursorcli_count);
+    messages.extend(cursorcli_msgs);
 
     let amp_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Amp)
