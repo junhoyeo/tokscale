@@ -73,6 +73,7 @@
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-kiro.png" alt="Kiro" /> | [Kiro CLI](https://kiro.dev/) | `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (project registry; fallback: `~/.local/share/crush/projects.json`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support, legacy Block/goose paths; override via `GOOSE_PATH_ROOT`) | ✅ Yes |
@@ -950,6 +951,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | Same path on all platforms |
 | Codebuff | `~/.config/manicode/projects/` (+ `manicode-dev`, `manicode-staging`) | `%USERPROFILE%\.config\manicode\projects\` | Override via `CODEBUFF_DATA_DIR` env var |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | Uses `xdg-basedir` like OpenCode |
+| Kiro CLI | `~/.local/share/kiro-cli/` (macOS: `~/Library/Application Support/kiro-cli/`) | `%USERPROFILE%\.local\share\kiro-cli\` | Uses `xdg-basedir`; macOS uses Application Support |
 | Crush | `$XDG_DATA_HOME/crush/` (fallback: `~/.local/share/crush/`) | `%USERPROFILE%\.local\share\crush\` (or `%XDG_DATA_HOME%\crush\` if set) | Uses XDG data directory with fallback |
 | Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, legacy Block paths) | `%USERPROFILE%\.local\share\goose\sessions\` | Configurable via `GOOSE_PATH_ROOT` env var |
 | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` is currently supported on macOS/Linux only |

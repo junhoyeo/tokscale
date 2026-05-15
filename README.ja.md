@@ -62,7 +62,7 @@
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db`（フォールバック: `~/.hermes/state.db`） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/*/chats/*.json` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | `~/.config/tokscale/cursor-cache/`経由でAPI同期 | ✅ 対応 |
-| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor CLI" /> | [Cursor CLI](https://cursor.com/cli) | Cursor内部/非公式の `~/.config/Cursor/User/globalStorage/state.vscdb` からのローカルメタデータ（ベストエフォート） | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor CLI" /> | [Cursor CLI](https://cursor.com/cli) | Cursor内部/非公式の `~/.config/Cursor/User/globalStorage/state.vscdb` からのローカルメタデータ（ベストエフォート）（macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`; Windows: `%APPDATA%/Cursor/User/globalStorage/state.vscdb`） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`、`manicode-staging`; `CODEBUFF_DATA_DIR` でオーバーライド可能) | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ 対応 |
