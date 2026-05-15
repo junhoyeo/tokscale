@@ -3,6 +3,7 @@ mod auth;
 mod commands;
 mod cursor;
 mod paths;
+mod trae;
 mod tui;
 
 use crate::tui::client_ui;
@@ -261,6 +262,11 @@ enum Commands {
         #[command(subcommand)]
         subcommand: AntigravitySubcommand,
     },
+    #[command(about = "Trae IDE integration commands")]
+    Trae {
+        #[command(subcommand)]
+        subcommand: TraeSubcommand,
+    },
     #[command(about = "Delete all submitted usage data from the server")]
     DeleteSubmittedData,
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
@@ -316,6 +322,34 @@ enum AntigravitySubcommand {
     },
     #[command(about = "Delete cached Antigravity usage artifacts")]
     PurgeCache,
+}
+
+#[derive(Subcommand)]
+enum TraeSubcommand {
+    #[command(about = "Authenticate Trae — auto-detect from desktop client or paste JWT")]
+    Login {
+        #[arg(long, help = "Paste access token directly (for manual fallback)")]
+        manual: bool,
+        #[arg(long, help = "Target Trae variant (solo, ide)")]
+        variant: Option<String>,
+    },
+    #[command(about = "Remove cached Trae credentials")]
+    Logout {
+        #[arg(long, help = "Target Trae variant (solo, ide)")]
+        variant: Option<String>,
+    },
+    #[command(about = "Show Trae authentication status")]
+    Status {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Sync Trae usage data into local cache")]
+    Sync {
+        #[arg(long, help = "Number of days to sync (default: 30)")]
+        since: Option<i64>,
+        #[arg(long, help = "Include auxiliary usage types (not just main chat)")]
+        include_aux: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -598,6 +632,10 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "antigravity")?;
             run_antigravity_command(subcommand)
         }
+        Some(Commands::Trae { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "trae")?;
+            run_trae_command(subcommand)
+        }
         Some(Commands::DeleteSubmittedData) => {
             reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
             run_delete_data_command()
@@ -707,6 +745,8 @@ pub enum ClientFilter {
     Antigravity,
     Zed,
     Kiro,
+    #[value(name = "trae")]
+    Trae,
     Synthetic,
 }
 
@@ -739,6 +779,7 @@ impl ClientFilter {
             Self::Antigravity => "antigravity",
             Self::Zed => "zed",
             Self::Kiro => "kiro",
+            Self::Trae => "trae",
             Self::Synthetic => "synthetic",
         }
     }
@@ -774,6 +815,7 @@ impl ClientFilter {
             Self::Antigravity => Some(ClientId::Antigravity),
             Self::Zed => Some(ClientId::Zed),
             Self::Kiro => Some(ClientId::Kiro),
+            Self::Trae => Some(ClientId::Trae),
             Self::Synthetic => None,
         }
     }
@@ -806,6 +848,7 @@ impl ClientFilter {
             ClientId::Antigravity => Self::Antigravity,
             ClientId::Zed => Self::Zed,
             ClientId::Kiro => Self::Kiro,
+            ClientId::Trae => Self::Trae,
         }
     }
 
@@ -905,6 +948,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub kiro: bool,
     #[arg(long, hide = true)]
+    pub trae: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -958,7 +1003,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 24] = [
+    let legacy: [(bool, ClientFilter); 25] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -982,6 +1027,7 @@ fn build_client_filter_with_defaults(
         (flags.antigravity, ClientFilter::Antigravity),
         (flags.zed, ClientFilter::Zed),
         (flags.kiro, ClientFilter::Kiro),
+        (flags.trae, ClientFilter::Trae),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -4314,6 +4360,149 @@ fn run_antigravity_command(subcommand: AntigravitySubcommand) -> Result<()> {
     }
 }
 
+/// Parse `--variant` into a typed value.
+///
+/// Returns:
+/// - `Ok(Some(v))` when a recognized value was provided
+/// - `Ok(None)` when the flag was omitted entirely
+/// - `Err` when an unrecognized value was provided
+///
+/// The earlier version returned `Option<_>` and merged the "unrecognized" and
+/// "omitted" cases, which let callers silently fall through to "all variants"
+/// when the user typed something like `--variant slo` — they got every variant
+/// touched instead of an error.
+fn parse_variant_arg(arg: Option<&str>) -> Result<Option<trae::auth::TraeVariant>> {
+    match arg {
+        Some("solo") => Ok(Some(trae::auth::TraeVariant::Solo)),
+        Some("ide") => Ok(Some(trae::auth::TraeVariant::Ide)),
+        Some(other) => anyhow::bail!("unknown variant: {other}, valid values: solo, ide"),
+        None => Ok(None),
+    }
+}
+
+fn run_trae_command(subcommand: TraeSubcommand) -> Result<()> {
+    use colored::Colorize;
+    let rt = tokio::runtime::Runtime::new()?;
+
+    match subcommand {
+        TraeSubcommand::Login { manual, variant } => {
+            if manual {
+                use std::io::{self, Write};
+                // Default to international Solo when `--variant` is omitted.
+                let selected =
+                    parse_variant_arg(variant.as_deref())?.unwrap_or(trae::auth::TraeVariant::Solo);
+                println!();
+                println!("  {}", "Trae Manual Token Login".cyan());
+                println!(
+                    "  {}",
+                    "Paste your JWT access token from the browser DevTools:".bright_black()
+                );
+                println!(
+                    "  {}",
+                    "1. Open https://www.trae.ai/account-setting#usage".bright_black()
+                );
+                println!(
+                    "  {}",
+                    "2. F12 → Network → filter 'query_user_usage' → copy Authorization value"
+                        .bright_black()
+                );
+                print!("  Token: ");
+                io::stdout().flush()?;
+                let mut token = String::new();
+                io::stdin().read_line(&mut token)?;
+                let token = token.trim().to_string();
+                if token.is_empty() {
+                    anyhow::bail!("token must not be empty");
+                }
+                trae::auth::save_manual_token(selected, token, None)?;
+                println!(
+                    "\n  {}",
+                    format!("Token saved for {}", selected.client_str()).green()
+                );
+            } else {
+                let variants: Vec<trae::auth::TraeVariant> =
+                    match parse_variant_arg(variant.as_deref())? {
+                        Some(v) => vec![v],
+                        None => trae::auth::all_variants().to_vec(),
+                    };
+
+                let mut any_success = false;
+                for v in variants {
+                    match rt.block_on(trae::auth::resolve_token(v)) {
+                        Ok(_) => {
+                            println!("  {} logged in (auto-detected)", v.client_str().green());
+                            any_success = true;
+                        }
+                        Err(e) => {
+                            println!("  {} auto-login failed: {}", v.client_str().yellow(), e);
+                        }
+                    }
+                }
+                if !any_success {
+                    println!(
+                        "  {}",
+                        "No Trae credentials found. Use --manual to paste a token by hand."
+                            .yellow()
+                    );
+                }
+            }
+            Ok(())
+        }
+        TraeSubcommand::Logout { variant } => {
+            let variants: Vec<trae::auth::TraeVariant> =
+                match parse_variant_arg(variant.as_deref())? {
+                    Some(v) => vec![v],
+                    None => trae::auth::all_variants().to_vec(),
+                };
+            for v in variants {
+                trae::auth::logout(v)?;
+                println!("  {} logged out", v.client_str().green());
+            }
+            Ok(())
+        }
+        TraeSubcommand::Status { json } => {
+            let mut status = serde_json::Map::new();
+            for v in trae::auth::all_variants() {
+                let has = trae::auth::has_credentials(v);
+                if json {
+                    status.insert(v.client_str().to_string(), serde_json::Value::Bool(has));
+                } else {
+                    println!(
+                        "  {}: {}",
+                        v.client_str(),
+                        if has {
+                            "authenticated".green()
+                        } else {
+                            "not authenticated".yellow()
+                        }
+                    );
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+            Ok(())
+        }
+        TraeSubcommand::Sync { since, include_aux } => {
+            let days = since.unwrap_or(30);
+            // Negative `days` would compute `now - (negative * 86400)` → a
+            // future `start_time`, and zero collapses the query window to an
+            // empty range. Reject both at the CLI boundary instead of
+            // forwarding garbage to the sync layer.
+            if days <= 0 {
+                anyhow::bail!("--since must be a positive number of days (got {days})");
+            }
+            // Trae IDE and Trae Solo share account-level usage data, so we
+            // always sync once using whichever credential source is available.
+            let variants: Vec<trae::auth::TraeVariant> = trae::auth::all_variants()
+                .into_iter()
+                .filter(|v| trae::auth::has_credentials(*v))
+                .collect();
+            rt.block_on(trae::sync::run_trae_sync(&variants, days, include_aux))
+        }
+    }
+}
+
 fn format_tokens_with_commas(n: i64) -> String {
     let s = n.to_string();
     let bytes = s.as_bytes();
@@ -4514,6 +4703,39 @@ mod tests {
         GraphMeta, GraphResult, TokenBreakdown, YearSummary,
     };
 
+    #[test]
+    fn test_parse_variant_arg_accepts_known_values() {
+        assert_eq!(
+            parse_variant_arg(Some("solo")).unwrap(),
+            Some(trae::auth::TraeVariant::Solo)
+        );
+        assert_eq!(
+            parse_variant_arg(Some("ide")).unwrap(),
+            Some(trae::auth::TraeVariant::Ide)
+        );
+    }
+
+    #[test]
+    fn test_parse_variant_arg_none_when_omitted() {
+        assert_eq!(parse_variant_arg(None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_variant_arg_rejects_unknown_value() {
+        // The earlier `Option`-returning version converted this to `None`
+        // and the caller fell through to "all variants" — a typo like
+        // `--variant slo` would log out every variant. Now we error out.
+        let err = parse_variant_arg(Some("slo")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown variant"), "got: {msg}");
+        assert!(msg.contains("slo"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_parse_variant_arg_rejects_empty_string() {
+        assert!(parse_variant_arg(Some("")).is_err());
+    }
+
     fn token_breakdown(total_tokens: i64) -> TokenBreakdown {
         TokenBreakdown {
             input: total_tokens,
@@ -4666,6 +4888,7 @@ mod tests {
             antigravity: true,
             zed: true,
             kiro: true,
+            trae: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -4699,6 +4922,7 @@ mod tests {
             "antigravity",
             "zed",
             "kiro",
+            "trae",
             "synthetic",
         ] {
             assert!(

@@ -75,6 +75,7 @@
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (프로젝트 레지스트리, 기본값: `~/.local/share/crush/projects.json`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support, 레거시 Block/goose 경로; `GOOSE_PATH_ROOT`로 오버라이드 가능) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | `tokscale antigravity sync`로 `~/.config/tokscale/antigravity-cache/sessions/*.jsonl`에 캐싱 (로컬 언어 서버 RPC 사용) | ✅ 지원 |
+| <img width="48px" src=".github/assets/client-trae.png" alt="Trae" /> | [Trae IDE](https://www.trae.ai/) / [Trae Solo](https://www.trae.ai/solo) (국제판) | `tokscale trae sync`로 `~/.config/tokscale/trae-cache/sessions/*.json`에 캐싱 (공식 API의 계정 단위 사용량) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; 호스팅된 Zed 모델 전용, 외부 ACP 에이전트 제외) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ 지원 |
 
@@ -105,6 +106,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - [소셜 플랫폼 명령어](#소셜-플랫폼-명령어)
   - [Cursor IDE 명령어](#cursor-ide-명령어)
   - [Antigravity 명령어](#antigravity-명령어)
+  - [Trae 명령어](#trae-명령어)
   - [예시 출력](#예시-출력---light-버전)
   - [설정](#설정)
   - [환경 변수](#환경-변수)
@@ -142,7 +144,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 9가지 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Synthetic 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Trae, Synthetic 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -314,7 +316,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `synthetic`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `trae`, `synthetic`.
 
 > **Deprecation 안내**: 기존 단일 클라이언트 플래그 (`--opencode`, `--claude`, `--codex` 등)는 하위 호환성을 위해 여전히 동작하지만 `--help`에서 숨겨졌으며 다음 메이저 릴리스에서 제거됩니다. 가능한 한 `--client`로 마이그레이션하세요. 인터랙티브 터미널에서 레거시 플래그를 사용하면 한 줄 경고가 출력됩니다.
 
@@ -470,6 +472,38 @@ tokscale antigravity purge-cache
 
 **동작 방식**: `tokscale antigravity sync`는 로컬 Antigravity 세션 후보를 검색하고, 로컬 언어 서버 RPC에서 확정된 사용량 데이터를 가져와, tokscale-core가 나중에 파싱할 수 있도록 정규화된 JSONL 아티팩트로 저장합니다. 가장 최신의 Antigravity 데이터를 반영하려면 리포트 실행 전에 sync를 먼저 실행하세요.
 
+### Trae 명령어
+
+Trae([ByteDance의 AI IDE](https://www.trae.ai/))는 두 국제판 제품군을 제공합니다. 사용량 데이터는 계정 단위로 공유되므로 tokscale은 하나의 `trae` 클라이언트로 표시합니다:
+
+- **`--variant ide`** — Trae IDE (국제판)의 자격 증명 사용
+- **`--variant solo`** — Trae Solo (국제판)의 자격 증명 사용
+
+`tokscale trae sync`는 공식 `query_user_usage_group_by_session` API를 호출하고 원본 JSON을 로컬 캐시에 저장합니다. `--solo` / `--ide`는 어떤 데스크톱 앱의 자격 증명을 사용할지만 선택하며, 별도 리포트 클라이언트를 만들지는 않습니다.
+
+```bash
+# 로그인 (Trae 데스크톱 클라이언트에서 자격 증명 자동 감지)
+tokscale trae login
+
+# 수동 JWT 입력 (storage.json을 자동 감지할 수 없는 환경용)
+tokscale trae login --manual --variant solo
+
+# 어떤 변형에 자격 증명이 캐시되어 있는지 확인
+tokscale trae status
+
+# 사용량을 한 번만 동기화 (플래그가 없으면 자격 증명이 있는 변형을 사용)
+tokscale trae sync --all --since 30
+
+# 특정 변형의 캐시된 자격 증명 삭제
+tokscale trae logout --variant solo
+```
+
+**캐시 위치**: `~/.config/tokscale/trae-cache/`
+
+**동작 방식**: tokscale은 데스크톱 클라이언트의 `iCubeAuthInfo://*` blob(`globalStorage/storage.json`)을 복호화해 JWT를 얻거나, `--manual`로 붙여 넣은 JWT를 사용합니다. 이후 `POST /trae/api/v1/pay/query_user_usage_group_by_session`을 페이지 단위로 호출하고 원본 JSON을 저장합니다. 최신 Trae 데이터를 반영하려면 리포트 실행 전에 sync를 먼저 실행하세요.
+
+> **중국판**: 중국판(`trae.com.cn`)은 의도적으로 지원하지 않습니다. CN 백엔드는 세션 단위 사용량 조회 API를 공개하지 않습니다. 공식 엔드포인트가 제공되면 지원을 추가할 예정입니다.
+
 ### 예시 출력 (`--light` 버전)
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -498,7 +532,7 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 
 #### 캐시 디렉터리 레이아웃
 
-재생성 가능한 CLI/TUI/가격/Wrapped 캐시는 `~/.config/tokscale/cache/` 아래에 저장됩니다 (`TOKSCALE_CONFIG_DIR`를 설정한 경우 `${TOKSCALE_CONFIG_DIR}/cache/`). Antigravity 동기화 아티팩트는 `~/.config/tokscale/antigravity-cache/`에 별도로 유지됩니다:
+재생성 가능한 CLI/TUI/가격/Wrapped 캐시는 `~/.config/tokscale/cache/` 아래에 저장됩니다 (`TOKSCALE_CONFIG_DIR`를 설정한 경우 `${TOKSCALE_CONFIG_DIR}/cache/`). 통합 동기화 아티팩트는 `~/.config/tokscale/antigravity-cache/` 및 `~/.config/tokscale/trae-cache/` 같은 클라이언트별 캐시 루트에 저장됩니다:
 
 - `tui-data-cache.json` — TUI 시작 캐시
 - `source-message-cache.bin` + `source-message-cache.lock` — 소스 메시지 캐시와 락 파일
@@ -515,7 +549,7 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 | 변수 | 기본값 | 설명 |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5분) | `nativeTimeoutMs` 설정 오버라이드 |
-| `TOKSCALE_CONFIG_DIR` | unset | 설정 디렉토리 루트(`settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/` 위치)를 오버라이드합니다. 절대 경로 권장; 상대 경로는 프로세스 CWD 기준으로 해석됩니다. CI 샌드박스나 비기본 위치를 고정할 때 유용합니다. 설정되면 tokscale은 macOS 레거시 경로(`~/Library/Application Support/tokscale/`)로 폴백하지 않습니다. |
+| `TOKSCALE_CONFIG_DIR` | unset | 설정 디렉토리 루트(`settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/`, `trae-cache/` 위치)를 오버라이드합니다. 절대 경로 권장; 상대 경로는 프로세스 CWD 기준으로 해석됩니다. CI 샌드박스나 비기본 위치를 고정할 때 유용합니다. 설정되면 tokscale은 macOS 레거시 경로(`~/Library/Application Support/tokscale/`)로 폴백하지 않습니다. |
 
 ```bash
 # 예시: 매우 큰 데이터셋에 대한 타임아웃 증가
@@ -598,7 +632,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Synthetic)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Trae, Synthetic)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -908,6 +942,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Crush | `$XDG_DATA_HOME/crush/` (기본값: `~/.local/share/crush/`) | `%USERPROFILE%\.local\share\crush\` (설정된 경우 `%XDG_DATA_HOME%\crush\`) | 기본 경로를 포함한 XDG 데이터 디렉토리 사용 |
 | Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, 레거시 Block 경로) | `%USERPROFILE%\.local\share\goose\sessions\` | `GOOSE_PATH_ROOT` 환경변수로 설정 가능 |
 | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync`는 현재 macOS/Linux에서만 지원 |
+| Trae | `~/.config/tokscale/trae-cache/sessions/` | `%APPDATA%\tokscale\trae-cache\sessions\` | `tokscale trae sync`로 한 번 동기화; 설치된 Trae IDE 또는 Trae Solo 데스크톱 앱에서 자격 증명 자동 발견 |
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 이러한 도구들은 `%APPDATA%`와 같은 Windows 기본 경로 대신 크로스 플랫폼 일관성을 위해 의도적으로 Unix 스타일 경로(`.local/share` 등)를 사용합니다.
@@ -919,6 +954,7 @@ Tokscale은 다음 위치에 설정을 저장합니다:
 - **캐시**: `%APPDATA%\tokscale\cache\` (통합 캐시 루트)
 - **레거시 캐시 경로**: 이전 릴리스의 `%USERPROFILE%\.cache\tokscale\` 같은 분리된 경로가 새 경로로 다시 생성 가능한 데이터가 기록될 때까지 남아 있을 수 있습니다.
 - **Cursor 자격 증명**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
+- **Trae 자격 증명 및 동기화된 사용량**: `%APPDATA%\tokscale\trae-cache\`
 - **Tokscale 계정 자격 증명**: `%USERPROFILE%\.config\tokscale\credentials.json`
 
 ## 세션 데이터 보존
@@ -1093,6 +1129,12 @@ Cursor 데이터는 세션 토큰을 사용하여 Cursor API에서 가져와 로
 위치: `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` (로컬 Antigravity 언어 서버 RPC를 통해 동기화)
 
 Antigravity 데이터는 루트 명령에서 자동으로 가져오지 않습니다. Antigravity가 활성화된 에디터가 열려 있는 동안 `tokscale antigravity sync`를 실행해 로컬 캐시를 새로 고친 다음, 캐시된 JSONL 아티팩트에 대해 일반적인 tokscale 리포트와 필터를 사용하세요.
+
+### Trae
+
+위치: `~/.config/tokscale/trae-cache/sessions/*.json` (공식 사용량 API를 통해 동기화)
+
+Trae 데이터는 루트 명령에서 자동으로 가져오지 않습니다. 먼저 `tokscale trae login`을 실행한 뒤, 리포트 전에 `tokscale trae sync --ide`, `tokscale trae sync --solo` 또는 `tokscale trae sync --all`을 실행하세요. Tokscale은 동기화된 API dump를 세션 수준 레코드로 파싱하고 Trae가 반환한 비용 합계를 보존합니다.
 
 ### OpenClaw
 

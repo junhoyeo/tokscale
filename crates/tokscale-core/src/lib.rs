@@ -1155,6 +1155,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .collect();
     all_messages.extend(antigravity_messages);
 
+    // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
+    let trae_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Trae)
+        .par_iter()
+        .flat_map(|path| sessions::trae::parse_trae_file("trae", path))
+        .collect();
+    all_messages.extend(trae_messages);
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
@@ -2130,6 +2138,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let antigravity_count = antigravity_msgs.len() as i32;
     counts.set(ClientId::Antigravity, antigravity_count);
     messages.extend(antigravity_msgs);
+
+    let trae_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Trae)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::trae::parse_trae_file("trae", path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let trae_count = trae_msgs.len() as i32;
+    counts.set(ClientId::Trae, trae_count);
+    messages.extend(trae_msgs);
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
