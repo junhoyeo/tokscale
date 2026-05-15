@@ -342,14 +342,21 @@ fn discover_cursorcli_state_dbs(home_dir: &str, use_env_roots: bool) -> Vec<Path
         }
     }
 
-    candidates.sort_unstable();
-    candidates.dedup();
-    candidates
+    // Build full DB paths, filter to valid files, then deduplicate by
+    // canonical path identity. On case-insensitive filesystems (macOS
+    // default), `~/.config/Cursor/...` and `~/.config/cursor/...` resolve
+    // to the same file, so string-level dedup is insufficient.
+    let mut dbs: Vec<PathBuf> = candidates
         .into_iter()
         .filter(|base| path_has_no_symlink_components(base))
         .map(|base| base.join("state.vscdb"))
         .filter(|path| is_regular_file_without_symlink(path))
-        .collect()
+        .filter_map(|path| std::fs::canonicalize(&path).ok())
+        .collect();
+
+    dbs.sort_unstable();
+    dbs.dedup();
+    dbs
 }
 
 fn is_regular_file_without_symlink(path: &Path) -> bool {
@@ -1211,6 +1218,35 @@ mod tests {
         let enabled: HashSet<ClientId> = [ClientId::CursorCli].into_iter().collect();
         let dirs = parse_extra_dirs("cursorcli:/tmp/cursor", &enabled);
         assert!(dirs.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_cursorcli_deduplicates_canonical_same_path() {
+        // When multiple candidate paths resolve to the same file (e.g. via
+        // XDG_CONFIG_HOME pointing at ~/.config), only one DB should be returned.
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path();
+
+        // Create the DB at ~/.config/Cursor/User/globalStorage/state.vscdb
+        let db_dir = home.join(".config/Cursor/User/globalStorage");
+        fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("state.vscdb");
+        File::create(&db_path).unwrap();
+
+        // Point XDG_CONFIG_HOME at ~/.config so that both the hardcoded
+        // ~/.config/Cursor/... and $XDG_CONFIG_HOME/Cursor/... candidates
+        // resolve to the same canonical path.
+        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+
+        let dbs = discover_cursorcli_state_dbs(home.to_str().unwrap(), true);
+
+        // Clean up env var
+        std::env::remove_var("XDG_CONFIG_HOME");
+
+        // Should return exactly one DB, not two.
+        assert_eq!(dbs.len(), 1, "Expected one DB but got {dbs:?}");
+        assert_eq!(dbs[0], std::fs::canonicalize(&db_path).unwrap());
     }
 
     #[test]
