@@ -8,7 +8,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
     normalize_model_for_grouping, parse_local_unified_messages, sessions, ClientId, GroupBy,
-    LocalParseOptions,
+    LocalParseOptions, ModelPerformance,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -54,6 +54,7 @@ pub struct ModelUsage {
     pub workspace_label: Option<String>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    pub performance: ModelPerformance,
     pub session_count: u32,
 }
 
@@ -186,6 +187,14 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
             UNKNOWN_WORKSPACE_LABEL.to_string(),
         ),
     }
+}
+
+fn positive_unified_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
+    tokens.input.max(0)
+        + tokens.output.max(0)
+        + tokens.cache_read.max(0)
+        + tokens.cache_write.max(0)
+        + tokens.reasoning.max(0)
 }
 
 fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
@@ -442,6 +451,7 @@ impl DataLoader {
                 },
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: ModelPerformance::default(),
                 session_count: 0,
             });
 
@@ -484,6 +494,10 @@ impl DataLoader {
                 0.0
             };
             model_entry.cost += msg_cost;
+            model_entry.performance.record_message(
+                positive_unified_token_total(&msg.tokens),
+                msg.duration_ms,
+            );
 
             let session_key = format!("{}:{}", msg.client, msg.session_id);
             let model_sessions = model_session_ids.entry(key).or_default();
@@ -844,7 +858,13 @@ impl DataLoader {
             }
         }
 
-        let mut models: Vec<ModelUsage> = model_map.into_values().collect();
+        let mut models: Vec<ModelUsage> = model_map
+            .into_values()
+            .map(|mut model| {
+                model.performance.finalize(model.tokens.total() as i64);
+                model
+            })
+            .collect();
         models.sort_by(|a, b| {
             b.cost
                 .total_cmp(&a.cost)

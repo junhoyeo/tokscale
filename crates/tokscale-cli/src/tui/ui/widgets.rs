@@ -59,6 +59,19 @@ pub fn format_cache_hit_rate(cache_read: u64, input: u64, cache_write: u64) -> S
     format!("{:.1}x", ratio)
 }
 
+pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
+    let Some(value) = ms_per_1k_tokens else {
+        return "—".to_string();
+    };
+    if !value.is_finite() || value <= 0.0 {
+        "—".to_string()
+    } else if value >= 1000.0 {
+        format!("{:.1}s", value / 1000.0)
+    } else {
+        format!("{:.0}ms", value)
+    }
+}
+
 pub fn get_model_color(model: &str) -> Color {
     get_provider_shade(get_provider_from_model(model), 0)
 }

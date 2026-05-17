@@ -1613,6 +1613,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1623,6 +1624,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1660,6 +1662,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1670,6 +1673,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1706,6 +1710,7 @@ mod tests {
             client: "opencode".to_string(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
+            performance: Default::default(),
             session_count: 1,
             workspace_key: None,
             workspace_label: None,
@@ -1821,6 +1826,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -2984,6 +2990,7 @@ mod tests {
             workspace_label: workspace.map(String::from),
             tokens: TokenBreakdown::default(),
             cost,
+            performance: Default::default(),
             session_count: 1,
         }
     }
@@ -3133,6 +3140,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 10.0,
+                performance: Default::default(),
                 session_count: 1,
             },
             ModelUsage {
@@ -3143,6 +3151,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 1.0,
+                performance: Default::default(),
                 session_count: 1,
             },
         ];
@@ -3198,6 +3207,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 10.0,
+                performance: Default::default(),
                 session_count: 1,
             },
             ModelUsage {
@@ -3208,6 +3218,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 5.0,
+                performance: Default::default(),
                 session_count: 1,
             },
         ];

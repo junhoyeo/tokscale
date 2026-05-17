@@ -758,6 +758,7 @@ mod tests {
                 reasoning: 0,
             },
             cost,
+            duration_ms: None,
             message_count: 1,
             agent: None,
             dedup_key: None,

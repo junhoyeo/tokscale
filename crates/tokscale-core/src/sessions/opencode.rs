@@ -129,6 +129,15 @@ fn merge_duplicate_workspace(
     }
 }
 
+fn opencode_duration_ms(time: &OpenCodeTime) -> Option<i64> {
+    let duration = time.completed? - time.created;
+    if duration.is_finite() && duration > 0.0 {
+        Some(duration as i64)
+    } else {
+        None
+    }
+}
+
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let data = read_file_or_none(path)?;
     let mut bytes = data;
@@ -174,6 +183,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
         msg.cost.unwrap_or(0.0).max(0.0),
         agent,
     );
+    unified.duration_ms = opencode_duration_ms(&msg.time);
     unified.dedup_key = dedup_key;
     set_workspace_from_root(&mut unified, workspace_root.as_deref());
     Some(unified)
@@ -297,6 +307,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             cost,
             agent,
         );
+        unified.duration_ms = opencode_duration_ms(&msg.time);
         unified.dedup_key = Some(dedup_key);
         let workspace_root = row_workspace_root
             .as_deref()
@@ -606,6 +617,33 @@ mod tests {
             Some("msg_dedup_001".to_string()),
             "dedup_key should use msg.id from JSON"
         );
+    }
+
+    #[test]
+    fn test_parse_opencode_file_sets_duration_from_completed_time() {
+        use std::io::Write;
+
+        let json = r#"{
+            "id": "msg_timed",
+            "sessionID": "ses_001",
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.01,
+            "tokens": {
+                "input": 100,
+                "output": 50,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0, "completed": 1700000001234.0 }
+        }"#;
+
+        let mut temp_file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        temp_file.write_all(json.as_bytes()).unwrap();
+
+        let msg = parse_opencode_file(temp_file.path()).expect("Should parse");
+        assert_eq!(msg.duration_ms, Some(1234));
     }
 
     /// JSON dedup_key falls back to file stem when msg.id is absent

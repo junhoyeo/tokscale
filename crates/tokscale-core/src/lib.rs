@@ -178,6 +178,57 @@ impl TokenBreakdown {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPerformance {
+    #[serde(rename = "msPer1KTokens")]
+    pub ms_per_1k_tokens: Option<f64>,
+    pub total_duration_ms: i64,
+    pub timed_tokens: i64,
+    pub sample_count: i32,
+    pub token_coverage: f64,
+}
+
+impl ModelPerformance {
+    pub fn record_message(&mut self, token_total: i64, duration_ms: Option<i64>) {
+        let Some(duration_ms) = duration_ms else {
+            return;
+        };
+        if duration_ms <= 0 || token_total <= 0 {
+            return;
+        }
+
+        self.total_duration_ms = self.total_duration_ms.saturating_add(duration_ms);
+        self.timed_tokens = self.timed_tokens.saturating_add(token_total);
+        self.sample_count = self.sample_count.saturating_add(1);
+    }
+
+    pub fn finalize(&mut self, total_tokens: i64) {
+        self.ms_per_1k_tokens = if self.timed_tokens > 0 && self.total_duration_ms > 0 {
+            Some(self.total_duration_ms as f64 * 1000.0 / self.timed_tokens as f64)
+        } else {
+            None
+        };
+
+        self.token_coverage = if total_tokens > 0 {
+            (self.timed_tokens as f64 / total_tokens as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    pub fn from_totals(total_duration_ms: i64, timed_tokens: i64, sample_count: i32) -> Self {
+        let mut performance = Self {
+            total_duration_ms,
+            timed_tokens,
+            sample_count,
+            ..Self::default()
+        };
+        performance.finalize(timed_tokens);
+        performance
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedMessage {
     pub client: String,
@@ -193,6 +244,7 @@ pub struct ParsedMessage {
     pub cache_read: i64,
     pub cache_write: i64,
     pub reasoning: i64,
+    pub duration_ms: Option<i64>,
     pub message_count: i32,
     pub agent: Option<String>,
 }
@@ -355,6 +407,7 @@ pub struct ModelUsage {
     pub reasoning: i64,
     pub message_count: i32,
     pub cost: f64,
+    pub performance: ModelPerformance,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1340,6 +1393,7 @@ fn aggregate_model_usage_entries(
             reasoning: 0,
             message_count: 0,
             cost: 0.0,
+            performance: ModelPerformance::default(),
         });
 
         if merge_clients {
@@ -1367,11 +1421,21 @@ fn aggregate_model_usage_entries(
         entry.reasoning += msg.tokens.reasoning;
         entry.message_count += msg.message_count.max(0);
         entry.cost += msg.cost;
+        entry.performance.record_message(
+            positive_token_total(&msg.tokens),
+            msg.duration_ms,
+        );
     }
 
     let mut entries: Vec<ModelUsage> = model_map
         .into_values()
         .map(|mut entry| {
+            let total_tokens = entry.input.max(0)
+                + entry.output.max(0)
+                + entry.cache_read.max(0)
+                + entry.cache_write.max(0)
+                + entry.reasoning.max(0);
+            entry.performance.finalize(total_tokens);
             let mut providers: Vec<&str> = entry.provider.split(", ").collect();
             providers.sort_unstable();
             providers.dedup();
@@ -1390,6 +1454,14 @@ fn aggregate_model_usage_entries(
     });
 
     entries
+}
+
+fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
+    tokens.input.max(0)
+        + tokens.output.max(0)
+        + tokens.cache_read.max(0)
+        + tokens.cache_write.max(0)
+        + tokens.reasoning.max(0)
 }
 
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
@@ -2280,6 +2352,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         cache_read: msg.tokens.cache_read,
         cache_write: msg.tokens.cache_write,
         reasoning: msg.tokens.reasoning,
+        duration_ms: msg.duration_ms,
         message_count: msg.message_count,
         agent: msg.agent.clone(),
     }
@@ -2339,6 +2412,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
             reasoning: msg.reasoning,
         },
         cost,
+        duration_ms: msg.duration_ms,
         message_count: msg.message_count,
         agent: msg.agent.clone(),
         dedup_key: None,
@@ -2619,6 +2693,76 @@ mod tests {
     }
 
     #[test]
+    fn test_model_usage_performance_uses_only_timed_positive_token_messages() {
+        let mut timed = make_workspace_message(
+            "opencode",
+            "gpt-5.4",
+            "openai",
+            "session-1",
+            0.0,
+            None,
+            None,
+        );
+        timed.tokens = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 25,
+            cache_write: 0,
+            reasoning: 25,
+        };
+        timed.duration_ms = Some(400);
+
+        let mut untimed = make_workspace_message(
+            "opencode",
+            "gpt-5.4",
+            "openai",
+            "session-2",
+            0.0,
+            None,
+            None,
+        );
+        untimed.tokens = TokenBreakdown {
+            input: 300,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        let entries = aggregate_model_usage_entries(vec![timed, untimed], &GroupBy::ClientModel);
+
+        assert_eq!(entries.len(), 1);
+        let performance = &entries[0].performance;
+        assert_eq!(performance.total_duration_ms, 400);
+        assert_eq!(performance.timed_tokens, 200);
+        assert_eq!(performance.sample_count, 1);
+        assert_eq!(performance.ms_per_1k_tokens, Some(2000.0));
+        assert!((performance.token_coverage - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_model_usage_performance_is_null_without_duration_samples() {
+        let entries = aggregate_model_usage_entries(
+            vec![make_workspace_message(
+                "claude",
+                "claude-sonnet-4-5",
+                "anthropic",
+                "session-1",
+                0.0,
+                None,
+                None,
+            )],
+            &GroupBy::ClientModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].performance.ms_per_1k_tokens, None);
+        assert_eq!(entries[0].performance.total_duration_ms, 0);
+        assert_eq!(entries[0].performance.timed_tokens, 0);
+        assert_eq!(entries[0].performance.token_coverage, 0.0);
+    }
+
+    #[test]
     fn test_workspace_model_grouping_merges_same_workspace_and_model() {
         let entries = aggregate_model_usage_entries(
             vec![
@@ -2778,6 +2922,7 @@ mod tests {
             Some("//server/share/demo-workspace".to_string()),
             Some("demo-workspace".to_string()),
         );
+        unified.duration_ms = Some(2500);
 
         let parsed = unified_to_parsed(&unified);
         let round_tripped = parsed_to_unified(&parsed, 2.5);
@@ -2791,6 +2936,7 @@ mod tests {
             Some("demo-workspace")
         );
         assert_eq!(round_tripped.cost, 2.5);
+        assert_eq!(round_tripped.duration_ms, Some(2500));
     }
 
     #[test]

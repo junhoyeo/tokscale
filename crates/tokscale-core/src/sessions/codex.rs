@@ -153,6 +153,8 @@ impl CodexTotals {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CodexParseState {
     pub current_model: Option<String>,
+    #[serde(default)]
+    pub current_turn_start_ms: Option<i64>,
     pub previous_totals: Option<CodexTotals>,
     pub session_is_headless: bool,
     pub session_id_from_meta: Option<String>,
@@ -321,6 +323,8 @@ fn parse_codex_reader<R: BufRead>(
                 // Extract model from turn_context
                 if entry.entry_type == "turn_context" {
                     state.current_model = payload_model.clone();
+                    state.current_turn_start_ms =
+                        parse_codex_entry_timestamp(entry.timestamp.as_deref());
                     if let Some(model) = state.current_model.clone() {
                         flush_pending_model_messages(
                             &mut pending_model_messages,
@@ -428,11 +432,10 @@ fn parse_codex_reader<R: BufRead>(
 
                     state.previous_totals = next_totals;
 
-                    let parsed_timestamp = entry
-                        .timestamp
-                        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-                        .map(|dt| dt.timestamp_millis());
+                    let parsed_timestamp = parse_codex_entry_timestamp(entry.timestamp.as_deref());
                     let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
+                    let duration_ms =
+                        duration_between_ms(state.current_turn_start_ms, parsed_timestamp);
 
                     let agent = if state.session_is_headless {
                         Some("headless".to_string())
@@ -452,6 +455,7 @@ fn parse_codex_reader<R: BufRead>(
                         0.0,
                         agent,
                     );
+                    message.duration_ms = duration_ms;
                     if parsed_timestamp.is_some() {
                         if let Some(model) = model.as_deref() {
                             set_codex_dedup_key(&mut message, model);
@@ -555,6 +559,17 @@ fn parse_codex_reader<R: BufRead>(
 
 fn codex_source_is_exec(source: Option<&Value>) -> bool {
     source.and_then(Value::as_str) == Some("exec")
+}
+
+fn parse_codex_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
+    timestamp
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
+    let duration = end_ms?.saturating_sub(start_ms?);
+    (duration > 0).then_some(duration)
 }
 
 fn codex_token_count_dedup_key(message: &UnifiedMessage, model: &str) -> String {
@@ -1431,6 +1446,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "o3-pro");
+        assert_eq!(messages[0].duration_ms, Some(1000));
     }
 
     #[test]

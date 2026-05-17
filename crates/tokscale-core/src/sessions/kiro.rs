@@ -232,8 +232,10 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
                 return None;
             }
 
+            let end_timestamp_ms = parse_timestamp_value(turn.end_timestamp.as_ref());
+            let duration_ms = duration_between_ms(prompt_timestamp_ms, end_timestamp_ms);
             let timestamp = prompt_timestamp_ms
-                .or_else(|| parse_timestamp_value(turn.end_timestamp.as_ref()))
+                .or(end_timestamp_ms)
                 .unwrap_or(fallback_timestamp);
 
             let mut message = UnifiedMessage::new_with_dedup(
@@ -253,6 +255,7 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
                 Some(format!("{}:{}", session_id, index)),
             );
             message.message_count = turn.total_request_count.unwrap_or(1).max(1);
+            message.duration_ms = duration_ms;
             message.is_turn_start = true;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
             Some(message)
@@ -277,6 +280,11 @@ fn estimate_tokens(chars: usize) -> i64 {
 
 fn seconds_to_millis(seconds: f64) -> i64 {
     (seconds * 1000.0) as i64
+}
+
+fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
+    let duration = end_ms?.saturating_sub(start_ms?);
+    (duration > 0).then_some(duration)
 }
 
 fn parse_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
@@ -394,6 +402,8 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 continue;
             }
 
+            let duration_ms =
+                duration_between_ms(meta.request_start_timestamp_ms, meta.stream_end_timestamp_ms);
             let timestamp = meta
                 .request_start_timestamp_ms
                 .or(meta.stream_end_timestamp_ms)
@@ -416,6 +426,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 Some(format!("{}:{}", conversation_id, index)),
             );
             message.message_count = 1;
+            message.duration_ms = duration_ms;
             message.is_turn_start = true;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
             messages.push(message);
@@ -485,6 +496,7 @@ mod tests {
         assert_eq!(messages[0].message_count, 2);
         assert!(messages[0].is_turn_start);
         assert_eq!(messages[0].timestamp, 1770983426420);
+        assert_eq!(messages[0].duration_ms, Some(580));
         assert_eq!(messages[0].workspace_key, Some("/tmp/project".to_string()));
         assert_eq!(messages[0].workspace_label, Some("project".to_string()));
     }
@@ -514,5 +526,45 @@ not valid json at all
 
         assert_eq!(messages.len(), 1);
         assert!(messages[0].tokens.input > 0 || messages[0].tokens.output > 0);
+    }
+
+    #[test]
+    fn test_parse_kiro_sqlite_sets_duration_from_request_metadata() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("data.sqlite3");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE conversations_v2 (key TEXT, conversation_id TEXT, value TEXT)",
+            [],
+        )
+        .unwrap();
+        let value = r#"{
+            "model_info": {
+                "model_id": "claude-sonnet-4-5",
+                "context_window_tokens": 1000
+            },
+            "history": [{
+                "request_metadata": {
+                    "context_usage_percentage": 10,
+                    "response_size": 40,
+                    "request_start_timestamp_ms": 1770983426000,
+                    "stream_end_timestamp_ms": 1770983427500
+                }
+            }]
+        }"#;
+        conn.execute(
+            "INSERT INTO conversations_v2 (key, conversation_id, value) VALUES (?1, ?2, ?3)",
+            (&"/tmp/project", &"conv-1", &value),
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_kiro_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1770983426000);
+        assert_eq!(messages[0].duration_ms, Some(1500));
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 10);
     }
 }

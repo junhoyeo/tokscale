@@ -1554,6 +1554,7 @@ fn run_models_report(
             reasoning: i64,
             message_count: i32,
             cost: f64,
+            performance: tokscale_core::ModelPerformance,
         }
 
         #[derive(serde::Serialize)]
@@ -1606,6 +1607,7 @@ fn run_models_report(
                     reasoning: e.reasoning,
                     message_count: e.message_count,
                     cost: e.cost,
+                    performance: e.performance,
                 })
                 .collect(),
             total_input: report.total_input,
@@ -1620,6 +1622,7 @@ fn run_models_report(
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
 
+        let total_performance = aggregate_model_report_performance(&report.entries);
         let term_width = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(120);
@@ -1646,6 +1649,7 @@ fn run_models_report(
                         Cell::new("Model").fg(Color::Cyan),
                         Cell::new("Input").fg(Color::Cyan),
                         Cell::new("Output").fg(Color::Cyan),
+                        Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
                         Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
@@ -1667,6 +1671,8 @@ fn run_models_report(
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
                                 .set_alignment(CellAlignment::Right),
+                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
+                                .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_cost_per_million(entry.cost, total_tokens))
@@ -1688,6 +1694,9 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_tokens_with_commas(report.total_output))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
@@ -1705,6 +1714,7 @@ fn run_models_report(
                         Cell::new("Model").fg(Color::Cyan),
                         Cell::new("Input").fg(Color::Cyan),
                         Cell::new("Output").fg(Color::Cyan),
+                        Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
                         Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
@@ -1719,6 +1729,8 @@ fn run_models_report(
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
@@ -1741,6 +1753,9 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_tokens_with_commas(report.total_output))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
@@ -1823,6 +1838,7 @@ fn run_models_report(
                     table.set_header(vec![
                         Cell::new("Workspace").fg(Color::Cyan),
                         Cell::new("Model").fg(Color::Cyan),
+                        Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
                     ]);
 
@@ -1830,6 +1846,8 @@ fn run_models_report(
                         table.add_row(vec![
                             Cell::new(workspace_name(entry.workspace_label.as_deref())),
                             Cell::new(&entry.model),
+                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
+                                .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
                         ]);
@@ -1840,6 +1858,9 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .add_attribute(Attribute::Bold),
                         Cell::new(""),
+                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
@@ -1858,6 +1879,7 @@ fn run_models_report(
                         Cell::new("Cache Write").fg(Color::Cyan),
                         Cell::new("Cache Read").fg(Color::Cyan),
                         Cell::new("Total").fg(Color::Cyan),
+                        Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
                         Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
@@ -1885,6 +1907,8 @@ fn run_models_report(
                             Cell::new(format_tokens_with_commas(entry.cache_read))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(total))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
@@ -1916,6 +1940,9 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_tokens_with_commas(total_all))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
@@ -2025,6 +2052,7 @@ fn run_models_report(
                         Cell::new("Cache Write").fg(Color::Cyan),
                         Cell::new("Cache Read").fg(Color::Cyan),
                         Cell::new("Total").fg(Color::Cyan),
+                        Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
                         Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
@@ -2047,6 +2075,8 @@ fn run_models_report(
                             Cell::new(format_tokens_with_commas(entry.cache_read))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(total))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
@@ -2081,6 +2111,9 @@ fn run_models_report(
                         Cell::new(format_tokens_with_commas(total_all))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
+                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
@@ -2100,6 +2133,7 @@ fn run_models_report(
                         Cell::new("Cache Write").fg(Color::Cyan),
                         Cell::new("Cache Read").fg(Color::Cyan),
                         Cell::new("Total").fg(Color::Cyan),
+                        Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
                     ]);
 
@@ -2127,6 +2161,8 @@ fn run_models_report(
                             Cell::new(format_tokens_with_commas(entry.cache_read))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(total))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
@@ -2157,6 +2193,9 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_tokens_with_commas(total_all))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
@@ -3107,6 +3146,47 @@ fn format_cost_per_million(cost: f64, total_tokens: i64) -> String {
     } else {
         format!("${:.2}/M", cost_per_m)
     }
+}
+
+fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
+    let Some(value) = ms_per_1k_tokens else {
+        return "—".to_string();
+    };
+    if !value.is_finite() || value <= 0.0 {
+        "—".to_string()
+    } else if value >= 1000.0 {
+        format!("{:.1}s", value / 1000.0)
+    } else {
+        format!("{:.0}ms", value)
+    }
+}
+
+fn model_entry_total_tokens(entry: &tokscale_core::ModelUsage) -> i64 {
+    entry.input.max(0)
+        + entry.output.max(0)
+        + entry.cache_read.max(0)
+        + entry.cache_write.max(0)
+        + entry.reasoning.max(0)
+}
+
+fn aggregate_model_report_performance(
+    entries: &[tokscale_core::ModelUsage],
+) -> tokscale_core::ModelPerformance {
+    let mut performance = tokscale_core::ModelPerformance::default();
+    for entry in entries {
+        performance.total_duration_ms = performance
+            .total_duration_ms
+            .saturating_add(entry.performance.total_duration_ms);
+        performance.timed_tokens = performance
+            .timed_tokens
+            .saturating_add(entry.performance.timed_tokens);
+        performance.sample_count = performance
+            .sample_count
+            .saturating_add(entry.performance.sample_count);
+    }
+    let total_tokens = entries.iter().map(model_entry_total_tokens).sum();
+    performance.finalize(total_tokens);
+    performance
 }
 
 /// Format a URL as an OSC 8 clickable hyperlink for supported terminals.

@@ -20,6 +20,7 @@ pub fn build_export_json(data: &UsageData) -> Result<String> {
                 "total": m.tokens.total()
             },
             "cost": m.cost,
+            "performance": m.performance,
             "sessionCount": m.session_count
         })).collect::<Vec<_>>(),
         "agents": data.agents.iter().map(|a| json!({

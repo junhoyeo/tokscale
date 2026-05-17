@@ -4,7 +4,7 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
+    format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
     get_provider_display_name,
 };
 use crate::tui::app::{App, SortDirection, SortField};
@@ -81,12 +81,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             "Cache Read",
             "Cache Write",
             "Total",
+            "ms/1K",
             "Cost",
         ]
     } else {
         vec![
             "#", "Model", "Provider", "Source", "Input", "Output", "Cache R", "Cache W", "Cache×",
-            "Total", "Cost",
+            "Total", "ms/1K", "Cost",
         ]
     };
 
@@ -108,7 +109,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|(i, h)| {
                 let indicator = match i {
                     9 if !is_narrow => sort_indicator(SortField::Tokens),
-                    10 if !is_narrow => sort_indicator(SortField::Cost),
+                    11 if !is_narrow => sort_indicator(SortField::Cost),
                     1 if is_very_narrow => sort_indicator(SortField::Cost),
                     2 if is_narrow && !is_very_narrow => sort_indicator(SortField::Cost),
                     1 if is_narrow && !is_very_narrow => sort_indicator(SortField::Tokens),
@@ -180,6 +181,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(format_tokens(model.tokens.cache_write))
                         .style(Style::default().fg(Color::Rgb(200, 150, 100))),
                     Cell::from(format_tokens(model.tokens.total())),
+                    Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
+                        .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else {
@@ -208,6 +211,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ))
                     .style(Style::default().fg(Color::Cyan)),
                     Cell::from(format_tokens(model.tokens.total())),
+                    Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
+                        .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
             };
@@ -245,6 +250,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Length(10),
         ]
     } else {
         vec![
@@ -257,6 +263,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(8),
+            Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
         ]

@@ -70,7 +70,7 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
             "reasoning": 0,
             "cache": { "read": 200, "write": 50 }
         },
-        "time": { "created": 1718452800000.0 }
+        "time": { "created": 1718452800000.0, "completed": 1718452803500.0 }
     }"#;
     fs::write(session1.join("msg_a.json"), msg_a).unwrap();
 
@@ -88,7 +88,7 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
             "reasoning": 0,
             "cache": { "read": 150, "write": 30 }
         },
-        "time": { "created": 1718456400000.0 }
+        "time": { "created": 1718456400000.0, "completed": 1718456402560.0 }
     }"#;
     fs::write(session1.join("msg_b.json"), msg_b).unwrap();
 
@@ -110,7 +110,7 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
             "reasoning": 0,
             "cache": { "read": 100, "write": 20 }
         },
-        "time": { "created": 1736510400000.0 }
+        "time": { "created": 1736510400000.0, "completed": 1736510400920.0 }
     }"#;
     fs::write(session2.join("msg_c.json"), msg_c).unwrap();
 
@@ -1029,6 +1029,17 @@ fn test_models_json_output() {
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
     assert!(first.get("cost").is_some());
+    let performance = first
+        .get("performance")
+        .expect("Missing performance")
+        .as_object()
+        .expect("performance should be an object");
+    assert!(performance.contains_key("msPer1KTokens"));
+    assert!(performance.contains_key("totalDurationMs"));
+    assert!(performance.contains_key("timedTokens"));
+    assert!(performance.contains_key("sampleCount"));
+    assert!(performance.contains_key("tokenCoverage"));
+    assert!(performance["msPer1KTokens"].as_f64().unwrap() > 0.0);
 }
 
 #[test]
@@ -1836,7 +1847,8 @@ fn test_models_light_output() {
         .args(["models", "--light", "--opencode", "--no-spinner"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Token Usage Report by Model"));
+        .stdout(predicate::str::contains("Token Usage Report by Model"))
+        .stdout(predicate::str::contains("ms/1K"));
 }
 
 #[test]

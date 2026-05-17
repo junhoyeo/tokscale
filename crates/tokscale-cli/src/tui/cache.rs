@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::{sessions, GroupBy};
+use tokscale_core::{sessions, GroupBy, ModelPerformance};
 
 use crate::ClientFilter;
 
@@ -21,7 +21,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 7;
+const CACHE_SCHEMA_VERSION: u32 = 8;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -98,6 +98,8 @@ struct CachedModelUsage {
     workspace_label: Option<String>,
     tokens: CachedTokenBreakdown,
     cost: f64,
+    #[serde(default)]
+    performance: ModelPerformance,
     session_count: u32,
 }
 
@@ -230,6 +232,7 @@ impl From<&ModelUsage> for CachedModelUsage {
             workspace_label: m.workspace_label.clone(),
             tokens: (&m.tokens).into(),
             cost: m.cost,
+            performance: m.performance.clone(),
             session_count: m.session_count,
         }
     }
@@ -245,6 +248,7 @@ impl From<CachedModelUsage> for ModelUsage {
             workspace_label: m.workspace_label,
             tokens: m.tokens.into(),
             cost: m.cost,
+            performance: m.performance,
             session_count: m.session_count,
         }
     }
@@ -1228,7 +1232,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
@@ -1510,7 +1514,7 @@ mod tests {
         fs::write(
             &legacy_path,
             r#"{
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,

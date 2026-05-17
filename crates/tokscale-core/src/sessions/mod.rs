@@ -43,6 +43,8 @@ pub struct UnifiedMessage {
     pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
     #[serde(default = "default_message_count")]
     pub message_count: i32,
     pub agent: Option<String>,
@@ -285,6 +287,7 @@ impl UnifiedMessage {
             date,
             tokens,
             cost,
+            duration_ms: None,
             message_count: default_message_count(),
             agent,
             dedup_key,
