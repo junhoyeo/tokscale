@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
@@ -12,7 +13,9 @@ use crate::ClientFilter;
 
 use ratatui::style::Color;
 
-use super::data::{AgentUsage, DailyUsage, DataLoader, HourlyUsage, ModelUsage, UsageData};
+use super::data::{
+    AgentUsage, DailyUsage, DataLoader, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
+};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
@@ -129,6 +132,17 @@ pub struct ClickArea {
     pub action: ClickAction,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DailyDetailRow<'a> {
+    pub source: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub color_key: &'a str,
+    pub tokens: &'a TokenBreakdown,
+    pub cost: f64,
+    pub messages: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum ClickAction {
     Tab(Tab),
@@ -160,6 +174,9 @@ pub struct App {
     pub scroll_offset: usize,
     pub selected_index: usize,
     pub max_visible_items: usize,
+    pub selected_daily_detail_date: Option<NaiveDate>,
+    daily_list_selected_index: usize,
+    daily_list_scroll_offset: usize,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
@@ -258,6 +275,9 @@ impl App {
             scroll_offset: 0,
             selected_index: 0,
             max_visible_items: 20,
+            selected_daily_detail_date: None,
+            daily_list_selected_index: 0,
+            daily_list_scroll_offset: 0,
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -468,8 +488,16 @@ impl App {
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
             }
+            KeyCode::Enter if self.current_tab == Tab::Daily => {
+                self.open_selected_daily_detail();
+            }
             KeyCode::Enter if self.current_tab == Tab::Stats => {
                 self.handle_graph_selection();
+            }
+            KeyCode::Esc | KeyCode::Backspace
+                if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
+            {
+                self.close_daily_detail();
             }
             KeyCode::Esc if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
@@ -573,6 +601,9 @@ impl App {
     fn reset_selection(&mut self) {
         self.scroll_offset = 0;
         self.selected_index = 0;
+        self.selected_daily_detail_date = None;
+        self.daily_list_selected_index = 0;
+        self.daily_list_scroll_offset = 0;
         self.selected_graph_cell = None;
         self.stats_breakdown_total_lines = 0;
     }
@@ -581,6 +612,9 @@ impl App {
         self.persist_current_sort();
 
         self.current_tab = target;
+        if target != Tab::Daily {
+            self.selected_daily_detail_date = None;
+        }
 
         let (field, dir) = self
             .tab_sort_state
@@ -715,6 +749,9 @@ impl App {
         match self.current_tab {
             Tab::Overview | Tab::Models => self.data.models.len(),
             Tab::Agents => self.data.agents.len(),
+            Tab::Daily if self.is_daily_detail_active() => {
+                self.get_sorted_daily_detail_rows().len()
+            }
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
             Tab::Stats => {
@@ -738,7 +775,12 @@ impl App {
             self.sort_direction = SortDirection::Descending;
         }
         self.persist_current_sort();
-        self.reset_selection();
+        if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.reset_selection();
+        }
         self.set_status(&format!(
             "Sorted by {:?} {:?}",
             self.sort_field, self.sort_direction
@@ -749,6 +791,7 @@ impl App {
         if self.current_tab != Tab::Daily {
             return;
         }
+        self.selected_daily_detail_date = None;
 
         let today = chrono::Local::now().date_naive();
         let (today_index, total_len) = {
@@ -836,6 +879,39 @@ impl App {
         self.dialog_stack.show(Box::new(dialog));
     }
 
+    fn open_selected_daily_detail(&mut self) {
+        if self.is_daily_detail_active() {
+            return;
+        }
+
+        let selected_date = {
+            let daily = self.get_sorted_daily();
+            daily.get(self.selected_index).map(|day| day.date)
+        };
+
+        if let Some(date) = selected_date {
+            self.daily_list_selected_index = self.selected_index;
+            self.daily_list_scroll_offset = self.scroll_offset;
+            self.selected_daily_detail_date = Some(date);
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.set_status(&format!("Viewing daily details for {}", date));
+            self.clamp_selection();
+        }
+    }
+
+    fn close_daily_detail(&mut self) {
+        if !self.is_daily_detail_active() {
+            return;
+        }
+
+        self.selected_daily_detail_date = None;
+        self.selected_index = self.daily_list_selected_index;
+        self.scroll_offset = self.daily_list_scroll_offset;
+        self.set_status("Returned to daily usage");
+        self.clamp_selection();
+    }
+
     fn toggle_auto_refresh(&mut self) {
         self.auto_refresh = !self.auto_refresh;
         self.settings.auto_refresh_enabled = self.auto_refresh;
@@ -893,6 +969,18 @@ impl App {
                 .get_sorted_agents()
                 .get(self.selected_index)
                 .map(|a| format!("{}: {} tokens, ${:.4}", a.agent, a.tokens.total(), a.cost)),
+            Tab::Daily if self.is_daily_detail_active() => self
+                .get_sorted_daily_detail_rows()
+                .get(self.selected_index)
+                .map(|row| {
+                    format!(
+                        "{} / {}: {} tokens, ${:.4}",
+                        row.source,
+                        row.model,
+                        row.tokens.total(),
+                        row.cost
+                    )
+                }),
             Tab::Daily => self
                 .get_sorted_daily()
                 .get(self.selected_index)
@@ -1048,6 +1136,73 @@ impl App {
         daily
     }
 
+    pub fn is_daily_detail_active(&self) -> bool {
+        self.selected_daily_detail_date.is_some()
+    }
+
+    pub fn daily_detail_date(&self) -> Option<NaiveDate> {
+        self.selected_daily_detail_date
+    }
+
+    pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow<'_>> {
+        let Some(date) = self.selected_daily_detail_date else {
+            return Vec::new();
+        };
+        let Some(day) = self.data.daily.iter().find(|day| day.date == date) else {
+            return Vec::new();
+        };
+
+        let mut rows: Vec<DailyDetailRow<'_>> = day
+            .source_breakdown
+            .iter()
+            .flat_map(|(source, source_info)| {
+                source_info
+                    .models
+                    .values()
+                    .map(move |model_info| DailyDetailRow {
+                        source,
+                        provider: &model_info.provider,
+                        model: &model_info.display_name,
+                        color_key: &model_info.color_key,
+                        tokens: &model_info.tokens,
+                        cost: model_info.cost,
+                        messages: model_info.messages,
+                    })
+            })
+            .collect();
+
+        let tie_breaker = |a: &DailyDetailRow<'_>, b: &DailyDetailRow<'_>| {
+            a.source
+                .cmp(b.source)
+                .then_with(|| a.model.cmp(b.model))
+                .then_with(|| a.provider.cmp(b.provider))
+        };
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => {
+                rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Cost, SortDirection::Ascending) => {
+                rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Date, _) => rows.sort_by(tie_breaker),
+        }
+
+        rows
+    }
+
     pub fn get_sorted_hourly(&self) -> Vec<&HourlyUsage> {
         let mut hourly: Vec<&HourlyUsage> = self.data.hourly.iter().collect();
 
@@ -1096,7 +1251,9 @@ impl App {
 mod tests {
     use super::super::ui::widgets::get_provider_shade;
     use super::*;
-    use crate::tui::data::{ModelUsage, TokenBreakdown};
+    use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_tab_all() {
@@ -1411,6 +1568,57 @@ mod tests {
         app
     }
 
+    fn daily_usage(date: &str, cost: f64, models: Vec<(&str, &str, f64)>) -> DailyUsage {
+        let mut model_breakdown = BTreeMap::new();
+        let mut total_tokens = TokenBreakdown::default();
+        let mut total_cost = 0.0;
+
+        for (model, provider, model_cost) in models {
+            let tokens = TokenBreakdown {
+                input: (model_cost * 100.0) as u64,
+                output: 10,
+                cache_read: 5,
+                cache_write: 0,
+                reasoning: 0,
+            };
+            total_tokens.input = total_tokens.input.saturating_add(tokens.input);
+            total_tokens.output = total_tokens.output.saturating_add(tokens.output);
+            total_tokens.cache_read = total_tokens.cache_read.saturating_add(tokens.cache_read);
+            total_cost += model_cost;
+
+            model_breakdown.insert(
+                model.to_string(),
+                DailyModelInfo {
+                    provider: provider.to_string(),
+                    display_name: model.to_string(),
+                    color_key: model.to_string(),
+                    tokens,
+                    cost: model_cost,
+                    messages: 1,
+                },
+            );
+        }
+
+        let mut source_breakdown = BTreeMap::new();
+        source_breakdown.insert(
+            "claude".to_string(),
+            DailySourceInfo {
+                tokens: total_tokens.clone(),
+                cost: total_cost,
+                models: model_breakdown,
+            },
+        );
+
+        DailyUsage {
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            tokens: total_tokens,
+            cost: if cost > 0.0 { cost } else { total_cost },
+            source_breakdown,
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -1581,6 +1789,60 @@ mod tests {
         assert_eq!(app.selected_index, 0);
         assert_eq!(app.scroll_offset, 0);
         assert_eq!(app.selected_graph_cell, None);
+    }
+
+    #[test]
+    fn test_enter_on_daily_opens_selected_day_detail_rows() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 0;
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(app.get_current_list_len(), 2);
+    }
+
+    #[test]
+    fn test_esc_from_daily_detail_restores_daily_selection() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.max_visible_items = 2;
+        app.selected_index = 1;
+        app.scroll_offset = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Down));
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert_eq!(app.current_tab, Tab::Daily);
+        assert_eq!(app.selected_index, 1);
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.get_current_list_len(), 3);
     }
 
     // ── handle_key_event: sort ──────────────────────────────────────
