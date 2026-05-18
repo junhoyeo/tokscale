@@ -313,6 +313,18 @@ impl App {
         self.data = data;
         self.last_refresh = Instant::now();
         self.build_model_shade_map();
+
+        // Exit Daily-detail mode if the refresh dropped the day we were
+        // viewing; otherwise `get_sorted_daily_detail_rows()` would return
+        // empty while the user is still nominally in detail mode.
+        if let Some(date) = self.selected_daily_detail_date {
+            if !self.data.daily.iter().any(|day| day.date == date) {
+                self.selected_daily_detail_date = None;
+                self.selected_index = self.daily_list_selected_index;
+                self.scroll_offset = self.daily_list_scroll_offset;
+            }
+        }
+
         self.clamp_selection();
     }
 
@@ -901,13 +913,31 @@ impl App {
     }
 
     fn close_daily_detail(&mut self) {
-        if !self.is_daily_detail_active() {
+        let Some(detail_date) = self.selected_daily_detail_date else {
             return;
-        }
+        };
 
         self.selected_daily_detail_date = None;
-        self.selected_index = self.daily_list_selected_index;
-        self.scroll_offset = self.daily_list_scroll_offset;
+
+        // Re-anchor by date so a sort change inside detail mode still
+        // restores the same day rather than the stale list index.
+        let restored_index = self
+            .get_sorted_daily()
+            .iter()
+            .position(|day| day.date == detail_date)
+            .unwrap_or(self.daily_list_selected_index);
+
+        self.selected_index = restored_index;
+
+        let max_visible = self.max_visible_items.max(1);
+        let viewport_still_holds = restored_index >= self.daily_list_scroll_offset
+            && restored_index < self.daily_list_scroll_offset + max_visible;
+        self.scroll_offset = if viewport_still_holds {
+            self.daily_list_scroll_offset
+        } else {
+            restored_index.saturating_sub(max_visible / 2)
+        };
+
         self.set_status("Returned to daily usage");
         self.clamp_selection();
     }
@@ -1843,6 +1873,113 @@ mod tests {
         assert_eq!(app.selected_index, 1);
         assert_eq!(app.scroll_offset, 1);
         assert_eq!(app.get_current_list_len(), 3);
+    }
+
+    #[test]
+    fn test_close_daily_detail_reanchors_selection_by_date_after_sort_change() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 1;
+        let target_date = app.get_sorted_daily()[app.selected_index].date;
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+        assert_eq!(app.daily_detail_date(), Some(target_date));
+
+        app.handle_key_event(key(KeyCode::Char('c')));
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.is_daily_detail_active());
+        let restored_index = app.selected_index;
+        let restored_date = app.get_sorted_daily()[restored_index].date;
+        assert_eq!(
+            restored_date, target_date,
+            "Closing detail after sort change should re-anchor on the original date"
+        );
+    }
+
+    #[test]
+    fn test_update_data_exits_daily_detail_when_date_disappears() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+
+        let mut refreshed = UsageData::default();
+        refreshed.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+        app.update_data(refreshed);
+
+        assert!(
+            !app.is_daily_detail_active(),
+            "update_data should drop detail mode when the selected date is gone"
+        );
+        assert_eq!(app.daily_detail_date(), None);
+        assert!(app.get_sorted_daily_detail_rows().is_empty());
+    }
+
+    #[test]
+    fn test_update_data_keeps_daily_detail_when_date_still_present() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+        ];
+
+        app.selected_index = 1;
+        let target_date = app.get_sorted_daily()[app.selected_index].date;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+
+        let mut refreshed = UsageData::default();
+        refreshed.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                9.0,
+                vec![("target-a", "openai", 7.0), ("target-b", "anthropic", 2.0)],
+            ),
+        ];
+        app.update_data(refreshed);
+
+        assert!(app.is_daily_detail_active());
+        assert_eq!(app.daily_detail_date(), Some(target_date));
     }
 
     // ── handle_key_event: sort ──────────────────────────────────────
