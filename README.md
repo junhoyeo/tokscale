@@ -248,15 +248,21 @@ The interactive TUI mode provides:
 
 - **6 Views**: Overview (chart + top models), Models, Daily, Hourly, Stats (contribution graph), Agents. A seventh per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
-  - `1-6` or `←/→/Tab`: Switch views
-  - `↑/↓`: Navigate lists
+  - `←/→/Tab/BackTab`: Switch views
+  - `↑/↓` or `Home/End`: Navigate lists
+  - `Enter`: Open daily detail (Daily tab) / select graph cell (Stats tab)
+  - `Esc` or `Backspace`: Close dialog or exit detail view
   - `c/d/t`: Sort by cost/date/tokens
+  - `j`: Jump to today
   - `s`: Open source picker dialog
   - `g`: Open group-by picker dialog (model, client+model, client+provider+model)
+  - `h`: Toggle Daily/Hourly chart granularity (Overview tab)
+  - `v`: Toggle Table/Profile view (Hourly tab)
+  - `y`: Copy selected row to clipboard
   - `p`: Cycle through 9 color themes
-  - `r`: Refresh data
+  - `r`: Refresh data; `Shift+R` toggles auto-refresh; `+`/`-` adjusts interval
   - `e`: Export to JSON
-  - `q`: Quit
+  - `q` or `Ctrl+C`: Quit
 - **Mouse Support**: Click tabs, buttons, and filters
 - **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu
 - **Settings Persistence**: Preferences saved to `~/.config/tokscale/settings.json` (see [Configuration](#configuration))
