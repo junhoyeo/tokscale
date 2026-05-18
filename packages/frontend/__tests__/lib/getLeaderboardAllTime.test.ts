@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 
 const mockState = vi.hoisted(() => {
   const awaitedResults: unknown[] = [];
+  const limitCalls: unknown[] = [];
 
   const tables = {
     users: {
@@ -52,7 +53,10 @@ const mockState = vi.hoisted(() => {
         where: vi.fn(() => builder),
         groupBy: vi.fn(() => builder),
         orderBy: vi.fn(() => builder),
-        limit: vi.fn(() => builder),
+        limit: vi.fn((value: unknown) => {
+          limitCalls.push(value);
+          return builder;
+        }),
         offset: vi.fn(() => builder),
         having: vi.fn(() => builder),
         as: vi.fn(() => builder),
@@ -75,6 +79,7 @@ const mockState = vi.hoisted(() => {
     sql,
     reset() {
       awaitedResults.length = 0;
+      limitCalls.length = 0;
       db.select.mockClear();
       eq.mockClear();
       desc.mockClear();
@@ -87,6 +92,7 @@ const mockState = vi.hoisted(() => {
     pushAwaitedResult(value: unknown) {
       awaitedResults.push(value);
     },
+    limitCalls,
   };
 });
 
@@ -100,6 +106,24 @@ vi.mock("@/lib/db", () => ({
   submissions: mockState.tables.submissions,
   dailyBreakdown: mockState.tables.dailyBreakdown,
 }));
+
+vi.mock("@/lib/db/usernameLookup", () => {
+  class AmbiguousUsernameError extends Error {}
+
+  return {
+    AmbiguousUsernameError,
+    USERNAME_LOOKUP_LIMIT: 2,
+    getSingleUsernameMatch: (rows: readonly unknown[], username: string) => {
+      if (rows.length > 1) {
+        throw new AmbiguousUsernameError(`Multiple users match username ${username} case-insensitively`);
+      }
+      return rows[0] ?? null;
+    },
+    normalizeUsernameCacheKey: (username: string) => username.toLowerCase(),
+    usernameEqualsIgnoreCase: (username: string) =>
+      mockState.sql`lower(${mockState.tables.users.username}) = ${username.toLowerCase()}`,
+  };
+});
 
 vi.mock("@/lib/submissionFreshness", async () =>
   import("../../src/lib/submissionFreshness")
@@ -263,5 +287,62 @@ describe("all-time leaderboard freshness queries", () => {
         isStale: false,
       },
     });
+  });
+
+  it("looks up all-time user rank usernames case-insensitively", async () => {
+    mockState.pushAwaitedResult([
+      {
+        id: "user-imlunahey",
+        username: "ImLunaHey",
+        displayName: "Luna",
+        avatarUrl: null,
+      },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 1200,
+        totalCost: 12,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T09:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+
+    const rank = await getUserRank("imlunahey", "all", "tokens");
+    const sqlTexts = serializeSqlCalls();
+
+    expect(rank).toMatchObject({
+      rank: 1,
+      username: "ImLunaHey",
+      totalTokens: 1200,
+    });
+    expect(mockState.limitCalls[0]).toBe(2);
+    expect(sqlTexts.some((text) =>
+      text.toLowerCase().includes("lower(users.username) = imlunahey")
+    )).toBe(true);
+  });
+
+  it("rejects ambiguous case-insensitive all-time user rank matches", async () => {
+    mockState.pushAwaitedResult([
+      {
+        id: "user-imlunahey",
+        username: "ImLunaHey",
+        displayName: "Luna",
+        avatarUrl: null,
+      },
+      {
+        id: "user-imlunahey-duplicate",
+        username: "imlunahey",
+        displayName: "Luna Duplicate",
+        avatarUrl: null,
+      },
+    ]);
+
+    await expect(getUserRank("imlunahey", "all", "tokens")).rejects.toThrow(
+      "Multiple users match username imlunahey case-insensitively"
+    );
+    expect(mockState.limitCalls[0]).toBe(2);
   });
 });

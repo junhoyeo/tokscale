@@ -5,6 +5,15 @@ const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
   const revalidateTag = vi.fn();
   const revalidatePath = vi.fn();
+  const revalidateUsernamePaths = vi.fn((username: string) => {
+    const lower = username.toLowerCase();
+    const variants = username === lower ? [username] : [username, lower];
+    for (const variant of variants) {
+      revalidatePath(`/u/${variant}`);
+      revalidatePath(`/api/users/${variant}`);
+      revalidatePath(`/api/embed/${variant}/svg`);
+    }
+  });
   const eq = vi.fn((left: unknown, right: unknown) => ({
     kind: "eq",
     left,
@@ -33,6 +42,7 @@ const mockState = vi.hoisted(() => {
     authenticatePersonalToken,
     revalidateTag,
     revalidatePath,
+    revalidateUsernamePaths,
     eq,
     db,
     where,
@@ -41,6 +51,7 @@ const mockState = vi.hoisted(() => {
       authenticatePersonalToken.mockReset();
       revalidateTag.mockReset();
       revalidatePath.mockReset();
+      revalidateUsernamePaths.mockReset();
       eq.mockClear();
       db.delete.mockClear();
       where.mockClear();
@@ -82,6 +93,11 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
+vi.mock("@/lib/db/usernameLookup", () => ({
+  normalizeUsernameCacheKey: (username: string) => username.toLowerCase(),
+  revalidateUsernamePaths: mockState.revalidateUsernamePaths,
+}));
+
 type ModuleExports = typeof import("../../src/app/api/settings/submitted-data/route");
 
 let DELETE: ModuleExports["DELETE"];
@@ -120,7 +136,7 @@ describe("DELETE /api/settings/submitted-data", () => {
   it("deletes submitted data and revalidates public caches", async () => {
     mockState.getSession.mockResolvedValue({
       id: "user-1",
-      username: "alice",
+      username: "Alice",
       displayName: "Alice",
       avatarUrl: null,
       isAdmin: false,
@@ -143,7 +159,9 @@ describe("DELETE /api/settings/submitted-data", () => {
       right: "user-1",
     });
     expect(mockState.revalidateTag).toHaveBeenCalledTimes(7);
-    expect(mockState.revalidatePath).toHaveBeenCalledTimes(5);
+    expect(mockState.revalidateUsernamePaths).toHaveBeenCalledTimes(1);
+    expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
+    expect(mockState.revalidatePath).toHaveBeenCalledTimes(8);
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "leaderboard", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "user:alice", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user-rank", "max");
@@ -153,9 +171,12 @@ describe("DELETE /api/settings/submitted-data", () => {
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(7, "embed-user:alice:cost", "max");
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(1, "/leaderboard");
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/profile");
-    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(3, "/u/alice");
-    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(4, "/api/users/alice");
-    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(5, "/api/embed/alice/svg");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(3, "/u/Alice");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(4, "/api/users/Alice");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(5, "/api/embed/Alice/svg");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(6, "/u/alice");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(7, "/api/users/alice");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(8, "/api/embed/alice/svg");
   });
 
   it("returns success and still revalidates caches when no submitted data exists", async () => {
@@ -177,7 +198,13 @@ describe("DELETE /api/settings/submitted-data", () => {
       deletedSubmissions: 0,
     });
     expect(mockState.revalidateTag).toHaveBeenCalledWith("leaderboard", "max");
-    expect(mockState.revalidatePath).toHaveBeenCalledWith("/u/alice");
+    expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("alice");
+    expect(mockState.revalidatePath).toHaveBeenCalledTimes(5);
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(1, "/leaderboard");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/profile");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(3, "/u/alice");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(4, "/api/users/alice");
+    expect(mockState.revalidatePath).toHaveBeenNthCalledWith(5, "/api/embed/alice/svg");
   });
 
   it("returns 500 when deletion fails", async () => {

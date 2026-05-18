@@ -18,11 +18,25 @@ fn prime_pricing_cache(base: &Path) {
     for dir in [
         base.join("Library/Caches/tokscale"),
         base.join(".cache/tokscale"),
+        base.join(".config/tokscale/cache"),
     ] {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
         fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
     }
+}
+
+fn prime_override_pricing_cache(config_dir: &Path) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let payload = format!(r#"{{"timestamp":{},"data":{{}}}}"#, now);
+
+    let cache_dir = config_dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("pricing-litellm.json"), &payload).unwrap();
+    fs::write(cache_dir.join("pricing-openrouter.json"), &payload).unwrap();
 }
 
 /// Create a temporary directory with minimal OpenCode fixture data.
@@ -203,6 +217,58 @@ fn create_codex_fixture_dir() -> TempDir {
     tmp
 }
 
+fn create_codex_workspace_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let sessions_dir = base.join(".codex/sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(
+        sessions_dir.join("workspace-session.jsonl"),
+        concat!(
+            r#"{"type":"session_meta","payload":{"source":"chat","cwd":"/Users/alice/codex-workspace"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    tmp
+}
+
+fn create_opencode_workspace_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let session = base.join(".local/share/opencode/storage/message/workspace-session");
+    fs::create_dir_all(&session).unwrap();
+
+    let msg = r#"{
+        "id": "workspace_msg",
+        "sessionID": "workspace-session",
+        "role": "assistant",
+        "modelID": "claude-sonnet-4-20250514",
+        "providerID": "anthropic",
+        "cost": 0.05,
+        "tokens": {
+            "input": 1000,
+            "output": 500,
+            "reasoning": 0,
+            "cache": { "read": 200, "write": 50 }
+        },
+        "time": { "created": 1718452800000.0 },
+        "path": { "root": "/Users/alice/opencode-workspace" }
+    }"#;
+    fs::write(session.join("workspace_msg.json"), msg).unwrap();
+
+    tmp
+}
+
 fn create_conflicting_opencode_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -274,7 +340,13 @@ fn cmd_with_conflicting_env(tmp: &Path) -> Command {
 
 fn offline_cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
+    // Pin every XDG_* var so the cache resolvers stay inside the sandbox.
+    // Without XDG_CONFIG_HOME the post-#470 cache root can leak to the
+    // host's $XDG_CONFIG_HOME (set globally on some CI runners) and
+    // either find pricing data outside the fixture or write to the
+    // host filesystem. Mirrors what cmd_with_home does.
     cmd.env("HOME", tmp)
+        .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("HTTP_PROXY", "http://127.0.0.1:9")
@@ -290,7 +362,16 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     );
     let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
 
+    // Seed all three locations so the test exercises the same fallback
+    // chain the binary uses post-#470: canonical
+    // <config_dir>/cache/, then legacy dirs::cache_dir()/tokscale, then
+    // ~/.cache/tokscale. Without the canonical path seeded, CI runners
+    // where dirs::cache_dir() resolves outside the sandboxed HOME (e.g.
+    // some Linux runners with XDG_CACHE_HOME set globally) miss the
+    // pricing cache entirely and the report falls back to embedded
+    // source costs.
     for dir in [
+        base.join(".config/tokscale/cache"),
         base.join("Library/Caches/tokscale"),
         base.join(".cache/tokscale"),
     ] {
@@ -1342,6 +1423,56 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
     assert_eq!(entries[0]["model"].as_str().unwrap(), "qwen3.5-plus");
 }
 
+#[test]
+fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
+    let tmp = create_codex_workspace_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--codex", "--no-spinner"])
+        .args(["--group-by", "workspace,model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]["workspaceKey"].as_str().unwrap(),
+        "/Users/alice/codex-workspace"
+    );
+    assert_eq!(
+        entries[0]["workspaceLabel"].as_str().unwrap(),
+        "codex-workspace"
+    );
+    assert_eq!(entries[0]["model"].as_str().unwrap(), "gpt-5.4");
+}
+
+#[test]
+fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode() {
+    let tmp = create_opencode_workspace_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["--group-by", "workspace,model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]["workspaceKey"].as_str().unwrap(),
+        "/Users/alice/opencode-workspace"
+    );
+    assert_eq!(
+        entries[0]["workspaceLabel"].as_str().unwrap(),
+        "opencode-workspace"
+    );
+    assert_eq!(entries[0]["model"].as_str().unwrap(), "claude-sonnet-4");
+}
+
 // ── Pricing command tests ──────────────────────────────────────────────────
 
 #[test]
@@ -1456,6 +1587,46 @@ fn test_clients_json() {
         first.get("messageCount").is_some(),
         "Client entry should have 'messageCount' field"
     );
+}
+
+#[test]
+fn test_clients_json_includes_claude_transcripts_path() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+
+    assert_eq!(
+        claude["additionalPaths"][0]["path"],
+        serde_json::json!(tmp.path().join(".claude/transcripts"))
+    );
+    assert_eq!(claude["additionalPaths"][0]["exists"], true);
+}
+
+#[test]
+fn test_clients_command_includes_claude_transcripts_text() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
+
+    cmd_with_home(tmp.path())
+        .arg("clients")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "additional: ~/.claude/transcripts ✓",
+        ));
 }
 
 #[test]
@@ -1707,6 +1878,25 @@ fn test_root_light_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"));
+}
+
+#[test]
+fn light_with_write_cache_writes_to_canonical_path() {
+    let tmp = create_temp_fixture_dir();
+    let config_dir = tmp.path().join("custom-config-root");
+    prime_override_pricing_cache(&config_dir);
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_CONFIG_DIR", &config_dir)
+        .args(["--light", "--opencode", "--write-cache", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Token Usage Report by Model"));
+
+    assert!(
+        config_dir.join("cache/tui-data-cache.json").exists(),
+        "--write-cache should populate the canonical cache path"
+    );
 }
 
 #[test]

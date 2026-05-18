@@ -7,6 +7,7 @@ import {
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
   mergeClientBreakdowns,
   recalculateDayTotals,
@@ -16,6 +17,7 @@ import {
   resolveSubmissionScope,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
+import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 
 export const SOURCE_IDENTITY_REQUIRED_MESSAGE =
   "Source identity is required for accounts with source-scoped submissions";
@@ -135,15 +137,14 @@ export async function POST(request: Request) {
     // ========================================
     // STEP 1: Authentication
     // ========================================
-    const authHeader = request.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
+    const token = getBearerToken(request.headers.get("Authorization"));
+    if (!token) {
       return NextResponse.json(
         { error: "Missing or invalid Authorization header" },
         { status: 401 }
       );
     }
 
-    const token = authHeader.slice(7);
     const authResult = await authenticatePersonalToken(token, {
       touchLastUsedAt: false,
     });
@@ -548,10 +549,13 @@ export async function POST(request: Request) {
     const { metrics } = result;
 
     try {
+      const usernameCacheKey = normalizeUsernameCacheKey(tokenRecord.username);
+
       revalidateTag("leaderboard", "max");
-      revalidateTag(`user:${tokenRecord.username}`, "max");
+      revalidateTag(`user:${usernameCacheKey}`, "max");
       revalidateTag("user-rank", "max");
-      revalidateTag(`user-rank:${tokenRecord.username}`, "max");
+      revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+      revalidateUsernamePaths(tokenRecord.username);
     } catch (e) {
       console.error("Cache invalidation failed:", e);
     }

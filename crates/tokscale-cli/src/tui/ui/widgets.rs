@@ -70,16 +70,19 @@ pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
     if let Some(base) = TokscaleConfig::load().get_provider_color(provider) {
         return shade_from_base(base, rank);
     }
-    let palette: &[(u8, u8, u8)] = match provider {
-        "anthropic" => &ANTHROPIC_SHADES,
-        "openai" => &OPENAI_SHADES,
-        "google" => &GOOGLE_SHADES,
-        "deepseek" => &DEEPSEEK_SHADES,
-        "xai" => &XAI_SHADES,
-        "meta" => &META_SHADES,
-        "cursor" => &CURSOR_SHADES,
+
+    let p = provider.to_lowercase();
+    let palette: &[(u8, u8, u8)] = match p.as_str() {
+        s if s.contains("anthropic") => &ANTHROPIC_SHADES,
+        s if s.contains("openai") => &OPENAI_SHADES,
+        s if s.contains("google") || s.contains("gemini") => &GOOGLE_SHADES,
+        s if s.contains("deepseek") => &DEEPSEEK_SHADES,
+        s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
+        s if s.contains("meta") || s.contains("llama") => &META_SHADES,
+        s if s.contains("cursor") => &CURSOR_SHADES,
         _ => &UNKNOWN_SHADES,
     };
+
     let idx = rank.min(palette.len() - 1);
     let (r, g, b) = palette[idx];
     Color::Rgb(r, g, b)
@@ -226,16 +229,20 @@ pub fn get_client_color(client: &str) -> Color {
         return color;
     }
     match client.to_lowercase().as_str() {
-        "opencode" => Color::Rgb(34, 197, 94), // #22c55e
-        "claude" => Color::Rgb(218, 119, 86),  // #DA7756 Claude brand coral
-        "codex" => Color::Rgb(59, 130, 246),   // #3b82f6
-        "cursor" => Color::Rgb(168, 85, 247),  // #a855f7
-        "gemini" => Color::Rgb(6, 182, 212),   // #06b6d4
-        "amp" => Color::Rgb(236, 72, 153),     // #EC4899
-        "droid" => Color::Rgb(16, 185, 129),   // #10b981
-        "openclaw" => Color::Rgb(239, 68, 68), // #ef4444
-        "hermes" => Color::Rgb(255, 215, 0),   // #ffd700
-        _ => Color::Rgb(136, 136, 136),        // #888888
+        "opencode" => Color::Rgb(34, 197, 94),     // #22c55e
+        "claude" => Color::Rgb(218, 119, 86),      // #DA7756 Claude brand coral
+        "codex" => Color::Rgb(59, 130, 246),       // #3b82f6
+        "cursor" => Color::Rgb(168, 85, 247),      // #a855f7
+        "gemini" => Color::Rgb(6, 182, 212),       // #06b6d4
+        "amp" => Color::Rgb(236, 72, 153),         // #EC4899
+        "droid" => Color::Rgb(16, 185, 129),       // #10b981
+        "openclaw" => Color::Rgb(239, 68, 68),     // #ef4444
+        "hermes" => Color::Rgb(255, 215, 0),       // #ffd700
+        "goose" => Color::Rgb(100, 180, 220),      // #64b4dc
+        "codebuff" => Color::Rgb(124, 58, 237),    // #7C3AED Codebuff brand purple
+        "antigravity" => Color::Rgb(99, 102, 241), // #6366F1 Antigravity indigo
+        "zed" => Color::Rgb(8, 76, 207),           // #084CCF Zed blue
+        _ => Color::Rgb(136, 136, 136),            // #888888
     }
 }
 
@@ -349,5 +356,29 @@ mod tests {
         let last = get_provider_shade("anthropic", 6);
         let past_end = get_provider_shade("anthropic", 99);
         assert_eq!(last, past_end);
+    }
+
+    #[test]
+    fn get_provider_shade_fuzzy_matching() {
+        assert_eq!(
+            get_provider_shade("test-anthropic", 0),
+            get_provider_shade("anthropic", 0)
+        );
+        assert_eq!(
+            get_provider_shade("company-google", 0),
+            get_provider_shade("google", 0)
+        );
+        assert_eq!(
+            get_provider_shade("openrouter-gemini-prod", 0),
+            get_provider_shade("google", 0)
+        );
+        assert_eq!(
+            get_provider_shade("deepseek-api", 0),
+            get_provider_shade("deepseek", 0)
+        );
+        assert_eq!(
+            get_provider_shade("meta-llama-endpoint", 0),
+            get_provider_shade("meta", 0)
+        );
     }
 }

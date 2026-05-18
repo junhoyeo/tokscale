@@ -2,8 +2,6 @@
 
 import styled from "styled-components";
 
-/* eslint-disable @next/next/no-img-element */
-
 interface SourceLogoProps {
   sourceId: string;
   height?: number;
@@ -61,6 +59,10 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/mux.png";
       case "crush":
         return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png";
+      case "kiro":
+        return "/assets/logos/kiro.ico";
+      case "zed":
+        return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp";
       case "synthetic":
         return "/assets/logos/synthetic.png";
       default:

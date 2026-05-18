@@ -80,6 +80,12 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       return createSvgResponse(svg, { status: 200 });
     }
 
+    if (data.user.username !== username) {
+      const redirectUrl = new URL(request.url);
+      redirectUrl.pathname = `/api/embed/${data.user.username}/svg`;
+      return NextResponse.redirect(redirectUrl, 308);
+    }
+
     if (view === "3d") {
       const contributions = await getUserEmbedContributions(username).catch(() => null);
 

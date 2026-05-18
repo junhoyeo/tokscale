@@ -3,14 +3,16 @@
 //! This module provides disk-based caching for TUI data to enable instant UI display
 //! while fresh data loads in the background (matching TypeScript implementation behavior).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::{ClientId, GroupBy};
+use tokscale_core::{sessions, GroupBy};
+
+use crate::ClientFilter;
 
 use super::data::{
     AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
@@ -19,17 +21,27 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 5;
+const CACHE_SCHEMA_VERSION: u32 = 7;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
 fn cache_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cache").join("tokscale"))
+    Some(crate::paths::get_cache_dir())
 }
 
 /// Get the cache file path
 fn cache_file() -> Option<PathBuf> {
     cache_dir().map(|d| d.join("tui-data-cache.json"))
+}
+
+fn legacy_cache_files() -> Vec<PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return Vec::new();
+    }
+
+    crate::paths::legacy_dot_cache_tokscale_dir()
+        .map(|dir| vec![dir.join("tui-data-cache.json")])
+        .unwrap_or_default()
 }
 
 /// Cached TUI data structure (serializable)
@@ -574,9 +586,13 @@ impl TryFrom<CachedUsageData> for UsageData {
 
         Ok(Self {
             models: u.models.into_iter().map(|m| m.into()).collect(),
-            agents: u.agents.into_iter().map(|a| a.into()).collect(),
+            agents: normalize_cached_agents(u.agents),
             daily: daily?,
             hourly: hourly?,
+            // Minutely data is recomputed on each load (high cardinality,
+            // not worth round-tripping through the on-disk cache); the
+            // first foreground refresh after cache hit will populate it.
+            minutely: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,
@@ -585,6 +601,58 @@ impl TryFrom<CachedUsageData> for UsageData {
             current_streak: u.current_streak,
             longest_streak: u.longest_streak,
         })
+    }
+}
+
+fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
+    let mut merged: BTreeMap<String, AgentUsage> = BTreeMap::new();
+    let mut clients_by_agent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for cached in agents {
+        let normalized_agent = normalize_cached_agent_name(&cached.agent, &cached.clients);
+        let entry = merged
+            .entry(normalized_agent.clone())
+            .or_insert_with(|| AgentUsage {
+                agent: normalized_agent.clone(),
+                clients: String::new(),
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                message_count: 0,
+            });
+
+        let tokens: TokenBreakdown = cached.tokens.into();
+        entry.tokens.input = entry.tokens.input.saturating_add(tokens.input);
+        entry.tokens.output = entry.tokens.output.saturating_add(tokens.output);
+        entry.tokens.cache_read = entry.tokens.cache_read.saturating_add(tokens.cache_read);
+        entry.tokens.cache_write = entry.tokens.cache_write.saturating_add(tokens.cache_write);
+        entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(tokens.reasoning);
+        entry.cost += cached.cost;
+        entry.message_count = entry.message_count.saturating_add(cached.message_count);
+
+        let client_set = clients_by_agent.entry(normalized_agent).or_default();
+        for client in cached
+            .clients
+            .split(", ")
+            .filter(|client| !client.is_empty())
+        {
+            client_set.insert(client.to_string());
+        }
+    }
+
+    let mut agents = merged.into_values().collect::<Vec<_>>();
+    for agent in &mut agents {
+        if let Some(clients) = clients_by_agent.get(&agent.agent) {
+            agent.clients = clients.iter().cloned().collect::<Vec<_>>().join(", ");
+        }
+    }
+    agents
+}
+
+fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
+    if clients.split(", ").any(|client| client == "opencode") {
+        sessions::normalize_opencode_agent_name(agent)
+    } else {
+        sessions::normalize_agent_name(agent)
     }
 }
 
@@ -613,25 +681,32 @@ enum ClientMatch {
 /// Load cached TUI data from disk with a single read/parse.
 /// Returns Fresh/Stale/Miss so the caller can decide whether to
 /// display cached data immediately and/or trigger a background refresh.
-pub fn load_cache(
-    enabled_clients: &HashSet<ClientId>,
-    include_synthetic: bool,
-    group_by: &GroupBy,
-) -> CacheResult {
+///
+/// `enabled_clients` is the unified `HashSet<ClientFilter>` (Synthetic
+/// included as a set member). The on-disk format keeps the legacy
+/// `(enabled_clients: Vec<String>, include_synthetic: bool)` shape so
+/// existing user caches keep working across upgrades — projection
+/// happens here.
+pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -> CacheResult {
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
     };
-    if !cache_path.exists() {
-        return CacheResult::Miss;
-    }
-    let file = match File::open(&cache_path) {
-        Ok(f) => f,
-        Err(_) => return CacheResult::Miss,
+    let cached: Option<CachedTUIData> = match File::open(&cache_path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            serde_json::from_reader(reader).ok()
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            legacy_cache_files().into_iter().find_map(|path| {
+                let file = File::open(path).ok()?;
+                let reader = BufReader::new(file);
+                serde_json::from_reader(reader).ok()
+            })
+        }
+        Err(_) => None,
     };
-    let reader = BufReader::new(file);
-    let cached: CachedTUIData = match serde_json::from_reader(reader) {
-        Ok(c) => c,
-        Err(_) => return CacheResult::Miss,
+    let Some(cached) = cached else {
+        return CacheResult::Miss;
     };
     if cached.schema_version > CACHE_SCHEMA_VERSION {
         return CacheResult::Miss;
@@ -640,7 +715,7 @@ pub fn load_cache(
     let cached_group_by = cached
         .group_by
         .as_deref()
-        .and_then(|value| value.parse::<GroupBy>().ok());
+        .and_then(|value: &str| value.parse::<GroupBy>().ok());
     if schema_outdated && cached_group_by.is_none() {
         return CacheResult::Miss;
     }
@@ -652,7 +727,6 @@ pub fn load_cache(
     // Check how cached clients relate to enabled clients
     let client_match = check_client_match(
         enabled_clients,
-        include_synthetic,
         &cached.enabled_clients,
         cached.include_synthetic,
     );
@@ -688,30 +762,40 @@ pub fn load_cache(
 /// - `Subset`   — cached clients ⊆ enabled clients (e.g. update added a new client),
 ///   and cached doesn't carry data the user doesn't want
 /// - `Mismatch` — anything else (superset, disjoint, unwanted synthetic data)
+///
+/// Cached side stays in the legacy `(Vec<String>, bool)` shape so we can
+/// read pre-refactor cache files without a migration step. Enabled side
+/// is the new unified `HashSet<ClientFilter>`.
 fn check_client_match(
-    enabled_clients: &HashSet<ClientId>,
-    include_synthetic: bool,
+    enabled_clients: &HashSet<ClientFilter>,
     cached_clients: &[String],
     cached_include_synthetic: bool,
 ) -> ClientMatch {
+    let include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
+
     // If cache has synthetic data but user doesn't want it → mismatch
     // (showing unwanted data is worse than a cache miss)
     if cached_include_synthetic && !include_synthetic {
         return ClientMatch::Mismatch;
     }
 
-    // Every cached client must exist in the enabled set
+    // Every cached client must exist in the enabled set. Compare on the
+    // canonical lowercase id so we don't have to round-trip through
+    // ClientId for clients that map 1:1.
     for cached_client_str in cached_clients {
         let in_enabled = enabled_clients
             .iter()
-            .any(|c| c.as_str() == cached_client_str);
+            .any(|f| f.as_filter_str() == cached_client_str);
         if !in_enabled {
             return ClientMatch::Mismatch;
         }
     }
 
-    // Exact match: same size + same synthetic flag + all cached ∈ enabled (checked above)
-    let same_size = enabled_clients.len() == cached_clients.len();
+    // Exact match requires same set membership on BOTH sides:
+    //   |enabled non-synthetic| == |cached_clients|  AND
+    //   include_synthetic == cached_include_synthetic
+    let enabled_non_synthetic = enabled_clients.len() - usize::from(include_synthetic);
+    let same_size = enabled_non_synthetic == cached_clients.len();
     let same_synthetic = include_synthetic == cached_include_synthetic;
 
     if same_size && same_synthetic {
@@ -721,11 +805,15 @@ fn check_client_match(
     }
 }
 
-/// Save TUI data to disk cache
+/// Save TUI data to disk cache.
+///
+/// On-disk schema keeps the legacy `(Vec<String> enabled_clients, bool
+/// include_synthetic)` pair so caches written by older releases remain
+/// readable across upgrades. We project the unified
+/// `HashSet<ClientFilter>` here.
 pub fn save_cached_data(
     data: &UsageData,
-    enabled_clients: &HashSet<ClientId>,
-    include_synthetic: bool,
+    enabled_clients: &HashSet<ClientFilter>,
     group_by: &GroupBy,
 ) {
     let Some(cache_path) = cache_file() else {
@@ -744,20 +832,44 @@ pub fn save_cached_data(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // Project unified set into the legacy on-disk shape.
+    let include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
+    let mut clients_vec: Vec<String> = enabled_clients
+        .iter()
+        .filter(|f| !matches!(f, ClientFilter::Synthetic))
+        .map(|f| f.as_filter_str().to_string())
+        .collect();
+    // Sort so the cache key is deterministic across runs / HashSet
+    // iteration order — otherwise unrelated runs would invalidate each
+    // other's caches just because the JSON ordering shuffled.
+    clients_vec.sort();
+
     let cached = CachedTUIData {
         schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
-        enabled_clients: enabled_clients
-            .iter()
-            .map(|s| s.as_str().to_string())
-            .collect(),
+        enabled_clients: clients_vec,
         include_synthetic,
         group_by: Some(group_by.to_string()),
         data: data.into(),
     };
 
-    // Write to temp file first, then rename (atomic)
-    let temp_path = cache_path.with_extension("json.tmp");
+    // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
+    // the canonical cache file before writing — a partial save or process
+    // crash between delete and rename would lose the cache. The temp-file
+    // pattern makes corruption-on-crash impossible.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let temp_path = cache_path.with_file_name(format!(
+        ".{}.{}.{:x}.tmp",
+        cache_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("tui-data-cache.json"),
+        std::process::id(),
+        nanos
+    ));
     let file = match File::create(&temp_path) {
         Ok(f) => f,
         Err(_) => return,
@@ -765,12 +877,7 @@ pub fn save_cached_data(
     let writer = BufWriter::new(file);
 
     if serde_json::to_writer(writer, &cached).is_ok() {
-        if fs::rename(&temp_path, &cache_path).is_err() {
-            // Windows: rename can't overwrite; copy then cleanup so destination is never removed first.
-            if fs::copy(&temp_path, &cache_path).is_ok() {
-                let _ = fs::remove_file(&temp_path);
-            }
-        }
+        let _ = tokscale_core::fs_atomic::replace_file(&temp_path, &cache_path);
     } else {
         let _ = fs::remove_file(&temp_path);
     }
@@ -780,21 +887,74 @@ pub fn save_cached_data(
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
     use tempfile::TempDir;
 
-    fn make_clients(ids: &[ClientId]) -> HashSet<ClientId> {
-        ids.iter().copied().collect()
+    /// Build a unified filter set. Pass `synthetic=true` to include
+    /// `ClientFilter::Synthetic` as a set member (the new way to express
+    /// "user has synthetic enabled").
+    fn make_filters(filters: &[ClientFilter], synthetic: bool) -> HashSet<ClientFilter> {
+        let mut set: HashSet<ClientFilter> = filters.iter().copied().collect();
+        if synthetic {
+            set.insert(ClientFilter::Synthetic);
+        }
+        set
+    }
+
+    fn cached_agent(agent: &str, clients: &str, total_seed: u64) -> CachedAgentUsage {
+        CachedAgentUsage {
+            agent: agent.to_string(),
+            clients: clients.to_string(),
+            tokens: CachedTokenBreakdown {
+                input: total_seed,
+                output: 1,
+                cache_read: 2,
+                cache_write: 3,
+                reasoning: 4,
+            },
+            cost: total_seed as f64,
+            message_count: 1,
+        }
+    }
+
+    #[test]
+    fn test_normalize_cached_agents_merges_opencode_display_variants() {
+        let agents = normalize_cached_agents(vec![
+            cached_agent("Sisyphus", "opencode", 10),
+            cached_agent("\u{200B} Sisyphus   -   Ultraworker", "opencode", 20),
+            cached_agent(
+                "\u{200B}\u{200B}\u{200B} Prometheus    Plan Builder",
+                "opencode",
+                30,
+            ),
+        ]);
+
+        assert_eq!(agents.len(), 2);
+        let sisyphus = agents
+            .iter()
+            .find(|agent| agent.agent == "Sisyphus")
+            .unwrap();
+        assert_eq!(sisyphus.clients, "opencode");
+        assert_eq!(sisyphus.message_count, 2);
+        assert_eq!(sisyphus.tokens.input, 30);
+        assert!((sisyphus.cost - 30.0).abs() < f64::EPSILON);
+
+        let prometheus = agents
+            .iter()
+            .find(|agent| agent.agent == "Prometheus")
+            .unwrap();
+        assert_eq!(prometheus.message_count, 1);
     }
 
     // ── check_client_match ──────────────────────────────────────────
 
     #[test]
     fn test_exact_match() {
-        let enabled = make_clients(&[ClientId::Claude, ClientId::OpenCode]);
+        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Opencode], false);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Exact,
         );
     }
@@ -802,10 +962,17 @@ mod tests {
     #[test]
     fn test_subset_new_client_added() {
         // Simulates: update added Qwen, cache only has Claude + OpenCode
-        let enabled = make_clients(&[ClientId::Claude, ClientId::OpenCode, ClientId::Qwen]);
+        let enabled = make_filters(
+            &[
+                ClientFilter::Claude,
+                ClientFilter::Opencode,
+                ClientFilter::Qwen,
+            ],
+            false,
+        );
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
@@ -813,10 +980,10 @@ mod tests {
     #[test]
     fn test_subset_synthetic_added() {
         // Cache was saved without synthetic, now user enables it
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], true);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, true, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
@@ -824,20 +991,20 @@ mod tests {
     #[test]
     fn test_mismatch_superset() {
         // Cache has more clients than enabled (user narrowed filter)
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Mismatch,
         );
     }
 
     #[test]
     fn test_mismatch_disjoint() {
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached = vec!["opencode".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Mismatch,
         );
     }
@@ -845,20 +1012,20 @@ mod tests {
     #[test]
     fn test_mismatch_unwanted_synthetic() {
         // Cache has synthetic data but user doesn't want it
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, true),
+            check_client_match(&enabled, &cached, true),
             ClientMatch::Mismatch,
         );
     }
 
     #[test]
     fn test_exact_with_synthetic() {
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], true);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, true, &cached, true),
+            check_client_match(&enabled, &cached, true),
             ClientMatch::Exact,
         );
     }
@@ -866,20 +1033,20 @@ mod tests {
     #[test]
     fn test_subset_both_new_client_and_synthetic() {
         // Update added new client AND user also enabled synthetic
-        let enabled = make_clients(&[ClientId::Claude, ClientId::Qwen]);
+        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Qwen], true);
         let cached = vec!["claude".to_string()];
         assert_eq!(
-            check_client_match(&enabled, true, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
 
     #[test]
     fn test_empty_cache_is_subset() {
-        let enabled = make_clients(&[ClientId::Claude]);
+        let enabled = make_filters(&[ClientFilter::Claude], false);
         let cached: Vec<String> = vec![];
         assert_eq!(
-            check_client_match(&enabled, false, &cached, false),
+            check_client_match(&enabled, &cached, false),
             ClientMatch::Subset,
         );
     }
@@ -914,9 +1081,9 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
+        let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, false, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model),
             CacheResult::Miss
         ));
 
@@ -958,9 +1125,9 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
+        let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, false, &GroupBy::WorkspaceModel),
+            load_cache(&clients, &GroupBy::WorkspaceModel),
             CacheResult::Miss
         ));
 
@@ -1027,8 +1194,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Stale(data) => {
                 let source = data.daily[0].source_breakdown.get("claude").unwrap();
                 let daily_model = source.models.get("claude-sonnet-4-5").unwrap();
@@ -1061,7 +1228,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 5,
+  "schemaVersion": 7,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
@@ -1147,8 +1314,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude, ClientId::Cursor]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Fresh(data) => {
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
@@ -1228,8 +1395,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Fresh(data) | CacheResult::Stale(data) => {
                 let hourly_model = data.hourly[0].models.get("claude-sonnet-4-5").unwrap();
                 assert_eq!(hourly_model.display_name, "claude-sonnet-4-5");
@@ -1301,8 +1468,8 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_clients(&[ClientId::Claude]);
-        match load_cache(&clients, false, &GroupBy::Model) {
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        match load_cache(&clients, &GroupBy::Model) {
             CacheResult::Stale(data) => {
                 assert!(
                     data.daily[0].source_breakdown.contains_key("unknown"),
@@ -1322,6 +1489,178 @@ mod tests {
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_cache_falls_back_to_legacy_dot_cache_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        let previous_xdg_config_home = env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+            env::set_var("XDG_CONFIG_HOME", temp_dir.path().join(".xdg-config"));
+        }
+
+        let legacy_path = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            r#"{
+  "schemaVersion": 7,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model),
+            CacheResult::Fresh(_)
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+        match previous_xdg_config_home {
+            Some(value) => unsafe { env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { env::remove_var("XDG_CONFIG_HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_cache_skips_legacy_when_overridden() {
+        let temp_dir = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::set_var("TOKSCALE_CONFIG_DIR", override_dir.path());
+        }
+
+        let legacy_path = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            r#"{
+  "schemaVersion": 6,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn save_cached_data_does_not_delete_destination() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let old_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        fs::write(
+            &cache_path,
+            format!(
+                r#"{{
+  "schemaVersion": 6,
+  "timestamp": {old_timestamp},
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {{
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }}
+}}"#
+            ),
+        )
+        .unwrap();
+        assert!(fs::metadata(&cache_path).is_ok());
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model);
+
+        let metadata = fs::metadata(&cache_path).unwrap();
+        assert!(metadata.is_file());
+        let saved: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert!(saved.timestamp >= old_timestamp);
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
         }
     }
 

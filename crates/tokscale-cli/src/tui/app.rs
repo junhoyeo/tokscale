@@ -4,13 +4,19 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
+use crate::ClientFilter;
+
 use ratatui::style::Color;
 
-use super::data::{AgentUsage, DailyUsage, DataLoader, HourlyUsage, ModelUsage, UsageData};
+use super::data::{
+    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, TokenBreakdown,
+    UsageData,
+};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
@@ -28,12 +34,13 @@ pub struct TuiConfig {
     pub initial_tab: Option<Tab>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
     Models,
     Daily,
     Hourly,
+    Minutely,
     Stats,
     Agents,
 }
@@ -45,6 +52,7 @@ impl Tab {
             Tab::Models,
             Tab::Daily,
             Tab::Hourly,
+            Tab::Minutely,
             Tab::Stats,
             Tab::Agents,
         ]
@@ -56,6 +64,7 @@ impl Tab {
             Tab::Models => "Models",
             Tab::Daily => "Daily",
             Tab::Hourly => "Hourly",
+            Tab::Minutely => "Minutely",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
         }
@@ -67,6 +76,7 @@ impl Tab {
             Tab::Models => "Mod",
             Tab::Daily => "Day",
             Tab::Hourly => "Hr",
+            Tab::Minutely => "Min",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
         }
@@ -77,7 +87,8 @@ impl Tab {
             Tab::Overview => Tab::Models,
             Tab::Models => Tab::Daily,
             Tab::Daily => Tab::Hourly,
-            Tab::Hourly => Tab::Stats,
+            Tab::Hourly => Tab::Minutely,
+            Tab::Minutely => Tab::Stats,
             Tab::Stats => Tab::Agents,
             Tab::Agents => Tab::Overview,
         }
@@ -89,7 +100,8 @@ impl Tab {
             Tab::Models => Tab::Overview,
             Tab::Daily => Tab::Models,
             Tab::Hourly => Tab::Daily,
-            Tab::Stats => Tab::Hourly,
+            Tab::Minutely => Tab::Hourly,
+            Tab::Stats => Tab::Minutely,
             Tab::Agents => Tab::Stats,
         }
     }
@@ -127,6 +139,17 @@ pub struct ClickArea {
     pub action: ClickAction,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DailyDetailRow<'a> {
+    pub source: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub color_key: &'a str,
+    pub tokens: &'a TokenBreakdown,
+    pub cost: f64,
+    pub messages: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum ClickAction {
     Tab(Tab),
@@ -142,16 +165,25 @@ pub struct App {
     pub data: UsageData,
     pub data_loader: DataLoader,
 
-    pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
-    pub include_synthetic: Rc<RefCell<bool>>,
+    /// Set of clients currently selected in the source picker. The
+    /// `Synthetic` variant is part of the same set so dialog code can
+    /// uniformly toggle/inspect every option without a separate boolean.
+    /// Code that talks to `tokscale_core` (which still expects a
+    /// `Vec<ClientId>` plus a `bool include_synthetic`) projects this set
+    /// at the boundary via `App::scan_clients` and `App::include_synthetic`.
+    pub enabled_clients: Rc<RefCell<HashSet<ClientFilter>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
+    tab_sort_state: HashMap<Tab, (SortField, SortDirection)>,
     pub chart_granularity: ChartGranularity,
 
     pub scroll_offset: usize,
     pub selected_index: usize,
     pub max_visible_items: usize,
+    pub selected_daily_detail_date: Option<NaiveDate>,
+    daily_list_selected_index: usize,
+    daily_list_scroll_offset: usize,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
@@ -192,22 +224,23 @@ impl App {
             .unwrap_or_else(|_| settings.theme_name());
         let theme = Theme::from_name(theme_name);
 
-        let mut enabled_clients = HashSet::new();
-        let mut include_synthetic = false;
-
-        if let Some(ref cli_clients) = config.clients {
-            for client_str in cli_clients {
-                if client_str.eq_ignore_ascii_case("synthetic") {
-                    include_synthetic = true;
-                } else if let Some(client) = ClientId::from_str(client_str) {
-                    enabled_clients.insert(client);
-                }
-            }
+        let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
+            // CLI-provided filter list. Each entry is the canonical
+            // lowercase id (`opencode`, `claude`, ..., `synthetic`).
+            // Unknown ids are dropped silently; the CLI parser already
+            // validated against `ClientFilter` so this lookup should be
+            // total in practice.
+            cli_clients
+                .iter()
+                .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+                .collect()
         } else {
-            for client in ClientId::iter() {
-                enabled_clients.insert(client);
-            }
-        }
+            // No filter → use the canonical default set (every real
+            // client, Synthetic opt-in only). MUST stay in sync with
+            // `run_warm_tui_cache()` so a fresh cache warm produces a
+            // fresh hit on the next no-filter launch.
+            ClientFilter::default_set()
+        };
 
         let auto_refresh_interval = if config.refresh > 0 {
             Duration::from_secs(config.refresh)
@@ -224,29 +257,40 @@ impl App {
             config.since,
             config.until,
             config.year,
-        );
+        )
+        .with_minutely_enabled(settings.minutely_tab_enabled);
 
         let data = cached_data.unwrap_or_default();
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
+        let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
+        let current_tab = if Self::tab_visible(&settings, requested_tab) {
+            requested_tab
+        } else {
+            Tab::Overview
+        };
+        let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
 
         let mut app = Self {
             should_quit: false,
-            current_tab: config.initial_tab.unwrap_or(Tab::Overview),
+            current_tab,
             theme,
             settings,
             data,
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
-            include_synthetic: Rc::new(RefCell::new(include_synthetic)),
             group_by: Rc::new(RefCell::new(tokscale_core::GroupBy::Model)),
-            sort_field: SortField::Cost,
-            sort_direction: SortDirection::Descending,
+            sort_field,
+            sort_direction,
+            tab_sort_state: HashMap::new(),
             chart_granularity: ChartGranularity::default(),
             scroll_offset: 0,
             selected_index: 0,
             max_visible_items: 20,
+            selected_daily_detail_date: None,
+            daily_list_selected_index: 0,
+            daily_list_scroll_offset: 0,
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -282,6 +326,18 @@ impl App {
         self.data = data;
         self.last_refresh = Instant::now();
         self.build_model_shade_map();
+
+        // Exit Daily-detail mode if the refresh dropped the day we were
+        // viewing; otherwise `get_sorted_daily_detail_rows()` would return
+        // empty while the user is still nominally in detail mode.
+        if let Some(date) = self.selected_daily_detail_date {
+            if !self.data.daily.iter().any(|day| day.date == date) {
+                self.selected_daily_detail_date = None;
+                self.selected_index = self.daily_list_selected_index;
+                self.scroll_offset = self.daily_list_scroll_offset;
+            }
+        }
+
         self.clamp_selection();
     }
 
@@ -364,23 +420,23 @@ impl App {
                 return true;
             }
             KeyCode::Tab => {
-                self.current_tab = self.current_tab.next();
-                self.apply_tab_sort_defaults();
+                let next = self.next_visible_tab();
+                self.switch_tab(next);
                 self.reset_selection();
             }
             KeyCode::BackTab => {
-                self.current_tab = self.current_tab.prev();
-                self.apply_tab_sort_defaults();
+                let prev = self.prev_visible_tab();
+                self.switch_tab(prev);
                 self.reset_selection();
             }
             KeyCode::Left => {
-                self.current_tab = self.current_tab.prev();
-                self.apply_tab_sort_defaults();
+                let prev = self.prev_visible_tab();
+                self.switch_tab(prev);
                 self.reset_selection();
             }
             KeyCode::Right => {
-                self.current_tab = self.current_tab.next();
-                self.apply_tab_sort_defaults();
+                let next = self.next_visible_tab();
+                self.switch_tab(next);
                 self.reset_selection();
             }
             KeyCode::Up => {
@@ -457,8 +513,16 @@ impl App {
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
             }
+            KeyCode::Enter if self.current_tab == Tab::Daily => {
+                self.open_selected_daily_detail();
+            }
             KeyCode::Enter if self.current_tab == Tab::Stats => {
                 self.handle_graph_selection();
+            }
+            KeyCode::Esc | KeyCode::Backspace
+                if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
+            {
+                self.close_daily_detail();
             }
             KeyCode::Esc if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
@@ -490,7 +554,7 @@ impl App {
                     {
                         match &area.action {
                             ClickAction::Tab(tab) => {
-                                self.current_tab = *tab;
+                                self.switch_tab(*tab);
                                 self.reset_selection();
                             }
                             ClickAction::Sort(field) => {
@@ -517,11 +581,19 @@ impl App {
         }
     }
 
+    /// Cache the latest terminal dimensions. `max_visible_items` is
+    /// intentionally not updated here: each tab's renderer owns its own
+    /// visible-item capacity and pushes the rendered count via
+    /// [`Self::set_max_visible_items`] (which clamps selection and scroll
+    /// state). Between resize and the next render, scroll math runs
+    /// against the previous tab's capacity for one frame and self-corrects.
     pub fn handle_resize(&mut self, width: u16, height: u16) {
         self.terminal_width = width;
         self.terminal_height = height;
-        // Ensure at least 1 visible item to prevent division/slice issues
-        self.max_visible_items = (height.saturating_sub(10) as usize).max(1);
+    }
+
+    pub(crate) fn set_max_visible_items(&mut self, max_visible_items: usize) {
+        self.max_visible_items = max_visible_items.max(1);
         self.clamp_selection();
     }
 
@@ -554,21 +626,68 @@ impl App {
     fn reset_selection(&mut self) {
         self.scroll_offset = 0;
         self.selected_index = 0;
+        self.selected_daily_detail_date = None;
+        self.daily_list_selected_index = 0;
+        self.daily_list_scroll_offset = 0;
         self.selected_graph_cell = None;
         self.stats_breakdown_total_lines = 0;
     }
 
-    /// Apply per-tab sort defaults when switching tabs.
-    /// Must be called AFTER updating `self.current_tab`, before `reset_selection`.
-    fn apply_tab_sort_defaults(&mut self) {
-        // Hourly tab shows time-ordered data by default; other tabs keep cost sort.
-        if self.current_tab == Tab::Hourly {
-            self.sort_field = SortField::Date;
-            self.sort_direction = SortDirection::Descending;
-        } else {
-            self.sort_field = SortField::Cost;
-            self.sort_direction = SortDirection::Descending;
+    fn switch_tab(&mut self, target: Tab) {
+        self.persist_current_sort();
+
+        self.current_tab = target;
+        if target != Tab::Daily {
+            self.selected_daily_detail_date = None;
         }
+
+        let (field, dir) = self
+            .tab_sort_state
+            .get(&target)
+            .copied()
+            .unwrap_or_else(|| Self::default_sort_for_tab(target));
+        self.sort_field = field;
+        self.sort_direction = dir;
+    }
+
+    fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
+        if matches!(tab, Tab::Hourly | Tab::Minutely) {
+            (SortField::Date, SortDirection::Descending)
+        } else {
+            (SortField::Cost, SortDirection::Descending)
+        }
+    }
+
+    pub(crate) fn tab_visible(settings: &Settings, tab: Tab) -> bool {
+        match tab {
+            Tab::Minutely => settings.minutely_tab_enabled,
+            _ => true,
+        }
+    }
+
+    pub(crate) fn is_tab_visible(&self, tab: Tab) -> bool {
+        Self::tab_visible(&self.settings, tab)
+    }
+
+    fn next_visible_tab(&self) -> Tab {
+        let mut candidate = self.current_tab.next();
+        while !self.is_tab_visible(candidate) && candidate != self.current_tab {
+            candidate = candidate.next();
+        }
+        candidate
+    }
+
+    fn prev_visible_tab(&self) -> Tab {
+        let mut candidate = self.current_tab.prev();
+        while !self.is_tab_visible(candidate) && candidate != self.current_tab {
+            candidate = candidate.prev();
+        }
+        candidate
+    }
+
+    fn persist_current_sort(&mut self) {
+        self.tab_sort_state
+            .insert(self.current_tab, (self.sort_field, self.sort_direction));
     }
 
     fn move_selection_up(&mut self) {
@@ -682,8 +801,12 @@ impl App {
         match self.current_tab {
             Tab::Overview | Tab::Models => self.data.models.len(),
             Tab::Agents => self.data.agents.len(),
+            Tab::Daily if self.is_daily_detail_active() => {
+                self.get_sorted_daily_detail_rows().len()
+            }
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
+            Tab::Minutely => self.data.minutely.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
                     self.stats_breakdown_total_lines
@@ -704,7 +827,13 @@ impl App {
             self.sort_field = field;
             self.sort_direction = SortDirection::Descending;
         }
-        self.reset_selection();
+        self.persist_current_sort();
+        if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.reset_selection();
+        }
         self.set_status(&format!(
             "Sorted by {:?} {:?}",
             self.sort_field, self.sort_direction
@@ -715,6 +844,7 @@ impl App {
         if self.current_tab != Tab::Daily {
             return;
         }
+        self.selected_daily_detail_date = None;
 
         let today = chrono::Local::now().date_naive();
         let (today_index, total_len) = {
@@ -763,10 +893,36 @@ impl App {
     fn open_client_picker(&mut self) {
         let dialog = ClientPickerDialog::new(
             self.enabled_clients.clone(),
-            self.include_synthetic.clone(),
             self.dialog_needs_reload.clone(),
         );
         self.dialog_stack.show(Box::new(dialog));
+    }
+
+    /// Project the unified `HashSet<ClientFilter>` into the
+    /// `Vec<ClientId>` shape that `tokscale_core` scanners still consume.
+    /// `ClientFilter::Synthetic` does not have a `ClientId` and is
+    /// excluded from this projection — use [`Self::include_synthetic`]
+    /// for that signal.
+    pub fn scan_clients(&self) -> Vec<ClientId> {
+        let mut out: Vec<ClientId> = self
+            .enabled_clients
+            .borrow()
+            .iter()
+            .filter_map(|f| f.to_client_id())
+            .collect();
+        // Stable order for downstream cache key + log output. Sort by the
+        // declaration index in ClientId::ALL so the projection mirrors
+        // the canonical ordering used elsewhere.
+        out.sort_by_key(|c| *c as usize);
+        out
+    }
+
+    /// Whether the user has Synthetic enabled. Boundary helper for code
+    /// paths that still take a separate `bool include_synthetic` argument.
+    pub fn include_synthetic(&self) -> bool {
+        self.enabled_clients
+            .borrow()
+            .contains(&ClientFilter::Synthetic)
     }
 
     fn open_group_by_picker(&mut self) {
@@ -774,6 +930,57 @@ impl App {
         let dialog =
             GroupByPickerDialog::new(self.group_by.clone(), self.dialog_needs_reload.clone());
         self.dialog_stack.show(Box::new(dialog));
+    }
+
+    fn open_selected_daily_detail(&mut self) {
+        if self.is_daily_detail_active() {
+            return;
+        }
+
+        let selected_date = {
+            let daily = self.get_sorted_daily();
+            daily.get(self.selected_index).map(|day| day.date)
+        };
+
+        if let Some(date) = selected_date {
+            self.daily_list_selected_index = self.selected_index;
+            self.daily_list_scroll_offset = self.scroll_offset;
+            self.selected_daily_detail_date = Some(date);
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.set_status(&format!("Viewing daily details for {}", date));
+            self.clamp_selection();
+        }
+    }
+
+    fn close_daily_detail(&mut self) {
+        let Some(detail_date) = self.selected_daily_detail_date else {
+            return;
+        };
+
+        self.selected_daily_detail_date = None;
+
+        // Re-anchor by date so a sort change inside detail mode still
+        // restores the same day rather than the stale list index.
+        let restored_index = self
+            .get_sorted_daily()
+            .iter()
+            .position(|day| day.date == detail_date)
+            .unwrap_or(self.daily_list_selected_index);
+
+        self.selected_index = restored_index;
+
+        let max_visible = self.max_visible_items.max(1);
+        let viewport_still_holds = restored_index >= self.daily_list_scroll_offset
+            && restored_index < self.daily_list_scroll_offset + max_visible;
+        self.scroll_offset = if viewport_still_holds {
+            self.daily_list_scroll_offset
+        } else {
+            restored_index.saturating_sub(max_visible / 2)
+        };
+
+        self.set_status("Returned to daily usage");
+        self.clamp_selection();
     }
 
     fn toggle_auto_refresh(&mut self) {
@@ -833,6 +1040,18 @@ impl App {
                 .get_sorted_agents()
                 .get(self.selected_index)
                 .map(|a| format!("{}: {} tokens, ${:.4}", a.agent, a.tokens.total(), a.cost)),
+            Tab::Daily if self.is_daily_detail_active() => self
+                .get_sorted_daily_detail_rows()
+                .get(self.selected_index)
+                .map(|row| {
+                    format!(
+                        "{} / {}: {} tokens, ${:.4}",
+                        row.source,
+                        row.model,
+                        row.tokens.total(),
+                        row.cost
+                    )
+                }),
             Tab::Daily => self
                 .get_sorted_daily()
                 .get(self.selected_index)
@@ -845,6 +1064,17 @@ impl App {
                     h.cost
                 )
             }),
+            Tab::Minutely => self
+                .get_sorted_minutely()
+                .get(self.selected_index)
+                .map(|m| {
+                    format!(
+                        "{}: {} tokens, ${:.4}",
+                        m.datetime.format("%Y-%m-%d %H:%M"),
+                        m.tokens.total(),
+                        m.cost
+                    )
+                }),
             Tab::Stats => None,
         };
 
@@ -988,6 +1218,73 @@ impl App {
         daily
     }
 
+    pub fn is_daily_detail_active(&self) -> bool {
+        self.selected_daily_detail_date.is_some()
+    }
+
+    pub fn daily_detail_date(&self) -> Option<NaiveDate> {
+        self.selected_daily_detail_date
+    }
+
+    pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow<'_>> {
+        let Some(date) = self.selected_daily_detail_date else {
+            return Vec::new();
+        };
+        let Some(day) = self.data.daily.iter().find(|day| day.date == date) else {
+            return Vec::new();
+        };
+
+        let mut rows: Vec<DailyDetailRow<'_>> = day
+            .source_breakdown
+            .iter()
+            .flat_map(|(source, source_info)| {
+                source_info
+                    .models
+                    .values()
+                    .map(move |model_info| DailyDetailRow {
+                        source,
+                        provider: &model_info.provider,
+                        model: &model_info.display_name,
+                        color_key: &model_info.color_key,
+                        tokens: &model_info.tokens,
+                        cost: model_info.cost,
+                        messages: model_info.messages,
+                    })
+            })
+            .collect();
+
+        let tie_breaker = |a: &DailyDetailRow<'_>, b: &DailyDetailRow<'_>| {
+            a.source
+                .cmp(b.source)
+                .then_with(|| a.model.cmp(b.model))
+                .then_with(|| a.provider.cmp(b.provider))
+        };
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => {
+                rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Cost, SortDirection::Ascending) => {
+                rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Date, _) => rows.sort_by(tie_breaker),
+        }
+
+        rows
+    }
+
     pub fn get_sorted_hourly(&self) -> Vec<&HourlyUsage> {
         let mut hourly: Vec<&HourlyUsage> = self.data.hourly.iter().collect();
 
@@ -1023,6 +1320,41 @@ impl App {
         hourly
     }
 
+    pub fn get_sorted_minutely(&self) -> Vec<&MinutelyUsage> {
+        let mut minutely: Vec<&MinutelyUsage> = self.data.minutely.iter().collect();
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => minutely.sort_by(|a, b| {
+                b.cost
+                    .total_cmp(&a.cost)
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => minutely.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => minutely.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => minutely.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Date, SortDirection::Descending) => {
+                minutely.sort_by_key(|b| std::cmp::Reverse(b.datetime))
+            }
+            (SortField::Date, SortDirection::Ascending) => minutely.sort_by_key(|a| a.datetime),
+        }
+
+        minutely
+    }
+
     pub fn is_narrow(&self) -> bool {
         self.terminal_width < 80
     }
@@ -1036,18 +1368,21 @@ impl App {
 mod tests {
     use super::super::ui::widgets::get_provider_shade;
     use super::*;
-    use crate::tui::data::{ModelUsage, TokenBreakdown};
+    use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 6);
+        assert_eq!(tabs.len(), 7);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Models);
         assert_eq!(tabs[2], Tab::Daily);
         assert_eq!(tabs[3], Tab::Hourly);
-        assert_eq!(tabs[4], Tab::Stats);
-        assert_eq!(tabs[5], Tab::Agents);
+        assert_eq!(tabs[4], Tab::Minutely);
+        assert_eq!(tabs[5], Tab::Stats);
+        assert_eq!(tabs[6], Tab::Agents);
     }
 
     #[test]
@@ -1055,7 +1390,8 @@ mod tests {
         assert_eq!(Tab::Overview.next(), Tab::Models);
         assert_eq!(Tab::Models.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
-        assert_eq!(Tab::Hourly.next(), Tab::Stats);
+        assert_eq!(Tab::Hourly.next(), Tab::Minutely);
+        assert_eq!(Tab::Minutely.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
         assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
@@ -1066,7 +1402,8 @@ mod tests {
         assert_eq!(Tab::Models.prev(), Tab::Overview);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
-        assert_eq!(Tab::Stats.prev(), Tab::Hourly);
+        assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
+        assert_eq!(Tab::Stats.prev(), Tab::Minutely);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
@@ -1076,6 +1413,8 @@ mod tests {
         assert_eq!(Tab::Models.as_str(), "Models");
         assert_eq!(Tab::Agents.as_str(), "Agents");
         assert_eq!(Tab::Daily.as_str(), "Daily");
+        assert_eq!(Tab::Hourly.as_str(), "Hourly");
+        assert_eq!(Tab::Minutely.as_str(), "Minutely");
         assert_eq!(Tab::Stats.as_str(), "Stats");
     }
 
@@ -1085,6 +1424,8 @@ mod tests {
         assert_eq!(Tab::Models.short_name(), "Mod");
         assert_eq!(Tab::Agents.short_name(), "Agt");
         assert_eq!(Tab::Daily.short_name(), "Day");
+        assert_eq!(Tab::Hourly.short_name(), "Hr");
+        assert_eq!(Tab::Minutely.short_name(), "Min");
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
 
@@ -1313,6 +1654,27 @@ mod tests {
         App::new_with_cached_data(config, None).unwrap()
     }
 
+    #[test]
+    fn test_app_no_filter_default_matches_default_set() {
+        // Regression for an Oracle-flagged HIGH bug: the no-filter TUI
+        // default and the `submit` warm-cache filter set drifted apart,
+        // making every TUI launch after submit a stale-cache reuse
+        // instead of a fresh hit. Both paths now go through
+        // `ClientFilter::default_set()`; assert it stays that way.
+        let app = make_app();
+        let actual = app.enabled_clients.borrow().clone();
+        let expected = ClientFilter::default_set();
+        assert_eq!(
+            actual, expected,
+            "no-filter App default drifted from ClientFilter::default_set() — \
+             warm cache and TUI launch will mismatch"
+        );
+        assert!(
+            !actual.contains(&ClientFilter::Synthetic),
+            "no-filter default must not include Synthetic (opt-in only)"
+        );
+    }
+
     fn make_app_with_models(n: usize) -> App {
         let mut app = make_app();
         app.data.models = (0..n)
@@ -1328,6 +1690,57 @@ mod tests {
             })
             .collect();
         app
+    }
+
+    fn daily_usage(date: &str, cost: f64, models: Vec<(&str, &str, f64)>) -> DailyUsage {
+        let mut model_breakdown = BTreeMap::new();
+        let mut total_tokens = TokenBreakdown::default();
+        let mut total_cost = 0.0;
+
+        for (model, provider, model_cost) in models {
+            let tokens = TokenBreakdown {
+                input: (model_cost * 100.0) as u64,
+                output: 10,
+                cache_read: 5,
+                cache_write: 0,
+                reasoning: 0,
+            };
+            total_tokens.input = total_tokens.input.saturating_add(tokens.input);
+            total_tokens.output = total_tokens.output.saturating_add(tokens.output);
+            total_tokens.cache_read = total_tokens.cache_read.saturating_add(tokens.cache_read);
+            total_cost += model_cost;
+
+            model_breakdown.insert(
+                model.to_string(),
+                DailyModelInfo {
+                    provider: provider.to_string(),
+                    display_name: model.to_string(),
+                    color_key: model.to_string(),
+                    tokens,
+                    cost: model_cost,
+                    messages: 1,
+                },
+            );
+        }
+
+        let mut source_breakdown = BTreeMap::new();
+        source_breakdown.insert(
+            "claude".to_string(),
+            DailySourceInfo {
+                tokens: total_tokens.clone(),
+                cost: total_cost,
+                models: model_breakdown,
+            },
+        );
+
+        DailyUsage {
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            tokens: total_tokens,
+            cost: if cost > 0.0 { cost } else { total_cost },
+            source_breakdown,
+            message_count: 1,
+            turn_count: 1,
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1401,6 +1814,42 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
+    }
+
+    #[test]
+    fn test_handle_key_tab_switch_with_minutely_enabled_includes_minutely() {
+        let mut app = make_app();
+        app.settings.minutely_tab_enabled = true;
+        assert_eq!(app.current_tab, Tab::Overview);
+
+        for expected in [
+            Tab::Models,
+            Tab::Daily,
+            Tab::Hourly,
+            Tab::Minutely,
+            Tab::Stats,
+            Tab::Agents,
+            Tab::Overview,
+        ] {
+            app.handle_key_event(key(KeyCode::Tab));
+            assert_eq!(app.current_tab, expected);
+        }
+    }
+
+    #[test]
+    fn test_initial_minutely_tab_clamps_to_overview_when_flag_off() {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Minutely),
+        };
+        let app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
@@ -1502,6 +1951,167 @@ mod tests {
         assert_eq!(app.selected_graph_cell, None);
     }
 
+    #[test]
+    fn test_enter_on_daily_opens_selected_day_detail_rows() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 0;
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(app.get_current_list_len(), 2);
+    }
+
+    #[test]
+    fn test_esc_from_daily_detail_restores_daily_selection() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.max_visible_items = 2;
+        app.selected_index = 1;
+        app.scroll_offset = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Down));
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert_eq!(app.current_tab, Tab::Daily);
+        assert_eq!(app.selected_index, 1);
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.get_current_list_len(), 3);
+    }
+
+    #[test]
+    fn test_close_daily_detail_reanchors_selection_by_date_after_sort_change() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 1;
+        let target_date = app.get_sorted_daily()[app.selected_index].date;
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+        assert_eq!(app.daily_detail_date(), Some(target_date));
+
+        app.handle_key_event(key(KeyCode::Char('c')));
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.is_daily_detail_active());
+        let restored_index = app.selected_index;
+        let restored_date = app.get_sorted_daily()[restored_index].date;
+        assert_eq!(
+            restored_date, target_date,
+            "Closing detail after sort change should re-anchor on the original date"
+        );
+    }
+
+    #[test]
+    fn test_update_data_exits_daily_detail_when_date_disappears() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+
+        let mut refreshed = UsageData::default();
+        refreshed.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+        app.update_data(refreshed);
+
+        assert!(
+            !app.is_daily_detail_active(),
+            "update_data should drop detail mode when the selected date is gone"
+        );
+        assert_eq!(app.daily_detail_date(), None);
+        assert!(app.get_sorted_daily_detail_rows().is_empty());
+    }
+
+    #[test]
+    fn test_update_data_keeps_daily_detail_when_date_still_present() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+        ];
+
+        app.selected_index = 1;
+        let target_date = app.get_sorted_daily()[app.selected_index].date;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+
+        let mut refreshed = UsageData::default();
+        refreshed.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                9.0,
+                vec![("target-a", "openai", 7.0), ("target-b", "anthropic", 2.0)],
+            ),
+        ];
+        app.update_data(refreshed);
+
+        assert!(app.is_daily_detail_active());
+        assert_eq!(app.daily_detail_date(), Some(target_date));
+    }
+
     // ── handle_key_event: sort ──────────────────────────────────────
 
     #[test]
@@ -1542,18 +2152,71 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_defaults_restore_after_hourly() {
+    fn test_switch_tab_restores_hourly_date_default() {
+        let mut app = make_app();
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.switch_tab(Tab::Hourly);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+
+        app.switch_tab(Tab::Models);
+        assert_eq!(app.sort_field, SortField::Cost);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_initial_hourly_tab_uses_hourly_sort_default() {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Hourly),
+        };
+
+        let app = App::new_with_cached_data(config, None).unwrap();
+
+        assert_eq!(app.current_tab, Tab::Hourly);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_switch_tab_preserves_user_sort() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Models);
+
+        app.set_sort(SortField::Tokens);
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+
+        app.switch_tab(Tab::Daily);
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.switch_tab(Tab::Models);
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_switch_tab_preserves_daily_sort_after_hourly_roundtrip() {
         let mut app = make_app();
 
-        assert_eq!(app.sort_field, SortField::Cost);
-
-        app.current_tab = Tab::Hourly;
-        app.apply_tab_sort_defaults();
+        app.switch_tab(Tab::Daily);
+        app.set_sort(SortField::Date);
         assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
 
-        app.current_tab = Tab::Models;
-        app.apply_tab_sort_defaults();
-        assert_eq!(app.sort_field, SortField::Cost);
+        app.switch_tab(Tab::Hourly);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+
+        app.switch_tab(Tab::Daily);
+        assert_eq!(app.sort_field, SortField::Date);
         assert_eq!(app.sort_direction, SortDirection::Descending);
     }
 
@@ -1652,6 +2315,22 @@ mod tests {
         app.move_selection_down();
         assert_eq!(app.selected_index, 0);
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_overview_scroll_keeps_rendered_capacity_after_resize() {
+        let mut app = make_app_with_models(33);
+        app.current_tab = Tab::Overview;
+        app.set_max_visible_items(9);
+
+        for _ in 0..32 {
+            app.move_selection_down();
+            app.handle_resize(120, 40);
+            app.set_max_visible_items(9);
+        }
+
+        assert_eq!(app.selected_index, 32);
+        assert_eq!(app.scroll_offset, 24);
     }
 
     // ── handle_key_event: theme ─────────────────────────────────────
@@ -1866,7 +2545,7 @@ mod tests {
         app.handle_resize(120, 40);
         assert_eq!(app.terminal_width, 120);
         assert_eq!(app.terminal_height, 40);
-        assert_eq!(app.max_visible_items, 30);
+        assert_eq!(app.max_visible_items, 20);
     }
 
     #[test]
@@ -1875,18 +2554,34 @@ mod tests {
         app.handle_resize(40, 12);
         assert_eq!(app.terminal_width, 40);
         assert_eq!(app.terminal_height, 12);
-        assert_eq!(app.max_visible_items, 2);
+        assert_eq!(app.max_visible_items, 20);
     }
 
     #[test]
-    fn test_handle_resize_clamps_selection() {
+    fn test_handle_resize_preserves_rendered_capacity() {
         let mut app = make_app_with_models(5);
         app.selected_index = 4;
-        app.scroll_offset = 3;
-        app.max_visible_items = 20;
+        app.scroll_offset = 2;
+        app.max_visible_items = 3;
 
         app.handle_resize(80, 24);
-        assert!(app.selected_index <= 4);
+
+        assert_eq!(app.max_visible_items, 3);
+        assert_eq!(app.selected_index, 4);
+        assert_eq!(app.scroll_offset, 2);
+    }
+
+    #[test]
+    fn test_set_max_visible_items_clamps_scroll_offset() {
+        let mut app = make_app_with_models(10);
+        app.selected_index = 9;
+        app.scroll_offset = 9;
+
+        app.set_max_visible_items(3);
+
+        assert_eq!(app.max_visible_items, 3);
+        assert_eq!(app.selected_index, 9);
+        assert_eq!(app.scroll_offset, 7);
     }
 
     // ── on_tick ─────────────────────────────────────────────────────

@@ -6,7 +6,13 @@ use crate::tui::app::{App, ClickAction, Tab};
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_very_narrow = app.is_very_narrow();
 
-    let titles: Vec<Line> = Tab::all()
+    let visible_tabs: Vec<Tab> = Tab::all()
+        .iter()
+        .copied()
+        .filter(|t| app.is_tab_visible(*t))
+        .collect();
+
+    let titles: Vec<Line> = visible_tabs
         .iter()
         .map(|t| {
             let name = if is_very_narrow {
@@ -25,7 +31,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let selected = Tab::all()
+    let selected = visible_tabs
         .iter()
         .position(|t| *t == app.current_tab)
         .unwrap_or(0);
@@ -75,14 +81,20 @@ fn register_tab_click_areas(app: &mut App, area: Rect) {
     let y = area.y + 1;
     let mut x = inner_x;
 
-    for tab in Tab::all() {
+    let visible_tabs: Vec<Tab> = Tab::all()
+        .iter()
+        .copied()
+        .filter(|t| app.is_tab_visible(*t))
+        .collect();
+
+    for tab in visible_tabs {
         let name_len = if is_very_narrow {
             tab.short_name().len()
         } else {
             tab.as_str().len()
         };
         let width = name_len as u16 + 3;
-        app.add_click_area(Rect::new(x, y, width, 1), ClickAction::Tab(*tab));
+        app.add_click_area(Rect::new(x, y, width, 1), ClickAction::Tab(tab));
         x += width;
     }
 }

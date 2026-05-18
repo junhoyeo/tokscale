@@ -51,6 +51,36 @@ beforeEach(() => {
 });
 
 describe("GET /api/embed/[username]/svg", () => {
+  it("redirects mixed-case requests to the canonical embed path", async () => {
+    getUserEmbedStats.mockResolvedValue({
+      user: {
+        id: "user-1",
+        username: "OctoCat",
+        displayName: "The Octocat",
+        avatarUrl: null,
+      },
+      stats: {
+        totalTokens: 0,
+        totalCost: 0,
+        submissionCount: 0,
+        rank: null,
+        updatedAt: null,
+      },
+    });
+
+    const response = await GET(
+      new NextRequest("http://localhost:3000/api/embed/octocat/svg?view=3d&theme=light"),
+      { params: Promise.resolve({ username: "octocat" }) },
+    );
+
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/api/embed/OctoCat/svg?view=3d&theme=light",
+    );
+    expect(getUserEmbedContributions).not.toHaveBeenCalled();
+    expect(renderIsometric3DEmbedSvg).not.toHaveBeenCalled();
+  });
+
   it("renders the 3D embed when contributions are empty", async () => {
     getUserEmbedStats.mockResolvedValue({
       user: {

@@ -29,7 +29,7 @@ jobs:
     outputs:
       version: ${{ steps.bump.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Calculate version
         id: bump
@@ -139,7 +139,7 @@ jobs:
           echo "📝 Version bump prepared (will commit after successful publish)"
 
       - name: Upload bumped manifest files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bumped-manifests
           path: |
@@ -222,16 +222,16 @@ jobs:
             strip: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
 
@@ -241,7 +241,7 @@ jobs:
           targets: ${{ matrix.settings.target }}
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -278,7 +278,7 @@ jobs:
         run: ${{ matrix.settings.strip }}
 
       - name: Upload CLI binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.settings.artifact_name }}
           path: target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}
@@ -326,10 +326,10 @@ jobs:
             binary_name: tokscale.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
@@ -340,7 +340,7 @@ jobs:
           bun-version: 1.1.38
 
       - name: Download CLI binary artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: ${{ matrix.settings.artifact_name }}
           path: artifacts/${{ matrix.settings.package_dir }}
@@ -369,10 +369,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
@@ -404,10 +404,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .
@@ -431,7 +431,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
@@ -439,7 +439,7 @@ jobs:
           fetch-tags: true
 
       - name: Download bumped package.json files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
           path: .

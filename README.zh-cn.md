@@ -58,19 +58,24 @@
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ 旧版: `.clawdbot`, `.moltbot`, `.moldbot`) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db`（回退：`~/.hermes/state.db`） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/*/chats/*.json` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | 通过 `~/.config/tokscale/cursor-cache/` API 同步 | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/`（+ `manicode-dev`、`manicode-staging`；可通过 `CODEBUFF_DATA_DIR` 覆盖） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` and `~/.omp/agent/sessions/` ([Oh My Pi](https://github.com/can1357/oh-my-pi)) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | `~/.kimi/sessions/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ 支持 |
-| <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json`（项目注册表；回退路径：`~/.local/share/crush/projects.json`） | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db`（+ macOS Application Support、旧版 Block/goose 路径；可通过 `GOOSE_PATH_ROOT` 覆盖） | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | 通过 `tokscale antigravity sync` 缓存到 `~/.config/tokscale/antigravity-cache/sessions/*.jsonl`（使用本地语言服务器 RPC） | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db`（macOS: `~/Library/Application Support/Zed/threads/threads.db`；Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`；仅限托管 Zed 模型，不含外部 ACP 代理） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | 通过 `hf:` 模型前缀或 `synthetic` provider 从其他来源重归属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） | ✅ 支持 |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
@@ -99,6 +104,7 @@
   - [价格查询](#价格查询)
   - [社交平台命令](#社交平台命令)
   - [Cursor IDE 命令](#cursor-ide-命令)
+  - [Antigravity 命令](#antigravity-命令)
   - [示例输出](#示例输出--light-版本)
   - [配置](#配置)
   - [环境变量](#环境变量)
@@ -131,12 +137,12 @@
 ## 功能
 
 - **交互式 TUI 模式** - 由 Ratatui 驱动的精美终端 UI（默认模式）
-  - 4 个交互式视图：概览、模型、每日、统计
+  - 6 个交互式视图：概览、模型、每日、每时、统计、代理（可选的 Minutely 视图通过 `minutelyTabEnabled` 启用）
   - 键盘和鼠标导航
   - 9 种颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush 和 Synthetic 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity 和 Synthetic 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -155,6 +161,9 @@ npx tokscale@latest
 
 # 或使用 bunx
 bunx tokscale@latest
+
+# 或使用 Deno（无需安装别名）
+deno x npm:tokscale@latest
 
 # 轻量模式（仅表格渲染）
 npx tokscale@latest --light
@@ -237,15 +246,21 @@ tokscale models --json > report.json   # 保存到文件
 
 - **6 个视图**：概览（图表 + 热门模型）、模型、每日、每时、统计（贡献图）、代理
 - **键盘导航**：
-  - `1-6` 或 `←/→/Tab`：切换视图
-  - `↑/↓`：导航列表
+  - `←/→/Tab/BackTab`：切换视图
+  - `↑/↓` 或 `Home/End`：导航列表
+  - `Enter`：打开每日详情（Daily 标签）/ 选择图表单元格（Stats 标签）
+  - `Esc` 或 `Backspace`：关闭对话框 / 退出详情视图
   - `c/d/t`：按成本/日期/Token 排序
+  - `j`：跳转到今天
   - `s`：打开来源选择对话框
   - `g`：打开分组方式选择对话框（模型、客户端+模型、客户端+提供商+模型）
+  - `h`：切换日/时图表粒度（Overview 标签）
+  - `v`：切换表格/Profile 视图（Hourly 标签）
+  - `y`：复制选中行到剪贴板
   - `p`：循环 9 种颜色主题
-  - `r`：刷新数据
+  - `r`：刷新数据；`Shift+R` 切换自动刷新；`+`/`-` 调整间隔
   - `e`：导出为 JSON
-  - `q`：退出
+  - `q` 或 `Ctrl+C`：退出
 - **鼠标支持**：点击标签、按钮和筛选器
 - **主题**：Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu
 - **设置持久化**：偏好设置保存到 `~/.config/tokscale/settings.json`（参见[配置](#配置)）
@@ -284,64 +299,31 @@ tokscale models --json > report.json   # 保存到文件
 
 ### 按平台筛选
 
+使用 `--client`（短选项 `-c`）将报告范围限定为一个或多个客户端。该选项可重复使用，支持逗号分隔的值，并适用于所有报告命令：
+
 ```bash
 # 仅显示 OpenCode 使用量
-tokscale --opencode
+tokscale --client opencode
 
-# 仅显示 Claude Code 使用量
-tokscale --claude
+# 逗号分隔：同时筛选多个客户端
+tokscale --client opencode,claude
 
-# 仅显示 Codex CLI 使用量
-tokscale --codex
+# 重复使用：效果相同（与 shell 别名搭配使用很方便）
+tokscale -c opencode -c claude
 
-# 仅显示 OpenClaw 使用量
-tokscale --openclaw
+# Cursor IDE 需要先运行 `tokscale cursor login`
+tokscale --client cursor
 
-# 仅显示 Pi 使用量
-tokscale --pi
+# Synthetic（synthetic.new）从其他 agent 会话中检测
+tokscale --client synthetic
 
-# 仅显示 Gemini CLI 使用量
-tokscale --gemini
-
-# 仅显示 Cursor IDE 使用量（需要先 `tokscale cursor login`）
-tokscale --cursor
-
-# 仅显示 Amp 使用量
-tokscale --amp
-
-# 仅显示 Droid 使用量
-tokscale --droid
-
-# 仅显示 Hermes Agent 使用量
-tokscale --hermes
-
-# 仅显示 Kimi CLI 使用量
-tokscale --kimi
-
-# 仅显示 Qwen CLI 使用量
-tokscale --qwen
-
-# 仅显示 Roo Code 使用量
-tokscale --roocode
-
-# 仅显示 Kilo 使用量
-tokscale --kilocode
-
-# 仅显示 Mux 使用量
-tokscale --mux
-
-# 仅显示 Kilo CLI 使用量
-tokscale --kilo
-
-# 仅显示 Crush 使用量
-tokscale --crush
-
-# 仅显示 Synthetic (synthetic.new) 使用量
-tokscale --synthetic
-
-# 组合筛选
-tokscale --opencode --claude
+# 与其他筛选条件组合
+tokscale --client opencode,claude --week --json
 ```
+
+可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`synthetic`。
+
+> **弃用通知**：旧的单客户端选项（`--opencode`、`--claude`、`--codex` 等）出于向后兼容仍然可用，但已从 `--help` 中隐藏，将在下一个主要版本中移除。请尽量迁移到 `--client`。在交互式终端中使用旧选项时会输出一行警告。
 
 ### 日期筛选
 
@@ -360,7 +342,7 @@ tokscale --since 2024-01-01 --until 2024-12-31
 tokscale --year 2024
 
 # 与其他选项组合
-tokscale models --week --claude --json
+tokscale models --week --client claude --json
 tokscale monthly --month --benchmark
 ```
 
@@ -420,7 +402,7 @@ tokscale whoami
 tokscale submit
 
 # 带筛选提交
-tokscale submit --opencode --claude --since 2024-01-01
+tokscale submit --client opencode,claude --since 2024-01-01
 
 # 预览将要提交的内容（试运行）
 tokscale submit --dry-run
@@ -476,6 +458,25 @@ tokscale cursor logout --all --purge-cache
 
 > ⚠️ **安全警告**：像对待密码一样对待您的会话令牌。切勿公开分享或提交到版本控制。该令牌授予对您 Cursor 账户的完全访问权限。
 
+### Antigravity 命令
+
+Antigravity 同步目前仅在 macOS 和 Linux 上受支持。只有在启用了 Antigravity 的编辑器正在运行且本地语言服务器可用时才生效；tokscale 会从该本地语言服务器读取使用量，并将归一化后的产物缓存到本地。
+
+```bash
+# 检查 tokscale 是否能识别正在运行的 Antigravity 语言服务器
+tokscale antigravity status
+
+# 将本地 Antigravity 语言服务器中的使用量同步到 tokscale 的缓存
+tokscale antigravity sync
+
+# 删除已缓存的 Antigravity 产物
+tokscale antigravity purge-cache
+```
+
+**缓存位置**：`~/.config/tokscale/antigravity-cache/`
+
+**工作原理**：`tokscale antigravity sync` 会发现本地的 Antigravity 会话候选项，从本地语言服务器 RPC 获取已确认的使用数据，并以归一化的 JSONL 产物形式存储，供 tokscale-core 后续解析。如果希望报告反映最新的 Antigravity 数据，请在生成报告前先运行同步。
+
 ### 示例输出（`--light` 版本）
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -487,7 +488,8 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 ```json
 {
   "colorPalette": "blue",
-  "includeUnusedModels": false
+  "includeUnusedModels": false,
+  "defaultClients": ["opencode", "claude"]
 }
 ```
 
@@ -498,6 +500,35 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | `autoRefreshEnabled` | boolean | `false` | 在 TUI 中启用自动刷新 |
 | `autoRefreshMs` | number | `60000` | 自动刷新间隔（30000-3600000ms） |
 | `nativeTimeoutMs` | number | `300000` | 原生子进程处理最大时间（5000-3600000ms） |
+| `defaultClients` | string[] | `[]` | 未传递 `--client/-c` 选项时应用的客户端筛选。接受与 `--client` 相同的 ID（例如 `["opencode", "claude", "synthetic"]`）。未知 ID 会被静默丢弃。命令行选项会完全覆盖此列表 — 不会合并。 |
+| `light.writeCache` | boolean | `false` | 为 `true` 时，`tokscale --light` 会在渲染完成后以原子方式覆盖 TUI 缓存。CLI 标志 `--write-cache` / `--no-write-cache` 会按次运行覆盖该设置。 |
+| `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
+
+#### 启用 Minutely 标签
+
+Minutely 标签按分钟显示 Token 使用情况，最适合用于诊断突发模式、调试单个会话，或与 `autoRefreshEnabled` 配合进行近实时监控。分钟级聚合在数据加载期间会遍历所有已解析的消息，对大多数用户来说带来不必要的 RAM 与 CPU 开销。因此默认情况下它是隐藏的。
+
+要启用它，请在 `~/.config/tokscale/settings.json` 中将 `minutelyTabEnabled` 设为 `true`：
+
+```json
+{
+  "minutelyTabEnabled": true
+}
+```
+
+重启后，Minutely 标签将出现在标签栏中 Hourly 与 Stats 之间，Tab / BackTab / Left / Right 导航将会在其间循环。把该标志再设为 `false` 可隐藏标签并再次跳过聚合。
+
+#### 缓存目录布局
+
+可再生成的 CLI/TUI/价格/Wrapped 缓存位于 `~/.config/tokscale/cache/` 下（如果设置了 `TOKSCALE_CONFIG_DIR`，则为 `${TOKSCALE_CONFIG_DIR}/cache/`）。Antigravity 同步产物仍保留在 `~/.config/tokscale/antigravity-cache/`：
+
+- `tui-data-cache.json` —— TUI 启动缓存
+- `source-message-cache.bin` + `source-message-cache.lock` —— 源消息缓存与锁文件
+- `pricing-litellm.json` / `pricing-openrouter.json` —— 定价缓存
+- `opencode-migration.json` —— OpenCode 迁移记录
+- `fonts/`、`images/` —— Wrapped 资源缓存
+
+删除该目录是安全的。Tokscale 会在需要时重新创建并重新生成其中的内容。
 
 ### 环境变量
 
@@ -506,6 +537,7 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000`（5 分钟） | 覆盖 `nativeTimeoutMs` 配置 |
+| `TOKSCALE_CONFIG_DIR` | unset | 覆盖配置目录根（`settings.json`、`star-cache.json`、`cache/`、`antigravity-cache/` 的存放位置）。建议使用绝对路径；相对路径将基于进程 CWD 解析。适用于 CI 沙箱或固定到非默认位置。设置后，tokscale 不会回退到 macOS 旧路径（`~/Library/Application Support/tokscale/`）。 |
 
 ```bash
 # 示例：为非常大的数据集增加超时时间
@@ -588,7 +620,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Cursor、Gemini、Amp、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Synthetic）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Synthetic）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -786,7 +818,7 @@ tokscale graph --since 2024-01-01 --until 2024-12-31
 tokscale graph --year 2024
 
 # 按平台筛选
-tokscale graph --opencode --claude
+tokscale graph --client opencode,claude
 
 # 显示处理时间基准
 tokscale graph --output data.json --benchmark
@@ -881,6 +913,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Claude Code | `~/.claude/` | `%USERPROFILE%\.claude\` | 所有平台使用相同路径 |
 | OpenClaw | `~/.openclaw/` (+ 旧版: `.clawdbot`, `.moltbot`, `.moldbot`) | `%USERPROFILE%\.openclaw\` (+ 旧版路径) | 所有平台使用相同路径 |
 | Codex CLI | `~/.codex/` | `%USERPROFILE%\.codex\` | 可通过 `CODEX_HOME` 环境变量配置（[源码](https://github.com/openai/codex)） |
+| Copilot CLI | `~/.copilot/otel/` | `%USERPROFILE%\.copilot\otel\` | 需要 OTEL 文件导出；同时自动采集 `COPILOT_OTEL_FILE_EXPORTER_PATH` |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | 可通过 `HERMES_HOME` 环境变量配置（[源码](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | 所有平台使用相同路径 |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | 与 OpenCode 一样使用 `xdg-basedir` |
@@ -892,8 +925,11 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage 任务日志 |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 任务日志 |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | 所有平台相同路径 |
+| Codebuff | `~/.config/manicode/projects/`（+ `manicode-dev`、`manicode-staging`） | `%USERPROFILE%\.config\manicode\projects\` | 通过 `CODEBUFF_DATA_DIR` 环境变量覆盖 |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | 与 OpenCode 一样使用 `xdg-basedir` |
 | Crush | `$XDG_DATA_HOME/crush/`（回退路径：`~/.local/share/crush/`） | `%USERPROFILE%\.local\share\crush\`（如果设置了 `%XDG_DATA_HOME%`，则为 `%XDG_DATA_HOME%\crush\`） | 使用带回退路径的 XDG 数据目录 |
+| Goose | `~/.local/share/goose/sessions/`（+ macOS Application Support、旧版 Block 路径） | `%USERPROFILE%\.local\share\goose\sessions\` | 可通过 `GOOSE_PATH_ROOT` 环境变量配置 |
+| Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` 目前仅支持 macOS / Linux |
 | Synthetic | 从其他来源重归属 | 从其他来源重归属 | 检测 `hf:` 模型前缀 + `synthetic` provider |
 
 > **注意**：在 Windows 上，`~` 扩展为 `%USERPROFILE%`（例如 `C:\Users\用户名`）。这些工具故意使用 Unix 风格的路径（如 `.local/share`）而不是 Windows 原生路径（如 `%APPDATA%`），以实现跨平台一致性。
@@ -901,9 +937,11 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 #### Windows 特定配置
 
 Tokscale 将配置存储在：
-- **配置**: `%USERPROFILE%\.config\tokscale\settings.json`
-- **缓存**: `%USERPROFILE%\.cache\tokscale\`
+- **TUI 设置**: `%APPDATA%\tokscale\settings.json`（平台默认值。可用 `TOKSCALE_CONFIG_DIR` 覆盖）
+- **缓存**: `%APPDATA%\tokscale\cache\`（统一缓存根目录）
+- **旧版缓存路径**: 旧版本曾使用 `%USERPROFILE%\.cache\tokscale\` 这类分散路径；在可再生数据写入新路径之前，这些旧路径可能仍然存在。
 - **Cursor 凭据**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
+- **Tokscale 账号凭据**: `%USERPROFILE%\.config\tokscale\credentials.json`
 
 ## 会话数据保留
 
@@ -1019,6 +1057,39 @@ OpenCode 根据构建时的发布渠道决定数据库文件名：`latest`/`beta
 {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1234, "output_tokens": 567}}}}
 ```
 
+### Copilot CLI
+
+位置：`~/.copilot/otel/*.jsonl` 或 `COPILOT_OTEL_FILE_EXPORTER_PATH` 中指定的显式路径
+
+Copilot 支持读取文件导出的 OpenTelemetry JSONL。在运行 Copilot 之前启用它：
+
+```bash
+export COPILOT_OTEL_ENABLED=true
+export COPILOT_OTEL_EXPORTER_TYPE=file
+mkdir -p "$HOME/.copilot/otel"
+export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel-$(date +%Y%m%d-%H%M%S).jsonl"
+```
+
+PowerShell：
+
+```powershell
+$otelDir = "$HOME/.copilot/otel"
+New-Item -ItemType Directory -Force -Path $otelDir | Out-Null
+$env:COPILOT_OTEL_ENABLED = "true"
+$env:COPILOT_OTEL_EXPORTER_TYPE = "file"
+$env:COPILOT_OTEL_FILE_EXPORTER_PATH = Join-Path $otelDir ("copilot-otel-{0}.jsonl" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+```
+
+建议使用带时间戳的文件名，这样每个 Copilot 会话都会写入新文件，而不是累积到一个巨大的 OTEL 日志中。
+
+Tokscale 将 `chat` span 作为 Token 统计的真实来源，并在第一阶段忽略工具 span 和累积指标：
+
+```json
+{"type":"span","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"session-id","gen_ai.usage.input_tokens":1234,"gen_ai.usage.output_tokens":567,"gen_ai.usage.cache_read.input_tokens":890,"gen_ai.usage.reasoning.output_tokens":123}}
+```
+
+> Copilot 的 OTEL 负载目前不暴露稳定的工作区元数据，因此 Copilot 行可能不会显示工作区属性。Tokscale 尽可能根据报告的模型为这些行定价，不会直接信任 `github.copilot.cost`。
+
 ### Gemini CLI
 
 位置：`~/.gemini/tmp/{projectHash}/chats/*.json`
@@ -1038,6 +1109,12 @@ OpenCode 根据构建时的发布渠道决定数据库文件名：`latest`/`beta
 位置：`~/.config/tokscale/cursor-cache/`（通过 Cursor API 同步）
 
 Cursor 数据使用您的会话令牌从 Cursor API 获取并本地缓存。运行 `tokscale cursor login` 进行认证。设置说明请参阅 [Cursor IDE 命令](#cursor-ide-命令)。
+
+### Antigravity
+
+位置：`~/.config/tokscale/antigravity-cache/sessions/*.jsonl`（通过本地 Antigravity 语言服务器 RPC 同步）
+
+Antigravity 数据不会被根命令自动获取。请在启用了 Antigravity 的编辑器打开时运行 `tokscale antigravity sync` 来刷新本地缓存，然后对缓存的 JSONL 产物使用常规的 tokscale 报告和筛选。
 
 ### OpenClaw
 
@@ -1152,6 +1229,18 @@ Kilo CLI 在类似于 OpenCode 的 SQLite 数据库中存储会话数据。每�
 
 Crush 在项目级 SQLite 数据库（`crush.db`）中存储使用量。由于 Crush 不提供可靠的每条消息或每个模型的 Token 统计，Tokscale 仅导入根会话的会话级成本总计。记录显示为 `model=session-total`，Token 细分为零。
 
+### Goose
+
+位置：`~/.local/share/goose/sessions/sessions.db`（同时扫描 `~/Library/Application Support/goose/`、`~/Library/Application Support/Block/goose/`、`~/.local/share/Block/goose/`；可通过 `GOOSE_PATH_ROOT` 覆盖）
+
+Goose 在 SQLite 的 `sessions.db` 中按会话保存使用量。Tokscale 从 `model_config_json` 提取模型，从 `provider_name` 提取提供商，并按会话累加输入/输出 Token 总数。当推理 Token 列有数据时也会被推断出来。
+
+### Codebuff
+
+位置：`~/.config/manicode/projects/<project>/chats/<chatId>/chat-messages.json`（同时扫描 `manicode-dev` 和 `manicode-staging` 频道；可通过 `CODEBUFF_DATA_DIR` 覆盖）
+
+Codebuff（前身 Manicode）按聊天写入 JSON 文件。Tokscale 从 `metadata.usage`、`metadata.codebuff.usage` 以及 run-state 中的 `messageHistory[*].providerOptions` 回退路径解析 Token 使用量，并以反向顺序遍历历史，避免部分更新的较新条目遮蔽实际承载 Token 数的较早条目。当消息时间戳缺失时，会回退到 chat-id 目录名，最后回退到文件 mtime。
+
 ### Synthetic (synthetic.new)
 
 Synthetic 通过后处理重归属其他来源的消息。当检测到 `hf:` 前缀模型 ID 或 `synthetic` / `glhf` / `octofriend` provider 时，消息会被归类为 `synthetic` 来源。
@@ -1167,8 +1256,8 @@ Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blo
 **Cursor 模型定价**：对于 LiteLLM 和 OpenRouter 中都尚未收录的最新模型（例如 `gpt-5.3-codex`），Tokscale 使用从 [Cursor 模型文档](https://cursor.com/en-US/docs/models)获取的硬编码定价。这些覆盖在所有上游来源之后、模糊匹配之前检查，因此当真正的上游定价可用时会自动让步。
 
 **缓存**：价格数据以 1 小时 TTL 缓存到磁盘，确保快速启动：
-- LiteLLM 缓存：`~/.cache/tokscale/pricing-litellm.json`
-- OpenRouter 缓存：`~/.cache/tokscale/pricing-openrouter.json`（缓存支持提供商的模型作者定价信息）
+- LiteLLM 缓存：`~/.config/tokscale/cache/pricing-litellm.json`
+- OpenRouter 缓存：`~/.config/tokscale/cache/pricing-openrouter.json`（缓存支持提供商的模型作者定价信息）
 
 定价包括：
 - 输入 Token

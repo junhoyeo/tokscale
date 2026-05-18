@@ -1,5 +1,11 @@
 import { unstable_cache } from "next/cache";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
+import {
+  USERNAME_LOOKUP_LIMIT,
+  getSingleUsernameMatch,
+  normalizeUsernameCacheKey,
+  usernameEqualsIgnoreCase,
+} from "@/lib/db/usernameLookup";
 import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 import type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
@@ -211,15 +217,19 @@ function buildPeriodUserRank(
   sortBy: SortBy = "tokens"
 ): LeaderboardUser | null {
   const aggregatedUsers = aggregatePeriodRows(rows, sortBy);
-  const userIndex = aggregatedUsers.findIndex((user) => user.username === username);
+  const usernameCacheKey = normalizeUsernameCacheKey(username);
+  const matchingUsers = aggregatedUsers.filter(
+    (user) => normalizeUsernameCacheKey(user.username) === usernameCacheKey
+  );
+  const user = getSingleUsernameMatch(matchingUsers, username);
 
-  if (userIndex === -1) {
+  if (!user) {
     return null;
   }
 
   return {
-    ...aggregatedUsers[userIndex],
-    rank: userIndex + 1,
+    ...user,
+    rank: aggregatedUsers.indexOf(user) + 1,
   };
 }
 
@@ -497,14 +507,14 @@ async function fetchUserRank(
   const userResult = await db
     .select({ id: users.id, username: users.username, displayName: users.displayName, avatarUrl: users.avatarUrl })
     .from(users)
-    .where(eq(users.username, username))
-    .limit(1);
+        .where(usernameEqualsIgnoreCase(users.username, username))
+    .limit(USERNAME_LOOKUP_LIMIT);
 
-  if (userResult.length === 0) {
+  const user = getSingleUsernameMatch(userResult, username);
+
+  if (!user) {
     return null;
   }
-
-  const user = userResult[0];
 
   const userStatsResult = await db
     .select({
@@ -580,11 +590,13 @@ export function getUserRank(
   period: Period = "all",
   sortBy: SortBy = "tokens"
 ): Promise<LeaderboardUser | null> {
+  const usernameCacheKey = normalizeUsernameCacheKey(username);
+
   return unstable_cache(
     () => fetchUserRank(username, period, sortBy),
-    [`user-rank:${username}:${period}:${sortBy}`],
+    [`user-rank:${usernameCacheKey}:${period}:${sortBy}`],
     {
-      tags: ["leaderboard", "user-rank", `user-rank:${username}`],
+      tags: ["leaderboard", "user-rank", `user-rank:${usernameCacheKey}`],
       revalidate: 60,
     }
   )();

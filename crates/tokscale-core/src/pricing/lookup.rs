@@ -1,5 +1,5 @@
 use super::{aliases, litellm::ModelPricing};
-use crate::{provider_identity, TokenBreakdown};
+use crate::{provider_identity, strip_parenthesized_reasoning_tier, TokenBreakdown};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -47,7 +47,10 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
 const FUZZY_BLOCKLIST: &[&str] = &["auto", "mini", "chat", "base"];
 
 const MAX_LOOKUP_CACHE_ENTRIES: usize = 512;
-const TIERED_PRICING_THRESHOLD_TOKENS: f64 = 200_000.0;
+const TIERED_PRICING_THRESHOLD_128K_TOKENS: f64 = 128_000.0;
+const TIERED_PRICING_THRESHOLD_200K_TOKENS: f64 = 200_000.0;
+const TIERED_PRICING_THRESHOLD_256K_TOKENS: f64 = 256_000.0;
+const TIERED_PRICING_THRESHOLD_272K_TOKENS: f64 = 272_000.0;
 
 const MIN_FUZZY_MATCH_LEN: usize = 5;
 
@@ -230,6 +233,29 @@ impl PricingLookup {
         let canonical = aliases::resolve_alias(model_id).unwrap_or(model_id);
         let lower = canonical.to_lowercase();
 
+        // CLIProxyAPI strips `(level)` reasoning-effort suffixes before routing,
+        // so for pricing lookup we resolve to the base model regardless of tier.
+        // Mirrors the dash-suffix path (e.g. `-xhigh`), which is handled by
+        // `try_strip_unknown_suffix` below.
+        let normalized_owned = strip_parenthesized_reasoning_tier(&lower).map(str::to_owned);
+
+        // Guard against silent misresolution: if the input ends with `(...)`
+        // but the contents are not a recognized CLIProxyAPI level, refuse the
+        // lookup. Falling through to `try_strip_unknown_suffix` would split on
+        // `-` and could match a shorter, unrelated model id by peeling the
+        // parenthesized fragment off (e.g. `gpt-5.2-codex(invalid)` would
+        // strip `-codex(invalid)` and resolve to `gpt-5.2`).
+        if normalized_owned.is_none()
+            && lower
+                .strip_suffix(')')
+                .and_then(|inner| inner.rsplit_once('('))
+                .is_some()
+        {
+            return None;
+        }
+
+        let lower_ref: &str = normalized_owned.as_deref().unwrap_or(&lower);
+
         // Helper to perform lookup with the given source constraint
         let do_lookup = |id: &str| match force_source {
             Some("litellm") => self.lookup_litellm_only(id, provider_id),
@@ -238,18 +264,18 @@ impl PricingLookup {
         };
 
         // 1. Try direct lookup
-        if let Some(result) = do_lookup(&lower) {
+        if let Some(result) = do_lookup(lower_ref) {
             return Some(result);
         }
 
         // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
-        if let Some(result) = try_strip_unknown_suffix(&lower, do_lookup) {
+        if let Some(result) = try_strip_unknown_suffix(lower_ref, do_lookup) {
             return Some(result);
         }
 
         // 3. Try stripping unknown prefixes (e.g., antigravity-, myplugin-)
         //    For each prefix candidate, also try suffix stripping
-        if let Some(result) = try_strip_unknown_prefix(&lower, do_lookup) {
+        if let Some(result) = try_strip_unknown_prefix(lower_ref, do_lookup) {
             return Some(result);
         }
 
@@ -736,16 +762,31 @@ pub fn compute_cost(
     reasoning: i64,
 ) -> f64 {
     let safe_price = |opt: Option<f64>| opt.filter(|v| is_valid_price_value(*v)).unwrap_or(0.0);
-    let tiered_cost = |tokens: f64, base: Option<f64>, above_200k: Option<f64>| {
+    let tiered_cost = |tokens: f64, base: Option<f64>, tiers: &[(f64, Option<f64>)]| {
         let base_price = safe_price(base);
-        let above_price = above_200k.filter(|v| is_valid_price_value(*v));
-        if tokens > TIERED_PRICING_THRESHOLD_TOKENS {
-            if let Some(above_price) = above_price {
-                return TIERED_PRICING_THRESHOLD_TOKENS * base_price
-                    + (tokens - TIERED_PRICING_THRESHOLD_TOKENS) * above_price;
+        let mut cost = 0.0;
+        let mut lower_bound = 0.0;
+        let mut active_price = base_price;
+
+        for (threshold, tier_price) in tiers {
+            let Some(tier_price) = tier_price.filter(|v| is_valid_price_value(*v)) else {
+                continue;
+            };
+
+            if !threshold.is_finite() || *threshold <= lower_bound {
+                continue;
             }
+
+            if tokens <= *threshold {
+                return cost + (tokens - lower_bound).max(0.0) * active_price;
+            }
+
+            cost += (*threshold - lower_bound) * active_price;
+            lower_bound = *threshold;
+            active_price = tier_price;
         }
-        tokens * base_price
+
+        cost + (tokens - lower_bound).max(0.0) * active_price
     };
 
     let input_clamped = input.max(0) as f64;
@@ -756,22 +797,75 @@ pub fn compute_cost(
     let input_cost = tiered_cost(
         input_clamped,
         pricing.input_cost_per_token,
-        pricing.input_cost_per_token_above_200k_tokens,
+        &[
+            (
+                TIERED_PRICING_THRESHOLD_128K_TOKENS,
+                pricing.input_cost_per_token_above_128k_tokens,
+            ),
+            (
+                TIERED_PRICING_THRESHOLD_200K_TOKENS,
+                pricing.input_cost_per_token_above_200k_tokens,
+            ),
+            (
+                TIERED_PRICING_THRESHOLD_256K_TOKENS,
+                pricing.input_cost_per_token_above_256k_tokens,
+            ),
+            (
+                TIERED_PRICING_THRESHOLD_272K_TOKENS,
+                pricing.input_cost_per_token_above_272k_tokens,
+            ),
+        ],
     );
     let output_cost = tiered_cost(
         output_clamped,
         pricing.output_cost_per_token,
-        pricing.output_cost_per_token_above_200k_tokens,
+        &[
+            (
+                TIERED_PRICING_THRESHOLD_128K_TOKENS,
+                pricing.output_cost_per_token_above_128k_tokens,
+            ),
+            (
+                TIERED_PRICING_THRESHOLD_200K_TOKENS,
+                pricing.output_cost_per_token_above_200k_tokens,
+            ),
+            (
+                TIERED_PRICING_THRESHOLD_256K_TOKENS,
+                pricing.output_cost_per_token_above_256k_tokens,
+            ),
+            (
+                TIERED_PRICING_THRESHOLD_272K_TOKENS,
+                pricing.output_cost_per_token_above_272k_tokens,
+            ),
+        ],
     );
+    // Cache-read tiers stay limited to the 200k and 272k thresholds
+    // because upstream LiteLLM does not currently declare 128k or 256k
+    // cache-read pricing for any model. If upstream begins emitting
+    // those keys, also add matching fields to `ModelPricing`,
+    // `has_any_usable_pricing`, `has_any_valid_above_tier_value`, and
+    // `has_meaningful_tier_support`; otherwise tier walks will silently
+    // undercost long-context cache reads on those models.
     let cache_read_cost = tiered_cost(
         cache_read_clamped,
         pricing.cache_read_input_token_cost,
-        pricing.cache_read_input_token_cost_above_200k_tokens,
+        &[
+            (
+                TIERED_PRICING_THRESHOLD_200K_TOKENS,
+                pricing.cache_read_input_token_cost_above_200k_tokens,
+            ),
+            (
+                TIERED_PRICING_THRESHOLD_272K_TOKENS,
+                pricing.cache_read_input_token_cost_above_272k_tokens,
+            ),
+        ],
     );
     let cache_write_cost = tiered_cost(
         cache_write_clamped,
         pricing.cache_creation_input_token_cost,
-        pricing.cache_creation_input_token_cost_above_200k_tokens,
+        &[(
+            TIERED_PRICING_THRESHOLD_200K_TOKENS,
+            pricing.cache_creation_input_token_cost_above_200k_tokens,
+        )],
     );
 
     input_cost + output_cost + cache_read_cost + cache_write_cost
@@ -968,9 +1062,16 @@ fn has_any_usable_pricing(pricing: &ModelPricing) -> bool {
         pricing.output_cost_per_token,
         pricing.cache_read_input_token_cost,
         pricing.cache_creation_input_token_cost,
+        pricing.input_cost_per_token_above_128k_tokens,
         pricing.input_cost_per_token_above_200k_tokens,
+        pricing.input_cost_per_token_above_256k_tokens,
+        pricing.input_cost_per_token_above_272k_tokens,
+        pricing.output_cost_per_token_above_128k_tokens,
         pricing.output_cost_per_token_above_200k_tokens,
+        pricing.output_cost_per_token_above_256k_tokens,
+        pricing.output_cost_per_token_above_272k_tokens,
         pricing.cache_read_input_token_cost_above_200k_tokens,
+        pricing.cache_read_input_token_cost_above_272k_tokens,
         pricing.cache_creation_input_token_cost_above_200k_tokens,
     ]
     .into_iter()
@@ -979,9 +1080,16 @@ fn has_any_usable_pricing(pricing: &ModelPricing) -> bool {
 
 fn has_any_valid_above_tier_value(pricing: &ModelPricing) -> bool {
     [
+        pricing.input_cost_per_token_above_128k_tokens,
         pricing.input_cost_per_token_above_200k_tokens,
+        pricing.input_cost_per_token_above_256k_tokens,
+        pricing.input_cost_per_token_above_272k_tokens,
+        pricing.output_cost_per_token_above_128k_tokens,
         pricing.output_cost_per_token_above_200k_tokens,
+        pricing.output_cost_per_token_above_256k_tokens,
+        pricing.output_cost_per_token_above_272k_tokens,
         pricing.cache_read_input_token_cost_above_200k_tokens,
+        pricing.cache_read_input_token_cost_above_272k_tokens,
         pricing.cache_creation_input_token_cost_above_200k_tokens,
     ]
     .into_iter()
@@ -993,11 +1101,35 @@ fn has_meaningful_tier_support(pricing: &ModelPricing) -> bool {
     [
         (
             pricing.input_cost_per_token,
+            pricing.input_cost_per_token_above_128k_tokens,
+        ),
+        (
+            pricing.input_cost_per_token,
             pricing.input_cost_per_token_above_200k_tokens,
+        ),
+        (
+            pricing.input_cost_per_token,
+            pricing.input_cost_per_token_above_256k_tokens,
+        ),
+        (
+            pricing.input_cost_per_token,
+            pricing.input_cost_per_token_above_272k_tokens,
+        ),
+        (
+            pricing.output_cost_per_token,
+            pricing.output_cost_per_token_above_128k_tokens,
         ),
         (
             pricing.output_cost_per_token,
             pricing.output_cost_per_token_above_200k_tokens,
+        ),
+        (
+            pricing.output_cost_per_token,
+            pricing.output_cost_per_token_above_256k_tokens,
+        ),
+        (
+            pricing.output_cost_per_token,
+            pricing.output_cost_per_token_above_272k_tokens,
         ),
     ]
     .into_iter()
@@ -1354,6 +1486,19 @@ mod tests {
                 input_cost_per_token: Some(0.00000175),
                 output_cost_per_token: Some(0.000014),
                 cache_read_input_token_cost: Some(1.75e-7),
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "gpt-5.5".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                input_cost_per_token_above_272k_tokens: Some(0.000010),
+                output_cost_per_token: Some(0.000030),
+                output_cost_per_token_above_272k_tokens: Some(0.000045),
+                cache_read_input_token_cost: Some(0.0000005),
+                cache_read_input_token_cost_above_272k_tokens: Some(0.000001),
                 cache_creation_input_token_cost: None,
                 ..Default::default()
             },
@@ -2053,6 +2198,14 @@ mod tests {
     }
 
     #[test]
+    fn test_exact_match_gpt_5_5_litellm() {
+        let lookup = create_lookup();
+        let result = lookup.lookup("gpt-5.5").unwrap();
+        assert_eq!(result.matched_key, "gpt-5.5");
+        assert_eq!(result.source, "LiteLLM");
+    }
+
+    #[test]
     fn test_exact_match_openrouter() {
         let lookup = create_lookup();
         let result = lookup.lookup("z-ai/glm-4.7").unwrap();
@@ -2101,11 +2254,96 @@ mod tests {
     }
 
     #[test]
+    fn test_tier_suffix_xhigh_gpt_5_5() {
+        let lookup = create_lookup();
+        let result = lookup.lookup("gpt-5.5-xhigh").unwrap();
+        assert_eq!(result.matched_key, "gpt-5.5");
+        assert_eq!(result.source, "LiteLLM");
+    }
+
+    #[test]
     fn test_tier_suffix_xhigh_codex_max() {
         let lookup = create_lookup();
         let result = lookup.lookup("gpt-5.1-codex-max-xhigh").unwrap();
         assert_eq!(result.matched_key, "gpt-5.1-codex-max");
         assert_eq!(result.source, "LiteLLM");
+    }
+
+    #[test]
+    fn test_parenthesized_reasoning_tier_gpt_levels() {
+        let lookup = create_lookup();
+
+        for tier in ["minimal", "low", "medium", "high", "xhigh", "auto", "none"] {
+            let id = format!("gpt-5.2({tier})");
+            let result = lookup.lookup(&id).unwrap_or_else(|| panic!("{id} miss"));
+            assert_eq!(result.matched_key, "gpt-5.2", "{id}");
+            assert_eq!(result.source, "LiteLLM", "{id}");
+        }
+    }
+
+    #[test]
+    fn test_parenthesized_reasoning_tier_claude_and_gemini() {
+        let lookup = create_lookup();
+
+        let claude = lookup.lookup("claude-sonnet-4-5(high)").unwrap();
+        assert_eq!(claude.matched_key, "claude-sonnet-4-5");
+        assert_eq!(claude.source, "LiteLLM");
+
+        // Dot-form claude id (cliproxyapi accepts either) routes through
+        // version-separator normalization to the dashed catalog entry.
+        let claude_dot = lookup.lookup("claude-sonnet-4.5(none)").unwrap();
+        assert_eq!(claude_dot.matched_key, "claude-sonnet-4-5");
+
+        let gemini = lookup.lookup("gemini-3-pro(auto)").unwrap();
+        assert_eq!(gemini.matched_key, "openrouter/google/gemini-3-pro-preview");
+    }
+
+    #[test]
+    fn test_parenthesized_reasoning_tier_with_routing_prefix() {
+        let lookup = create_lookup();
+
+        let prefixed = lookup.lookup("myproxy-gpt-5.2(xhigh)").unwrap();
+        assert_eq!(prefixed.matched_key, "gpt-5.2");
+
+        let antigravity = lookup
+            .lookup("antigravity-claude-sonnet-4-5(high)")
+            .unwrap();
+        assert_eq!(antigravity.matched_key, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn test_parenthesized_reasoning_tier_unknown_value_does_not_strip() {
+        let lookup = create_lookup();
+
+        // Values outside the cliproxyapi level set must not silently
+        // misresolve via `try_strip_unknown_suffix`: without an early
+        // return, splitting on `-` would peel the parenthesized fragment
+        // off and match a shorter, unrelated model id (e.g.
+        // `gpt-5.2-codex(invalid)` collapsing to `gpt-5.2`).
+        assert!(lookup.lookup("gpt-5.2(weirdgarbage)").is_none());
+        assert!(lookup.lookup("gpt-5.2(1024)").is_none());
+        assert!(lookup.lookup("gpt-5.2()").is_none());
+        assert!(lookup.lookup("gpt-5.2-codex(invalid)").is_none());
+        assert!(lookup.lookup("myproxy-gpt-5.2(invalid)").is_none());
+
+        // The same guard must hold across model families so that the
+        // generalized stripper never misresolves a non-GPT id by peeling
+        // a parenthesized fragment off through the dash-suffix path.
+        assert!(lookup
+            .lookup("antigravity-claude-sonnet-4-5(invalid)")
+            .is_none());
+        assert!(lookup.lookup("claude-sonnet-4-5(garbage)").is_none());
+        assert!(lookup.lookup("gemini-3-pro(weird)").is_none());
+    }
+
+    #[test]
+    fn test_parenthesized_reasoning_tier_cost_matches_base_model() {
+        let lookup = create_lookup();
+        let base = lookup.calculate_cost("gpt-5.2", 1_000_000, 500_000, 0, 0, 0);
+        let tiered = lookup.calculate_cost("gpt-5.2(xhigh)", 1_000_000, 500_000, 0, 0, 0);
+
+        assert!((tiered - base).abs() < f64::EPSILON);
+        assert!((tiered - 8.75).abs() < 0.001);
     }
 
     #[test]
@@ -2606,6 +2844,49 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_cost_tiered_above_272k_splits_gpt_5_5_tokens() {
+        let pricing: ModelPricing = serde_json::from_str(
+            r#"{
+                "input_cost_per_token": 0.000005,
+                "input_cost_per_token_above_272k_tokens": 0.000010,
+                "output_cost_per_token": 0.000030,
+                "output_cost_per_token_above_272k_tokens": 0.000045,
+                "cache_read_input_token_cost": 0.0000005,
+                "cache_read_input_token_cost_above_272k_tokens": 0.000001
+            }"#,
+        )
+        .unwrap();
+
+        let cost = compute_cost(&pricing, 272_001, 272_001, 272_001, 0, 0);
+        let expected = (272_000.0 * 0.000005 + 1.0 * 0.000010)
+            + (272_000.0 * 0.000030 + 1.0 * 0.000045)
+            + (272_000.0 * 0.0000005 + 1.0 * 0.000001);
+
+        assert!((cost - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_compute_cost_tiered_uses_multiple_thresholds_in_order() {
+        let pricing: ModelPricing = serde_json::from_str(
+            r#"{
+                "input_cost_per_token": 0.000001,
+                "input_cost_per_token_above_128k_tokens": 0.000002,
+                "input_cost_per_token_above_256k_tokens": 0.000003,
+                "input_cost_per_token_above_272k_tokens": 0.000004
+            }"#,
+        )
+        .unwrap();
+
+        let cost = compute_cost(&pricing, 300_000, 0, 0, 0, 0);
+        let expected = (128_000.0 * 0.000001)
+            + (128_000.0 * 0.000002)
+            + (16_000.0 * 0.000003)
+            + (28_000.0 * 0.000004);
+
+        assert!((cost - expected).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_compute_cost_tiered_is_applied_per_bucket() {
         let pricing: ModelPricing = serde_json::from_str(
             r#"{
@@ -2978,6 +3259,7 @@ mod tests {
                 cache_read_input_token_cost_above_200k_tokens: Some(0.000002),
                 cache_creation_input_token_cost: Some(0.000003),
                 cache_creation_input_token_cost_above_200k_tokens: Some(0.000004),
+                ..Default::default()
             },
         );
 
@@ -3079,6 +3361,7 @@ mod tests {
                 cache_read_input_token_cost_above_200k_tokens: Some(0.0000002),
                 cache_creation_input_token_cost: Some(0.0000003),
                 cache_creation_input_token_cost_above_200k_tokens: Some(0.0000004),
+                ..Default::default()
             },
         );
 

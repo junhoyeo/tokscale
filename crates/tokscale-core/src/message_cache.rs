@@ -1,7 +1,6 @@
 use crate::sessions::codex::CodexParseState;
 use crate::UnifiedMessage;
 use bincode::Options;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -11,7 +10,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_SCHEMA_VERSION: u32 = 5;
+const CACHE_SCHEMA_VERSION: u32 = 13;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -20,9 +19,14 @@ const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir()
-        .map(|path| path.join("tokscale"))
-        .or_else(fallback_cache_dir)
+    if crate::paths::is_config_dir_overridden()
+        || dirs::config_dir().is_some()
+        || cfg!(target_os = "macos") && dirs::home_dir().is_some()
+    {
+        Some(crate::paths::get_cache_dir())
+    } else {
+        fallback_cache_dir()
+    }
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -31,6 +35,20 @@ fn cache_path() -> Option<PathBuf> {
 
 fn cache_lock_path() -> Option<PathBuf> {
     Some(cache_dir()?.join(CACHE_LOCK_FILENAME))
+}
+
+fn legacy_cache_paths() -> Vec<PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return Vec::new();
+    }
+
+    [
+        crate::paths::legacy_dirs_cache_dir().map(|d| d.join(CACHE_FILENAME)),
+        crate::paths::legacy_dot_cache_tokscale_dir().map(|d| d.join(CACHE_FILENAME)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn fallback_cache_dir() -> Option<PathBuf> {
@@ -272,6 +290,11 @@ impl SourceMessageCache {
         let Some(lock_path) = cache_lock_path() else {
             return Self::default();
         };
+        if let Some(lock_dir) = lock_path.parent() {
+            if ensure_cache_dir(lock_dir).is_err() {
+                return Self::default();
+            }
+        }
         let lock_file = match OpenOptions::new()
             .read(true)
             .write(true)
@@ -282,13 +305,19 @@ impl SourceMessageCache {
             Ok(file) => file,
             Err(_) => return Self::default(),
         };
-        if lock_file.lock_shared().is_err() {
+        if fs2::FileExt::lock_shared(&lock_file).is_err() {
             return Self::default();
         }
 
-        let store = match read_store_from_path(&path) {
-            Some(store) => store,
-            None => return Self::default(),
+        let store = match read_store_from_path_status(&path) {
+            CacheReadStatus::Loaded(store) => Some(store),
+            CacheReadStatus::Missing => legacy_cache_paths()
+                .into_iter()
+                .find_map(|path| read_store_from_path(&path)),
+            CacheReadStatus::Invalid => None,
+        };
+        let Some(store) = store else {
+            return Self::default();
         };
 
         let entries = store
@@ -316,6 +345,15 @@ impl SourceMessageCache {
     pub(crate) fn get(&self, path: &Path) -> Option<&CachedSourceEntry> {
         let key = CachedPath::from_path(path);
         self.entries.get(&key)
+    }
+
+    pub(crate) fn remove(&mut self, path: &Path) {
+        let key = CachedPath::from_path(path);
+        if self.entries.remove(&key).is_some() {
+            self.dirty_keys.remove(&key);
+            self.deleted_paths.insert(key);
+            self.dirty = true;
+        }
     }
 
     pub(crate) fn prune_missing_files(&mut self) {
@@ -365,7 +403,7 @@ impl SourceMessageCache {
             Ok(file) => file,
             Err(_) => return,
         };
-        if lock_file.lock_exclusive().is_err() {
+        if fs2::FileExt::lock_exclusive(&lock_file).is_err() {
             return;
         }
 
@@ -405,6 +443,10 @@ impl SourceMessageCache {
             nanos
         ));
 
+        // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
+        // the canonical cache file before writing — a partial save or process
+        // crash between delete and rename would lose the cache. The temp-file
+        // pattern makes corruption-on-crash impossible.
         let write_result = (|| -> std::io::Result<()> {
             let file = File::create(&tmp_path)?;
             let mut writer = BufWriter::new(file);
@@ -414,12 +456,9 @@ impl SourceMessageCache {
                 .map_err(std::io::Error::other)?;
             writer.flush()?;
             writer.get_ref().sync_all()?;
-            if fs::rename(&tmp_path, &final_path).is_err() {
-                fs::copy(&tmp_path, &final_path)?;
-                let final_file = File::open(&final_path)?;
-                final_file.sync_all()?;
-                let _ = fs::remove_file(&tmp_path);
-            }
+            crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
+            let final_file = File::open(&final_path)?;
+            final_file.sync_all()?;
             Ok(())
         })();
 
@@ -451,6 +490,40 @@ fn read_store_from_path(path: &Path) -> Option<CachedSourceStore> {
         return None;
     }
     Some(store)
+}
+
+enum CacheReadStatus {
+    Missing,
+    Invalid,
+    Loaded(CachedSourceStore),
+}
+
+fn read_store_from_path_status(path: &Path) -> CacheReadStatus {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheReadStatus::Missing,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    if metadata.len() > MAX_CACHE_FILE_BYTES {
+        return CacheReadStatus::Invalid;
+    }
+
+    let reader = BufReader::new(file);
+    let store: CachedSourceStore = match bincode::options()
+        .with_limit(MAX_CACHE_FILE_BYTES)
+        .deserialize_from(reader)
+    {
+        Ok(store) => store,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    if store.schema_version != CACHE_SCHEMA_VERSION {
+        return CacheReadStatus::Invalid;
+    }
+    CacheReadStatus::Loaded(store)
 }
 
 fn read_sample_hash(file: &mut File, offset: u64, len: usize) -> Option<FileSampleHash> {
@@ -566,10 +639,15 @@ pub(crate) fn build_codex_incremental_cache(
     consumed_offset: u64,
     state: CodexParseState,
 ) -> Option<CodexIncrementalCache> {
+    let ends_with_newline = consumed_offset == 0 || file_ends_with_newline(path, consumed_offset);
+    if !ends_with_newline {
+        return None;
+    }
+
     Some(CodexIncrementalCache {
         state,
         consumed_offset,
-        ends_with_newline: consumed_offset == 0 || file_ends_with_newline(path, consumed_offset),
+        ends_with_newline,
         prefix_hash: hash_prefix(path, consumed_offset)?,
     })
 }
@@ -602,12 +680,69 @@ pub(crate) fn codex_prefix_matches(path: &Path, cached: &CodexIncrementalCache) 
     }
 }
 
+pub(crate) fn codex_cache_entry_matches_fingerprint(
+    cached: &CachedSourceEntry,
+    fingerprint: &SourceFingerprint,
+) -> bool {
+    let Some(codex_incremental) = cached.codex_incremental.as_ref() else {
+        return false;
+    };
+
+    codex_incremental.consumed_offset == fingerprint.size
+        && codex_incremental.ends_with_newline
+        && codex_incremental.prefix_hash == fingerprint.content_hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    /// Pin every env var the cache resolvers consult so the test stays
+    /// inside `temp_home`. CI runners can leak `XDG_CONFIG_HOME` /
+    /// `XDG_CACHE_HOME` from the host, in which case `paths::get_cache_dir`
+    /// resolves outside the sandbox and the legacy fallback never gets
+    /// exercised. Returns the previous values so the caller can restore.
+    fn sandbox_cache_env(
+        temp_home: &std::path::Path,
+    ) -> (
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+    ) {
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        unsafe {
+            std::env::set_var("HOME", temp_home);
+            std::env::set_var("XDG_CONFIG_HOME", temp_home.join(".config"));
+            std::env::set_var("XDG_CACHE_HOME", temp_home.join(".cache"));
+        }
+        (prev_home, prev_xdg_config, prev_xdg_cache)
+    }
+
+    fn restore_cache_env(
+        prev: (
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+        ),
+    ) {
+        restore_env_var("HOME", prev.0);
+        restore_env_var("XDG_CONFIG_HOME", prev.1);
+        restore_env_var("XDG_CACHE_HOME", prev.2);
+    }
 
     fn write_temp_file(content: &[u8]) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -726,6 +861,18 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_incremental_cache_requires_newline_boundary() {
+        let file = write_temp_file(b"line-1\nline-2");
+
+        assert!(build_codex_incremental_cache(
+            file.path(),
+            file.as_file().metadata().unwrap().len(),
+            CodexParseState::default(),
+        )
+        .is_none());
+    }
+
+    #[test]
     fn test_codex_prefix_matches_rejects_middle_rewrite_with_same_tail() {
         let file = write_temp_file(b"aaaa\nbbbb\ncccc\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
@@ -766,8 +913,7 @@ mod tests {
     #[serial_test::serial]
     fn test_source_message_cache_round_trip() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        let prev_env = sandbox_cache_env(temp_home.path());
 
         let file = write_temp_file(b"{}\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
@@ -801,10 +947,7 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         assert!(loaded.get(file.path()).is_some());
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -833,7 +976,7 @@ mod tests {
     fn test_load_ignores_oversized_cache_file() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         {
             let cache_file = cache_path().unwrap();
@@ -845,10 +988,7 @@ mod tests {
             assert!(loaded.entries.is_empty());
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var("HOME", original_home);
     }
 
     #[test]
@@ -856,7 +996,7 @@ mod tests {
     fn test_load_ignores_stale_schema_version() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         {
             let cache_file = cache_path().unwrap();
@@ -873,10 +1013,7 @@ mod tests {
             assert!(loaded.entries.is_empty());
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var("HOME", original_home);
     }
 
     #[test]
@@ -884,7 +1021,7 @@ mod tests {
     fn test_fallback_cache_dir_prefers_runtime_dir() {
         let runtime_dir = TempDir::new().unwrap();
         let original_xdg_runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
-        std::env::set_var("XDG_RUNTIME_DIR", runtime_dir.path());
+        restore_env_var("XDG_RUNTIME_DIR", Some(runtime_dir.path()));
 
         {
             assert_eq!(
@@ -893,10 +1030,7 @@ mod tests {
             );
         }
 
-        match original_xdg_runtime_dir {
-            Some(path) => std::env::set_var("XDG_RUNTIME_DIR", path),
-            None => std::env::remove_var("XDG_RUNTIME_DIR"),
-        }
+        restore_env_var("XDG_RUNTIME_DIR", original_xdg_runtime_dir);
     }
 
     #[test]
@@ -904,7 +1038,7 @@ mod tests {
     fn test_save_if_dirty_marks_cache_clean() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         let mut cache = SourceMessageCache::default();
         assert!(!cache.dirty);
@@ -925,10 +1059,7 @@ mod tests {
             assert!(!cache.dirty);
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var("HOME", original_home);
     }
 
     #[test]
@@ -936,7 +1067,7 @@ mod tests {
     fn test_save_if_dirty_merges_concurrent_writers() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         {
             let file_one = write_temp_file(b"{\"id\":1}\n");
@@ -968,10 +1099,94 @@ mod tests {
             assert!(loaded.get(file_two.path()).is_some());
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var("HOME", original_home);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_falls_back_to_legacy_dirs_cache_path() {
+        let temp_home = TempDir::new().unwrap();
+        let temp_xdg_cache = TempDir::new().unwrap();
+        let original_home = std::env::var_os("HOME");
+        let original_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let original_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let original_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
+
+        restore_env_var("HOME", Some(temp_home.path()));
+        restore_env_var("XDG_CACHE_HOME", Some(temp_xdg_cache.path()));
+        restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
+        restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
+
+        let source = write_temp_file(b"legacy-dirs\n");
+        let entry = CachedSourceEntry::new(
+            source.path(),
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        let legacy_path = crate::paths::legacy_dirs_cache_dir()
+            .unwrap()
+            .join(CACHE_FILENAME);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+        let store = CachedSourceStore {
+            schema_version: CACHE_SCHEMA_VERSION,
+            entries: vec![entry],
+        };
+        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
+        bincode::options().serialize_into(writer, &store).unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(source.path()).is_some());
+
+        restore_env_var("HOME", original_home);
+        restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
+        restore_env_var("XDG_CONFIG_HOME", original_xdg_config);
+        restore_env_var("TOKSCALE_CONFIG_DIR", original_override);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_falls_back_to_legacy_dot_cache_path() {
+        let temp_home = TempDir::new().unwrap();
+        let original_home = std::env::var_os("HOME");
+        let original_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let original_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let original_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
+
+        restore_env_var("HOME", Some(temp_home.path()));
+        restore_env_var("XDG_CACHE_HOME", None::<&str>);
+        restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
+        restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
+
+        let source = write_temp_file(b"legacy-dot\n");
+        let entry = CachedSourceEntry::new(
+            source.path(),
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        let legacy_path = crate::paths::legacy_dot_cache_tokscale_dir()
+            .unwrap()
+            .join(CACHE_FILENAME);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+        let store = CachedSourceStore {
+            schema_version: CACHE_SCHEMA_VERSION,
+            entries: vec![entry],
+        };
+        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
+        bincode::options().serialize_into(writer, &store).unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(source.path()).is_some());
+
+        restore_env_var("HOME", original_home);
+        restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
+        restore_env_var("XDG_CONFIG_HOME", original_xdg_config);
+        restore_env_var("TOKSCALE_CONFIG_DIR", original_override);
     }
 
     #[cfg(unix)]

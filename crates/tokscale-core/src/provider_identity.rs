@@ -233,6 +233,7 @@ mod tests {
             Some("anthropic")
         );
         assert_eq!(inferred_provider_from_model("gpt-5.2"), Some("openai"));
+        assert_eq!(inferred_provider_from_model("gpt-5.5"), Some("openai"));
         assert_eq!(
             inferred_provider_from_model("gemini-2.5-pro"),
             Some("google")

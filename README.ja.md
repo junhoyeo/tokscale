@@ -58,19 +58,24 @@
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ レガシー: `.clawdbot`, `.moltbot`, `.moldbot`) | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db`（フォールバック: `~/.hermes/state.db`） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/*/chats/*.json` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | `~/.config/tokscale/cursor-cache/`経由でAPI同期 | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`、`manicode-staging`; `CODEBUFF_DATA_DIR` でオーバーライド可能) | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` and `~/.omp/agent/sessions/` ([Oh My Pi](https://github.com/can1357/oh-my-pi)) | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | `~/.kimi/sessions/` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ 対応 |
-| <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json`（プロジェクトレジストリ。フォールバック: `~/.local/share/crush/projects.json`） | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support、レガシー Block/goose パス; `GOOSE_PATH_ROOT` でオーバーライド可能) | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | `tokscale antigravity sync` で `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` にキャッシュ（ローカル言語サーバ RPC を使用） | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db`（macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; ホスティング済み Zed モデル専用、外部 ACP エージェントは対象外） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:`モデルや`synthetic`プロバイダを検出して他ソースから再帰属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） | ✅ 対応 |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
@@ -99,6 +104,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - [価格検索](#価格検索)
   - [ソーシャルプラットフォームコマンド](#ソーシャルプラットフォームコマンド)
   - [Cursor IDEコマンド](#cursor-ideコマンド)
+  - [Antigravity コマンド](#antigravity-コマンド)
   - [出力例](#出力例--lightバージョン)
   - [設定](#設定)
   - [環境変数](#環境変数)
@@ -131,12 +137,12 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
 ## 機能
 
 - **インタラクティブTUIモード** - Ratatuiによる美しいターミナルUI（デフォルトモード）
-  - 4つのインタラクティブビュー：概要、モデル、日別、統計
+  - 6つのインタラクティブビュー：概要、モデル、日別、時間別、統計、エージェント（オプションの Minutely ビューを `minutelyTabEnabled` でオプトイン可能）
   - キーボード＆マウスナビゲーション
   - 9色テーマのGitHubスタイル貢献グラフ
   - リアルタイムフィルタリングとソート
   - ゼロフリッカーレンダリング
-- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Cursor IDE、Gemini CLI、Amp、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Synthetic全体の使用量追跡
+- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Synthetic全体の使用量追跡
 - **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得；OpenRouter自動フォールバックと新規モデル向けCursor価格サポート
 - **詳細な内訳** - 入力、出力、キャッシュ読み書き、推論トークン追跡
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
@@ -155,6 +161,9 @@ npx tokscale@latest
 
 # またはbunxを使用
 bunx tokscale@latest
+
+# またはエイリアスをインストールせずにDenoを使用
+deno x npm:tokscale@latest
 
 # ライトモード（テーブルレンダリングのみ）
 npx tokscale@latest --light
@@ -237,15 +246,21 @@ tokscale models --json > report.json   # ファイルに保存
 
 - **6つのビュー**: 概要（チャート + トップモデル）、モデル、日別、時間別、統計（貢献グラフ）、エージェント
 - **キーボードナビゲーション**:
-  - `1-6`または`←/→/Tab`: ビュー切り替え
-  - `↑/↓`: リスト操作
+  - `←/→/Tab/BackTab`: ビュー切り替え
+  - `↑/↓` または `Home/End`: リスト操作
+  - `Enter`: 日別詳細を開く（Daily タブ）/ グラフセル選択（Stats タブ）
+  - `Esc` または `Backspace`: ダイアログを閉じる / 詳細表示を抜ける
   - `c/d/t`: コスト/日付/トークンでソート
+  - `j`: 今日にジャンプ
   - `s`: ソース選択ダイアログを開く
   - `g`: グループ基準選択ダイアログを開く（モデル、クライアント+モデル、クライアント+プロバイダー+モデル）
+  - `h`: 日別/時間別のチャート粒度を切り替え（Overview タブ）
+  - `v`: テーブル/プロフィールビューを切り替え（Hourly タブ）
+  - `y`: 選択行をクリップボードにコピー
   - `p`: 9色テーマを循環
-  - `r`: データ更新
+  - `r`: データを更新; `Shift+R` で自動更新の切り替え; `+`/`-` で間隔調整
   - `e`: JSONにエクスポート
-  - `q`: 終了
+  - `q` または `Ctrl+C`: 終了
 - **マウスサポート**: タブ、ボタン、フィルターをクリック
 - **テーマ**: Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu
 - **設定の永続化**: 設定は`~/.config/tokscale/settings.json`に保存（[設定](#設定)を参照）
@@ -284,64 +299,31 @@ TUIで`g`を押すか、`--light`/`--json`モードで`--group-by`を使用し�
 
 ### プラットフォーム別フィルタリング
 
+`--client`（短縮形 `-c`）でレポートを 1 つ以上のクライアントに絞り込めます。フラグは繰り返し可能で、カンマ区切りの値にも対応し、すべてのレポートコマンドで利用できます：
+
 ```bash
 # OpenCodeの使用量のみ表示
-tokscale --opencode
+tokscale --client opencode
 
-# Claude Codeの使用量のみ表示
-tokscale --claude
+# カンマ区切り：複数のクライアントを同時にフィルター
+tokscale --client opencode,claude
 
-# Codex CLIの使用量のみ表示
-tokscale --codex
+# 繰り返し：同じ効果（シェルエイリアスと相性が良い）
+tokscale -c opencode -c claude
 
-# OpenClawの使用量のみ表示
-tokscale --openclaw
+# Cursor IDE は事前に `tokscale cursor login` が必要
+tokscale --client cursor
 
-# Piの使用量のみ表示
-tokscale --pi
+# Synthetic（synthetic.new）は他のエージェントセッションから検出されます
+tokscale --client synthetic
 
-# Gemini CLIの使用量のみ表示
-tokscale --gemini
-
-# Cursor IDEの使用量のみ表示（事前に`tokscale cursor login`が必要）
-tokscale --cursor
-
-# Ampの使用量のみ表示
-tokscale --amp
-
-# Droidの使用量のみ表示
-tokscale --droid
-
-# Hermes Agentの使用量のみ表示
-tokscale --hermes
-
-# Kimi CLIの使用量のみ表示
-tokscale --kimi
-
-# Qwen CLIの使用量のみ表示
-tokscale --qwen
-
-# Roo Codeの使用量のみ表示
-tokscale --roocode
-
-# Kiloの使用量のみ表示
-tokscale --kilocode
-
-# Muxの使用量のみ表示
-tokscale --mux
-
-# Kilo CLIの使用量のみ表示
-tokscale --kilo
-
-# Crushの使用量のみ表示
-tokscale --crush
-
-# Synthetic (synthetic.new) の使用量のみ表示
-tokscale --synthetic
-
-# フィルターを組み合わせ
-tokscale --opencode --claude
+# 他のフィルターと組み合わせ
+tokscale --client opencode,claude --week --json
 ```
+
+利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `synthetic`。
+
+> **非推奨のお知らせ**: 既存の単一クライアントフラグ（`--opencode`、`--claude`、`--codex` など）は後方互換性のため引き続き動作しますが、`--help` から非表示となり、次のメジャーリリースで削除予定です。可能な限り `--client` への移行を推奨します。インタラクティブな端末で旧フラグを使用すると 1 行の警告が表示されます。
 
 ### 日付フィルタリング
 
@@ -360,7 +342,7 @@ tokscale --since 2024-01-01 --until 2024-12-31
 tokscale --year 2024
 
 # 他のオプションと組み合わせ
-tokscale models --week --claude --json
+tokscale models --week --client claude --json
 tokscale monthly --month --benchmark
 ```
 
@@ -420,7 +402,7 @@ tokscale whoami
 tokscale submit
 
 # フィルター付きで送信
-tokscale submit --opencode --claude --since 2024-01-01
+tokscale submit --client opencode,claude --since 2024-01-01
 
 # 送信内容をプレビュー（ドライラン）
 tokscale submit --dry-run
@@ -476,6 +458,25 @@ tokscale cursor logout --all --purge-cache
 
 > ⚠️ **セキュリティ警告**: セッショントークンはパスワードのように扱ってください。公開したり、バージョン管理にコミットしたりしないでください。トークンはCursorアカウントへの完全なアクセス権を付与します。
 
+### Antigravity コマンド
+
+Antigravity の同期は現在 macOS / Linux でのみサポートされています。Antigravity 対応エディタが起動していてローカル言語サーバが利用可能な場合にのみ動作し、tokscale はそのローカル言語サーバから使用量を読み取り、正規化されたアーティファクトをローカルにキャッシュします。
+
+```bash
+# 実行中の Antigravity 言語サーバを tokscale が認識できるか確認
+tokscale antigravity status
+
+# ローカル Antigravity 言語サーバから使用量を tokscale のキャッシュに同期
+tokscale antigravity sync
+
+# キャッシュされた Antigravity アーティファクトを削除
+tokscale antigravity purge-cache
+```
+
+**キャッシュ場所**: `~/.config/tokscale/antigravity-cache/`
+
+**仕組み**: `tokscale antigravity sync` はローカルの Antigravity セッション候補を検出し、ローカル言語サーバ RPC から確定済みの使用量データを取得して、tokscale-core が後で解析できるよう正規化された JSONL アーティファクトとして保存します。最新の Antigravity データをレポートに反映したい場合は、レポート実行前に sync を実行してください。
+
 ### 出力例（`--light`バージョン）
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -487,7 +488,8 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 ```json
 {
   "colorPalette": "blue",
-  "includeUnusedModels": false
+  "includeUnusedModels": false,
+  "defaultClients": ["opencode", "claude"]
 }
 ```
 
@@ -498,6 +500,35 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 | `autoRefreshEnabled` | boolean | `false` | TUIの自動更新を有効化 |
 | `autoRefreshMs` | number | `60000` | 自動更新間隔（30000-3600000ms） |
 | `nativeTimeoutMs` | number | `300000` | ネイティブサブプロセス処理の最大時間（5000-3600000ms） |
+| `defaultClients` | string[] | `[]` | `--client/-c` フラグを渡さない場合に適用されるクライアントフィルター。`--client` と同じ ID を受け付けます（例: `["opencode", "claude", "synthetic"]`）。未知の ID は無視されます。CLI フラグが指定されるとこのリストは完全に無視されます — マージはしません。 |
+| `light.writeCache` | boolean | `false` | `true` のとき、`tokscale --light` はレンダリング直後に TUI キャッシュを原子的に上書きします。CLI フラグ `--write-cache` / `--no-write-cache` が実行ごとに優先されます。 |
+| `minutelyTabEnabled` | boolean | `false` | TUI に分単位の Minutely タブを表示し、データ読み込み時に分単位の集計を実行します。分単位の粒度はほとんどのユーザーにとってニッチな診断ビューであり、大規模データセットでは分単位のバケット処理に無視できないコストがかかるため、既定では無効になっています。 |
+
+#### Minutely タブの有効化
+
+Minutely タブはトークン使用量を分単位で表示し、バーストパターンの診断、単一セッションのデバッグ、`autoRefreshEnabled` と組み合わせたほぼリアルタイムの監視に最も有用です。分単位の集計はデータ読み込み時にすべての解析済みメッセージを処理するため、ほとんどのユーザーには不要な RAM と CPU コストが発生します。そのため既定では非表示になっています。
+
+有効化するには、`~/.config/tokscale/settings.json` で `minutelyTabEnabled` を `true` に設定します：
+
+```json
+{
+  "minutelyTabEnabled": true
+}
+```
+
+再起動後、タブストリップの Hourly と Stats の間に Minutely タブが表示され、Tab / BackTab / Left / Right ナビゲーションがそれを循環します。フラグを `false` に戻すとタブは再び非表示になり、集計もスキップされます。
+
+#### キャッシュディレクトリ構成
+
+再生成可能な CLI/TUI/料金/Wrapped キャッシュは `~/.config/tokscale/cache/` 配下に保存されます（`TOKSCALE_CONFIG_DIR` を設定した場合は `${TOKSCALE_CONFIG_DIR}/cache/`）。Antigravity の同期アーティファクトは `~/.config/tokscale/antigravity-cache/` に別管理で残ります。
+
+- `tui-data-cache.json` — TUI 起動キャッシュ
+- `source-message-cache.bin` + `source-message-cache.lock` — ソースメッセージキャッシュとロックファイル
+- `pricing-litellm.json` / `pricing-openrouter.json` — 料金キャッシュ
+- `opencode-migration.json` — OpenCode 移行記録
+- `fonts/`、`images/` — Wrapped アセットキャッシュ
+
+このディレクトリは削除しても安全です。必要になれば Tokscale が再作成し、再生成します。
 
 ### 環境変数
 
@@ -506,6 +537,7 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 | 変数 | デフォルト | 説明 |
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000`（5分） | `nativeTimeoutMs` 設定をオーバーライド |
+| `TOKSCALE_CONFIG_DIR` | unset | 設定ディレクトリのルート（`settings.json`、`star-cache.json`、`cache/`、`antigravity-cache/` の保存場所）をオーバーライドします。絶対パス推奨；相対パスはプロセス CWD を基準に解決されます。CI サンドボックスや非デフォルトの場所を固定したい場合に便利です。設定されている場合、tokscale は macOS のレガシーパス（`~/Library/Application Support/tokscale/`）にフォールバックしません。 |
 
 ```bash
 # 例：非常に大きなデータセット用にタイムアウトを増加
@@ -588,7 +620,7 @@ tokscale sources --json
 - **インタラクティブツールチップ**: ホバーで詳細な日別内訳を表示
 - **日別内訳パネル**: クリックでソース別、モデル別の詳細を確認
 - **年別フィルタリング**: 年間を移動
-- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Cursor、Gemini、Amp、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Synthetic）
+- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Synthetic）
 - **統計パネル**: 総コスト、トークン、活動日数、連続記録
 - **FOUC防止**: Reactハイドレーション前にテーマを適用（フラッシュなし）
 
@@ -786,7 +818,7 @@ tokscale graph --since 2024-01-01 --until 2024-12-31
 tokscale graph --year 2024
 
 # プラットフォーム別フィルター
-tokscale graph --opencode --claude
+tokscale graph --client opencode,claude
 
 # 処理時間ベンチマークを表示
 tokscale graph --output data.json --benchmark
@@ -881,6 +913,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Claude Code | `~/.claude/` | `%USERPROFILE%\.claude\` | すべてのプラットフォームで同じパス |
 | OpenClaw | `~/.openclaw/` (+ レガシー: `.clawdbot`, `.moltbot`, `.moldbot`) | `%USERPROFILE%\.openclaw\` (+ レガシーパス) | すべてのプラットフォームで同じパス |
 | Codex CLI | `~/.codex/` | `%USERPROFILE%\.codex\` | `CODEX_HOME`環境変数で設定可能（[ソース](https://github.com/openai/codex)） |
+| Copilot CLI | `~/.copilot/otel/` | `%USERPROFILE%\.copilot\otel\` | OTELファイル書き出しが必要; `COPILOT_OTEL_FILE_EXPORTER_PATH`も自動取り込み |
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | `HERMES_HOME`環境変数で設定可能（[ソース](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | すべてのプラットフォームで同じパス |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | OpenCodeと同様に`xdg-basedir`を使用 |
@@ -892,8 +925,11 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorageタスクログ |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorageタスクログ |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | 全プラットフォームで同じパス |
+| Codebuff | `~/.config/manicode/projects/` (+ `manicode-dev`、`manicode-staging`) | `%USERPROFILE%\.config\manicode\projects\` | `CODEBUFF_DATA_DIR` 環境変数でオーバーライド |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | OpenCodeと同様に`xdg-basedir`を使用 |
 | Crush | `$XDG_DATA_HOME/crush/`（フォールバック: `~/.local/share/crush/`） | `%USERPROFILE%\.local\share\crush\`（設定されていれば `%XDG_DATA_HOME%\crush\`） | フォールバック付きでXDGデータディレクトリを使用 |
+| Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support、レガシー Block パス) | `%USERPROFILE%\.local\share\goose\sessions\` | `GOOSE_PATH_ROOT` 環境変数で設定可能 |
+| Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` は現在 macOS / Linux でのみサポート |
 | Synthetic | 他ソースから再帰属 | 他ソースから再帰属 | `hf:`モデル + `synthetic`プロバイダを検出 |
 
 > **注**: Windowsでは`~`は`%USERPROFILE%`に展開されます（例：`C:\Users\ユーザー名`）。これらのツールは`%APPDATA%`のようなWindowsネイティブパスではなく、クロスプラットフォームの一貫性のためにUnixスタイルのパス（`.local/share`など）を意図的に使用しています。
@@ -901,9 +937,11 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 #### Windows固有の設定
 
 Tokscaleは以下の場所に設定を保存します：
-- **設定**: `%USERPROFILE%\.config\tokscale\settings.json`
-- **キャッシュ**: `%USERPROFILE%\.cache\tokscale\`
+- **TUI設定**: `%APPDATA%\tokscale\settings.json`（プラットフォームのデフォルト。`TOKSCALE_CONFIG_DIR` でオーバーライド可能）
+- **キャッシュ**: `%APPDATA%\tokscale\cache\`（統合キャッシュルート）
+- **レガシーキャッシュパス**: 以前のリリースで使われていた `%USERPROFILE%\.cache\tokscale\` のような分散パスは、新しい場所に再生成可能データが書かれるまで残ることがあります。
 - **Cursor認証情報**: `%USERPROFILE%\.config\tokscale\cursor-credentials.json`
+- **Tokscaleアカウント認証情報**: `%USERPROFILE%\.config\tokscale\credentials.json`
 
 ## セッションデータ保持
 
@@ -1019,6 +1057,39 @@ OpenCodeはビルド時のリリースチャンネルに応じてDBファイル�
 {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1234, "output_tokens": 567}}}}
 ```
 
+### Copilot CLI
+
+場所: `~/.copilot/otel/*.jsonl` または `COPILOT_OTEL_FILE_EXPORTER_PATH` に明示されたパス
+
+Copilot対応はファイル書き出しされたOpenTelemetry JSONLを読み取ります。Copilotを実行する前に有効化してください:
+
+```bash
+export COPILOT_OTEL_ENABLED=true
+export COPILOT_OTEL_EXPORTER_TYPE=file
+mkdir -p "$HOME/.copilot/otel"
+export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/copilot-otel-$(date +%Y%m%d-%H%M%S).jsonl"
+```
+
+PowerShell:
+
+```powershell
+$otelDir = "$HOME/.copilot/otel"
+New-Item -ItemType Directory -Force -Path $otelDir | Out-Null
+$env:COPILOT_OTEL_ENABLED = "true"
+$env:COPILOT_OTEL_EXPORTER_TYPE = "file"
+$env:COPILOT_OTEL_FILE_EXPORTER_PATH = Join-Path $otelDir ("copilot-otel-{0}.jsonl" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+```
+
+タイムスタンプ付きのファイル名を使用することを推奨します。これにより、各Copilotセッションが1つの巨大なOTELログに蓄積されるのではなく、新しいファイルに書き込まれます。
+
+Tokscaleは `chat` spanをトークン集計の信頼源として扱い、ツールspanおよび累積メトリクスはフェーズ1で無視します:
+
+```json
+{"type":"span","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"session-id","gen_ai.usage.input_tokens":1234,"gen_ai.usage.output_tokens":567,"gen_ai.usage.cache_read.input_tokens":890,"gen_ai.usage.reasoning.output_tokens":123}}
+```
+
+> CopilotのOTELペイロードは現在、安定したワークスペースメタデータを公開していないため、Copilotの行はワークスペース属性なしで表示される場合があります。Tokscaleは可能な限り報告されたモデルからこれらの行を価格計算し、`github.copilot.cost` を直接信頼しません。
+
 ### Gemini CLI
 
 場所: `~/.gemini/tmp/{projectHash}/chats/*.json`
@@ -1038,6 +1109,12 @@ OpenCodeはビルド時のリリースチャンネルに応じてDBファイル�
 場所: `~/.config/tokscale/cursor-cache/`（Cursor API経由で同期）
 
 CursorデータはセッショントークンでCursor APIから取得され、ローカルにキャッシュされます。認証するには`tokscale cursor login`を実行してください。セットアップ手順は[Cursor IDEコマンド](#cursor-ideコマンド)を参照。
+
+### Antigravity
+
+場所: `~/.config/tokscale/antigravity-cache/sessions/*.jsonl`（ローカルの Antigravity 言語サーバ RPC 経由で同期）
+
+Antigravity データはルートコマンドでは自動取得されません。Antigravity 対応エディタを開いた状態で `tokscale antigravity sync` を実行してローカルキャッシュを更新し、その後はキャッシュ済みの JSONL アーティファクトに対して通常の tokscale レポートとフィルターを利用してください。
 
 ### OpenClaw
 
@@ -1152,6 +1229,18 @@ Kilo CLIはOpenCodeと同様のSQLiteデータベースにセッションデー�
 
 Crushはプロジェクトごとのデータベース（`crush.db`）に使用量を保存します。Crushは信頼できるメッセージごとまたはモデルごとのトークン集計を提供しないため、Tokscaleはルートセッションのセッションレベルのコスト合計のみをインポートします。レコードは`model=session-total`として表示され、トークン内訳はゼロです。
 
+### Goose
+
+場所: `~/.local/share/goose/sessions/sessions.db`（`~/Library/Application Support/goose/`、`~/Library/Application Support/Block/goose/`、`~/.local/share/Block/goose/` もスキャン; `GOOSE_PATH_ROOT` でオーバーライド可能）
+
+Goose はセッションごとの使用量を SQLite の `sessions.db` に保存します。Tokscale は `model_config_json` からモデル、`provider_name` からプロバイダ、そしてセッションごとに累積された入力/出力トークン合計を抽出します。推論トークンはそのカラムが値を持つ場合に推定されます。
+
+### Codebuff
+
+場所: `~/.config/manicode/projects/<project>/chats/<chatId>/chat-messages.json`（`manicode-dev` および `manicode-staging` チャネルもスキャン; `CODEBUFF_DATA_DIR` でオーバーライド可能）
+
+Codebuff（旧 Manicode）はチャットごとに JSON ファイルを書き出します。Tokscale は `metadata.usage`、`metadata.codebuff.usage`、および run-state の `messageHistory[*].providerOptions` フォールバックからトークン使用量を解析し、部分的に新しいエントリが実トークン数を持つ古いエントリを覆い隠さないように履歴を逆順に走査します。メッセージごとのタイムスタンプが欠けている場合は chat-id ディレクトリ名、最後にファイルの mtime にフォールバックします。
+
 ### Synthetic (synthetic.new)
 
 Synthetic は他ソースのメッセージを後処理で再帰属します。`hf:`プレフィックスのモデル ID または `synthetic` / `glhf` / `octofriend` プロバイダを検出した場合、ソースを `synthetic` として扱います。
@@ -1167,8 +1256,8 @@ Tokscaleは[LiteLLMの価格データベース](https://github.com/BerriAI/litel
 **Cursorモデル価格**: LiteLLMとOpenRouterの両方にまだ存在しない最新モデル（例：`gpt-5.3-codex`）は、[Cursorモデルドキュメント](https://cursor.com/en-US/docs/models)から取得したハードコード価格を使用します。これらのオーバーライドはすべてのアップストリームソースの後、ファジーマッチングの前にチェックされるため、実際のアップストリーム価格が利用可能になると自動的に優先されます。
 
 **キャッシュ**: 価格データは1時間TTLでディスクにキャッシュされ、高速な起動を確保します：
-- LiteLLMキャッシュ: `~/.cache/tokscale/pricing-litellm.json`
-- OpenRouterキャッシュ: `~/.cache/tokscale/pricing-openrouter.json`（サポート対象プロバイダーのモデル作成者価格をキャッシュ）
+- LiteLLMキャッシュ: `~/.config/tokscale/cache/pricing-litellm.json`
+- OpenRouterキャッシュ: `~/.config/tokscale/cache/pricing-openrouter.json`（サポート対象プロバイダーのモデル作成者価格をキャッシュ）
 
 価格には以下が含まれます：
 - 入力トークン

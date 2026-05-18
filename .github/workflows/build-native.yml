@@ -63,7 +63,7 @@ jobs:
             bin_name: tokscale.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -71,7 +71,7 @@ jobs:
           targets: ${{ matrix.settings.target }}
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -104,7 +104,7 @@ jobs:
         run: ${{ matrix.settings.strip }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cli-binary-${{ matrix.settings.target }}
           path: target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}

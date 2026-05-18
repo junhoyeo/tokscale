@@ -136,10 +136,7 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Current list count
     if !is_very_narrow {
-        let count_label = match app.current_tab {
-            Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
-            _ => format!(" ({} models)", app.data.models.len()),
-        };
+        let count_label = current_count_label(app);
         right_spans.push(Span::styled(
             count_label,
             Style::default().fg(app.theme.muted),
@@ -149,6 +146,20 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
     let right_line = Line::from(right_spans);
     let right_para = Paragraph::new(right_line).alignment(Alignment::Right);
     frame.render_widget(right_para, chunks[1]);
+}
+
+fn current_count_label(app: &App) -> String {
+    match app.current_tab {
+        Tab::Overview | Tab::Models => format!(" ({} models)", app.data.models.len()),
+        Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
+        Tab::Daily if app.is_daily_detail_active() => {
+            format!(" ({} models)", app.get_sorted_daily_detail_rows().len())
+        }
+        Tab::Daily => format!(" ({} days)", app.data.daily.len()),
+        Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
+        Tab::Minutely => format!(" ({} minutes)", app.data.minutely.len()),
+        Tab::Stats => String::new(),
+    }
 }
 
 fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -174,7 +185,13 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         ];
         if app.current_tab == Tab::Daily {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
+            if app.is_daily_detail_active() {
+                spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
+            } else {
+                spans.push(Span::styled("↵", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+                spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
+            }
         }
         if app.current_tab == Tab::Hourly {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
@@ -191,10 +208,22 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" • ", Style::default().fg(app.theme.muted)),
         ];
         if app.current_tab == Tab::Daily {
-            spans.push(Span::styled(
-                "[j:today]",
-                Style::default().fg(Color::Yellow),
-            ));
+            if app.is_daily_detail_active() {
+                spans.push(Span::styled(
+                    "[esc:back]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "[enter:details]",
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::styled(" ", Style::default()));
+                spans.push(Span::styled(
+                    "[j:today]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
             spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         }
         if app.current_tab == Tab::Hourly {
@@ -306,4 +335,48 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::UsageData;
+
+    fn make_app_on(tab: Tab) -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(tab),
+        };
+        App::new_with_cached_data(config, Some(UsageData::default())).unwrap()
+    }
+
+    #[test]
+    fn test_current_count_label_matches_active_tab() {
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Models)),
+            " (0 models)"
+        );
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Agents)),
+            " (0 agents)"
+        );
+        assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
+        assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
+        assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+    }
+
+    #[test]
+    fn test_current_count_label_minutely_when_flag_enabled() {
+        let mut app = make_app_on(Tab::Models);
+        app.settings.minutely_tab_enabled = true;
+        app.current_tab = Tab::Minutely;
+        assert_eq!(current_count_label(&app), " (0 minutes)");
+    }
 }

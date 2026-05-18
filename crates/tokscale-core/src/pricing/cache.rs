@@ -6,9 +6,7 @@ use std::time::SystemTime;
 const CACHE_TTL_SECS: u64 = 3600;
 
 pub fn get_cache_dir() -> PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("tokscale")
+    crate::paths::get_cache_dir()
 }
 
 pub fn get_cache_path(filename: &str) -> PathBuf {
@@ -25,9 +23,17 @@ fn load_cache_with_policy<T: for<'de> Deserialize<'de>>(
     filename: &str,
     allow_stale: bool,
 ) -> Option<T> {
-    let path = get_cache_path(filename);
-    let content = fs::read_to_string(&path).ok()?;
-    let cached: CachedData<T> = serde_json::from_str(&content).ok()?;
+    let canonical_path = get_cache_path(filename);
+    let cached: CachedData<T> = match fs::read_to_string(&canonical_path) {
+        Ok(content) => serde_json::from_str(&content).ok()?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            legacy_cache_paths(filename).into_iter().find_map(|path| {
+                let content = fs::read_to_string(&path).ok()?;
+                serde_json::from_str(&content).ok()
+            })?
+        }
+        Err(_) => return None,
+    };
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -77,15 +83,15 @@ pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io:
     let tmp_path = dir.join(&tmp_filename);
 
     use std::io::Write;
+    // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
+    // the canonical cache file before writing — a partial save or process
+    // crash between delete and rename would lose the cache. The temp-file
+    // pattern makes corruption-on-crash impossible.
     let write_result = (|| {
         let mut file = fs::File::create(&tmp_path)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
-        if fs::rename(&tmp_path, &final_path).is_err() {
-            // Windows: rename can't overwrite; copy then cleanup so destination is never removed first.
-            fs::copy(&tmp_path, &final_path)?;
-            let _ = fs::remove_file(&tmp_path);
-        }
+        crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
         Ok(())
     })();
 
@@ -94,4 +100,80 @@ pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io:
     }
 
     write_result
+}
+
+fn legacy_cache_paths(filename: &str) -> Vec<PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return Vec::new();
+    }
+
+    [
+        crate::paths::legacy_dirs_cache_dir().map(|d| d.join(filename)),
+        crate::paths::legacy_dot_cache_tokscale_dir().map(|d| d.join(filename)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
+
+    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+        unsafe {
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_falls_back_to_legacy_dirs_cache_path() {
+        let temp_home = TempDir::new().unwrap();
+        let temp_xdg_cache = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_xdg_cache = env::var_os("XDG_CACHE_HOME");
+        let previous_xdg_config = env::var_os("XDG_CONFIG_HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_home.path());
+            env::set_var("XDG_CACHE_HOME", temp_xdg_cache.path());
+            // Pin XDG_CONFIG_HOME so paths::get_cache_dir() stays inside
+            // the sandboxed HOME on Linux CI runners that set this var
+            // globally — without the pin, the canonical path resolves
+            // outside the temp dir and the legacy fallback never gets
+            // exercised because the binary never tries the right legacy
+            // root either.
+            env::set_var("XDG_CONFIG_HOME", temp_home.path().join(".config"));
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let legacy_path = crate::paths::legacy_dirs_cache_dir()
+            .unwrap()
+            .join("pricing-litellm.json");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        fs::write(
+            &legacy_path,
+            format!(r#"{{"timestamp":{now},"data":{{"ok":true}}}}"#),
+        )
+        .unwrap();
+
+        let loaded: Option<serde_json::Value> = load_cache("pricing-litellm.json");
+        assert_eq!(loaded.unwrap()["ok"], serde_json::json!(true));
+
+        restore_env_var("HOME", previous_home);
+        restore_env_var("XDG_CACHE_HOME", previous_xdg_cache);
+        restore_env_var("XDG_CONFIG_HOME", previous_xdg_config);
+        restore_env_var("TOKSCALE_CONFIG_DIR", previous_override);
+    }
 }

@@ -2,6 +2,7 @@
 pub enum PathRoot {
     Home,
     XdgData,
+    Config,
     EnvVar {
         var: &'static str,
         fallback_relative: &'static str,
@@ -19,6 +20,36 @@ impl PathRoot {
                 } else {
                     format!("{}/.local/share", home_dir)
                 }
+            }
+            PathRoot::Config => {
+                if use_env_roots {
+                    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
+                        if !custom.is_empty() {
+                            return custom.to_string_lossy().into_owned();
+                        }
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+                        return format!("{xdg_config_home}/tokscale");
+                    }
+                }
+
+                // Match paths::get_config_dir() platform branches so the
+                // scanner reads from the same root the writer (e.g.
+                // get_antigravity_cache_dir) targets. Hardcoding
+                // `{home}/.config/tokscale` everywhere would diverge from
+                // dirs::config_dir() on Windows (where it resolves to
+                // %APPDATA%\tokscale), causing synced data to land in
+                // %APPDATA% while the scanner looks in %USERPROFILE%.
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(dir) = dirs::config_dir() {
+                        return dir.join("tokscale").to_string_lossy().into_owned();
+                    }
+                }
+
+                format!("{home_dir}/.config/tokscale")
             }
             PathRoot::EnvVar {
                 var,
@@ -177,7 +208,7 @@ define_clients!(
         id: "gemini",
         root: PathRoot::Home,
         relative: ".gemini/tmp",
-        pattern: "*.json",
+        pattern: "*.json|*.jsonl",
         headless: false,
         parse_local: true,
         submit_default: true
@@ -301,6 +332,54 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Goose = 18 => {
+        id: "goose",
+        root: PathRoot::XdgData,
+        relative: "goose/sessions/sessions.db",
+        pattern: "sessions.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Codebuff = 19 => {
+        id: "codebuff",
+        root: PathRoot::EnvVar {
+            var: "CODEBUFF_DATA_DIR",
+            fallback_relative: ".config/manicode",
+        },
+        relative: "projects",
+        pattern: "chat-messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Antigravity = 20 => {
+        id: "antigravity",
+        root: PathRoot::Config,
+        relative: "antigravity-cache/sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: false
+    },
+    Zed = 21 => {
+        id: "zed",
+        root: PathRoot::XdgData,
+        relative: "zed/threads/threads.db",
+        pattern: "threads.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Kiro = 22 => {
+        id: "kiro",
+        root: PathRoot::Home,
+        relative: ".kiro/sessions/cli",
+        pattern: "*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -353,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 18);
+        assert_eq!(ClientId::COUNT, 23);
     }
 
     #[test]
@@ -409,6 +488,86 @@ mod tests {
         assert_eq!(resolved, "/tmp/home/.local/share");
 
         restore_env("XDG_DATA_HOME", previous);
+    }
+
+    #[test]
+    fn test_path_root_config_uses_override_when_set() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/custom-config-root");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_path_root_config_uses_xdg_config_home_when_override_unset() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/xdg-config-home/tokscale");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_path_root_config_uses_dirs_config_dir_on_windows() {
+        // Windows must resolve PathRoot::Config to the same root that
+        // paths::get_config_dir() and get_antigravity_cache_dir() use,
+        // i.e. dirs::config_dir() (= %APPDATA%\tokscale). Hardcoding
+        // {home}/.config/tokscale would diverge from the writer side
+        // and silently hide synced Antigravity data from reports.
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        unsafe {
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let resolved = PathRoot::Config.resolve("C:\\fake-home");
+        let expected = dirs::config_dir()
+            .expect("Windows always exposes dirs::config_dir")
+            .join("tokscale")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            resolved, expected,
+            "PathRoot::Config on Windows must match dirs::config_dir().join('tokscale') so the scanner agrees with the writer"
+        );
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+    }
+
+    #[test]
+    fn test_path_root_config_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.config/tokscale");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
     }
 
     #[test]
@@ -525,5 +684,52 @@ mod tests {
             }
         );
         assert_eq!(ClientId::Hermes.data().relative_path, "state.db");
+    }
+
+    #[test]
+    fn test_codebuff_root_uses_codebuff_data_dir_env_var() {
+        assert_eq!(
+            ClientId::Codebuff.data().root,
+            PathRoot::EnvVar {
+                var: "CODEBUFF_DATA_DIR",
+                fallback_relative: ".config/manicode",
+            }
+        );
+        assert_eq!(ClientId::Codebuff.data().pattern, "chat-messages.json");
+    }
+
+    #[test]
+    fn test_antigravity_parse_local_is_true() {
+        assert!(ClientId::Antigravity.data().parse_local);
+    }
+
+    #[test]
+    fn test_antigravity_submit_default_is_false() {
+        assert!(!ClientId::Antigravity.submit_default());
+    }
+
+    #[test]
+    fn test_zed_data_dir_path() {
+        assert_eq!(
+            ClientId::Zed.data().resolve_path("/tmp/home"),
+            "/tmp/home/.local/share/zed/threads/threads.db"
+        );
+    }
+
+    #[test]
+    fn test_zed_submit_default_is_true() {
+        assert!(ClientId::Zed.submit_default());
+    }
+
+    #[test]
+    fn test_kiro_data_dir_path() {
+        assert_eq!(
+            ClientId::Kiro.data().resolve_path("/tmp/home"),
+            "/tmp/home/.kiro/sessions/cli"
+        );
+        assert_eq!(ClientId::Kiro.data().pattern, "*.json");
+        assert!(ClientId::Kiro.parse_local());
+        assert!(ClientId::Kiro.submit_default());
+        assert!(!ClientId::Kiro.supports_headless());
     }
 }

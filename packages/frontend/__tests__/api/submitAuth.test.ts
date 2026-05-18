@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
   const validateSubmission = vi.fn();
   const revalidateTag = vi.fn();
+  const revalidatePath = vi.fn();
   const mergeClientBreakdowns = vi.fn();
   const recalculateDayTotals = vi.fn();
   const buildModelBreakdown = vi.fn();
@@ -79,6 +80,7 @@ const mockState = vi.hoisted(() => {
     authenticatePersonalToken,
     validateSubmission,
     revalidateTag,
+    revalidatePath,
     mergeClientBreakdowns,
     recalculateDayTotals,
     buildModelBreakdown,
@@ -97,6 +99,7 @@ const mockState = vi.hoisted(() => {
       authenticatePersonalToken.mockReset();
       validateSubmission.mockReset();
       revalidateTag.mockClear();
+      revalidatePath.mockClear();
       mergeClientBreakdowns.mockReset();
       recalculateDayTotals.mockReset();
       buildModelBreakdown.mockReset();
@@ -119,6 +122,7 @@ const mockState = vi.hoisted(() => {
 
 vi.mock("next/cache", () => ({
   revalidateTag: mockState.revalidateTag,
+  revalidatePath: mockState.revalidatePath,
 }));
 
 vi.mock("@/lib/auth/personalTokens", () => ({

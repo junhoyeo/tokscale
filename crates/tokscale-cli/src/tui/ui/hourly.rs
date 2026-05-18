@@ -31,7 +31,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
-    app.max_visible_items = visible_height;
+    app.set_max_visible_items(visible_height);
 
     let hourly = app.get_sorted_hourly();
     if hourly.is_empty() {

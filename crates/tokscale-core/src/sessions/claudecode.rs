@@ -626,6 +626,20 @@ fn extract_claude_headless_message(
     ))
 }
 
+/// Internal Claude Code system/tool tags that should NOT be counted as human turns.
+/// User prompts containing arbitrary HTML/XML (e.g. `<div>hello</div>`) are still
+/// counted, only this narrow allowlist is excluded.
+const CLAUDECODE_INTERNAL_USER_TAGS: &[&str] = &[
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<command-name>",
+    "<command-message>",
+    "<system-reminder>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+];
+
 /// Returns true if a `type: "user"` JSONL entry is genuine human input (not tool results or system messages).
 fn is_human_turn(raw_line: &str) -> bool {
     if let Some(pos) = raw_line.find("\"content\":") {
@@ -635,8 +649,13 @@ fn is_human_turn(raw_line: &str) -> bool {
             return false;
         }
         if let Some(content_start) = after_trimmed.strip_prefix('"') {
-            if after_trimmed.len() > 1 && content_start.starts_with('<') {
-                return false;
+            // Only filter out content that begins with a known internal tag.
+            // Anything else (including `<div>`, `<table>`, etc. in genuine prompts)
+            // is treated as a real human turn.
+            for tag in CLAUDECODE_INTERNAL_USER_TAGS {
+                if content_start.starts_with(tag) {
+                    return false;
+                }
             }
             return true;
         }
@@ -713,6 +732,30 @@ mod tests {
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
+    #[test]
+    fn is_human_turn_counts_html_user_prompt() {
+        let line = r#"{"type":"user","message":{"content":"<div>hello</div>"}}"#;
+        assert!(is_human_turn(line));
+    }
+
+    #[test]
+    fn is_human_turn_skips_internal_tool_tags() {
+        for tag in CLAUDECODE_INTERNAL_USER_TAGS {
+            let line =
+                format!(r#"{{"type":"user","message":{{"content":"{tag}some output</...>"}}}}"#);
+            assert!(
+                !is_human_turn(&line),
+                "expected tag {tag} to be filtered as non-human"
+            );
+        }
+    }
+
+    #[test]
+    fn is_human_turn_skips_array_content() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#;
+        assert!(!is_human_turn(line));
+    }
+
     fn create_test_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
@@ -731,6 +774,18 @@ mod tests {
             .join(".claude")
             .join("projects")
             .join(project)
+            .join(filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        (temp_dir, path)
+    }
+
+    fn create_transcript_file(content: &str, filename: &str) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(".claude")
+            .join("transcripts")
             .join(filename);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, content).unwrap();
@@ -1025,6 +1080,40 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
         assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn test_wrapper_transcript_with_usage_is_parsed() {
+        let content = r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"assistant","timestamp":"2026-04-01T10:00:01.000Z","requestId":"req_wrapper","message":{"id":"msg_wrapper","model":"claude-sonnet-4","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":67,"cache_creation_input_tokens":8}}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_123456789012345678901234567.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "ses_123456789012345678901234567");
+        assert_eq!(messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(messages[0].tokens.input, 123);
+        assert_eq!(messages[0].tokens.output, 45);
+        assert_eq!(messages[0].tokens.cache_read, 67);
+        assert_eq!(messages[0].tokens.cache_write, 8);
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].workspace_label, None);
+    }
+
+    #[test]
+    fn test_wrapper_transcript_without_usage_is_skipped() {
+        let content = r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:01.000Z","message":{"content":"Run tool"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:02.000Z","message":{"content":"Tool result"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_765432109876543210987654321.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "wrapper transcripts without usage metadata must not be estimated"
+        );
     }
 
     // --- Sidechain / Agent tracking tests ---

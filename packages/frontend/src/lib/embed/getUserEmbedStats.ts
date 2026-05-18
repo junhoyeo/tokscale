@@ -1,5 +1,11 @@
 import { unstable_cache } from "next/cache";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
+import {
+  USERNAME_LOOKUP_LIMIT,
+  getSingleUsernameMatch,
+  normalizeUsernameCacheKey,
+  usernameEqualsIgnoreCase,
+} from "@/lib/db/usernameLookup";
 import { eq, sql, and, gte } from "drizzle-orm";
 
 export type EmbedSortBy = "tokens" | "cost";
@@ -28,7 +34,7 @@ export interface UserEmbedStats {
 }
 
 async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promise<UserEmbedStats | null> {
-  const [result] = await db
+  const matchingUsers = await db
     .select({
       id: users.id,
       username: users.username,
@@ -41,9 +47,10 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
     })
     .from(users)
     .leftJoin(submissions, eq(submissions.userId, users.id))
-    .where(eq(users.username, username))
+    .where(usernameEqualsIgnoreCase(users.username, username))
     .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
-    .limit(1);
+    .limit(USERNAME_LOOKUP_LIMIT);
+  const result = getSingleUsernameMatch(matchingUsers, username);
 
   if (!result) {
     return null;
@@ -104,22 +111,29 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
 }
 
 export function getUserEmbedStats(username: string, sortBy: EmbedSortBy = "tokens"): Promise<UserEmbedStats | null> {
+  const usernameCacheKey = normalizeUsernameCacheKey(username);
+
   return unstable_cache(
     () => fetchUserEmbedStats(username, sortBy),
-    [`embed-user:${username}:${sortBy}`],
+    [`embed-user:${usernameCacheKey}:${sortBy}`],
     {
-      tags: [`user:${username}`, `embed-user:${username}`, `embed-user:${username}:${sortBy}`],
+      tags: [
+        `user:${usernameCacheKey}`,
+        `embed-user:${usernameCacheKey}`,
+        `embed-user:${usernameCacheKey}:${sortBy}`,
+      ],
       revalidate: 60,
     }
   )();
 }
 
 async function fetchUserEmbedContributions(username: string): Promise<EmbedContributionDay[] | null> {
-  const [user] = await db
+  const matchingUsers = await db
     .select({ id: users.id })
     .from(users)
-    .where(eq(users.username, username))
-    .limit(1);
+      .where(usernameEqualsIgnoreCase(users.username, username))
+    .limit(USERNAME_LOOKUP_LIMIT);
+  const user = getSingleUsernameMatch(matchingUsers, username);
 
   if (!user) return null;
 
@@ -162,11 +176,13 @@ async function fetchUserEmbedContributions(username: string): Promise<EmbedContr
 }
 
 export function getUserEmbedContributions(username: string): Promise<EmbedContributionDay[] | null> {
+  const usernameCacheKey = normalizeUsernameCacheKey(username);
+
   return unstable_cache(
     () => fetchUserEmbedContributions(username),
-    [`embed-contrib:${username}`],
+    [`embed-contrib:${usernameCacheKey}`],
     {
-      tags: [`user:${username}`, `embed-contrib:${username}`],
+      tags: [`user:${usernameCacheKey}`, `embed-contrib:${usernameCacheKey}`],
       revalidate: 60,
     }
   )();
