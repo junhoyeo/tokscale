@@ -61,6 +61,13 @@ pub struct Settings {
     pub default_clients: Vec<String>,
     #[serde(default)]
     pub light: LightSettings,
+    /// Opt-in toggle for the per-minute breakdown tab. Default is `false`
+    /// to keep the tab strip focused on the daily/hourly views most users
+    /// want and to skip the minute-bucket aggregation cost in DataLoader
+    /// for users who never need it. Set to `true` to surface the Minutely
+    /// tab and enable its aggregation in subsequent loads.
+    #[serde(default)]
+    pub minutely_tab_enabled: bool,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -105,6 +112,7 @@ impl Default for Settings {
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
             light: LightSettings::default(),
+            minutely_tab_enabled: false,
         }
     }
 }
@@ -543,5 +551,30 @@ mod tests {
         let serialized = serde_json::to_string(&light).unwrap();
         let parsed: LightSettings = serde_json::from_str(&serialized).unwrap();
         assert!(parsed.write_cache);
+    }
+
+    #[test]
+    fn settings_minutely_tab_enabled_defaults_to_false() {
+        let json = r#"{ "colorPalette": "blue" }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(!parsed.minutely_tab_enabled);
+        assert!(!Settings::default().minutely_tab_enabled);
+    }
+
+    #[test]
+    fn settings_minutely_tab_enabled_round_trips_when_set() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "minutelyTabEnabled": true
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.minutely_tab_enabled);
+
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            round_trip["minutelyTabEnabled"],
+            serde_json::Value::Bool(true)
+        );
     }
 }

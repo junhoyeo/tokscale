@@ -257,13 +257,19 @@ impl App {
             config.since,
             config.until,
             config.year,
-        );
+        )
+        .with_minutely_enabled(settings.minutely_tab_enabled);
 
         let data = cached_data.unwrap_or_default();
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
-        let current_tab = config.initial_tab.unwrap_or(Tab::Overview);
+        let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
+        let current_tab = if Self::tab_visible(&settings, requested_tab) {
+            requested_tab
+        } else {
+            Tab::Overview
+        };
         let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
 
         let mut app = Self {
@@ -414,22 +420,22 @@ impl App {
                 return true;
             }
             KeyCode::Tab => {
-                let next = self.current_tab.next();
+                let next = self.next_visible_tab();
                 self.switch_tab(next);
                 self.reset_selection();
             }
             KeyCode::BackTab => {
-                let prev = self.current_tab.prev();
+                let prev = self.prev_visible_tab();
                 self.switch_tab(prev);
                 self.reset_selection();
             }
             KeyCode::Left => {
-                let prev = self.current_tab.prev();
+                let prev = self.prev_visible_tab();
                 self.switch_tab(prev);
                 self.reset_selection();
             }
             KeyCode::Right => {
-                let next = self.current_tab.next();
+                let next = self.next_visible_tab();
                 self.switch_tab(next);
                 self.reset_selection();
             }
@@ -650,6 +656,33 @@ impl App {
         } else {
             (SortField::Cost, SortDirection::Descending)
         }
+    }
+
+    pub(crate) fn tab_visible(settings: &Settings, tab: Tab) -> bool {
+        match tab {
+            Tab::Minutely => settings.minutely_tab_enabled,
+            _ => true,
+        }
+    }
+
+    pub(crate) fn is_tab_visible(&self, tab: Tab) -> bool {
+        Self::tab_visible(&self.settings, tab)
+    }
+
+    fn next_visible_tab(&self) -> Tab {
+        let mut candidate = self.current_tab.next();
+        while !self.is_tab_visible(candidate) && candidate != self.current_tab {
+            candidate = candidate.next();
+        }
+        candidate
+    }
+
+    fn prev_visible_tab(&self) -> Tab {
+        let mut candidate = self.current_tab.prev();
+        while !self.is_tab_visible(candidate) && candidate != self.current_tab {
+            candidate = candidate.prev();
+        }
+        candidate
     }
 
     fn persist_current_sort(&mut self) {
@@ -1753,9 +1786,6 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Hourly);
 
         app.handle_key_event(key(KeyCode::Tab));
-        assert_eq!(app.current_tab, Tab::Minutely);
-
-        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -1777,9 +1807,6 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::BackTab));
-        assert_eq!(app.current_tab, Tab::Minutely);
-
-        app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Hourly);
 
         app.handle_key_event(key(KeyCode::BackTab));
@@ -1787,6 +1814,42 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
+    }
+
+    #[test]
+    fn test_handle_key_tab_switch_with_minutely_enabled_includes_minutely() {
+        let mut app = make_app();
+        app.settings.minutely_tab_enabled = true;
+        assert_eq!(app.current_tab, Tab::Overview);
+
+        for expected in [
+            Tab::Models,
+            Tab::Daily,
+            Tab::Hourly,
+            Tab::Minutely,
+            Tab::Stats,
+            Tab::Agents,
+            Tab::Overview,
+        ] {
+            app.handle_key_event(key(KeyCode::Tab));
+            assert_eq!(app.current_tab, expected);
+        }
+    }
+
+    #[test]
+    fn test_initial_minutely_tab_clamps_to_overview_when_flag_off() {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Minutely),
+        };
+        let app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]

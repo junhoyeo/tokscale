@@ -369,10 +369,14 @@ mod tests {
         );
         assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
         assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
-        assert_eq!(
-            current_count_label(&make_app_on(Tab::Minutely)),
-            " (0 minutes)"
-        );
         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+    }
+
+    #[test]
+    fn test_current_count_label_minutely_when_flag_enabled() {
+        let mut app = make_app_on(Tab::Models);
+        app.settings.minutely_tab_enabled = true;
+        app.current_tab = Tab::Minutely;
+        assert_eq!(current_count_label(&app), " (0 minutes)");
     }
 }
