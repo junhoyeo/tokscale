@@ -962,7 +962,11 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
     let lower = model_id.to_lowercase();
 
     if lower.contains("opus") {
-        if contains_delimited_fragment(&lower, "4.6") || contains_delimited_fragment(&lower, "4-6")
+        if contains_delimited_fragment(&lower, "4.7") || contains_delimited_fragment(&lower, "4-7")
+        {
+            return Some("claude-opus-4-7".into());
+        } else if contains_delimited_fragment(&lower, "4.6")
+            || contains_delimited_fragment(&lower, "4-6")
         {
             return Some("claude-opus-4-6".into());
         } else if contains_delimited_fragment(&lower, "4.5")
@@ -2446,6 +2450,109 @@ mod tests {
         let result = lookup.lookup("opus-4-60").unwrap();
         assert_eq!(result.matched_key, "claude-opus-4");
         assert_ne!(result.matched_key, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_normalize_opus_4_7_prefers_4_7_over_4() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000015),
+                output_cost_per_token: Some(0.000075),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "claude-opus-4-7".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("opus-4-7").unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-7");
+        assert_eq!(result.source, "LiteLLM");
+    }
+
+    #[test]
+    fn test_normalize_opus_4_7_dot_prefers_4_7_over_4() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000015),
+                output_cost_per_token: Some(0.000075),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "claude-opus-4-7".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("opus-4.7").unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-7");
+        assert_eq!(result.source, "LiteLLM");
+    }
+
+    /// Regression: `aws.claude-opus-4-7` (Bedrock-style id) used to degrade
+    /// to OpenRouter's `anthropic/claude-opus-4` ($15/$75/$1.50/$18.75 per M)
+    /// because `normalize_model_name` only knew 4.5/4.6 and fell through to
+    /// the bare `claude-opus-4` branch — which OpenRouter then resolved via
+    /// `model_part` index to the legacy opus 4 entry. Result was ~3x overcharge.
+    #[test]
+    fn test_aws_opus_4_7_does_not_degrade_to_opus_4() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4-7".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                cache_read_input_token_cost: Some(5e-7),
+                cache_creation_input_token_cost: Some(0.00000625),
+                ..Default::default()
+            },
+        );
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000015),
+                output_cost_per_token: Some(0.000075),
+                cache_read_input_token_cost: Some(0.0000015),
+                cache_creation_input_token_cost: Some(0.00001875),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+        let result = lookup.lookup("aws.claude-opus-4-7").unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-7");
+        assert_ne!(result.matched_key, "anthropic/claude-opus-4");
+
+        // 8.4M input + 873K output + 41.3M cache_read + 12.1M cache_write
+        // at opus-4-7 rates should be ~$160, not ~$480 (legacy opus 4).
+        let cost = lookup.calculate_cost(
+            "aws.claude-opus-4-7",
+            8_400_000,
+            873_000,
+            41_300_000,
+            12_100_000,
+            0,
+        );
+        assert!(
+            (140.0..=180.0).contains(&cost),
+            "expected opus-4-7 priced cost around $160, got ${cost:.2}"
+        );
     }
 
     #[test]
