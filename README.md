@@ -422,6 +422,10 @@ tokscale submit --client opencode,claude --since 2024-01-01
 # Preview what would be submitted (dry run)
 tokscale submit --dry-run
 
+# Name this machine (persisted locally); usage from each machine is
+# aggregated per device on your profile
+tokscale submit --device-name "MacBook Pro"
+
 # Logout
 tokscale logout
 ```
