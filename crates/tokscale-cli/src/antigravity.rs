@@ -1055,21 +1055,57 @@ fn identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<S
         return None;
     }
 
+    let status_ok = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .is_some_and(|status| status == 200);
+
+    let mut content_length: Option<usize> = None;
+    let mut chunked = false;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).is_err() {
             return None;
         }
-        if header.trim().is_empty() {
+        let trimmed = header.trim();
+        if trimmed.is_empty() {
             break;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("content-length:") {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+        if lower.contains("transfer-encoding") && lower.contains("chunked") {
+            chunked = true;
         }
     }
 
+    if !status_ok {
+        return None;
+    }
+
+    // RFC 7230 §3.3.3: when Transfer-Encoding is present, Content-Length MUST
+    // be ignored. Check chunked first so a server that sets both headers is
+    // decoded correctly.
+    if chunked {
+        return read_chunked_body_prefix(&mut reader, MAX_IDENTITY_PROBE_BYTES).ok();
+    }
+
+    if let Some(length) = content_length {
+        let read_length = length.min(MAX_IDENTITY_PROBE_BYTES);
+        let mut bytes = vec![0_u8; read_length];
+        reader.read_exact(&mut bytes).ok()?;
+        return String::from_utf8(bytes).ok();
+    }
+
     let mut buffer = String::new();
-    let _ = reader
+    reader
         .by_ref()
         .take(MAX_IDENTITY_PROBE_BYTES as u64)
-        .read_to_string(&mut buffer);
+        .read_to_string(&mut buffer)
+        .ok()?;
     Some(buffer)
 }
 
@@ -1080,9 +1116,32 @@ fn response_contains_antigravity_marker(body: &str) -> bool {
         return false;
     };
     let Ok(value) = serde_json::from_str::<Value>(&trimmed[idx..]) else {
-        return false;
+        return prefix_contains_antigravity_marker(&trimmed[idx..]);
     };
     contains_antigravity_marker(&value)
+}
+
+fn prefix_contains_antigravity_marker(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    if !trimmed.starts_with(['{', '[']) {
+        return false;
+    }
+
+    [
+        "\"cascadeId\"",
+        "\"cascadeTrajectories\"",
+        "\"trajectorySummaries\"",
+        "\"generatorMetadata\"",
+        "\"serverInfo\"",
+        "\"serverCapabilities\"",
+    ]
+    .iter()
+    .any(|marker| {
+        trimmed
+            .split(marker)
+            .skip(1)
+            .any(|suffix| suffix.trim_start().starts_with(':'))
+    })
 }
 
 fn contains_antigravity_marker(value: &Value) -> bool {
@@ -1426,7 +1485,9 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
         }
     }
 
-    let response_body = if let Some(length) = content_length {
+    let response_body = if chunked {
+        read_chunked_body(&mut reader)?
+    } else if let Some(length) = content_length {
         if length > MAX_RPC_BODY_BYTES {
             anyhow::bail!(
                 "Antigravity RPC body of {length} bytes exceeds {MAX_RPC_BODY_BYTES} cap"
@@ -1435,8 +1496,6 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
         let mut bytes = vec![0_u8; length];
         reader.read_exact(&mut bytes)?;
         String::from_utf8(bytes)?
-    } else if chunked {
-        read_chunked_body(&mut reader)?
     } else {
         let mut text = String::new();
         reader
@@ -1465,6 +1524,43 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
 }
 
 fn read_chunked_body(reader: &mut BufReader<TcpStream>) -> Result<String> {
+    read_chunked_body_with_cap(reader, MAX_RPC_BODY_BYTES)
+}
+
+fn read_chunked_body_prefix(
+    reader: &mut BufReader<TcpStream>,
+    max_body_bytes: usize,
+) -> Result<String> {
+    let mut body = Vec::new();
+    while body.len() < max_body_bytes {
+        let mut size_line = String::new();
+        reader.read_line(&mut size_line)?;
+        let chunk_size = parse_chunk_size_line(&size_line)?;
+        if chunk_size == 0 {
+            break;
+        }
+
+        let remaining = max_body_bytes - body.len();
+        let read_size = chunk_size.min(remaining);
+        let mut chunk = vec![0_u8; read_size];
+        reader.read_exact(&mut chunk)?;
+        body.extend_from_slice(&chunk);
+
+        if read_size < chunk_size {
+            break;
+        }
+
+        let mut crlf = [0_u8; 2];
+        reader.read_exact(&mut crlf)?;
+    }
+
+    Ok(String::from_utf8(body)?)
+}
+
+fn read_chunked_body_with_cap(
+    reader: &mut BufReader<TcpStream>,
+    max_body_bytes: usize,
+) -> Result<String> {
     let mut body = Vec::new();
     loop {
         let mut size_line = String::new();
@@ -1474,12 +1570,11 @@ fn read_chunked_body(reader: &mut BufReader<TcpStream>) -> Result<String> {
             break;
         }
 
-        if chunk_size > MAX_RPC_BODY_BYTES
-            || body.len().saturating_add(chunk_size) > MAX_RPC_BODY_BYTES
-        {
+        if chunk_size > max_body_bytes || body.len().saturating_add(chunk_size) > max_body_bytes {
             anyhow::bail!(
-                "Antigravity RPC body of {} bytes exceeds {MAX_RPC_BODY_BYTES} cap",
-                body.len().saturating_add(chunk_size)
+                "Antigravity RPC body of {} bytes exceeds {} cap",
+                body.len().saturating_add(chunk_size),
+                max_body_bytes
             );
         }
 
@@ -2274,6 +2369,81 @@ mod tests {
             err.to_string().contains("exceeds"),
             "expected cap error, got: {err:#}"
         );
+    }
+
+    #[test]
+    fn identity_probe_request_decodes_chunked_antigravity_response() {
+        let json = r#"{"trajectorySummaries":{"session-1":{"cascadeId":"session-1"}}}"#;
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("{:x}\r\n", json.len()).as_bytes());
+        body.extend_from_slice(json.as_bytes());
+        body.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let port = serve_once(body, "Transfer-Encoding: chunked\r\n");
+        let response = identity_probe_request(
+            port,
+            "abcdef0123456789abcdef0123456789",
+            "GetAllCascadeTrajectories",
+        )
+        .unwrap();
+
+        assert!(response_contains_antigravity_marker(&response));
+    }
+
+    #[test]
+    fn identity_probe_request_uses_probe_cap_for_large_bodies() {
+        let prefix = r#"{"trajectorySummaries":{"session-1":{"cascadeId":"session-1"}}}"#;
+        let mut content_length_body = prefix.as_bytes().to_vec();
+        content_length_body.resize(MAX_IDENTITY_PROBE_BYTES + 1, b'a');
+        let content_length_port = serve_once(
+            content_length_body,
+            &format!("Content-Length: {}\r\n", MAX_IDENTITY_PROBE_BYTES + 1),
+        );
+        let content_length_response = identity_probe_request(
+            content_length_port,
+            "abcdef0123456789abcdef0123456789",
+            "GetAllCascadeTrajectories",
+        )
+        .unwrap();
+        assert_eq!(content_length_response.len(), MAX_IDENTITY_PROBE_BYTES);
+        assert!(response_contains_antigravity_marker(
+            &content_length_response
+        ));
+
+        let chunk_size = MAX_IDENTITY_PROBE_BYTES + 1;
+        let mut chunked_body = Vec::new();
+        chunked_body.extend_from_slice(format!("{:x}\r\n", chunk_size).as_bytes());
+        chunked_body.extend_from_slice(prefix.as_bytes());
+        chunked_body.extend(std::iter::repeat_n(b'a', chunk_size - prefix.len()));
+        chunked_body.extend_from_slice(b"\r\n0\r\n\r\n");
+        let chunked_port = serve_once(chunked_body, "Transfer-Encoding: chunked\r\n");
+        let chunked_response = identity_probe_request(
+            chunked_port,
+            "abcdef0123456789abcdef0123456789",
+            "GetAllCascadeTrajectories",
+        )
+        .unwrap();
+        assert_eq!(chunked_response.len(), MAX_IDENTITY_PROBE_BYTES);
+        assert!(response_contains_antigravity_marker(&chunked_response));
+    }
+
+    #[test]
+    fn identity_probe_request_prefers_chunked_over_content_length() {
+        let json = r#"{"trajectorySummaries":{"session-1":{"cascadeId":"session-1"}}}"#;
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("{:x}\r\n", json.len()).as_bytes());
+        body.extend_from_slice(json.as_bytes());
+        body.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let port = serve_once(body, "Transfer-Encoding: chunked\r\nContent-Length: 1\r\n");
+        let response = identity_probe_request(
+            port,
+            "abcdef0123456789abcdef0123456789",
+            "GetAllCascadeTrajectories",
+        )
+        .unwrap();
+
+        assert!(response_contains_antigravity_marker(&response));
     }
 
     #[test]

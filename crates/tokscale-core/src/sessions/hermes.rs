@@ -10,6 +10,8 @@ use rusqlite::Connection;
 use std::path::Path;
 use tracing::warn;
 
+const HERMES_AGENT_NAME: &str = "Hermes Agent";
+
 fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
     if timestamp > 1e12 {
         timestamp as i64
@@ -135,7 +137,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             actual_cost,
         )| {
             let provider = resolved_provider(billing_provider, &model_id);
-            let mut msg = UnifiedMessage::new(
+            let mut msg = UnifiedMessage::new_with_agent(
                 "hermes",
                 model_id,
                 provider,
@@ -149,6 +151,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                     reasoning: reasoning.max(0),
                 },
                 actual_cost.or(estimated_cost).unwrap_or(0.0).max(0.0),
+                Some(HERMES_AGENT_NAME.to_string()),
             );
             msg.message_count = message_count.max(0);
             msg.dedup_key = Some(session_id);

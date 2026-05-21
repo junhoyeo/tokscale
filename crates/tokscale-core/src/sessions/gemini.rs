@@ -397,8 +397,11 @@ fn build_messages_from_stats(
     usages
         .into_iter()
         .map(|usage| {
-            let (input, cache_read) =
-                normalize_gemini_headless_input_and_cache(usage.input, usage.cached);
+            let (input, cache_read) = if usage.input_includes_cache {
+                normalize_gemini_headless_input_and_cache(usage.input, usage.cached)
+            } else {
+                (usage.input.max(0), usage.cached.max(0))
+            };
             UnifiedMessage::new(
                 "gemini",
                 usage.model,
@@ -465,42 +468,16 @@ struct GeminiHeadlessUsage {
     output: i64,
     cached: i64,
     reasoning: i64,
+    input_includes_cache: bool,
 }
 
 fn extract_gemini_usages(stats: &Value, model_hint: Option<String>) -> Vec<GeminiHeadlessUsage> {
     if let Some(models) = stats.get("models").and_then(|val| val.as_object()) {
         let mut usages = Vec::new();
         for (model, data) in models {
-            let tokens = match data.get("tokens") {
-                Some(t) => t,
-                None => continue,
-            };
-            let input = extract_i64(tokens.get("prompt"))
-                .or_else(|| extract_i64(tokens.get("input")))
-                .or_else(|| extract_i64(tokens.get("input_tokens")))
-                .unwrap_or(0);
-            let output = extract_i64(tokens.get("candidates"))
-                .or_else(|| extract_i64(tokens.get("output")))
-                .or_else(|| extract_i64(tokens.get("output_tokens")))
-                .unwrap_or(0);
-            let cached = extract_i64(tokens.get("cached"))
-                .or_else(|| extract_i64(tokens.get("cached_tokens")))
-                .unwrap_or(0);
-            let reasoning = extract_i64(tokens.get("thoughts"))
-                .or_else(|| extract_i64(tokens.get("reasoning")))
-                .unwrap_or(0);
-
-            if input == 0 && output == 0 && cached == 0 && reasoning == 0 {
-                continue;
+            if let Some(usage) = extract_gemini_usage_from_value(model.clone(), data) {
+                usages.push(usage);
             }
-
-            usages.push(GeminiHeadlessUsage {
-                model: model.clone(),
-                input,
-                output,
-                cached,
-                reasoning,
-            });
         }
 
         if !usages.is_empty() {
@@ -508,28 +485,48 @@ fn extract_gemini_usages(stats: &Value, model_hint: Option<String>) -> Vec<Gemin
         }
     }
 
-    let input = extract_i64(stats.get("input_tokens"))
-        .or_else(|| extract_i64(stats.get("prompt_tokens")))
+    extract_gemini_usage_from_value(model_hint.unwrap_or_else(|| "unknown".to_string()), stats)
+        .into_iter()
+        .collect()
+}
+
+fn extract_gemini_usage_from_value(model: String, value: &Value) -> Option<GeminiHeadlessUsage> {
+    let has_tokens_wrapper = value.get("tokens").is_some();
+    let tokens = value.get("tokens").unwrap_or(value);
+    let prompt_input = extract_i64(tokens.get("prompt"))
+        .or_else(|| extract_i64(tokens.get("input_tokens")))
+        .or_else(|| extract_i64(tokens.get("prompt_tokens")));
+    let net_input = extract_i64(tokens.get("input"));
+    let wrapper_input = if has_tokens_wrapper { net_input } else { None };
+    let input = prompt_input.or(wrapper_input).or(net_input).unwrap_or(0);
+    let output = extract_i64(tokens.get("candidates"))
+        .or_else(|| extract_i64(tokens.get("output")))
+        .or_else(|| extract_i64(tokens.get("output_tokens")))
+        .or_else(|| extract_i64(tokens.get("candidates_tokens")))
         .unwrap_or(0);
-    let output = extract_i64(stats.get("output_tokens"))
-        .or_else(|| extract_i64(stats.get("candidates_tokens")))
+    let cached = extract_i64(tokens.get("cached"))
+        .or_else(|| extract_i64(tokens.get("cached_tokens")))
         .unwrap_or(0);
-    let cached = extract_i64(stats.get("cached_tokens")).unwrap_or(0);
-    let reasoning = extract_i64(stats.get("thoughts_tokens"))
-        .or_else(|| extract_i64(stats.get("reasoning_tokens")))
+    let reasoning = extract_i64(tokens.get("thoughts"))
+        .or_else(|| extract_i64(tokens.get("thoughts_tokens")))
+        .or_else(|| extract_i64(tokens.get("reasoning")))
+        .or_else(|| extract_i64(tokens.get("reasoning_tokens")))
         .unwrap_or(0);
 
     if input == 0 && output == 0 && cached == 0 && reasoning == 0 {
-        return Vec::new();
+        return None;
     }
 
-    vec![GeminiHeadlessUsage {
-        model: model_hint.unwrap_or_else(|| "unknown".to_string()),
+    Some(GeminiHeadlessUsage {
+        model,
         input,
         output,
         cached,
         reasoning,
-    }]
+        input_includes_cache: prompt_input.is_some()
+            || wrapper_input.is_some()
+            || net_input.is_none(),
+    })
 }
 
 fn extract_timestamp_from_value(value: &Value) -> Option<i64> {
@@ -772,6 +769,68 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_read, 5);
         assert_eq!(messages[0].tokens.reasoning, 3);
         assert_eq!(messages[0].tokens.total(), 35);
+    }
+
+    #[test]
+    fn test_parse_gemini_stream_jsonl_v0391_model_stats_without_tokens_wrapper() {
+        let content = r#"{"type":"init","model":"gemini-2.5-pro","session_id":"session-1"}
+{"type":"result","stats":{"total_tokens":32,"input_tokens":12,"output_tokens":20,"cached":5,"input":7,"models":{"gemini-2.5-pro":{"total_tokens":32,"input_tokens":12,"output_tokens":20,"cached":5,"input":7}}}}"#;
+        let mut file = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].tokens.input, 7);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 5);
+        assert_eq!(messages[0].tokens.total(), 32);
+    }
+
+    #[test]
+    fn test_parse_gemini_stream_jsonl_v0391_flat_stats_uses_net_input_alias() {
+        let content = r#"{"type":"init","model":"gemini-2.5-pro","session_id":"session-1"}
+{"type":"result","stats":{"total_tokens":32,"output_tokens":20,"cached":5,"input":7}}"#;
+        let mut file = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].tokens.input, 7);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 5);
+        assert_eq!(messages[0].tokens.total(), 32);
+    }
+
+    #[test]
+    fn test_parse_headless_stats_tokens_wrapper_preserves_cache_inclusive_input() {
+        let json = r#"{"stats":{"models":{"gemini-2.5-pro":{"tokens":{"input":12,"output":20,"cached":5}}}}}"#;
+        let file = tempfile::Builder::new()
+            .prefix("session-")
+            .suffix(".json")
+            .tempfile()
+            .unwrap();
+        std::fs::write(file.path(), json).unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].tokens.input, 7);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 5);
+        assert_eq!(messages[0].tokens.total(), 32);
     }
 
     #[test]

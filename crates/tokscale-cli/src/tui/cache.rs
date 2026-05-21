@@ -589,6 +589,10 @@ impl TryFrom<CachedUsageData> for UsageData {
             agents: normalize_cached_agents(u.agents),
             daily: daily?,
             hourly: hourly?,
+            // Minutely data is recomputed on each load (high cardinality,
+            // not worth round-tripping through the on-disk cache); the
+            // first foreground refresh after cache hit will populate it.
+            minutely: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,

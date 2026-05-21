@@ -121,6 +121,17 @@ pub struct HourlyUsage {
 }
 
 #[derive(Debug, Clone)]
+pub struct MinutelyUsage {
+    pub datetime: NaiveDateTime,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub clients: BTreeSet<String>,
+    pub models: BTreeMap<String, HourlyModelInfo>,
+    pub message_count: u32,
+    pub turn_count: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct ContributionDay {
     pub date: NaiveDate,
     pub tokens: u64,
@@ -139,6 +150,7 @@ pub struct UsageData {
     pub agents: Vec<AgentUsage>,
     pub daily: Vec<DailyUsage>,
     pub hourly: Vec<HourlyUsage>,
+    pub minutely: Vec<MinutelyUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -153,6 +165,7 @@ pub struct DataLoader {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+    pub minutely_enabled: bool,
 }
 
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
@@ -240,6 +253,7 @@ impl DataLoader {
             since: None,
             until: None,
             year: None,
+            minutely_enabled: false,
         }
     }
 
@@ -254,7 +268,13 @@ impl DataLoader {
             since,
             until,
             year,
+            minutely_enabled: false,
         }
+    }
+
+    pub fn with_minutely_enabled(mut self, enabled: bool) -> Self {
+        self.minutely_enabled = enabled;
+        self
     }
 
     pub fn load(
@@ -368,6 +388,7 @@ impl DataLoader {
         let mut agent_clients: HashMap<String, BTreeSet<String>> = HashMap::new();
         let mut daily_map: HashMap<NaiveDate, DailyUsage> = HashMap::new();
         let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
+        let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
 
         for msg in &messages {
@@ -703,6 +724,104 @@ impl DataLoader {
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
                 h_model.cost += h_cost;
             }
+
+            // Minute aggregation: same fallback semantics as hourly, but
+            // truncated to the minute. Used by the Minutely tab. Gated
+            // on `Settings::minutely_tab_enabled` so users who never open
+            // the tab do not pay the per-minute bucketing cost.
+            let minute_bucket = if self.minutely_enabled {
+                minute_bucket_with_fallback(msg.timestamp, &msg.date)
+            } else {
+                None
+            };
+            if let Some(minute_dt) = minute_bucket {
+                let minutely_entry =
+                    minutely_map
+                        .entry(minute_dt)
+                        .or_insert_with(|| MinutelyUsage {
+                            datetime: minute_dt,
+                            tokens: TokenBreakdown::default(),
+                            cost: 0.0,
+                            clients: BTreeSet::new(),
+                            models: BTreeMap::new(),
+                            message_count: 0,
+                            turn_count: 0,
+                        });
+
+                minutely_entry.tokens.input = minutely_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                minutely_entry.tokens.output = minutely_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                minutely_entry.tokens.cache_read = minutely_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                minutely_entry.tokens.cache_write = minutely_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                minutely_entry.tokens.reasoning = minutely_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                let m_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
+                    msg.cost
+                } else {
+                    0.0
+                };
+                minutely_entry.cost += m_cost;
+                minutely_entry.message_count += msg.message_count.max(0) as u32;
+                if msg.is_turn_start {
+                    minutely_entry.turn_count += 1;
+                }
+                minutely_entry.clients.insert(msg.client.clone());
+
+                let m_model_key = hourly_model_key(group_by, &msg.provider_id, &normalized_model);
+                let m_model =
+                    minutely_entry
+                        .models
+                        .entry(m_model_key)
+                        .or_insert_with(|| HourlyModelInfo {
+                            provider: msg.provider_id.clone(),
+                            display_name: hourly_model_display_name(
+                                group_by,
+                                &msg.provider_id,
+                                &normalized_model,
+                            ),
+                            color_key: model_color_key(
+                                group_by,
+                                &msg.provider_id,
+                                &normalized_model,
+                            ),
+                            tokens: TokenBreakdown::default(),
+                            cost: 0.0,
+                        });
+                m_model.tokens.input = m_model
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                m_model.tokens.output = m_model
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                m_model.tokens.cache_read = m_model
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                m_model.tokens.cache_write = m_model
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                m_model.tokens.reasoning = m_model
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                m_model.cost += m_cost;
+            }
         }
 
         let mut models: Vec<ModelUsage> = model_map.into_values().collect();
@@ -733,6 +852,9 @@ impl DataLoader {
         let mut hourly: Vec<HourlyUsage> = hourly_map.into_values().collect();
         hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
+        let mut minutely: Vec<MinutelyUsage> = minutely_map.into_values().collect();
+        minutely.sort_by_key(|b| std::cmp::Reverse(b.datetime));
+
         let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
         let total_cost: f64 = models
             .iter()
@@ -747,6 +869,7 @@ impl DataLoader {
             agents,
             daily,
             hourly,
+            minutely,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -789,6 +912,37 @@ fn timestamp_to_hour(timestamp_ms: i64) -> Option<NaiveDateTime> {
 /// CLI hourly bucketing behavior in `tokscale-core::lib::get_hourly_report`.
 fn hour_bucket_with_fallback(timestamp_ms: i64, date_str: &str) -> Option<NaiveDateTime> {
     if let Some(dt) = timestamp_to_hour(timestamp_ms) {
+        return Some(dt);
+    }
+    parse_date(date_str).and_then(|d| d.and_hms_opt(0, 0, 0))
+}
+
+/// Convert Unix ms timestamp to a NaiveDateTime truncated to the minute (local tz).
+fn timestamp_to_minute(timestamp_ms: i64) -> Option<NaiveDateTime> {
+    use chrono::TimeZone;
+    if timestamp_ms <= 0 {
+        return None;
+    }
+    let ts_secs = timestamp_ms / 1000;
+    match Local.timestamp_opt(ts_secs, 0) {
+        chrono::LocalResult::Single(dt) => {
+            let naive = dt.naive_local();
+            Some(
+                naive
+                    .date()
+                    .and_hms_opt(naive.hour(), naive.minute(), 0)
+                    .unwrap_or(naive),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Derive a minute-truncated NaiveDateTime from `msg.timestamp` when present,
+/// otherwise fall back to `msg.date`'s 00:00 bucket so messages with missing
+/// timestamps are not silently dropped from minutely aggregation.
+fn minute_bucket_with_fallback(timestamp_ms: i64, date_str: &str) -> Option<NaiveDateTime> {
+    if let Some(dt) = timestamp_to_minute(timestamp_ms) {
         return Some(dt);
     }
     parse_date(date_str).and_then(|d| d.and_hms_opt(0, 0, 0))
@@ -2242,5 +2396,119 @@ after"#,
         let (current, longest) = calculate_streaks_for_today(&daily, today);
         assert_eq!(current, 2);
         assert_eq!(longest, 2);
+    }
+
+    fn make_msg(timestamp_ms: i64, input: i64, output: i64, cost: f64) -> UnifiedMessage {
+        UnifiedMessage::new(
+            "claude",
+            "claude-sonnet-4-5-20250929",
+            "anthropic",
+            format!("session-{timestamp_ms}"),
+            timestamp_ms,
+            tokscale_core::TokenBreakdown {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+        )
+    }
+
+    #[test]
+    fn test_minutely_aggregation_skipped_when_flag_disabled() {
+        let loader = DataLoader::new(None);
+        assert!(!loader.minutely_enabled);
+        let usage = loader
+            .aggregate_messages(
+                vec![make_msg(1_735_689_600_000, 10, 5, 1.0)],
+                &GroupBy::Model,
+            )
+            .unwrap();
+        assert!(
+            usage.minutely.is_empty(),
+            "minutely aggregation should be skipped when flag is off"
+        );
+        assert_eq!(usage.hourly.len(), 1, "hourly should still aggregate");
+    }
+
+    #[test]
+    fn test_minutely_aggregation_runs_when_flag_enabled() {
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        assert!(loader.minutely_enabled);
+        let usage = loader
+            .aggregate_messages(
+                vec![make_msg(1_735_689_600_000, 10, 5, 1.0)],
+                &GroupBy::Model,
+            )
+            .unwrap();
+        assert_eq!(usage.minutely.len(), 1);
+        let bucket = &usage.minutely[0];
+        assert_eq!(bucket.tokens.input, 10);
+        assert_eq!(bucket.tokens.output, 5);
+        assert_eq!(bucket.cost, 1.0);
+        assert_eq!(bucket.message_count, 1);
+    }
+
+    #[test]
+    fn test_minutely_aggregation_groups_same_minute_messages() {
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        let base_ms = 1_735_689_600_000_i64;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_msg(base_ms, 10, 5, 1.0),
+                    make_msg(base_ms + 30_000, 20, 10, 2.0),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+        assert_eq!(
+            usage.minutely.len(),
+            1,
+            "two messages within the same minute should share a bucket"
+        );
+        let bucket = &usage.minutely[0];
+        assert_eq!(bucket.tokens.input, 30);
+        assert_eq!(bucket.tokens.output, 15);
+        assert_eq!(bucket.cost, 3.0);
+        assert_eq!(bucket.message_count, 2);
+    }
+
+    #[test]
+    fn test_minutely_aggregation_splits_adjacent_minutes() {
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        let base_ms = 1_735_689_600_000_i64;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_msg(base_ms, 10, 5, 1.0),
+                    make_msg(base_ms + 60_000, 20, 10, 2.0),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+        assert_eq!(
+            usage.minutely.len(),
+            2,
+            "messages one minute apart should land in distinct buckets"
+        );
+    }
+
+    #[test]
+    fn test_minutely_aggregation_clamps_negative_tokens_and_cost() {
+        let loader = DataLoader::new(None).with_minutely_enabled(true);
+        let usage = loader
+            .aggregate_messages(
+                vec![make_msg(1_735_689_600_000, -50, -50, -10.0)],
+                &GroupBy::Model,
+            )
+            .unwrap();
+        assert_eq!(usage.minutely.len(), 1);
+        let bucket = &usage.minutely[0];
+        assert_eq!(bucket.tokens.input, 0);
+        assert_eq!(bucket.tokens.output, 0);
+        assert_eq!(bucket.cost, 0.0);
     }
 }
