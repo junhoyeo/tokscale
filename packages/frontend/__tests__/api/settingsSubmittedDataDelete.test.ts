@@ -25,16 +25,20 @@ const mockState = vi.hoisted(() => {
     }
     return deletedRows;
   });
+  // where() chains .returning() for the submissions delete and is awaited
+  // directly for the devices delete, so it is also thenable.
   const where = vi.fn(() => ({
     returning,
+    then: (resolve: (value: unknown) => unknown) => Promise.resolve(resolve(undefined)),
   }));
   let deletedRows: Array<{ id: string }> = [];
   let deleteError: Error | null = null;
 
+  const txDelete = vi.fn(() => ({ where }));
   const db = {
-    delete: vi.fn(() => ({
-      where,
-    })),
+    transaction: vi.fn(async (callback: (tx: { delete: typeof txDelete }) => unknown) =>
+      callback({ delete: txDelete })
+    ),
   };
 
   return {
@@ -46,6 +50,7 @@ const mockState = vi.hoisted(() => {
     eq,
     db,
     where,
+    txDelete,
     reset() {
       getSession.mockReset();
       authenticatePersonalToken.mockReset();
@@ -53,7 +58,8 @@ const mockState = vi.hoisted(() => {
       revalidatePath.mockReset();
       revalidateUsernamePaths.mockReset();
       eq.mockClear();
-      db.delete.mockClear();
+      db.transaction.mockClear();
+      txDelete.mockClear();
       where.mockClear();
       returning.mockClear();
       deletedRows = [];
@@ -90,6 +96,10 @@ vi.mock("@/lib/db", () => ({
   submissions: {
     id: "submissions.id",
     userId: "submissions.userId",
+  },
+  devices: {
+    id: "devices.id",
+    userId: "devices.userId",
   },
 }));
 
@@ -130,7 +140,7 @@ describe("DELETE /api/settings/submitted-data", () => {
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Not authenticated" });
-    expect(mockState.db.delete).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
   });
 
   it("deletes submitted data and revalidates public caches", async () => {
@@ -151,8 +161,10 @@ describe("DELETE /api/settings/submitted-data", () => {
       deleted: true,
       deletedSubmissions: 1,
     });
-    expect(mockState.db.delete).toHaveBeenCalledTimes(1);
+    expect(mockState.db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockState.txDelete).toHaveBeenCalledTimes(2);
     expect(mockState.eq).toHaveBeenCalledWith("submissions.userId", "user-1");
+    expect(mockState.eq).toHaveBeenCalledWith("devices.userId", "user-1");
     expect(mockState.where).toHaveBeenCalledWith({
       kind: "eq",
       left: "submissions.userId",

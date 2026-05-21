@@ -542,3 +542,84 @@ describe('POST /api/submit - Client-Level Merge', () => {
     });
   });
 });
+
+describe('POST /api/submit - Device payload', () => {
+  const base = {
+    meta: {
+      generatedAt: new Date().toISOString(),
+      version: '1.0.0',
+      dateRange: { start: '2024-12-01', end: '2024-12-01' },
+    },
+    summary: {
+      totalTokens: 1500,
+      totalCost: 1.5,
+      totalDays: 1,
+      activeDays: 1,
+      averagePerDay: 1.5,
+      maxCostInSingleDay: 1.5,
+      clients: ['claude' as const],
+      models: ['claude-sonnet-4'],
+    },
+    years: [
+      { year: '2024', totalTokens: 1500, totalCost: 1.5, range: { start: '2024-12-01', end: '2024-12-01' } },
+    ],
+    contributions: [
+      {
+        date: '2024-12-01',
+        totals: { tokens: 1500, cost: 1.5, messages: 5 },
+        intensity: 2 as const,
+        tokenBreakdown: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        clients: [
+          {
+            client: 'claude' as const,
+            modelId: 'claude-sonnet-4',
+            tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+            cost: 1.5,
+            messages: 5,
+          },
+        ],
+      },
+    ],
+  };
+
+  it('accepts a submission with a valid device', () => {
+    const result = validateSubmission({
+      ...base,
+      device: {
+        deviceId: '1649043c-d63b-4792-9f77-286df1b52ce3',
+        name: 'MacBook Pro',
+        hostname: 'mbp.local',
+        os: 'macos',
+      },
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.data?.device?.name).toBe('MacBook Pro');
+  });
+
+  it('accepts a submission without a device field', () => {
+    const result = validateSubmission(base);
+
+    expect(result.valid).toBe(true);
+    expect(result.data?.device).toBeUndefined();
+  });
+
+  it('accepts a device with nameExplicit set', () => {
+    const result = validateSubmission({
+      ...base,
+      device: { deviceId: 'work-laptop-001', name: 'Work laptop', nameExplicit: true },
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.data?.device?.nameExplicit).toBe(true);
+  });
+
+  it('rejects the reserved "legacy" device id', () => {
+    const result = validateSubmission({
+      ...base,
+      device: { deviceId: 'legacy', name: 'Legacy device' },
+    });
+
+    expect(result.valid).toBe(false);
+  });
+});

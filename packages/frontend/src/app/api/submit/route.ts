@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
-import { db, apiTokens, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { db, apiTokens, submissions, dailyBreakdown, devices } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
@@ -50,16 +50,19 @@ function normalizeSubmissionData(data: unknown): void {
 /**
  * POST /api/submit
  * Submit token usage data from CLI
- * 
- * IMPLEMENTS CLIENT-LEVEL MERGE:
- * - Only updates clients present in submission
- * - Preserves data for clients NOT in submission
- * - Recalculates totals from dailyBreakdown
+ *
+ * IMPLEMENTS DEVICE-SCOPED, CLIENT-LEVEL MERGE:
+ * - Each submission belongs to a device (machine); usage is stored per device
+ *   so submissions from multiple PCs are summed, not overwritten.
+ * - Within a device, only updates clients present in the submission and
+ *   preserves data for clients NOT in the submission.
+ * - Recalculates the per-user submission totals as the SUM across all devices.
  *
  * Headers:
  *   Authorization: Bearer <api_token>
  *
- * Body: TokenContributionData JSON
+ * Body: TokenContributionData JSON (optional `device` field; submissions
+ *       without it are bucketed into a per-user "legacy" device).
  */
 export async function POST(request: Request) {
   try {
@@ -185,7 +188,113 @@ export async function POST(request: Request) {
       }
 
       // ------------------------------------------
-      // STEP 3b: Fetch existing daily breakdown for merge
+      // STEP 3a-2: Resolve the submitting device
+      // ------------------------------------------
+      // Submissions without a `device` field fall back to a per-user "legacy"
+      // device; the first device-aware submission promotes that legacy device
+      // so upgrading a single-PC CLI does not re-scan into a second device.
+      const deviceInput = data.device;
+      const now = new Date();
+      let deviceUuid: string;
+      let resolvedDeviceName: string;
+
+      if (!deviceInput) {
+        // Legacy / pre-device CLI: upsert the per-user "legacy" device.
+        resolvedDeviceName = "Legacy device";
+        const [legacy] = await tx
+          .insert(devices)
+          .values({
+            userId: tokenRecord.userId,
+            deviceId: "legacy",
+            name: resolvedDeviceName,
+            cliVersion: data.meta.version,
+            lastSeenAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [devices.userId, devices.deviceId],
+            set: { cliVersion: data.meta.version, lastSeenAt: now, updatedAt: now },
+          })
+          .returning({ id: devices.id });
+        deviceUuid = legacy.id;
+      } else {
+        resolvedDeviceName = deviceInput.name;
+        const [existingDevice] = await tx
+          .select({ id: devices.id, name: devices.name })
+          .from(devices)
+          .where(
+            and(
+              eq(devices.userId, tokenRecord.userId),
+              eq(devices.deviceId, deviceInput.deviceId)
+            )
+          )
+          .limit(1);
+
+        if (existingDevice) {
+          // Only overwrite the stored name when set explicitly via
+          // --device-name, so routine submits do not clobber a chosen name.
+          await tx
+            .update(devices)
+            .set({
+              ...(deviceInput.nameExplicit ? { name: deviceInput.name } : {}),
+              hostname: deviceInput.hostname ?? null,
+              os: deviceInput.os ?? null,
+              cliVersion: data.meta.version,
+              lastSeenAt: now,
+              updatedAt: now,
+            })
+            .where(eq(devices.id, existingDevice.id));
+          deviceUuid = existingDevice.id;
+          resolvedDeviceName = deviceInput.nameExplicit
+            ? deviceInput.name
+            : existingDevice.name;
+        } else {
+          // First time this device identity is seen. If a "legacy" device
+          // exists, promote it (claim its history); otherwise insert fresh.
+          const [legacy] = await tx
+            .select({ id: devices.id })
+            .from(devices)
+            .where(
+              and(
+                eq(devices.userId, tokenRecord.userId),
+                eq(devices.deviceId, "legacy")
+              )
+            )
+            .limit(1);
+
+          if (legacy) {
+            await tx
+              .update(devices)
+              .set({
+                deviceId: deviceInput.deviceId,
+                name: deviceInput.name,
+                hostname: deviceInput.hostname ?? null,
+                os: deviceInput.os ?? null,
+                cliVersion: data.meta.version,
+                lastSeenAt: now,
+                updatedAt: now,
+              })
+              .where(eq(devices.id, legacy.id));
+            deviceUuid = legacy.id;
+          } else {
+            const [created] = await tx
+              .insert(devices)
+              .values({
+                userId: tokenRecord.userId,
+                deviceId: deviceInput.deviceId,
+                name: deviceInput.name,
+                hostname: deviceInput.hostname ?? null,
+                os: deviceInput.os ?? null,
+                cliVersion: data.meta.version,
+                lastSeenAt: now,
+              })
+              .returning({ id: devices.id });
+            deviceUuid = created.id;
+          }
+        }
+      }
+
+      // ------------------------------------------
+      // STEP 3b: Fetch existing daily breakdown for THIS device's merge
       // ------------------------------------------
       const existingDays = await tx
         .select({
@@ -195,7 +304,12 @@ export async function POST(request: Request) {
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
         })
         .from(dailyBreakdown)
-        .where(eq(dailyBreakdown.submissionId, submissionId))
+        .where(
+          and(
+            eq(dailyBreakdown.submissionId, submissionId),
+            eq(dailyBreakdown.deviceId, deviceUuid)
+          )
+        )
         .for('update');
 
       const existingDaysMap = new Map(
@@ -207,6 +321,7 @@ export async function POST(request: Request) {
       // ------------------------------------------
       const toInsert: Array<{
         submissionId: string;
+        deviceId: string;
         date: string;
         tokens: number;
         cost: string;
@@ -291,6 +406,7 @@ export async function POST(request: Request) {
 
           toInsert.push({
             submissionId,
+            deviceId: deviceUuid,
             date: incomingDay.date,
             tokens: dayTotals.tokens,
             cost: dayTotals.cost.toFixed(4),
@@ -343,8 +459,9 @@ export async function POST(request: Request) {
           outputTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)::bigint`,
           dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
           dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
-          activeDays: sql<number>`COUNT(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN 1 END)::int`,
+          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
+          deviceCount: sql<number>`COUNT(DISTINCT ${dailyBreakdown.deviceId})::int`,
         })
         .from(dailyBreakdown)
         .where(eq(dailyBreakdown.submissionId, submissionId));
@@ -410,6 +527,10 @@ export async function POST(request: Request) {
       return {
         submissionId,
         isNewSubmission,
+        device: {
+          name: resolvedDeviceName,
+          count: aggregates.deviceCount,
+        },
         metrics: {
           totalTokens: aggregates.totalTokens,
           totalCost: parseFloat(aggregates.totalCost),
@@ -439,6 +560,7 @@ export async function POST(request: Request) {
       success: true,
       submissionId: result.submissionId,
       username: tokenRecord.username,
+      device: result.device,
       metrics: result.metrics,
       mode: result.isNewSubmission ? "create" : "merge",
       warnings: validation.warnings.length > 0 ? validation.warnings : undefined,

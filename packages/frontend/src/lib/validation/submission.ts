@@ -98,6 +98,28 @@ const ExportMetaSchema = z.object({
   }),
 });
 
+// The machine a submission came from. Optional: pre-device-aware CLIs omit it
+// and the server buckets them into a per-user "legacy" device.
+const DeviceInfoSchema = z.object({
+  // "legacy" is reserved for the server's fallback device.
+  deviceId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .refine((id) => id.toLowerCase() !== "legacy", {
+      message: '"legacy" is a reserved device id',
+    }),
+  name: z.string().trim().min(1).max(100),
+  hostname: z.string().trim().max(255).optional(),
+  os: z.string().trim().max(32).optional(),
+  // Set by `--device-name`; the server only overwrites an existing device's
+  // name when true, so routine submits never clobber a chosen name.
+  nameExplicit: z.boolean().optional(),
+});
+
+export type DeviceInfo = z.infer<typeof DeviceInfoSchema>;
+
 const LEGACY_CLIENT_ALIASES: Record<string, string> = {
   kilocode: "kilo",
 };
@@ -166,6 +188,7 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   summary: DataSummarySchema,
   years: z.array(YearSummarySchema),
   contributions: z.array(DailyContributionSchema),
+  device: DeviceInfoSchema.optional(),
 }));
 
 export type SubmissionData = z.infer<typeof SubmissionDataSchema>;

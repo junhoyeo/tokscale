@@ -78,6 +78,7 @@ vi.mock("@/lib/db", () => ({
   dailyBreakdown: {
     id: "dailyBreakdown.id",
     submissionId: "dailyBreakdown.submissionId",
+    deviceId: "dailyBreakdown.deviceId",
     date: "dailyBreakdown.date",
     timestampMs: "dailyBreakdown.timestampMs",
     sourceBreakdown: "dailyBreakdown.sourceBreakdown",
@@ -85,6 +86,17 @@ vi.mock("@/lib/db", () => ({
     cost: "dailyBreakdown.cost",
     inputTokens: "dailyBreakdown.inputTokens",
     outputTokens: "dailyBreakdown.outputTokens",
+  },
+  devices: {
+    id: "devices.id",
+    userId: "devices.userId",
+    deviceId: "devices.deviceId",
+    name: "devices.name",
+    hostname: "devices.hostname",
+    os: "devices.os",
+    cliVersion: "devices.cliVersion",
+    lastSeenAt: "devices.lastSeenAt",
+    updatedAt: "devices.updatedAt",
   },
 }));
 
@@ -313,6 +325,7 @@ describe("POST /api/submit auth path", () => {
         dateEnd: "2026-04-30",
         activeDays: 1,
         rowCount: 1,
+        deviceCount: 1,
       }],
       [{
         sourceBreakdown: {
@@ -350,17 +363,18 @@ describe("POST /api/submit auth path", () => {
       select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
       insert: vi.fn(() => {
         insertCall += 1;
-        if (insertCall === 1) {
-          const builder = {
-            values: vi.fn(() => builder),
-            returning: vi.fn(() => Promise.resolve([{ id: "submission-1" }])),
-          };
-          return builder;
-        }
-
-        return {
-          values: vi.fn(() => Promise.resolve()),
+        // insertCall 1: submission insert; insertCall 2: device upsert.
+        // The builder is awaitable (`then`) so the batch dailyBreakdown
+        // insert (`await tx.insert(...).values(...)`) also resolves.
+        const id = insertCall === 1 ? "submission-1" : "device-1";
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id }])),
+          then: (resolve: (value: unknown) => unknown) =>
+            Promise.resolve(resolve(undefined)),
         };
+        return builder;
       }),
       execute: vi.fn(() => Promise.resolve()),
     };
