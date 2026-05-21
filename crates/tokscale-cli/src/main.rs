@@ -208,6 +208,12 @@ enum Commands {
         #[command(flatten)]
         date: DateRangeFlags,
         #[arg(
+            long = "device-name",
+            value_name = "NAME",
+            help = "Set this machine's display name on Tokscale (persisted locally)"
+        )]
+        device_name: Option<String>,
+        #[arg(
             long,
             help = "Show what would be submitted without actually submitting"
         )]
@@ -542,6 +548,7 @@ fn main() -> Result<()> {
         Some(Commands::Submit {
             clients,
             date,
+            device_name,
             dry_run,
         }) => {
             reject_unsupported_home_override(&cli.home, "submit")?;
@@ -556,7 +563,7 @@ fn main() -> Result<()> {
             // defaultClients view filter (which may exclude clients they still want
             // to upload). Pass an explicit empty defaults slice.
             let clients = build_client_filter_with_defaults(clients, &[]);
-            run_submit_command(clients, since, until, year, dry_run)
+            run_submit_command(clients, since, until, year, device_name, dry_run)
         }
         Some(Commands::Headless {
             source,
@@ -3302,6 +3309,22 @@ struct TsExportMeta {
     date_range: DateRange,
 }
 
+/// Identifies the machine a submission came from, so the server stores usage
+/// per device and sums it instead of letting a second PC overwrite the first.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TsDeviceInfo {
+    device_id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os: Option<String>,
+    /// True when the user set the name this run via `--device-name`; the
+    /// server only overwrites an existing device's name when this is set.
+    name_explicit: bool,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TsTokenContributionData {
@@ -3309,6 +3332,8 @@ struct TsTokenContributionData {
     summary: TsDataSummary,
     years: Vec<TsYearSummary>,
     contributions: Vec<TsDailyContribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: Option<TsDeviceInfo>,
 }
 
 fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenContributionData {
@@ -3386,7 +3411,47 @@ fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenC
                     .collect(),
             })
             .collect(),
+        // Set by run_submit_command; None for the converter's other callers.
+        device: None,
     }
+}
+
+/// Resolve this machine's device identity, clamped to the server's field
+/// limits. `device_name`, when set, overrides and persists the stored name.
+fn resolve_submit_device(device_name: Option<&str>) -> Result<TsDeviceInfo> {
+    fn clamp(value: &str, max_chars: usize) -> String {
+        value.chars().take(max_chars).collect()
+    }
+
+    let mut identity = auth::load_or_create_device_identity()?;
+
+    let name_explicit = device_name.map(|n| !n.trim().is_empty()).unwrap_or(false);
+    if let Some(new_name) = device_name {
+        let trimmed = new_name.trim();
+        if !trimmed.is_empty() {
+            identity.name = trimmed.to_string();
+            if let Err(err) = auth::save_device_identity(&identity) {
+                use colored::Colorize;
+                eprintln!(
+                    "{}",
+                    format!("  Warning: could not persist device name: {err}").yellow()
+                );
+            }
+        }
+    }
+
+    let mut name = clamp(identity.name.trim(), 100);
+    if name.is_empty() {
+        name = clamp(&auth::device_hostname(), 100);
+    }
+
+    Ok(TsDeviceInfo {
+        device_id: clamp(identity.device_id.trim(), 64),
+        name,
+        hostname: Some(clamp(&auth::device_hostname(), 255)),
+        os: Some(clamp(auth::device_os(), 32)),
+        name_explicit,
+    })
 }
 
 fn run_login_command(token: Option<String>) -> Result<()> {
@@ -3829,10 +3894,18 @@ struct SubmitResponse {
     submission_id: Option<String>,
     #[allow(dead_code)]
     username: Option<String>,
+    device: Option<SubmitResponseDevice>,
     metrics: Option<SubmitMetrics>,
     warnings: Option<Vec<String>>,
     error: Option<String>,
     details: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct SubmitResponseDevice {
+    name: Option<String>,
+    /// Number of devices contributing to the user's aggregated total.
+    count: Option<i32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3880,6 +3953,7 @@ fn run_submit_command(
     since: Option<String>,
     until: Option<String>,
     year: Option<String>,
+    device_name: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
     use colored::Colorize;
@@ -3965,6 +4039,10 @@ fn run_submit_command(
     let mut graph_result = graph_result;
     cap_graph_result_to_utc_today(&mut graph_result, &utc_today);
 
+    // Abort on identity failure rather than falling back to the server's
+    // "legacy" bucket, which would mis-attribute this machine's usage.
+    let submit_device = resolve_submit_device(device_name.as_deref())?;
+
     println!("{}", "  Data to submit:".white());
     println!(
         "{}",
@@ -4002,6 +4080,10 @@ fn run_submit_command(
         "{}",
         format!("    Models: {} models", graph_result.summary.models.len()).bright_black()
     );
+    println!(
+        "{}",
+        format!("    Device: {}", submit_device.name).bright_black()
+    );
     println!();
 
     if graph_result.summary.total_tokens == 0 {
@@ -4018,7 +4100,8 @@ fn run_submit_command(
 
     let api_url = auth::get_api_base_url();
 
-    let submit_payload = to_ts_token_contribution_data(&graph_result);
+    let mut submit_payload = to_ts_token_contribution_data(&graph_result);
+    submit_payload.device = Some(submit_device);
 
     let response = rt.block_on(async {
         reqwest::Client::new()
@@ -4038,6 +4121,7 @@ fn run_submit_command(
                     .unwrap_or_else(|_| SubmitResponse {
                         submission_id: None,
                         username: None,
+                        device: None,
                         metrics: None,
                         warnings: None,
                         error: Some(format!(
@@ -4088,6 +4172,19 @@ fn run_submit_command(
                 }
                 if let Some(days) = metrics.active_days {
                     println!("{}", format!("    Active days: {}", days).bright_black());
+                }
+            }
+            if let Some(device) = &body.device {
+                if let Some(name) = &device.name {
+                    println!("{}", format!("    Device: {}", name).bright_black());
+                }
+                if let Some(count) = device.count {
+                    if count > 1 {
+                        println!(
+                            "{}",
+                            format!("    Aggregated across {} devices", count).bright_black()
+                        );
+                    }
                 }
             }
             if let Some(username) = body

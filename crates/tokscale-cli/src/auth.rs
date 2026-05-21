@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const API_TOKEN_ENV_VAR: &str = "TOKSCALE_API_TOKEN";
 
@@ -164,11 +164,125 @@ pub fn get_api_base_url() -> String {
 }
 
 fn get_device_name() -> String {
-    let hostname = hostname::get()
+    format!("CLI on {}", device_hostname())
+}
+
+/// Raw machine hostname, used as the default device name.
+pub fn device_hostname() -> String {
+    hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "unknown".to_string());
-    format!("CLI on {}", hostname)
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Short OS identifier ("linux", "macos", "windows", ...).
+pub fn device_os() -> &'static str {
+    std::env::consts::OS
+}
+
+/// Stable identity of this machine, persisted in
+/// `~/.config/tokscale/device.json`. `device_id` is a UUID generated once;
+/// `name` defaults to the hostname.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceIdentity {
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+    pub name: String,
+}
+
+fn get_device_identity_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".config/tokscale/device.json"))
+}
+
+pub fn save_device_identity(identity: &DeviceIdentity) -> Result<()> {
+    ensure_config_dir()?;
+    let path = get_device_identity_path()?;
+    let json = serde_json::to_string_pretty(identity)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(json.as_bytes())?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, json)?;
+    }
+
+    Ok(())
+}
+
+/// Load this machine's device identity, creating it on first use. A corrupt or
+/// unreadable file is a hard error, not a silent regeneration — minting a fresh
+/// id would re-upload this machine's history and double-count it.
+pub fn load_or_create_device_identity() -> Result<DeviceIdentity> {
+    let path = get_device_identity_path()?;
+
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            let identity: DeviceIdentity = serde_json::from_str(&content).with_context(|| {
+                format!(
+                    "Device identity file is corrupt: {}. Delete it to regenerate.",
+                    path.display()
+                )
+            })?;
+            if identity.device_id.trim().is_empty() {
+                anyhow::bail!(
+                    "Device identity file has an empty device id: {}. Delete it to regenerate.",
+                    path.display()
+                );
+            }
+            Ok(identity)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => create_device_identity(&path),
+        Err(err) => Err(err).with_context(|| {
+            format!("Could not read device identity file: {}", path.display())
+        }),
+    }
+}
+
+/// Create and persist a new device identity. Uses `create_new` so two
+/// concurrent first submits cannot mint two different ids for one machine —
+/// the loser reads back the winner's file.
+fn create_device_identity(path: &Path) -> Result<DeviceIdentity> {
+    let identity = DeviceIdentity {
+        device_id: uuid::Uuid::new_v4().to_string(),
+        name: device_hostname(),
+    };
+    ensure_config_dir()?;
+    let json = serde_json::to_string_pretty(&identity)?;
+
+    let mut open_opts = fs::OpenOptions::new();
+    open_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.mode(0o600);
+    }
+
+    match open_opts.open(path) {
+        Ok(mut file) => {
+            file.write_all(json.as_bytes())?;
+            Ok(identity)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let content = fs::read_to_string(path)?;
+            serde_json::from_str(&content).with_context(|| {
+                format!("Device identity file is corrupt: {}", path.display())
+            })
+        }
+        Err(err) => Err(err)
+            .with_context(|| format!("Could not create device identity file: {}", path.display())),
+    }
 }
 
 #[cfg(target_os = "linux")]
