@@ -71,7 +71,7 @@ export function GraphContainer({ data }: GraphContainerProps) {
   const [selectedYear, setSelectedYear] = useState<string>(() => data.years.length > 0 ? data.years[data.years.length - 1].year : "");
   const [hoveredDay, setHoveredDay] = useState<DailyContribution | null>(null);
   const [tooltipPosition, setTooltipPosition] = useState<TooltipPosition | null>(null);
-  const [selectedDay, setSelectedDay] = useState<DailyContribution | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [clientFilter, setClientFilter] = useState<ClientType[]>([]);
   const initializedRef = useRef(false);
 
@@ -88,6 +88,16 @@ export function GraphContainer({ data }: GraphContainerProps) {
     const filtered = filterByYear(filteredByClient.contributions, selectedYear);
     return recalculateIntensity(filtered);
   }, [filteredByClient.contributions, selectedYear]);
+
+  // Derived from selectedDate so switching device or year refreshes the
+  // detailed breakdown instead of leaving a stale day on screen.
+  const selectedDay = useMemo(
+    () =>
+      selectedDate
+        ? yearContributions.find((c) => c.date === selectedDate) ?? null
+        : null,
+    [yearContributions, selectedDate]
+  );
 
   const maxTokens = useMemo(() => Math.max(...yearContributions.map((c) => c.totals.tokens), 0), [yearContributions]);
   const totalCost = useMemo(() => yearContributions.reduce((sum, c) => sum + c.totals.cost, 0), [yearContributions]);
@@ -114,7 +124,7 @@ export function GraphContainer({ data }: GraphContainerProps) {
         const latestDay = activeDaysWithTokens[activeDaysWithTokens.length - 1];
         // Intentional one-time initialization on first data load
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setSelectedDay(latestDay);
+        setSelectedDate(latestDay.date);
         initializedRef.current = true;
       }
     }
@@ -126,7 +136,7 @@ export function GraphContainer({ data }: GraphContainerProps) {
   }, []);
 
   const handleDayClick = useCallback((day: DailyContribution | null) => {
-    setSelectedDay((prev) => (prev?.date === day?.date ? null : day));
+    setSelectedDate((prev) => (prev === day?.date ? null : day?.date ?? null));
   }, []);
 
   return (
@@ -178,7 +188,7 @@ export function GraphContainer({ data }: GraphContainerProps) {
         </GraphWrapper>
       </GraphCard>
 
-      {selectedDay && <BreakdownPanel day={selectedDay} onClose={() => setSelectedDay(null)} palette={palette} />}
+      {selectedDay && <BreakdownPanel day={selectedDay} onClose={() => setSelectedDate(null)} palette={palette} />}
       {view === "2d" && <StatsPanel data={filteredByClient} palette={palette} />}
       <Tooltip day={hoveredDay} position={tooltipPosition} visible={hoveredDay !== null} palette={palette} />
     </Container>

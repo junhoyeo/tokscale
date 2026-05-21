@@ -1211,3 +1211,8 @@ export function ProfileEmptyActivity() {
     </EmptyActivityContainer>
   );
 }
+
+// Re-export the device breakdown widget so it is available alongside the
+// other profile components from "@/components/profile".
+export { ProfileDevices } from "./ProfileDevices";
+export type { ProfileDevice } from "./ProfileDevices";

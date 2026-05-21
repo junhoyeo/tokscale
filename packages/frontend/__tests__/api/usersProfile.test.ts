@@ -120,6 +120,12 @@ vi.mock("@/lib/db", () => ({
   dailyBreakdown: mockState.tables.dailyBreakdown,
 }));
 
+// The profile route fetches per-device stats; isolate the route test from the
+// devices query module by stubbing it with an empty result.
+vi.mock("@/lib/db/devices", () => ({
+  getUserDeviceStats: async () => [],
+}));
+
 vi.mock("@/lib/db/usernameLookup", () => {
   class AmbiguousUsernameError extends Error {}
 

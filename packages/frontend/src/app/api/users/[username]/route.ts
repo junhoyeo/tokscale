@@ -8,6 +8,7 @@ import {
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+import { getUserDeviceStats } from "@/lib/db/devices";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
@@ -49,7 +50,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
     const oneYearAgo = new Date();
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
-    const [statsResult, latestSubmissionResult, rankResult, dailyData] = await Promise.all([
+    const [statsResult, latestSubmissionResult, rankResult, dailyData, deviceStats] = await Promise.all([
       db
         .select({
           totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)`,
@@ -99,6 +100,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       db
         .select({
           date: dailyBreakdown.date,
+          deviceId: dailyBreakdown.deviceId,
           timestampMs: dailyBreakdown.timestampMs,
           tokens: dailyBreakdown.tokens,
           cost: dailyBreakdown.cost,
@@ -116,11 +118,17 @@ export async function GET(_request: Request, { params }: RouteParams) {
           )
         )
         .orderBy(dailyBreakdown.date),
+
+      getUserDeviceStats(user.id),
     ]);
 
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
     const rank = (rankResult as unknown as { rank: number }[])[0]?.rank || null;
+
+    // The aggregatedDaily loop below mutates dailyData rows in place; keep an
+    // independent copy for the per-device pass so it reads unmutated data.
+    const deviceDailyRows = structuredClone(dailyData);
 
     type ModelData = {
       tokens: number;
@@ -401,6 +409,97 @@ export async function GET(_request: Request, { params }: RouteParams) {
       };
     });
 
+    // Per-device daily contributions for the Activity tab's device selector.
+    const rowsByDevice = new Map<string, typeof deviceDailyRows>();
+    for (const row of deviceDailyRows) {
+      const list = rowsByDevice.get(row.deviceId);
+      if (list) list.push(row);
+      else rowsByDevice.set(row.deviceId, [row]);
+    }
+
+    const buildDeviceContributions = (rows: typeof deviceDailyRows) =>
+      rows
+        .slice()
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((row) => {
+          const cost = Number(row.cost);
+          const intensity =
+            maxCost === 0 || cost === 0
+              ? 0
+              : cost <= maxCost * 0.25
+              ? 1
+              : cost <= maxCost * 0.5
+              ? 2
+              : cost <= maxCost * 0.75
+              ? 3
+              : 4;
+
+          let cacheRead = 0;
+          let cacheWrite = 0;
+          let reasoning = 0;
+          const clientList: Array<{
+            client: string;
+            modelId: string;
+            models: Record<string, ModelData>;
+            tokens: {
+              input: number;
+              output: number;
+              cacheRead: number;
+              cacheWrite: number;
+              reasoning: number;
+            };
+            cost: number;
+            messages: number;
+          }> = [];
+
+          if (row.sourceBreakdown) {
+            for (const [rawClient, data] of Object.entries(row.sourceBreakdown)) {
+              const b = data as ClientBreakdown;
+              cacheRead += b.cacheRead || 0;
+              cacheWrite += b.cacheWrite || 0;
+              reasoning += b.reasoning || 0;
+              clientList.push({
+                client: normalizeClientId(rawClient),
+                modelId: b.modelId || "",
+                models: b.models || {},
+                tokens: {
+                  input: b.input || 0,
+                  output: b.output || 0,
+                  cacheRead: b.cacheRead || 0,
+                  cacheWrite: b.cacheWrite || 0,
+                  reasoning: b.reasoning || 0,
+                },
+                cost: b.cost || 0,
+                messages: b.messages || 0,
+              });
+            }
+          }
+
+          return {
+            date: row.date,
+            timestampMs: row.timestampMs ?? null,
+            totals: { tokens: Number(row.tokens), cost, messages: 0 },
+            intensity: intensity as 0 | 1 | 2 | 3 | 4,
+            tokenBreakdown: {
+              input: Number(row.inputTokens),
+              output: Number(row.outputTokens),
+              cacheRead,
+              cacheWrite,
+              reasoning,
+            },
+            clients: clientList,
+          };
+        });
+
+    const deviceContributions = deviceStats
+      .filter((device) => (rowsByDevice.get(device.id)?.length ?? 0) > 0)
+      .map((device) => ({
+        id: device.id,
+        name: device.name,
+        os: device.os,
+        contributions: buildDeviceContributions(rowsByDevice.get(device.id) ?? []),
+      }));
+
     const activeDays = contributions.filter((c) => c.tokens > 0).length;
 
     const modelUsageMap = new Map<string, { tokens: number; cost: number }>();
@@ -458,6 +557,19 @@ export async function GET(_request: Request, { params }: RouteParams) {
       models: latestSubmission?.modelsUsed || [],
       modelUsage,
       contributions: graphContributions,
+      // Per-device usage breakdown, public-safe fields only (no hostname).
+      devices: deviceStats
+        .filter((device) => (rowsByDevice.get(device.id)?.length ?? 0) > 0)
+        .map((device) => ({
+          id: device.id,
+          name: device.name,
+          os: device.os,
+          totalTokens: device.totalTokens,
+          totalCost: device.totalCost,
+          activeDays: device.activeDays,
+          lastActiveDate: device.lastActiveDate,
+        })),
+      deviceContributions,
     });
   } catch (error) {
     if (error instanceof AmbiguousUsernameError) {
