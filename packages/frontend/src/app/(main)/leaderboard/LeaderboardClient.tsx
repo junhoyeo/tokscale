@@ -1160,33 +1160,31 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           onTabChange={(tab) => {
             setPeriod(tab);
             setPage(1);
-            if (tab !== "all") {
-              setSearchQuery("");
-              setDebouncedSearch("");
+            if (tab !== "custom") {
+              setAppliedFrom("");
+              setAppliedTo("");
             }
           }}
         />
       </TabSection>
 
       <SearchSortRow>
-        {period === "all" && (
-          <SearchInputWrapper>
-            <SearchInputIcon>
-              <SearchIcon size={16} />
-            </SearchInputIcon>
-            <SearchInput
-              type="text"
-              placeholder="Search users..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-            {searchQuery && (
-              <ClearSearchButton onClick={() => setSearchQuery("")} aria-label="Clear search">
-                <XIcon size={16} />
-              </ClearSearchButton>
-            )}
-          </SearchInputWrapper>
-        )}
+        <SearchInputWrapper>
+          <SearchInputIcon>
+            <SearchIcon size={16} />
+          </SearchInputIcon>
+          <SearchInput
+            type="text"
+            placeholder="Search users..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchQuery && (
+            <ClearSearchButton onClick={() => setSearchQuery("")} aria-label="Clear search">
+              <XIcon size={16} />
+            </ClearSearchButton>
+          )}
+        </SearchInputWrapper>
         <SortToggleInner>
           <SortLabel>Sort by:</SortLabel>
           <Switch

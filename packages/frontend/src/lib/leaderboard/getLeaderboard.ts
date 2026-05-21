@@ -160,14 +160,21 @@ function aggregatePeriodRows(
 }
 
 function matchesLeaderboardSearch(
-  user: Pick<LeaderboardUser, "username">,
+  user: Pick<LeaderboardUser, "username" | "displayName">,
   search: string
 ): boolean {
   if (!search) {
     return true;
   }
 
-  return user.username.toLowerCase().includes(search.toLowerCase());
+  const lowerSearch = search.toLowerCase();
+  if (user.username.toLowerCase().includes(lowerSearch)) {
+    return true;
+  }
+  if (user.displayName && user.displayName.toLowerCase().includes(lowerSearch)) {
+    return true;
+  }
+  return false;
 }
 
 function buildPeriodLeaderboardData(
@@ -332,7 +339,7 @@ async function fetchLeaderboardData(
     const results = await db
       .select()
       .from(rankedSubquery)
-      .where(sql`LOWER(${rankedSubquery.username}) LIKE ${searchPattern}`)
+      .where(sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`)
       .orderBy(sql`${rankedSubquery.rank} ASC`)
       .limit(limit)
       .offset(offset);
@@ -341,7 +348,7 @@ async function fetchLeaderboardData(
     const countResult = await db
       .select({ count: sql<number>`COUNT(*)`.as("count") })
       .from(rankedSubquery)
-      .where(sql`LOWER(${rankedSubquery.username}) LIKE ${searchPattern}`);
+      .where(sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`);
 
     const totalUsers = Number(countResult[0]?.count) || 0;
     const totalPages = Math.ceil(totalUsers / limit);
