@@ -50,6 +50,13 @@
       "when": 1778025600000,
       "tag": "0006_rehash_plaintext_personal_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1779321600000,
+      "tag": "0007_add_devices_and_device_breakdown",
+      "breakpoints": true
     }
   ]
 }
