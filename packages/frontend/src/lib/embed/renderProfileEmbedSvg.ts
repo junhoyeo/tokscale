@@ -1,149 +1,43 @@
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
-import { escapeXml, formatNumber, formatCurrency } from "../format";
+import { formatNumber, formatCurrency } from "../format";
+import {
+  type ThemePalette,
+  type EmbedTheme,
+  type EmbedColorName,
+  type EmbedNumberFormat,
+  resolvePalette,
+  FIGTREE_FONT_STACK,
+  FIGTREE_FONT_IMPORT,
+  brandIcon,
+  formatDateLabel,
+  getRankColor,
+  escapeXml,
+  formatRank,
+  type EmbedRankFormat,
+} from "./embedShared";
 
-export type EmbedTheme = "dark" | "light";
+export type { EmbedTheme } from "./embedShared";
 export type EmbedSortBy = "tokens" | "cost";
 
 export interface RenderProfileEmbedOptions {
   theme?: EmbedTheme;
+  color?: EmbedColorName | null;
   compact?: boolean;
+  /** Legacy flag: when true, both card size and numbers are compact. */
   compactNumbers?: boolean;
+  /** Token count format; overrides the legacy `compactNumbers` default. */
+  tokensFormat?: EmbedNumberFormat;
+  /** Cost format; overrides the legacy `compactNumbers` default. */
+  costFormat?: EmbedNumberFormat;
+  rankFormat?: EmbedRankFormat;
   sortBy?: EmbedSortBy;
   contributions?: EmbedContributionDay[] | null;
-}
-
-type ThemePalette = {
-  bgStart: string;
-  bgEnd: string;
-  border: string;
-  glowColor: string;
-  glowOpacity: number;
-  metricBg: string;
-  metricBorder: string;
-  title: string;
-  text: string;
-  muted: string;
-  brand: string;
-  tokenStart: string;
-  tokenEnd: string;
-  cost: string;
-  rankGold: string;
-  rankSilver: string;
-  rankBronze: string;
-  rankDefault: string;
-  badgeBg: string;
-  badgeBorder: string;
-  badgeText: string;
-  divider: string;
-  accentTokens: string;
-  accentCost: string;
-  accentRank: string;
-  graphGrade0: string;
-  graphGrade1: string;
-  graphGrade2: string;
-  graphGrade3: string;
-  graphGrade4: string;
-};
-
-const THEMES: Record<EmbedTheme, ThemePalette> = {
-  dark: {
-    bgStart: "#0D1117",
-    bgEnd: "#010409",
-    border: "#30363D",
-    glowColor: "#388BFD",
-    glowOpacity: 0.07,
-    metricBg: "rgba(22,27,34,0.6)",
-    metricBorder: "rgba(48,54,61,0.6)",
-    title: "#F0F6FC",
-    text: "#E6EDF3",
-    muted: "#8B949E",
-    brand: "#58A6FF",
-    tokenStart: "#58A6FF",
-    tokenEnd: "#A5D6FF",
-    cost: "#3FB950",
-    rankGold: "#E3B341",
-    rankSilver: "#8B949E",
-    rankBronze: "#DA7E1A",
-    rankDefault: "#58A6FF",
-    badgeBg: "rgba(56,139,253,0.08)",
-    badgeBorder: "rgba(56,139,253,0.25)",
-    badgeText: "#58A6FF",
-    divider: "#30363D",
-    accentTokens: "#58A6FF",
-    accentCost: "#3FB950",
-    accentRank: "#D29922",
-    graphGrade0: "#161B22",
-    graphGrade1: "#0E4429",
-    graphGrade2: "#006D32",
-    graphGrade3: "#26A641",
-    graphGrade4: "#39D353",
-  },
-  light: {
-    bgStart: "#FFFFFF",
-    bgEnd: "#F6F8FA",
-    border: "#D0D7DE",
-    glowColor: "#0969DA",
-    glowOpacity: 0.04,
-    metricBg: "rgba(246,248,250,0.7)",
-    metricBorder: "rgba(208,215,222,0.55)",
-    title: "#1F2328",
-    text: "#1F2328",
-    muted: "#656D76",
-    brand: "#0969DA",
-    tokenStart: "#0969DA",
-    tokenEnd: "#54AEFF",
-    cost: "#1A7F37",
-    rankGold: "#9A6700",
-    rankSilver: "#656D76",
-    rankBronze: "#BC4C00",
-    rankDefault: "#0969DA",
-    badgeBg: "rgba(9,105,218,0.06)",
-    badgeBorder: "rgba(9,105,218,0.2)",
-    badgeText: "#0969DA",
-    divider: "#D0D7DE",
-    accentTokens: "#0969DA",
-    accentCost: "#1A7F37",
-    accentRank: "#9A6700",
-    graphGrade0: "#EBEDF0",
-    graphGrade1: "#9BE9A8",
-    graphGrade2: "#40C463",
-    graphGrade3: "#30A14E",
-    graphGrade4: "#216E39",
-  },
-};
-
-const FIGTREE_FONT_STACK = "Figtree, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
-const FIGTREE_FONT_IMPORT = "https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700;800&amp;display=swap";
-
-function formatDateLabel(value: string | null): string {
-  if (!value) {
-    return "No submissions yet";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "Updated recently";
-  }
-
-  return `Updated ${new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(date)} (UTC)`;
 }
 
 // Approximate character-width ratio for Figtree at various weights.
 // Used to estimate rendered text width for dynamic positioning / collision.
 const CHAR_WIDTH_RATIO = 0.6;
 const APPROX_CHAR_WIDTH_13 = 8;
-
-function getRankColor(rank: number | null, palette: ThemePalette): string {
-  if (rank === 1) return palette.rankGold;
-  if (rank === 2) return palette.rankSilver;
-  if (rank === 3) return palette.rankBronze;
-  return palette.rankDefault;
-}
 
 /**
  * Auto-scale font size so rendered text fits within maxWidth.
@@ -153,15 +47,6 @@ function fitValueFontSize(text: string, maxWidth: number, baseSize: number): num
   const estWidth = text.length * baseSize * CHAR_WIDTH_RATIO;
   if (estWidth <= maxWidth) return baseSize;
   return Math.max(Math.ceil(baseSize * 0.5), Math.floor(baseSize * (maxWidth / estWidth)));
-}
-
-function brandIcon(x: number, baselineY: number, color: string): string {
-  const top = baselineY - 12;
-  return [
-    `<rect x="${x}" y="${top + 8}" width="3" height="6" rx="1" fill="${color}" opacity="0.45"/>`,
-    `<rect x="${x + 5}" y="${top}" width="3" height="14" rx="1" fill="${color}"/>`,
-    `<rect x="${x + 10}" y="${top + 4}" width="3" height="10" rx="1" fill="${color}" opacity="0.7"/>`,
-  ].join("");
 }
 
 function metricCard(args: {
@@ -269,9 +154,11 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const compact = options.compact ?? false;
   const compactNumbers = options.compactNumbers ?? false;
+  const tokensFormat: EmbedNumberFormat = options.tokensFormat ?? (compactNumbers ? "compact" : "full");
+  const costFormat: EmbedNumberFormat = options.costFormat ?? (compactNumbers ? "compact" : "full");
   const sortBy: EmbedSortBy = options.sortBy === "cost" ? "cost" : "tokens";
   const contributions = (!compact && options.contributions) ? options.contributions : null;
-  const palette = THEMES[theme];
+  const palette = resolvePalette(theme, options.color ?? null);
 
   const width = compact ? 460 : 680;
   const height = (compact ? 162 : 186) + (contributions ? 120 : 0);
@@ -288,26 +175,21 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
   const username = `@${data.user.username}`;
   const displayNameRaw = data.user.displayName;
   const displayName = displayNameRaw ? escapeXml(displayNameRaw) : null;
-  const tokens = formatNumber(data.stats.totalTokens, compactNumbers);
-  const cost = formatCurrency(data.stats.totalCost, compactNumbers);
-  const rank = data.stats.rank ? `#${data.stats.rank}` : "N/A";
+  const tokens = formatNumber(data.stats.totalTokens, tokensFormat === "compact");
+  const cost = formatCurrency(data.stats.totalCost, costFormat === "compact");
+  const rank = data.stats.rank
+    ? formatRank(data.stats.rank, data.stats.rankTotal ?? null, options.rankFormat)
+    : "N/A";
   const updated = escapeXml(formatDateLabel(data.stats.updatedAt));
   const rankLabel = compact
     ? `Rank · ${sortBy === "cost" ? "Cost" : "Tokens"}`
     : `Rank (${sortBy === "cost" ? "Cost" : "Tokens"})`;
 
-  const badgeText = sortBy === "cost" ? "RANK · COST" : "RANK · TOKENS";
-  const badgeWidth = compact ? 88 : 106;
-  const badgeX = width - px - badgeWidth;
-  const badgeH = compact ? 22 : 24;
-  const badgeY = compact ? 14 : 16;
-  const badgeRx = badgeH / 2;
-
   const usernameFontSize = compact ? 15 : 17;
   const usernameEstWidth = username.length * usernameFontSize * CHAR_WIDTH_RATIO;
   const displayNameX = Math.round(px + usernameEstWidth + 8);
   const displayNameEstWidth = displayNameRaw ? displayNameRaw.length * APPROX_CHAR_WIDTH_13 : 0;
-  const showDisplayName = Boolean(displayName) && displayNameX + displayNameEstWidth < badgeX - 12;
+  const showDisplayName = Boolean(displayName) && displayNameX + displayNameEstWidth < width - px - 12;
 
   const metricsGap = compact ? 8 : 10;
   const metricsW = width - px * 2;
@@ -365,8 +247,6 @@ function renderProfileCardSvg(data: UserEmbedStats, options: RenderProfileEmbedO
       ? `<text x="${displayNameX}" y="${usernameY}" fill="${palette.muted}" font-size="13" font-family="${FIGTREE_FONT_STACK}">${displayName}</text>`
       : ""
   }
-  <rect x="${badgeX}" y="${badgeY}" width="${badgeWidth}" height="${badgeH}" rx="${badgeRx}" fill="${palette.badgeBg}" stroke="${palette.badgeBorder}"/>
-  <text x="${badgeX + badgeWidth / 2}" y="${badgeY + badgeH / 2 + 4}" fill="${palette.badgeText}" font-size="${compact ? 9 : 10}" font-weight="700" font-family="${FIGTREE_FONT_STACK}" text-anchor="middle" letter-spacing="0.06em">${badgeText}</text>
   <rect x="${px}" y="${dividerY}" width="${metricsW}" height="1" fill="url(#divider-grad)"/>
   ${metricCard({
     x: px,
@@ -424,7 +304,7 @@ export function renderProfileEmbedErrorSvg(
   options: RenderProfileEmbedOptions = {}
 ): string {
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
-  const palette = THEMES[theme];
+  const palette = resolvePalette(theme, options.color ?? null);
   const safeMessage = escapeXml(message);
   const width = 540;
   const height = 120;

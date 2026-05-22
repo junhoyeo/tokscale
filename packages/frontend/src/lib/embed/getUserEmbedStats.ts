@@ -29,6 +29,8 @@ export interface UserEmbedStats {
     totalCost: number;
     submissionCount: number;
     rank: number | null;
+    /** Total number of ranked users, for rendering "rank N of total". */
+    rankTotal?: number | null;
     updatedAt: string | null;
   };
 }
@@ -56,11 +58,12 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
   }
 
   let rank: number | null = null;
+  let rankTotal: number | null = null;
 
   const rankingValue = sortBy === "cost" ? Number(result.totalCost) || 0 : Number(result.totalTokens) || 0;
 
   if (rankingValue > 0) {
-    const rankResult = await db.execute<{ rank: number }>(sql`
+    const rankResult = await db.execute<{ rank: number; total: number }>(sql`
       WITH ranked AS (
         SELECT
           user_id,
@@ -72,10 +75,13 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
           ) AS rank
         FROM submissions
       )
-      SELECT rank FROM ranked WHERE user_id = ${result.id}
+      SELECT rank, (SELECT COUNT(*)::int FROM submissions) AS total
+      FROM ranked WHERE user_id = ${result.id}
     `);
 
-    rank = (rankResult as unknown as { rank: number }[])[0]?.rank || null;
+    const rankRow = (rankResult as unknown as { rank: number; total: number }[])[0];
+    rank = rankRow?.rank || null;
+    rankTotal = rankRow?.total || null;
   }
 
   return {
@@ -90,6 +96,7 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
       totalCost: Number(result.totalCost) || 0,
       submissionCount: Number(result.submissionCount) || 0,
       rank,
+      rankTotal,
       updatedAt: result.updatedAt?.toISOString() || null,
     },
   };

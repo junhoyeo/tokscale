@@ -693,13 +693,29 @@ You can embed your public Tokscale stats directly in your GitHub profile README:
 [![Tokscale Stats](https://tokscale.ai/api/embed/<username>/svg)](https://tokscale.ai/u/<username>)
 ```
 
-- Replace `<username>` with your GitHub username
-- Optional query params:
-  - `theme=light` for a light theme
-  - `sort=tokens` (default) or `sort=cost` to control ranking basis
-  - `compact=1` to use compact layout + compact number notation (e.g., `1.2M`, `$3.4K`)
-- Example:
-  - `https://tokscale.ai/api/embed/<username>/svg?theme=light&sort=cost&compact=1`
+Replace `<username>` with your GitHub username. With no query parameters this
+renders the default `classic` card; append any of the parameters below to
+customize the design.
+
+| Parameter | Values | Effect |
+| --- | --- | --- |
+| `template` | `classic` (default) · `minimal` · `terminal` · `graph` · `orbit` · `vitals` · `blueprint` · `receipt` | Card design |
+| `color` | `blue` · `green` · `teal` · `purple` · `pink` · `orange` · `monochrome` · `halloween` · `YlGnBu` | Accent color and contribution-graph palette |
+| `theme` | `dark` (default) · `light` | Light or dark card |
+| `sort` | `tokens` (default) · `cost` | Which leaderboard the rank is taken from |
+| `tokens`, `cost` | `compact` · `full` | Number format, set independently — `20.9B` vs `20,941,000,000` |
+| `rank` | `plain` (default, `#134`) · `percent` (`top 12%`) · `total` (`#134 / 1,174`) | How the leaderboard rank is shown |
+| `graph` | `1` to append the contribution graph (off by default) | Supported by `classic`, `minimal`, `terminal`, `orbit`, `blueprint`, `receipt` |
+| `compact` | `1` for the compact layout | `classic` only |
+
+Examples:
+
+```md
+![](https://tokscale.ai/api/embed/<username>/svg?template=minimal&color=purple&graph=1)
+![](https://tokscale.ai/api/embed/<username>/svg?template=orbit&color=pink&rank=percent)
+![](https://tokscale.ai/api/embed/<username>/svg?template=terminal&color=green&theme=light)
+![](https://tokscale.ai/api/embed/<username>/svg?template=receipt&color=YlGnBu&graph=1)
+```
 
 ### GitHub Profile Badge
 
