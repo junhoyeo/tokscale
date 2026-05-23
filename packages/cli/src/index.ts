@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -143,7 +143,30 @@ searchPaths.push(
   join(cliDir, "bin", binaryName),
 );
 
-let binary = searchPaths.find((p) => existsSync(p));
+function tryRealpath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+// Paths that would re-enter this wrapper if executed - using any of these as
+// the "real" binary causes infinite recursion (a fork bomb). We compare by
+// realpath so symlinks (e.g. npm/bun bin shims) are dereferenced.
+const selfPaths = new Set<string>([
+  tryRealpath(fileURLToPath(import.meta.url)),
+  tryRealpath(join(cliDir, "bin.js")),
+]);
+if (process.argv[1]) {
+  selfPaths.add(tryRealpath(process.argv[1]));
+}
+
+function isSelfReference(p: string): boolean {
+  return selfPaths.has(tryRealpath(p));
+}
+
+let binary = searchPaths.find((p) => existsSync(p) && !isSelfReference(p));
 
 if (!binary) {
   try {
@@ -154,7 +177,7 @@ if (!binary) {
     })
       .trim()
       .split("\n")[0];
-    if (found && existsSync(found)) {
+    if (found && existsSync(found) && !isSelfReference(found)) {
       binary = found;
     }
   } catch {}
