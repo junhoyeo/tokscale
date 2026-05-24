@@ -513,6 +513,13 @@ pub fn parse_claude_file_with_cache(
                 }
                 messages.push(unified);
                 provider_confidences.push(provider_confidence);
+                // Consume the pending request-start timestamp so a back-to-back
+                // assistant message with no intervening user entry doesn't reuse
+                // it and report an inflated duration. Streaming duplicates of
+                // this same message have already been captured in the dedup map
+                // above, so they merge via merge_claude_duplicate without needing
+                // the global pending value again.
+                pending_request_start_timestamp_ms = None;
                 handled = true;
             }
         }
@@ -595,9 +602,22 @@ fn merge_claude_duplicate(
 
     if let Some(timestamp_ms) = parsed_timestamp {
         if timestamp_ms >= existing.timestamp {
+            // Recover the original request-start timestamp from the existing
+            // message's recorded duration. The parent loop clears
+            // `pending_request_start_timestamp_ms` after the first chunk of a
+            // message commits (so a NEW message with no preceding user doesn't
+            // inflate by reusing a stale start), which would otherwise blank
+            // out streaming duplicates' duration. Recovering from
+            // `existing.timestamp - existing.duration_ms` keeps the duration
+            // honest for late chunks of the same logical message.
+            let recovered_start = existing
+                .duration_ms
+                .map(|d| existing.timestamp - d)
+                .or(request_start_timestamp_ms);
             existing.set_timestamp(timestamp_ms);
-            existing.duration_ms =
-                duration_between_ms(request_start_timestamp_ms, parsed_timestamp);
+            if let Some(new_duration) = duration_between_ms(recovered_start, Some(timestamp_ms)) {
+                existing.duration_ms = Some(new_duration);
+            }
         }
     }
 }
@@ -1185,6 +1205,33 @@ mod tests {
         assert_eq!(
             messages[0].dedup_key.as_deref(),
             Some("message:msg_stream")
+        );
+    }
+
+    #[test]
+    fn test_pending_request_start_is_cleared_between_assistant_messages() {
+        // Regression: previously, the user-entry timestamp was set into
+        // `pending_request_start_timestamp_ms` and never cleared after the
+        // first assistant message consumed it. A subsequent assistant message
+        // with no intervening user entry would then reuse the stale start
+        // timestamp and report a wildly inflated duration.
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:01:30.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(1_000),
+            "first assistant should report duration vs the user entry (1s)"
+        );
+        assert_eq!(
+            messages[1].duration_ms, None,
+            "second assistant has no preceding user entry; duration must NOT \
+             reuse the stale pending_request_start_timestamp_ms"
         );
     }
 

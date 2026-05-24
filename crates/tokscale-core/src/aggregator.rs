@@ -1289,6 +1289,7 @@ mod tests {
             agent: None,
             dedup_key: None,
             is_turn_start: false,
+            duration_ms: None,
         }
     }
 
