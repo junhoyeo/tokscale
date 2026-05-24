@@ -188,7 +188,10 @@ enum Commands {
     #[command(about = "Show current logged in user")]
     Whoami,
     #[command(about = "Display saved API token as QR code")]
-    Qr,
+    Qr {
+        #[arg(long, help = "Skip the on-screen warning + confirmation prompt")]
+        yes: bool,
+    },
     #[command(about = "Export contribution graph data as JSON")]
     Graph {
         #[arg(long, help = "Write to file instead of stdout")]
@@ -543,9 +546,9 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "whoami")?;
             run_whoami_command()
         }
-        Some(Commands::Qr) => {
+        Some(Commands::Qr { yes }) => {
             reject_unsupported_home_override(&cli.home, "qr")?;
-            run_qr_command()
+            run_qr_command(yes)
         }
         Some(Commands::Graph {
             output,
@@ -3761,8 +3764,8 @@ fn run_whoami_command() -> Result<()> {
     auth::whoami()
 }
 
-fn run_qr_command() -> Result<()> {
-    auth::show_qr()
+fn run_qr_command(yes: bool) -> Result<()> {
+    auth::show_qr(yes)
 }
 
 fn run_delete_data_command() -> Result<()> {
