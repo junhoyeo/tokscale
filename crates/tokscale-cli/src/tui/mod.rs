@@ -51,6 +51,15 @@ fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
     (cached_data, true)
 }
 
+fn background_data_loader(
+    since: Option<String>,
+    until: Option<String>,
+    year: Option<String>,
+    minutely_enabled: bool,
+) -> DataLoader {
+    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     theme: &str,
@@ -153,9 +162,10 @@ pub fn run(
         let bg_year = year.clone();
         let bg_enabled_clients = enabled_clients.clone();
         let bg_group_by = app.group_by.borrow().clone();
+        let bg_minutely_enabled = app.settings.minutely_tab_enabled;
 
         thread::spawn(move || {
-            let loader = DataLoader::with_filters(None, bg_since, bg_until, bg_year);
+            let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
             let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
 
             if let Ok(ref data) = result {
@@ -270,9 +280,10 @@ fn run_loop_with_background(
             let year = app.data_loader.year.clone();
             let enabled_clients = app.enabled_clients.borrow().clone();
             let group_by = app.group_by.borrow().clone();
+            let minutely_enabled = app.settings.minutely_tab_enabled;
 
             thread::spawn(move || {
-                let loader = DataLoader::with_filters(None, since, until, year);
+                let loader = background_data_loader(since, until, year, minutely_enabled);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
                     save_cached_data(data, &enabled_clients, &group_by);
@@ -371,5 +382,14 @@ mod tests {
 
         assert!(cached_data.is_none());
         assert!(needs_background_load);
+    }
+
+    #[test]
+    fn background_loader_preserves_minutely_toggle() {
+        let enabled = background_data_loader(None, None, None, true);
+        assert!(enabled.minutely_enabled);
+
+        let disabled = background_data_loader(None, None, None, false);
+        assert!(!disabled.minutely_enabled);
     }
 }

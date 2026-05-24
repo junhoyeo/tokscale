@@ -208,7 +208,9 @@ fn daily_source_model_key(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
+            model.to_string()
+        }
     }
 }
 
@@ -221,28 +223,42 @@ fn daily_source_model_display_name(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
-        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
+            model.to_string()
+        }
     }
 }
 
 fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => model.to_string(),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
 fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
 fn hourly_model_display_name(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
@@ -402,6 +418,10 @@ impl DataLoader {
                 }
                 GroupBy::WorkspaceModel => {
                     format!("{}:{}", workspace_group_key, normalized_model)
+                }
+                GroupBy::Session => format!("{}:{}", msg.session_id, normalized_model),
+                GroupBy::ClientSession => {
+                    format!("{}:{}:{}", msg.client, msg.session_id, normalized_model)
                 }
             };
             let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
@@ -1298,7 +1318,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 23);
+        assert_eq!(clients.len(), 24);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -1322,6 +1342,7 @@ mod tests {
         assert_eq!(clients[20], ClientId::Antigravity);
         assert_eq!(clients[21], ClientId::Zed);
         assert_eq!(clients[22], ClientId::Kiro);
+        assert_eq!(clients[23], ClientId::Trae);
     }
 
     #[test]
@@ -1395,6 +1416,8 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Zed),
             "Zed Agent"
         );
+        assert_eq!(crate::tui::client_ui::display_name(ClientId::Kiro), "Kiro");
+        assert_eq!(crate::tui::client_ui::display_name(ClientId::Trae), "Trae");
     }
 
     #[test]
@@ -1420,6 +1443,8 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codebuff), 'b');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Antigravity), 'a');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zed), 'z');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), 'i');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), 'y');
     }
 
     #[test]
@@ -1496,6 +1521,14 @@ mod tests {
             Some(ClientId::Antigravity)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('z'), Some(ClientId::Zed));
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('i'),
+            Some(ClientId::Kiro)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('y'),
+            Some(ClientId::Trae)
+        );
     }
 
     #[test]

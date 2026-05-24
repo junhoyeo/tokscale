@@ -53,6 +53,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   sessions: many(sessions),
   apiTokens: many(apiTokens),
   submissions: many(submissions),
+  submittedDevices: many(submittedDevices),
 }));
 
 // ============================================================================
@@ -209,6 +210,40 @@ export const submissionsRelations = relations(submissions, ({ one, many }) => ({
 }));
 
 // ============================================================================
+// SUBMITTED DEVICES
+// ============================================================================
+export const submittedDevices = pgTable(
+  "submitted_devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    deviceKey: varchar("device_key", { length: 96 }).notNull(),
+    displayName: varchar("display_name", { length: 120 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastSubmittedAt: timestamp("last_submitted_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("idx_submitted_devices_user_id").on(table.userId),
+    unique("submitted_devices_user_device_key_unique").on(table.userId, table.deviceKey),
+  ]
+);
+
+export const submittedDevicesRelations = relations(submittedDevices, ({ one, many }) => ({
+  user: one(users, {
+    fields: [submittedDevices.userId],
+    references: [users.id],
+  }),
+  dailyBreakdown: many(dailyBreakdown),
+}));
+
+// ============================================================================
 // DAILY BREAKDOWN
 // ============================================================================
 export const dailyBreakdown = pgTable(
@@ -218,6 +253,9 @@ export const dailyBreakdown = pgTable(
     submissionId: uuid("submission_id")
       .notNull()
       .references(() => submissions.id, { onDelete: "cascade" }),
+    submittedDeviceId: uuid("submitted_device_id")
+      .notNull()
+      .references(() => submittedDevices.id, { onDelete: "cascade" }),
 
     date: date("date").notNull(),
     tokens: bigint("tokens", { mode: "number" }).notNull(),
@@ -260,9 +298,11 @@ export const dailyBreakdown = pgTable(
   },
   (table) => [
     index("idx_daily_breakdown_submission_id").on(table.submissionId),
+    index("idx_daily_breakdown_submitted_device_id").on(table.submittedDeviceId),
     index("idx_daily_breakdown_date").on(table.date),
-    unique("daily_breakdown_submission_date_unique").on(
+    unique("daily_breakdown_submission_device_date_unique").on(
       table.submissionId,
+      table.submittedDeviceId,
       table.date
     ),
   ]
@@ -272,6 +312,10 @@ export const dailyBreakdownRelations = relations(dailyBreakdown, ({ one }) => ({
   submission: one(submissions, {
     fields: [dailyBreakdown.submissionId],
     references: [submissions.id],
+  }),
+  submittedDevice: one(submittedDevices, {
+    fields: [dailyBreakdown.submittedDeviceId],
+    references: [submittedDevices.id],
   }),
 }));
 
@@ -288,5 +332,7 @@ export type DeviceCode = typeof deviceCodes.$inferSelect;
 export type NewDeviceCode = typeof deviceCodes.$inferInsert;
 export type Submission = typeof submissions.$inferSelect;
 export type NewSubmission = typeof submissions.$inferInsert;
+export type SubmittedDevice = typeof submittedDevices.$inferSelect;
+export type NewSubmittedDevice = typeof submittedDevices.$inferInsert;
 export type DailyBreakdown = typeof dailyBreakdown.$inferSelect;
 export type NewDailyBreakdown = typeof dailyBreakdown.$inferInsert;

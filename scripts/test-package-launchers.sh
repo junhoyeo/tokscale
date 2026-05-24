@@ -17,6 +17,7 @@ fi
 BUN_BIN="${BUN_BIN:-$(command -v bun)}"
 NODE_BIN="${NODE_BIN:-$(command -v node)}"
 LDD_BIN="${LDD_BIN:-$(command -v ldd || true)}"
+WHICH_BIN="${WHICH_BIN:-$(command -v which || true)}"
 
 PLATFORM_PACKAGE="$(node --input-type=module <<'NODE'
 import { execSync } from "node:child_process";
@@ -89,6 +90,7 @@ NPM_CACHE="${TMP_ROOT}/npm-cache"
 EMPTY_PATH_DIR="${TMP_ROOT}/empty-path"
 BUN_ONLY_DIR="${TMP_ROOT}/bun-only-path"
 NODE_ONLY_DIR="${TMP_ROOT}/node-only-path"
+STALE_PATH_DIR="${TMP_ROOT}/stale-path"
 
 cp -R packages/cli "${CLI_STAGE}"
 cp -R packages/tokscale "${WRAPPER_STAGE}"
@@ -99,16 +101,26 @@ mkdir -p \
   "${NPM_CACHE}" \
   "${EMPTY_PATH_DIR}" \
   "${BUN_ONLY_DIR}" \
-  "${NODE_ONLY_DIR}"
+  "${NODE_ONLY_DIR}" \
+  "${STALE_PATH_DIR}"
 cp target/release/tokscale "${PLATFORM_STAGE}/bin/tokscale"
 
 chmod +x "${CLI_STAGE}/bin.js" "${WRAPPER_STAGE}/bin.js" "${PLATFORM_STAGE}/bin/tokscale"
+
+cat > "${STALE_PATH_DIR}/tokscale" <<'SH'
+#!/bin/sh
+echo "tokscale 2.0.0"
+SH
+chmod +x "${STALE_PATH_DIR}/tokscale"
 
 ln -s "${BUN_BIN}" "${BUN_ONLY_DIR}/bun"
 ln -s "${NODE_BIN}" "${NODE_ONLY_DIR}/node"
 if [[ -n "${LDD_BIN}" ]]; then
   ln -s "${LDD_BIN}" "${BUN_ONLY_DIR}/ldd"
   ln -s "${LDD_BIN}" "${NODE_ONLY_DIR}/ldd"
+fi
+if [[ -n "${WHICH_BIN}" ]]; then
+  ln -s "${WHICH_BIN}" "${NODE_ONLY_DIR}/which"
 fi
 
 BUN_ONLY_PATH="${BUN_ONLY_DIR}"
@@ -147,6 +159,32 @@ echo "Checking installed launcher with Node-only PATH..."
 INSTALLED_VERSION_NODE="$(env PATH="${NODE_ONLY_PATH}" "${INSTALLED_BIN}" --version)"
 [[ "${INSTALLED_VERSION_NODE}" == tokscale* ]] || {
   echo "Unexpected Node-only launcher output: ${INSTALLED_VERSION_NODE}" >&2
+  exit 1
+}
+
+echo "Checking missing platform binary does not fall back to stale PATH tokscale..."
+rm -f "${INSTALL_DIR}/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/@tokscale/cli/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/@tokscale/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/packages/${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/target/release/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/@tokscale/cli/bin/tokscale"
+set +e
+STALE_OUTPUT="$(env PATH="${STALE_PATH_DIR}:${NODE_ONLY_PATH}" "${INSTALLED_BIN}" --version 2>&1)"
+STALE_CODE=$?
+set -e
+if [[ ${STALE_CODE} -eq 0 ]]; then
+  echo "Expected launcher to fail instead of executing stale PATH tokscale" >&2
+  echo "Launcher output: ${STALE_OUTPUT}" >&2
+  exit 1
+fi
+if [[ "${STALE_OUTPUT}" == *"tokscale 2.0.0"* ]]; then
+  echo "Launcher executed stale PATH tokscale: ${STALE_OUTPUT}" >&2
+  exit 1
+fi
+[[ "${STALE_OUTPUT}" == *"tokscale binary not found"* ]] || {
+  echo "Unexpected missing-binary error output: ${STALE_OUTPUT}" >&2
   exit 1
 }
 

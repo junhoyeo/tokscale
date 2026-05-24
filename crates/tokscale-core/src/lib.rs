@@ -82,7 +82,28 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
         name = result;
     }
 
+    if let Some(canonical) = normalize_anthropic_prefixed_claude_model(&name) {
+        name = canonical;
+    }
+
     name
+}
+
+fn normalize_anthropic_prefixed_claude_model(model_id: &str) -> Option<String> {
+    let rest = model_id.strip_prefix("anthropic/claude-")?;
+    let mut parts = rest.split('-');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let family = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    if !matches!(family, "opus" | "sonnet" | "haiku") {
+        return None;
+    }
+
+    Some(format!("claude-{family}-{major}-{minor}"))
 }
 
 fn retain_for_requested_clients(
@@ -103,6 +124,8 @@ pub enum GroupBy {
     ClientModel,
     ClientProviderModel,
     WorkspaceModel,
+    Session,
+    ClientSession,
 }
 
 impl std::fmt::Display for GroupBy {
@@ -112,6 +135,8 @@ impl std::fmt::Display for GroupBy {
             GroupBy::ClientModel => write!(f, "client,model"),
             GroupBy::ClientProviderModel => write!(f, "client,provider,model"),
             GroupBy::WorkspaceModel => write!(f, "workspace,model"),
+            GroupBy::Session => write!(f, "session,model"),
+            GroupBy::ClientSession => write!(f, "client,session,model"),
         }
     }
 }
@@ -126,8 +151,12 @@ impl std::str::FromStr for GroupBy {
             "client,model" | "client-model" => Ok(GroupBy::ClientModel),
             "client,provider,model" | "client-provider-model" => Ok(GroupBy::ClientProviderModel),
             "workspace,model" | "workspace-model" => Ok(GroupBy::WorkspaceModel),
+            "session" | "session,model" | "session-model" => Ok(GroupBy::Session),
+            "client,session" | "client-session" | "client,session,model" | "client-session-model" => {
+                Ok(GroupBy::ClientSession)
+            }
             _ => Err(format!(
-                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model",
+                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model, session,model, client,session,model",
                 s
             )),
         }
@@ -214,14 +243,14 @@ pub struct LocalParseOptions {
     pub scanner_settings: scanner::ScannerSettings,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DailyTotals {
     pub tokens: i64,
     pub cost: f64,
     pub messages: i32,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClientContribution {
     pub client: String,
     pub model_id: String,
@@ -238,6 +267,24 @@ pub struct DailyContribution {
     pub intensity: u8,
     pub token_breakdown: TokenBreakdown,
     pub clients: Vec<ClientContribution>,
+}
+
+/// Per-session aggregate of token usage, cost, and timing — keyed on
+/// `session_id` so downstream consumers can attribute cost to a specific
+/// agent-CLI session rather than just a date or model rollup.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SessionContribution {
+    pub session_id: String,
+    pub client: String,
+    pub provider: String,
+    pub model: String,
+    pub totals: DailyTotals,
+    pub token_breakdown: TokenBreakdown,
+    pub clients: Vec<ClientContribution>,
+    /// Earliest message timestamp (unix seconds) in the session.
+    pub first_seen: i64,
+    /// Latest message timestamp (unix seconds) in the session.
+    pub last_seen: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -298,6 +345,7 @@ pub struct ModelUsage {
     pub merged_clients: Option<String>,
     pub workspace_key: Option<String>,
     pub workspace_label: Option<String>,
+    pub session_id: Option<String>,
     pub model: String,
     pub provider: String,
     pub input: i64,
@@ -1155,6 +1203,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .collect();
     all_messages.extend(antigravity_messages);
 
+    // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
+    let trae_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Trae)
+        .par_iter()
+        .flat_map(|path| sessions::trae::parse_trae_file("trae", path))
+        .collect();
+    all_messages.extend(trae_messages);
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
@@ -1246,8 +1302,13 @@ fn aggregate_model_usage_entries(
                 format!("{}:{}:{}", msg.client, msg.provider_id, normalized)
             }
             GroupBy::WorkspaceModel => format!("{}:{}", workspace_group_key, normalized),
+            GroupBy::Session => format!("{}:{}", msg.session_id, normalized),
+            GroupBy::ClientSession => {
+                format!("{}:{}:{}", msg.client, msg.session_id, normalized)
+            }
         };
         let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
+        let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             client: msg.client.clone(),
             merged_clients: if merge_clients {
@@ -1262,6 +1323,11 @@ fn aggregate_model_usage_entries(
             },
             workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
                 Some(workspace_label.clone())
+            } else {
+                None
+            },
+            session_id: if session_grouped {
+                Some(msg.session_id.clone())
             } else {
                 None
             },
@@ -2131,6 +2197,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Antigravity, antigravity_count);
     messages.extend(antigravity_msgs);
 
+    let trae_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Trae)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::trae::parse_trae_file("trae", path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let trae_count = trae_msgs.len() as i32;
+    counts.set(ClientId::Trae, trae_count);
+    messages.extend(trae_msgs);
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let synthetic_msgs: Vec<ParsedMessage> =
@@ -2380,6 +2460,18 @@ mod tests {
             normalize_model_for_grouping("claude-opus-4.6"),
             "claude-opus-4-6"
         );
+        assert_eq!(
+            normalize_model_for_grouping("anthropic/claude-4-6-sonnet"),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("anthropic/claude-4-5-haiku"),
+            "claude-haiku-4-5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("anthropic/claude-4-6-opus"),
+            "claude-opus-4-6"
+        );
 
         assert_eq!(normalize_model_for_grouping("gpt-5.2"), "gpt-5.2");
         assert_eq!(normalize_model_for_grouping("gpt-5.4(xhigh)"), "gpt-5.4");
@@ -2462,6 +2554,27 @@ mod tests {
             GroupBy::from_str("workspace-model").unwrap(),
             GroupBy::WorkspaceModel
         );
+        assert_eq!(GroupBy::from_str("session").unwrap(), GroupBy::Session);
+        assert_eq!(
+            GroupBy::from_str("session,model").unwrap(),
+            GroupBy::Session
+        );
+        assert_eq!(
+            GroupBy::from_str("session-model").unwrap(),
+            GroupBy::Session
+        );
+        assert_eq!(
+            GroupBy::from_str("client,session").unwrap(),
+            GroupBy::ClientSession
+        );
+        assert_eq!(
+            GroupBy::from_str("client,session,model").unwrap(),
+            GroupBy::ClientSession
+        );
+        assert_eq!(
+            GroupBy::from_str("client-session-model").unwrap(),
+            GroupBy::ClientSession
+        );
         assert!(GroupBy::from_str("unknown").is_err());
     }
 
@@ -2477,6 +2590,8 @@ mod tests {
             GroupBy::ClientModel,
             GroupBy::ClientProviderModel,
             GroupBy::WorkspaceModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
         ];
 
         for variant in variants {
@@ -2536,6 +2651,40 @@ mod tests {
         assert_eq!(entries[0].cost, 4.0);
         assert_eq!(entries[0].message_count, 2);
         assert_eq!(entries[0].merged_clients.as_deref(), Some("claude, qwen"));
+    }
+
+    #[test]
+    fn test_model_grouping_merges_anthropic_prefixed_claude_variant_with_canonical_model() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "anthropic/claude-4-6-sonnet",
+                    "anthropic",
+                    "session-1",
+                    1.25,
+                    Some("/repo-a"),
+                    Some("repo-a"),
+                ),
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-6",
+                    "anthropic",
+                    "session-2",
+                    2.75,
+                    Some("/repo-b"),
+                    Some("repo-b"),
+                ),
+            ],
+            &GroupBy::ClientModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "claude-sonnet-4-6");
+        assert_eq!(entries[0].input, 20);
+        assert_eq!(entries[0].output, 10);
+        assert_eq!(entries[0].cost, 4.0);
+        assert_eq!(entries[0].message_count, 2);
     }
 
     #[test]
@@ -2681,6 +2830,135 @@ mod tests {
                 && entry.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
                 && (entry.cost - 2.0).abs() < f64::EPSILON
         }));
+    }
+
+    #[test]
+    fn test_session_grouping_merges_same_session_and_model() {
+        // Two messages with the same session_id + same model — should collapse
+        // into one row regardless of the client that produced them, because
+        // GroupBy::Session keys on (session_id, model) only.
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    1.25,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "amp",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    2.75,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::Session,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id.as_deref(), Some("session-shared"));
+        assert_eq!(entries[0].model, "claude-sonnet-4-5");
+        assert!((entries[0].cost - 4.0).abs() < f64::EPSILON);
+        assert_eq!(entries[0].message_count, 2);
+        assert!(entries[0].workspace_key.is_none());
+        assert!(entries[0].workspace_label.is_none());
+        // Session grouping does not merge_clients into a comma list.
+        assert!(entries[0].merged_clients.is_none());
+    }
+
+    #[test]
+    fn test_session_grouping_separates_different_sessions() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message("codex", "gpt-5", "openai", "session-a", 1.0, None, None),
+                make_workspace_message("codex", "gpt-5", "openai", "session-b", 2.0, None, None),
+            ],
+            &GroupBy::Session,
+        );
+
+        assert_eq!(entries.len(), 2);
+        let session_ids: HashSet<_> = entries
+            .iter()
+            .map(|e| e.session_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(session_ids, HashSet::from(["session-a", "session-b"]));
+    }
+
+    #[test]
+    fn test_client_session_grouping_keeps_clients_separate() {
+        // Same session_id seen by two different clients (unusual in practice
+        // but possible if parsers collide on an id space). ClientSession
+        // must yield two rows; Session would yield one (covered above).
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    1.0,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "amp",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    3.0,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::ClientSession,
+        );
+
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert_eq!(entry.session_id.as_deref(), Some("session-shared"));
+            assert!(entry.merged_clients.is_none());
+        }
+        let by_client: HashSet<_> = entries.iter().map(|e| e.client.as_str()).collect();
+        assert_eq!(by_client, HashSet::from(["claude", "amp"]));
+    }
+
+    #[test]
+    fn test_non_session_grouping_does_not_populate_session_id() {
+        // Defensive: only Session/ClientSession variants should set the
+        // session_id field on ModelUsage — every other group_by must leave
+        // it None so the camelCase JSON output omits it via
+        // `skip_serializing_if = "Option::is_none"`.
+        for group_by in &[
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+        ] {
+            let entries = aggregate_model_usage_entries(
+                vec![make_workspace_message(
+                    "codex",
+                    "gpt-5",
+                    "openai",
+                    "session-x",
+                    1.0,
+                    None,
+                    None,
+                )],
+                group_by,
+            );
+            assert_eq!(entries.len(), 1);
+            assert!(
+                entries[0].session_id.is_none(),
+                "session_id leaked into {:?} grouping",
+                group_by
+            );
+        }
     }
 
     #[test]
@@ -4448,6 +4726,50 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_pricing_if_available_keeps_scoped_fireworks_cost_without_exact_pricing() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "fireworks_ai/accounts/fireworks/models/deepseek-r1-0528-distill-qwen3-8b".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.0000002),
+                output_cost_per_token: Some(0.0000002),
+                ..Default::default()
+            },
+        );
+
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "deepseek/deepseek-v4-pro".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000001),
+                output_cost_per_token: Some(0.000002),
+                ..Default::default()
+            },
+        );
+
+        let pricing = pricing::PricingService::new(litellm, openrouter);
+        let mut msg = UnifiedMessage::new(
+            "opencode",
+            "accounts/fireworks/models/deepseek-v4-pro",
+            "fireworks",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.123,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.123);
+    }
+
+    #[test]
     fn test_apply_pricing_if_available_prefers_provider_specific_exact_match_over_plain_exact() {
         let mut litellm = HashMap::new();
         litellm.insert(
@@ -4521,6 +4843,66 @@ mod tests {
             "openai-codex",
             "session-1",
             1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.2);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_prices_claude_code_gpt_5_3_codex() {
+        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "claude",
+            "gpt-5.3-codex",
+            "openai",
+            "session-1",
+            1_776_000_000_000,
+            TokenBreakdown {
+                input: 1_000_000,
+                output: 100_000,
+                cache_read: 50_000,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        let expected = 1.75 + 1.4 + 0.00875;
+        assert!((msg.cost - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_prices_claude_code_minimax_model() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "minimax/minimax-m2.1".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.01),
+                output_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "claude",
+            "MiniMax-M2.1",
+            "minimax",
+            "session-1",
+            1_776_000_000_000,
             TokenBreakdown {
                 input: 10,
                 output: 5,

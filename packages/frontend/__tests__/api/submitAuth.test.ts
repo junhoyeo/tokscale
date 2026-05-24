@@ -75,9 +75,18 @@ vi.mock("@/lib/db", () => ({
     submissionHash: "submissions.submissionHash",
     schemaVersion: "submissions.schemaVersion",
   },
+  submittedDevices: {
+    id: "submittedDevices.id",
+    userId: "submittedDevices.userId",
+    deviceKey: "submittedDevices.deviceKey",
+    displayName: "submittedDevices.displayName",
+    lastSubmittedAt: "submittedDevices.lastSubmittedAt",
+    updatedAt: "submittedDevices.updatedAt",
+  },
   dailyBreakdown: {
     id: "dailyBreakdown.id",
     submissionId: "dailyBreakdown.submissionId",
+    submittedDeviceId: "dailyBreakdown.submittedDeviceId",
     date: "dailyBreakdown.date",
     timestampMs: "dailyBreakdown.timestampMs",
     sourceBreakdown: "dailyBreakdown.sourceBreakdown",
@@ -118,6 +127,17 @@ beforeAll(async () => {
 beforeEach(() => {
   mockState.reset();
 });
+
+function makeAwaitableBuilder(result: unknown) {
+  const builder = {
+    from: vi.fn(() => builder),
+    where: vi.fn(() => builder),
+    for: vi.fn(() => builder),
+    limit: vi.fn(() => builder),
+    then: (resolve: (value: unknown) => unknown) => Promise.resolve(resolve(result)),
+  };
+  return builder;
+}
 
 describe("POST /api/submit auth path", () => {
   it("rejects invalid API tokens through the shared auth service", async () => {
@@ -195,6 +215,8 @@ describe("POST /api/submit auth path", () => {
     });
     expect(mockState.validateSubmission).toHaveBeenCalledTimes(1);
     expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(mockState.revalidateUsernamePaths).not.toHaveBeenCalled();
     expect(await response.json()).toEqual({
       error: "Validation failed",
       details: ["bad payload"],
@@ -250,6 +272,10 @@ describe("POST /api/submit auth path", () => {
     mockState.validateSubmission.mockReturnValue({
       valid: true,
       data: {
+        device: {
+          id: "dev_test",
+          name: "Test device",
+        },
         meta: {
           version: "2.0.0",
           dateRange: { start: "2026-04-30", end: "2026-04-30" },
@@ -327,18 +353,9 @@ describe("POST /api/submit auth path", () => {
       }],
     ];
 
-    function makeAwaitableBuilder(result: unknown) {
-      const builder = {
-        from: vi.fn(() => builder),
-        where: vi.fn(() => builder),
-        for: vi.fn(() => builder),
-        limit: vi.fn(() => builder),
-        then: (resolve: (value: unknown) => unknown) => Promise.resolve(resolve(result)),
-      };
-      return builder;
-    }
-
     let insertCall = 0;
+    let submittedDeviceValues: unknown;
+    let dailyInsertValues: unknown;
     const tx = {
       update: vi.fn(() => {
         const builder = {
@@ -358,8 +375,23 @@ describe("POST /api/submit auth path", () => {
           return builder;
         }
 
+        if (insertCall === 2) {
+          const builder = {
+            values: vi.fn((values: unknown) => {
+              submittedDeviceValues = values;
+              return builder;
+            }),
+            onConflictDoUpdate: vi.fn(() => builder),
+            returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+          };
+          return builder;
+        }
+
         return {
-          values: vi.fn(() => Promise.resolve()),
+          values: vi.fn((values: unknown) => {
+            dailyInsertValues = values;
+            return Promise.resolve();
+          }),
         };
       }),
       execute: vi.fn(() => Promise.resolve()),
@@ -382,10 +414,194 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(tx.insert).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      id: "submittedDevices.id",
+    }));
+    expect(submittedDeviceValues).toEqual(expect.objectContaining({
+      userId: "user-1",
+      deviceKey: "dev_test",
+      displayName: "Test device",
+    }));
+    expect(dailyInsertValues).toEqual([
+      expect.objectContaining({
+        submissionId: "submission-1",
+        submittedDeviceId: "submitted-device-1",
+        date: "2026-04-30",
+      }),
+    ]);
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "leaderboard", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "user:alice", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user-rank", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(4, "user-rank:alice", "max");
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
+  });
+
+  it("replaces same-device daily rows without inserting duplicate dates", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_laptop",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    const incomingBreakdown = {
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    };
+    const existingBreakdown = {
+      codex: {
+        tokens: 12,
+        cost: 0.5,
+        input: 7,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 1,
+        models: { "gpt-5.5": { tokens: 12 } },
+      },
+    };
+    const mergedBreakdown = {
+      codex: {
+        ...incomingBreakdown,
+        models: { "gpt-5.5": incomingBreakdown },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
+    mockState.mergeClientBreakdowns.mockReturnValue(mergedBreakdown);
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    mockState.buildModelBreakdown.mockReturnValue({ "gpt-5.5": 15 });
+    mockState.mergeTimestampMs.mockReturnValue(456);
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      [{
+        id: "daily-1",
+        date: "2026-04-30",
+        timestampMs: 123,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
+        totalTokens: 15,
+        totalCost: "0.7500",
+        inputTokens: 10,
+        outputTokens: 5,
+        dateStart: "2026-04-30",
+        dateEnd: "2026-04-30",
+        activeDays: 1,
+        rowCount: 1,
+      }],
+      [{ sourceBreakdown: mergedBreakdown }],
+    ];
+
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn(() => Promise.resolve()),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(tx.insert).toHaveBeenCalledWith(expect.objectContaining({
+      id: "submittedDevices.id",
+    }));
+    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(mockState.mergeClientBreakdowns).toHaveBeenCalledWith(
+      existingBreakdown,
+      { codex: mergedBreakdown.codex },
+      expect.any(Set)
+    );
+    expect(await response.json()).toEqual(expect.objectContaining({
+      success: true,
+      metrics: expect.objectContaining({
+        totalTokens: 15,
+        activeDays: 1,
+      }),
+      mode: "merge",
+    }));
   });
 });

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
-import { db, apiTokens, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { db, apiTokens, submissions, submittedDevices, dailyBreakdown } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
@@ -18,6 +18,9 @@ import {
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
+
+const LEGACY_SUBMIT_DEVICE_KEY = "legacy-default";
+const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
 
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -45,6 +48,22 @@ function normalizeSubmissionData(data: unknown): void {
       }
     }
   }
+}
+
+function getSubmitDevice(data: SubmissionData): { key: string; name: string | null; schemaVersion: number } {
+  if (data.device) {
+    return {
+      key: data.device.id,
+      name: data.device.name ?? null,
+      schemaVersion: 2,
+    };
+  }
+
+  return {
+    key: LEGACY_SUBMIT_DEVICE_KEY,
+    name: LEGACY_SUBMIT_DEVICE_NAME,
+    schemaVersion: data.contributions.some((c) => c.timestampMs != null) ? 1 : 0,
+  };
 }
 
 /**
@@ -184,6 +203,27 @@ export async function POST(request: Request) {
         submissionId = newSubmission.id;
       }
 
+      const submitDevice = getSubmitDevice(data);
+      const submittedAt = new Date();
+      const [submittedDevice] = await tx
+        .insert(submittedDevices)
+        .values({
+          userId: tokenRecord.userId,
+          deviceKey: submitDevice.key,
+          displayName: submitDevice.name,
+          lastSubmittedAt: submittedAt,
+          updatedAt: submittedAt,
+        })
+        .onConflictDoUpdate({
+          target: [submittedDevices.userId, submittedDevices.deviceKey],
+          set: {
+            displayName: sql`COALESCE(EXCLUDED.display_name, ${submittedDevices.displayName})`,
+            lastSubmittedAt: submittedAt,
+            updatedAt: submittedAt,
+          },
+        })
+        .returning({ id: submittedDevices.id });
+
       // ------------------------------------------
       // STEP 3b: Fetch existing daily breakdown for merge
       // ------------------------------------------
@@ -195,7 +235,12 @@ export async function POST(request: Request) {
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
         })
         .from(dailyBreakdown)
-        .where(eq(dailyBreakdown.submissionId, submissionId))
+        .where(
+          and(
+            eq(dailyBreakdown.submissionId, submissionId),
+            eq(dailyBreakdown.submittedDeviceId, submittedDevice.id)
+          )
+        )
         .for('update');
 
       const existingDaysMap = new Map(
@@ -207,6 +252,7 @@ export async function POST(request: Request) {
       // ------------------------------------------
       const toInsert: Array<{
         submissionId: string;
+        submittedDeviceId: string;
         date: string;
         tokens: number;
         cost: string;
@@ -291,6 +337,7 @@ export async function POST(request: Request) {
 
           toInsert.push({
             submissionId,
+            submittedDeviceId: submittedDevice.id,
             date: incomingDay.date,
             tokens: dayTotals.tokens,
             cost: dayTotals.cost.toFixed(4),
@@ -343,7 +390,7 @@ export async function POST(request: Request) {
           outputTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)::bigint`,
           dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
           dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
-          activeDays: sql<number>`COUNT(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN 1 END)::int`,
+          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
         })
         .from(dailyBreakdown)
@@ -402,7 +449,7 @@ export async function POST(request: Request) {
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
-          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c) => c.timestampMs != null) ? 1 : 0})`,
+          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));

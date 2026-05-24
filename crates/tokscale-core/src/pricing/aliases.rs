@@ -27,6 +27,12 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("claude-opus-4.6", "claude-opus-4-6");
     m.insert("claude-sonnet-4.6", "claude-sonnet-4-6");
     m.insert("claude-haiku-4.6", "claude-haiku-4-6");
+    m.insert("anthropic/claude-4-5-opus", "claude-opus-4-5");
+    m.insert("anthropic/claude-4-5-sonnet", "claude-sonnet-4-5");
+    m.insert("anthropic/claude-4-5-haiku", "claude-haiku-4-5");
+    m.insert("anthropic/claude-4-6-opus", "claude-opus-4-6");
+    m.insert("anthropic/claude-4-6-sonnet", "claude-sonnet-4-6");
+    m.insert("anthropic/claude-4-6-haiku", "claude-haiku-4-6");
     m.insert("gemini-3.1-pro-high", "gemini-3.1-pro");
     m.insert("gemini-3.1-pro-low", "gemini-3.1-pro");
     m.insert("gemini-3-pro-high", "gemini-3-pro");
@@ -69,6 +75,14 @@ mod tests {
         assert_eq!(
             resolve_alias("claude-opus-4.6-thinking"),
             Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            resolve_alias("anthropic/claude-4-5-haiku"),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(
+            resolve_alias("anthropic/claude-4-6-sonnet"),
+            Some("claude-sonnet-4-6")
         );
     }
 }

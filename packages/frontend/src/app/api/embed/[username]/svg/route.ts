@@ -3,8 +3,24 @@ import { getUserEmbedStats, getUserEmbedContributions, type EmbedSortBy } from "
 import {
   renderProfileEmbedErrorSvg,
   renderProfileEmbedSvg,
-  type EmbedTheme,
 } from "@/lib/embed/renderProfileEmbedSvg";
+import { renderMinimalEmbedSvg } from "@/lib/embed/renderMinimalEmbedSvg";
+import { renderTerminalEmbedSvg } from "@/lib/embed/renderTerminalEmbedSvg";
+import { renderGraphEmbedSvg } from "@/lib/embed/renderGraphEmbedSvg";
+import { renderOrbitEmbedSvg } from "@/lib/embed/renderOrbitEmbedSvg";
+import { renderVitalsEmbedSvg } from "@/lib/embed/renderVitalsEmbedSvg";
+import { renderBlueprintEmbedSvg } from "@/lib/embed/renderBlueprintEmbedSvg";
+import { renderReceiptEmbedSvg } from "@/lib/embed/renderReceiptEmbedSvg";
+import {
+  type EmbedTheme,
+  type EmbedTemplate,
+  type EmbedColorName,
+  type EmbedNumberFormat,
+  parseEmbedTemplate,
+  parseEmbedColor,
+  parseNumberFormat,
+  parseRankFormat,
+} from "@/lib/embed/embedShared";
 import {
   renderIsometric3DEmbedSvg,
   renderIsometric3DErrorSvg,
@@ -62,11 +78,16 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   const sortBy = parseSort(searchParams);
   const showGraph = parseGraph(searchParams);
   const view = parseView(searchParams);
+  const template: EmbedTemplate = parseEmbedTemplate(searchParams.get("template"));
+  const color: EmbedColorName | null = parseEmbedColor(searchParams.get("color"));
+  const tokensFormat: EmbedNumberFormat | undefined = parseNumberFormat(searchParams.get("tokens"));
+  const costFormat: EmbedNumberFormat | undefined = parseNumberFormat(searchParams.get("cost"));
+  const rankFormat = parseRankFormat(searchParams.get("rank"));
 
   if (!isValidGitHubUsername(username)) {
     const svg = view === "3d"
       ? renderIsometric3DErrorSvg("Invalid username format", { theme })
-      : renderProfileEmbedErrorSvg("Invalid username format", { theme, compact: true });
+      : renderProfileEmbedErrorSvg("Invalid username format", { theme, color, compact: true });
     return createSvgResponse(svg, { status: 400, cacheControl: "no-store" });
   }
 
@@ -76,7 +97,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     if (!data) {
       const svg = view === "3d"
         ? renderIsometric3DErrorSvg(`User @${username} was not found`, { theme })
-        : renderProfileEmbedErrorSvg(`User @${username} was not found`, { theme, compact });
+        : renderProfileEmbedErrorSvg(`User @${username} was not found`, { theme, color, compact });
       return createSvgResponse(svg, { status: 200 });
     }
 
@@ -108,22 +129,34 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       return createSvgResponse(svg);
     }
 
-    const contributions = showGraph && !compact
+    // The classic card fetches contributions on demand (`graph=1`); every other
+    // template receives them and decides how/whether to render the graph.
+    const wantsContributions = template === "classic" ? showGraph && !compact : true;
+    const contributions = wantsContributions
       ? await getUserEmbedContributions(username).catch(() => null)
       : null;
 
-    const svg = renderProfileEmbedSvg(data, {
-      theme,
-      compact,
-      compactNumbers: compact,
-      sortBy,
-      contributions,
-    });
+    const common = { theme, color, sortBy, tokensFormat, costFormat, rankFormat, contributions };
+    let svg: string;
+    switch (template) {
+      case "minimal": svg = renderMinimalEmbedSvg(data, { ...common, graph: showGraph }); break;
+      case "terminal": svg = renderTerminalEmbedSvg(data, { ...common, graph: showGraph }); break;
+      case "graph": svg = renderGraphEmbedSvg(data, common); break;
+      case "orbit": svg = renderOrbitEmbedSvg(data, { ...common, graph: showGraph }); break;
+      case "vitals": svg = renderVitalsEmbedSvg(data, common); break;
+      case "blueprint": svg = renderBlueprintEmbedSvg(data, { ...common, graph: showGraph }); break;
+      case "receipt": svg = renderReceiptEmbedSvg(data, { ...common, graph: showGraph }); break;
+      default:
+        svg = renderProfileEmbedSvg(data, { ...common, compact, compactNumbers: compact });
+        break;
+    }
 
     console.info("[embed-svg] success", {
       username,
       status: 200,
       durationMs: Date.now() - startedAt,
+      template,
+      color,
       compact,
       sortBy,
       theme,
@@ -140,7 +173,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     const svg = view === "3d"
       ? renderIsometric3DErrorSvg("Tokscale stats are temporarily unavailable", { theme })
-      : renderProfileEmbedErrorSvg("Tokscale stats are temporarily unavailable", { theme, compact });
+      : renderProfileEmbedErrorSvg("Tokscale stats are temporarily unavailable", { theme, color, compact });
 
     return createSvgResponse(svg, {
       status: 500,

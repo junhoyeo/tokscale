@@ -53,6 +53,16 @@ impl GroupByPickerDialog {
                 label: "Workspace + Model",
                 description: "Group local usage by workspace key, then model",
             },
+            GroupByOption {
+                value: GroupBy::Session,
+                label: "Session + Model",
+                description: "One row per session_id and model (attribute cost per session)",
+            },
+            GroupByOption {
+                value: GroupBy::ClientSession,
+                label: "Client + Session + Model",
+                description: "One row per client, session_id, and model",
+            },
         ];
 
         let cursor = options.iter().position(|o| o.value == current).unwrap_or(1);
@@ -77,8 +87,12 @@ impl GroupByPickerDialog {
 
 impl DialogContent for GroupByPickerDialog {
     fn desired_size(&self, viewport: Rect) -> (u16, u16) {
+        // 6 options render as 2 lines each (label + description) = 12 rows,
+        // plus header (1) + divider (1) + hint (1) + borders (2). Cap at 18
+        // so every option stays visible without scrolling on a typical
+        // terminal; matches source_picker's sizing.
         let width = 52u16.min(viewport.width.saturating_sub(4));
-        let height = 14u16.min(viewport.height.saturating_sub(4));
+        let height = 18u16.min(viewport.height.saturating_sub(4));
         (width, height)
     }
 

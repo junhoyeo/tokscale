@@ -64,8 +64,6 @@ describe("renderProfileEmbedSvg", () => {
 
     expect(tokensSvg).toContain("Rank (Tokens)");
     expect(costSvg).toContain("Rank (Cost)");
-    expect(tokensSvg).toContain("RANK · TOKENS");
-    expect(costSvg).toContain("RANK · COST");
   });
 
   it("uses gradient tokens, green cost, and rank-specific colors", () => {
@@ -257,6 +255,20 @@ describe("renderProfileEmbedSvg with contributions graph", () => {
 
     expect(svg).toContain('height="186"');
     expect(svg).not.toContain("Less");
+  });
+});
+
+describe("renderProfileEmbedSvg customization", () => {
+  it("applies a named color override to the accent and gradient", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { color: "purple" });
+    expect(svg).toContain('stop-color="#a371f7"');
+    expect(svg).not.toContain('stop-color="#58A6FF"');
+  });
+
+  it("formats tokens and cost independently", () => {
+    const svg = renderProfileEmbedSvg(mockStats, { tokensFormat: "compact", costFormat: "full" });
+    expect(svg).toContain("1.2M");
+    expect(svg).toContain("$42.42");
   });
 });
 

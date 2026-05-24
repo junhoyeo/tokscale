@@ -4,6 +4,9 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         .trim_end_matches('/')
         .to_lowercase()
         .replace('-', "_");
+    if normalized.starts_with('<') && normalized.ends_with('>') {
+        return None;
+    }
 
     let canonical = match normalized.as_str() {
         "" | "unknown" => return None,
@@ -17,6 +20,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "fireworks" | "fireworks_ai" => "fireworks_ai",
         "google" | "gemini" => "google",
         "openai" | "openai_codex" => "openai",
+        "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
         "ai21" => "ai21",
         // For unknown segments, reject if they contain digits — those are
@@ -150,6 +154,10 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("deepseek");
     }
 
+    if lower.contains("minimax") {
+        return Some("minimax");
+    }
+
     if lower.contains("mistral") || lower.contains("mixtral") {
         return Some("mistral");
     }
@@ -177,6 +185,7 @@ mod tests {
             ("vertex", vec!["anthropic"]),
             ("azure", vec!["azure_ai"]),
             ("fireworks", vec!["fireworks_ai"]),
+            ("MiniMax", vec!["minimax"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -193,6 +202,7 @@ mod tests {
             canonical_provider("openrouter/google"),
             Some("openrouter".into())
         );
+        assert_eq!(canonical_provider("<synthetic>"), None);
         assert_eq!(canonical_provider("unknown"), None);
     }
 
@@ -245,6 +255,10 @@ mod tests {
         assert_eq!(
             inferred_provider_from_model("deepseek-v3"),
             Some("deepseek")
+        );
+        assert_eq!(
+            inferred_provider_from_model("MiniMax-M2.1"),
+            Some("minimax")
         );
         assert_eq!(
             inferred_provider_from_model("mixtral-8x7b"),

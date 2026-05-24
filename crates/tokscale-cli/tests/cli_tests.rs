@@ -381,6 +381,49 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     }
 }
 
+fn write_fireworks_pricing_cache(base: &Path) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let litellm = serde_json::json!({
+        "timestamp": now,
+        "data": {
+            "fireworks_ai/accounts/fireworks/models/deepseek-r1-0528-distill-qwen3-8b": {
+                "input_cost_per_token": 0.0000002,
+                "output_cost_per_token": 0.0000002
+            }
+        }
+    });
+    let openrouter = serde_json::json!({
+        "timestamp": now,
+        "data": {
+            "deepseek/deepseek-v4-pro": {
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002
+            }
+        }
+    });
+
+    for dir in [
+        base.join(".config/tokscale/cache"),
+        base.join("Library/Caches/tokscale"),
+        base.join(".cache/tokscale"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pricing-litellm.json"),
+            serde_json::to_vec(&litellm).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("pricing-openrouter.json"),
+            serde_json::to_vec(&openrouter).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
 fn write_fake_credentials(base: &Path) {
     let creds_dir = base.join(".config/tokscale");
     fs::create_dir_all(&creds_dir).unwrap();
@@ -1364,6 +1407,74 @@ fn test_models_json_with_group_by_model() {
             entry.get("workspaceLabel").is_none(),
             "group-by model entries should not expose workspaceLabel"
         );
+        assert!(
+            entry.get("sessionId").is_none(),
+            "group-by model entries should not expose sessionId"
+        );
+    }
+}
+
+#[test]
+fn test_models_group_by_session_emits_session_id_per_entry() {
+    let tmp = create_temp_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["--group-by", "session,model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["groupBy"].as_str().unwrap(), "session,model");
+
+    let entries = json["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "expected at least one entry");
+
+    let mut session_ids: Vec<&str> = entries
+        .iter()
+        .map(|e| {
+            e.get("sessionId")
+                .and_then(|v| v.as_str())
+                .expect("session,model entries must include sessionId")
+        })
+        .collect();
+    session_ids.sort();
+    session_ids.dedup();
+    // Fixture has two sessions ("session1", "session2"); expect both to appear.
+    assert!(
+        session_ids.contains(&"session1") && session_ids.contains(&"session2"),
+        "expected both fixture sessions to appear in output, got {:?}",
+        session_ids
+    );
+
+    for entry in entries {
+        assert!(
+            entry.get("workspaceKey").is_none(),
+            "session grouping should not expose workspaceKey"
+        );
+        assert!(entry.get("model").is_some());
+        assert!(entry.get("provider").is_some());
+        assert!(entry.get("cost").is_some());
+    }
+}
+
+#[test]
+fn test_models_group_by_client_session_includes_client_and_session() {
+    let tmp = create_temp_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["--group-by", "client,session,model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["groupBy"].as_str().unwrap(), "client,session,model");
+
+    let entries = json["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    for entry in entries {
+        assert!(entry.get("sessionId").and_then(|v| v.as_str()).is_some());
+        assert!(entry.get("client").and_then(|v| v.as_str()).is_some());
+        assert!(entry.get("model").is_some());
     }
 }
 
@@ -1535,6 +1646,32 @@ fn test_pricing_command_invalid_provider() {
     ])
     .assert()
     .failure();
+}
+
+#[test]
+fn test_pricing_command_does_not_fuzzy_match_provider_scoped_fireworks_model() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    write_fireworks_pricing_cache(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "pricing",
+            "accounts/fireworks/models/deepseek-v4-pro",
+            "--no-spinner",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Model not found: accounts/fireworks/models/deepseek-v4-pro"),
+        "expected a not-found message, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("deepseek-r1-0528-distill-qwen3-8b"),
+        "provider-scoped pricing lookup must not report the wrong Fireworks match: {stdout}"
+    );
 }
 
 // ── Clients command tests ──────────────────────────────────────────────────

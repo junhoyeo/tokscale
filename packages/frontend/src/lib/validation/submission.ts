@@ -1,22 +1,35 @@
 /**
  * Submission Validation (Level 1)
  * - Mathematical consistency (no negatives, totals match)
+ * - Server-side sanity caps for self-reported usage
  * - No future dates
  * - Required fields present
  */
 
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 // ============================================================================
 // SCHEMAS
 // ============================================================================
 
+const MAX_DAILY_TOKENS = 10_000_000_000;
+const MAX_DAILY_COST = 10_000;
+const MAX_COST_PER_MILLION_TOKENS = 10_000;
+const COST_RELATIVE_TOLERANCE = 0.01;
+const COST_ABSOLUTE_TOLERANCE = 0.1;
+const TOKEN_RELATIVE_TOLERANCE = 0.01;
+const TOKEN_ABSOLUTE_TOLERANCE = 100;
+
+const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const NonNegativeNumberSchema = z.number().finite().min(0);
+
 const TokenBreakdownSchema = z.object({
-  input: z.number().int().min(0),
-  output: z.number().int().min(0),
-  cacheRead: z.number().int().min(0),
-  cacheWrite: z.number().int().min(0),
-  reasoning: z.number().int().min(0),
+  input: NonNegativeIntegerSchema,
+  output: NonNegativeIntegerSchema,
+  cacheRead: NonNegativeIntegerSchema,
+  cacheWrite: NonNegativeIntegerSchema,
+  reasoning: NonNegativeIntegerSchema,
 });
 
 const SUPPORTED_SOURCES = [
@@ -51,27 +64,27 @@ const ClientContributionSchema = z.object({
   modelId: z.string().min(1),
   providerId: z.string().optional(),
   tokens: TokenBreakdownSchema,
-  cost: z.number().min(0),
-  messages: z.number().int().min(0),
+  cost: NonNegativeNumberSchema,
+  messages: NonNegativeIntegerSchema,
 });
 
 const DailyContributionSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   timestampMs: z.number().int().min(1e12).max(Number.MAX_SAFE_INTEGER).optional(),
   totals: z.object({
-    tokens: z.number().int().min(0),
-    cost: z.number().min(0),
-    messages: z.number().int().min(0),
+    tokens: NonNegativeIntegerSchema,
+    cost: NonNegativeNumberSchema,
+    messages: NonNegativeIntegerSchema,
   }),
-  intensity: z.number().int().min(0).max(4),
+  intensity: NonNegativeIntegerSchema.max(4),
   tokenBreakdown: TokenBreakdownSchema,
   clients: z.array(ClientContributionSchema),
 });
 
 const YearSummarySchema = z.object({
   year: z.string().regex(/^\d{4}$/),
-  totalTokens: z.number().int().min(0),
-  totalCost: z.number().min(0),
+  totalTokens: NonNegativeIntegerSchema,
+  totalCost: NonNegativeNumberSchema,
   range: z.object({
     start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -79,12 +92,12 @@ const YearSummarySchema = z.object({
 });
 
 const DataSummarySchema = z.object({
-  totalTokens: z.number().int().min(0),
-  totalCost: z.number().min(0),
-  totalDays: z.number().int().min(0),
-  activeDays: z.number().int().min(0),
-  averagePerDay: z.number().min(0),
-  maxCostInSingleDay: z.number().min(0),
+  totalTokens: NonNegativeIntegerSchema,
+  totalCost: NonNegativeNumberSchema,
+  totalDays: NonNegativeIntegerSchema,
+  activeDays: NonNegativeIntegerSchema,
+  averagePerDay: NonNegativeNumberSchema,
+  maxCostInSingleDay: NonNegativeNumberSchema,
   clients: z.array(SourceSchema),
   models: z.array(z.string()),
 });
@@ -96,6 +109,11 @@ const ExportMetaSchema = z.object({
     start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   }),
+});
+
+const SubmitDeviceSchema = z.object({
+  id: z.string().trim().min(1).max(96).regex(/^[A-Za-z0-9._:-]+$/),
+  name: z.string().trim().min(1).max(120).optional(),
 });
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = {
@@ -163,12 +181,15 @@ function normalizeLegacySources(data: unknown): unknown {
 
 const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   meta: ExportMetaSchema,
+  device: SubmitDeviceSchema.optional(),
   summary: DataSummarySchema,
   years: z.array(YearSummarySchema),
   contributions: z.array(DailyContributionSchema),
 }));
 
 export type SubmissionData = z.infer<typeof SubmissionDataSchema>;
+
+type TokenBreakdown = SubmissionData["contributions"][number]["tokenBreakdown"];
 
 // ============================================================================
 // VALIDATION FUNCTIONS
@@ -179,6 +200,42 @@ export interface ValidationResult {
   errors: string[];
   warnings: string[];
   data?: SubmissionData;
+}
+
+function tokenTotal(tokens: TokenBreakdown): number {
+  return tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite + tokens.reasoning;
+}
+
+function exceedsTolerance(
+  actual: number,
+  expected: number,
+  relativeTolerance: number,
+  absoluteTolerance: number
+): boolean {
+  return Math.abs(actual - expected) > Math.max(Math.abs(expected) * relativeTolerance, absoluteTolerance);
+}
+
+function pushCostSanityErrors(
+  errors: string[],
+  label: string,
+  cost: number,
+  tokens: number
+): void {
+  if (cost > 0 && tokens === 0) {
+    errors.push(`${label}: Cost submitted without tokens`);
+    return;
+  }
+
+  if (cost <= 1 || tokens === 0) {
+    return;
+  }
+
+  const costPerMillion = (cost * 1_000_000) / tokens;
+  if (costPerMillion > MAX_COST_PER_MILLION_TOKENS) {
+    errors.push(
+      `${label}: Cost per million tokens exceeds ${MAX_COST_PER_MILLION_TOKENS.toLocaleString("en-US")}: ${costPerMillion.toFixed(2)}`
+    );
+  }
 }
 
 /**
@@ -226,7 +283,7 @@ export function validateSubmission(data: unknown): ValidationResult {
     }
   }
 
-  // Step 3: Mathematical consistency checks
+  // Step 3: Mathematical consistency and sanity checks
 
   // 3a. Summary totals should match sum of contributions
   const calculatedTotalTokens = submission.contributions.reduce(
@@ -238,7 +295,7 @@ export function validateSubmission(data: unknown): ValidationResult {
     0
   );
 
-  // Allow 1% tolerance for floating point
+  // Allow small tolerance for floating point and legacy rounding.
   const tokenDiff = Math.abs(calculatedTotalTokens - submission.summary.totalTokens);
   const costDiff = Math.abs(calculatedTotalCost - submission.summary.totalCost);
 
@@ -249,10 +306,39 @@ export function validateSubmission(data: unknown): ValidationResult {
   }
 
   if (costDiff > submission.summary.totalCost * 0.01 && costDiff > 0.1) {
-    warnings.push(
-      `Cost total minor mismatch: summary=${submission.summary.totalCost.toFixed(2)}, calculated=${calculatedTotalCost.toFixed(2)}`
+    errors.push(
+      `Cost total mismatch: summary=${submission.summary.totalCost.toFixed(2)}, calculated=${calculatedTotalCost.toFixed(2)}`
     );
   }
+
+  const claimedDays = Math.max(submission.summary.totalDays, submission.contributions.length, 1);
+  const maxSubmissionTokens = MAX_DAILY_TOKENS * claimedDays;
+  const maxSubmissionCost = MAX_DAILY_COST * claimedDays;
+
+  if (submission.summary.totalTokens > maxSubmissionTokens) {
+    errors.push(
+      `Submission token total exceeds ${maxSubmissionTokens.toLocaleString("en-US")} for ${claimedDays} day(s): ${submission.summary.totalTokens.toLocaleString("en-US")}`
+    );
+  }
+
+  if (submission.summary.totalCost > maxSubmissionCost) {
+    errors.push(
+      `Submission cost exceeds ${maxSubmissionCost.toLocaleString("en-US")} for ${claimedDays} day(s): ${submission.summary.totalCost.toFixed(2)}`
+    );
+  }
+
+  if (submission.summary.maxCostInSingleDay > MAX_DAILY_COST) {
+    errors.push(
+      `Summary maxCostInSingleDay exceeds ${MAX_DAILY_COST.toLocaleString("en-US")}: ${submission.summary.maxCostInSingleDay.toFixed(2)}`
+    );
+  }
+
+  pushCostSanityErrors(
+    errors,
+    "Submission summary",
+    submission.summary.totalCost,
+    submission.summary.totalTokens
+  );
 
   // 3b. Active days should match
   const activeDays = submission.contributions.filter((d) => d.totals.tokens > 0).length;
@@ -264,19 +350,69 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   // 3c. Day token breakdown should sum to totals
   for (const day of submission.contributions) {
-    // Check clients sum to day totals
+    if (day.totals.tokens > MAX_DAILY_TOKENS) {
+      errors.push(
+        `Daily token total exceeds ${MAX_DAILY_TOKENS.toLocaleString("en-US")} on ${day.date}: ${day.totals.tokens.toLocaleString("en-US")}`
+      );
+    }
+
+    if (day.totals.cost > MAX_DAILY_COST) {
+      errors.push(
+        `Daily cost exceeds ${MAX_DAILY_COST.toLocaleString("en-US")} on ${day.date}: ${day.totals.cost.toFixed(2)}`
+      );
+    }
+
+    pushCostSanityErrors(errors, `Day ${day.date}`, day.totals.cost, day.totals.tokens);
+
+    const dayBreakdownTokens = tokenTotal(day.tokenBreakdown);
+    if (exceedsTolerance(dayBreakdownTokens, day.totals.tokens, TOKEN_RELATIVE_TOLERANCE, TOKEN_ABSOLUTE_TOLERANCE)) {
+      errors.push(
+        `Day ${day.date}: token breakdown (${dayBreakdownTokens}) does not match total (${day.totals.tokens})`
+      );
+    }
+
+    // Check clients sum to day totals. The route persists client rows and then
+    // recalculates totals from them, so mismatches must not remain warnings.
     if (day.clients.length > 0) {
       const clientsTokenSum = day.clients.reduce((sum, c) => {
         const t = c.tokens;
-        return sum + t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning;
+        return sum + tokenTotal(t);
       }, 0);
+      const clientsCostSum = day.clients.reduce((sum, c) => sum + c.cost, 0);
 
-      // Allow some tolerance
-      if (Math.abs(clientsTokenSum - day.totals.tokens) > day.totals.tokens * 0.05 && day.totals.tokens > 100) {
-        warnings.push(
-          `Day ${day.date}: client tokens (${clientsTokenSum}) don't match total (${day.totals.tokens})`
+      if (exceedsTolerance(clientsTokenSum, day.totals.tokens, TOKEN_RELATIVE_TOLERANCE, TOKEN_ABSOLUTE_TOLERANCE)) {
+        errors.push(
+          `Day ${day.date}: client tokens (${clientsTokenSum}) do not match total (${day.totals.tokens})`
         );
       }
+
+      if (exceedsTolerance(clientsCostSum, day.totals.cost, COST_RELATIVE_TOLERANCE, COST_ABSOLUTE_TOLERANCE)) {
+        errors.push(
+          `Day ${day.date}: client cost (${clientsCostSum.toFixed(2)}) does not match total (${day.totals.cost.toFixed(2)})`
+        );
+      }
+    }
+
+    for (const client of day.clients) {
+      const clientTokens = tokenTotal(client.tokens);
+      if (clientTokens > MAX_DAILY_TOKENS) {
+        errors.push(
+          `Client ${client.client} on ${day.date}: token total exceeds ${MAX_DAILY_TOKENS.toLocaleString("en-US")}: ${clientTokens.toLocaleString("en-US")}`
+        );
+      }
+
+      if (client.cost > MAX_DAILY_COST) {
+        errors.push(
+          `Client ${client.client} on ${day.date}: cost exceeds ${MAX_DAILY_COST.toLocaleString("en-US")}: ${client.cost.toFixed(2)}`
+        );
+      }
+
+      pushCostSanityErrors(
+        errors,
+        `Client ${client.client}/${client.modelId} on ${day.date}`,
+        client.cost,
+        clientTokens
+      );
     }
   }
 
@@ -334,38 +470,62 @@ export function validateSubmission(data: unknown): ValidationResult {
 }
 
 /**
- * Generate a hash for the submission data (for deduplication)
- * 
- * CHANGED for client-level merge:
- * - Hash is now based on clients + date range (not totals)
- * - Totals change after merge, so they can't be in the hash
- * - This hash identifies "what clients and dates are being submitted"
+ * Generate a content hash for the submitted usage payload.
+ *
+ * generatedAt is intentionally excluded so an idempotent resubmit of the same
+ * usage data keeps the same hash even when the export timestamp changes.
  */
 export function generateSubmissionHash(data: SubmissionData): string {
-  // Sort contributions by date to ensure deterministic hash
-  const sortedDates = data.contributions
-    .map(c => c.date)
-    .sort();
-
   const content = JSON.stringify({
-    // What clients are being submitted
-    clients: data.summary.clients.slice().sort(),
-    // Date range of this submission
-    dateRange: data.meta.dateRange,
-    // Number of days with data (for basic fingerprinting)
-    daysCount: data.contributions.length,
-    // First and last dates FROM SORTED LIST
-    firstDay: sortedDates[0],
-    lastDay: sortedDates[sortedDates.length - 1],
+    meta: {
+      dateRange: data.meta.dateRange,
+    },
+    // Which durable device bucket is being replaced. Legacy no-device payloads
+    // omit this key entirely (JSON.stringify skips undefined), preserving prior
+    // hash behavior for clients that don't send device metadata.
+    deviceId: data.device?.id,
+    summary: {
+      totalTokens: data.summary.totalTokens,
+      totalCost: data.summary.totalCost,
+      totalDays: data.summary.totalDays,
+      activeDays: data.summary.activeDays,
+      averagePerDay: data.summary.averagePerDay,
+      maxCostInSingleDay: data.summary.maxCostInSingleDay,
+      clients: data.summary.clients.slice().sort(),
+      models: data.summary.models.slice().sort(),
+    },
+    years: data.years
+      .map((year) => ({
+        year: year.year,
+        totalTokens: year.totalTokens,
+        totalCost: year.totalCost,
+        range: year.range,
+      }))
+      .sort((a, b) => a.year.localeCompare(b.year)),
+    contributions: data.contributions
+      .map((day) => ({
+        date: day.date,
+        timestampMs: day.timestampMs ?? null,
+        totals: day.totals,
+        intensity: day.intensity,
+        tokenBreakdown: day.tokenBreakdown,
+        clients: day.clients
+          .map((client) => ({
+            client: client.client,
+            modelId: client.modelId,
+            providerId: client.providerId ?? null,
+            tokens: client.tokens,
+            cost: client.cost,
+            messages: client.messages,
+          }))
+          .sort((a, b) =>
+            `${a.client}\u0000${a.providerId ?? ""}\u0000${a.modelId}`.localeCompare(
+              `${b.client}\u0000${b.providerId ?? ""}\u0000${b.modelId}`
+            )
+          ),
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date)),
   });
 
-  // Simple synchronous hash (djb2 algorithm)
-  let hash = 5381;
-  for (let i = 0; i < content.length; i++) {
-    const char = content.charCodeAt(i);
-    hash = ((hash << 5) + hash) + char; // hash * 33 + char
-    hash = hash & hash; // Convert to 32-bit integer
-  }
-
-  return Math.abs(hash).toString(16).padStart(16, "0");
+  return createHash("sha256").update(content).digest("hex");
 }

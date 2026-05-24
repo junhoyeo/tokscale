@@ -43,6 +43,8 @@ export interface AuthenticatePersonalTokenOptions {
 
 const TOKEN_NAME_LOCK_NAMESPACE = "personal_token_names";
 
+type PersonalTokenDb = Pick<typeof db, "execute" | "insert" | "select">;
+
 function getUniqueTokenName(baseName: string, existingNames: Iterable<string>): string {
   const names = new Set(existingNames);
   let finalName = baseName;
@@ -56,6 +58,79 @@ function getUniqueTokenName(baseName: string, existingNames: Iterable<string>): 
   return finalName;
 }
 
+async function insertPersonalToken(
+  client: PersonalTokenDb,
+  {
+    userId,
+    name,
+    expiresAt,
+  }: {
+    userId: string;
+    name: string;
+    expiresAt: Date | null;
+  }
+): Promise<IssuedPersonalToken> {
+  const token = generateApiToken();
+  const tokenHashed = hashToken(token);
+  const [createdToken] = await client
+    .insert(apiTokens)
+    .values({
+      userId,
+      token: tokenHashed,
+      name,
+      expiresAt,
+    })
+    .returning({
+      id: apiTokens.id,
+      userId: apiTokens.userId,
+      name: apiTokens.name,
+      createdAt: apiTokens.createdAt,
+      lastUsedAt: apiTokens.lastUsedAt,
+      expiresAt: apiTokens.expiresAt,
+    });
+
+  return {
+    ...createdToken,
+    token,
+  };
+}
+
+export async function issuePersonalTokenInTransaction(
+  tx: PersonalTokenDb,
+  {
+    userId,
+    name,
+    expiresAt = null,
+    ensureUniqueName = false,
+  }: IssuePersonalTokenInput
+): Promise<IssuedPersonalToken> {
+  if (!ensureUniqueName) {
+    return insertPersonalToken(tx, { userId, name, expiresAt });
+  }
+
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtext(${TOKEN_NAME_LOCK_NAMESPACE}),
+      hashtext(${userId})
+    )
+  `);
+
+  const existingTokens = await tx
+    .select({
+      name: apiTokens.name,
+    })
+    .from(apiTokens)
+    .where(eq(apiTokens.userId, userId))
+    .orderBy(desc(apiTokens.createdAt));
+
+  const finalName = getUniqueTokenName(
+    name,
+    existingTokens.map((token) => token.name)
+  );
+
+  return insertPersonalToken(tx, { userId, name: finalName, expiresAt });
+}
+
 export async function issuePersonalToken({
   userId,
   name,
@@ -63,74 +138,21 @@ export async function issuePersonalToken({
   ensureUniqueName = false,
 }: IssuePersonalTokenInput): Promise<IssuedPersonalToken> {
   if (!ensureUniqueName) {
-    const token = generateApiToken();
-    const tokenHashed = hashToken(token);
-    const [createdToken] = await db
-      .insert(apiTokens)
-      .values({
-        userId,
-        token: tokenHashed,
-        name,
-        expiresAt,
-      })
-      .returning({
-        id: apiTokens.id,
-        userId: apiTokens.userId,
-        name: apiTokens.name,
-        createdAt: apiTokens.createdAt,
-        lastUsedAt: apiTokens.lastUsedAt,
-        expiresAt: apiTokens.expiresAt,
-      });
-
-    return {
-      ...createdToken,
-      token,
-    };
+    return issuePersonalTokenInTransaction(db, {
+      userId,
+      name,
+      expiresAt,
+      ensureUniqueName,
+    });
   }
 
   return db.transaction(async (tx) => {
-    await tx.execute(sql`
-      SELECT pg_advisory_xact_lock(
-        hashtext(${TOKEN_NAME_LOCK_NAMESPACE}),
-        hashtext(${userId})
-      )
-    `);
-
-    const existingTokens = await tx
-      .select({
-        name: apiTokens.name,
-      })
-      .from(apiTokens)
-      .where(eq(apiTokens.userId, userId))
-      .orderBy(desc(apiTokens.createdAt));
-
-    const finalName = getUniqueTokenName(
+    return issuePersonalTokenInTransaction(tx, {
+      userId,
       name,
-      existingTokens.map((token) => token.name)
-    );
-    const token = generateApiToken();
-    const tokenHashed = hashToken(token);
-    const [createdToken] = await tx
-      .insert(apiTokens)
-      .values({
-        userId,
-        token: tokenHashed,
-        name: finalName,
-        expiresAt,
-      })
-      .returning({
-        id: apiTokens.id,
-        userId: apiTokens.userId,
-        name: apiTokens.name,
-        createdAt: apiTokens.createdAt,
-        lastUsedAt: apiTokens.lastUsedAt,
-        expiresAt: apiTokens.expiresAt,
-      });
-
-    return {
-      ...createdToken,
-      token,
-    };
+      expiresAt,
+      ensureUniqueName,
+    });
   });
 }
 

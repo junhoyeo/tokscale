@@ -1,6 +1,51 @@
 use ratatui::style::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalColorMode {
+    FullColor,
+    Compatible,
+}
+
+impl TerminalColorMode {
+    pub(crate) fn from_env<I, K, V>(env: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut term = String::new();
+        let mut term_program = String::new();
+        let mut colorterm = String::new();
+        let mut no_color = false;
+
+        for (key, value) in env {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            match key {
+                "TERM" => term = value.to_ascii_lowercase(),
+                "TERM_PROGRAM" => term_program = value.to_ascii_lowercase(),
+                "COLORTERM" => colorterm = value.to_ascii_lowercase(),
+                "NO_COLOR" => no_color = true,
+                _ => {}
+            }
+        }
+
+        if no_color || term == "dumb" || term_program == "apple_terminal" {
+            return Self::Compatible;
+        }
+
+        if matches!(colorterm.as_str(), "truecolor" | "24bit")
+            || term.contains("truecolor")
+            || term.contains("24bit")
+        {
+            return Self::FullColor;
+        }
+
+        Self::FullColor
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeName {
     Green,
     Halloween,
@@ -82,7 +127,14 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn from_name(name: ThemeName) -> Self {
+    pub fn from_name_for_current_terminal(name: ThemeName) -> Self {
+        Self::from_name_with_color_mode(name, TerminalColorMode::from_env(std::env::vars()))
+    }
+
+    pub(crate) fn from_name_with_color_mode(
+        name: ThemeName,
+        color_mode: TerminalColorMode,
+    ) -> Self {
         let colors = match name {
             // Colors match frontend contribution graph palettes (higher grade = darker = more activity)
             ThemeName::Green => [
@@ -150,7 +202,7 @@ impl Theme {
             ],
         };
 
-        Self {
+        let mut theme = Self {
             name,
             colors,
             background: Color::Rgb(13, 17, 23),
@@ -160,6 +212,82 @@ impl Theme {
             muted: Color::Rgb(139, 148, 158),
             accent: Color::Cyan,
             selection: Color::Rgb(48, 54, 61),
+        };
+
+        if color_mode == TerminalColorMode::Compatible {
+            theme.colors = [
+                Color::Black,
+                Color::DarkGray,
+                Color::Gray,
+                Color::White,
+                Color::Cyan,
+            ];
+            theme.background = Color::Black;
+            theme.foreground = Color::White;
+            theme.border = Color::DarkGray;
+            theme.highlight = Color::Cyan;
+            theme.muted = Color::DarkGray;
+            theme.accent = Color::Cyan;
+            theme.selection = Color::DarkGray;
         }
+
+        theme
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn apple_terminal_uses_compatible_color_mode() {
+        let mode = TerminalColorMode::from_env(env(&[
+            ("TERM_PROGRAM", "Apple_Terminal"),
+            ("TERM", "xterm-256color"),
+        ]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn vscode_truecolor_keeps_full_color_mode() {
+        let mode = TerminalColorMode::from_env(env(&[
+            ("TERM_PROGRAM", "vscode"),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ]));
+
+        assert_eq!(mode, TerminalColorMode::FullColor);
+    }
+
+    #[test]
+    fn no_color_forces_compatible_color_mode() {
+        let mode =
+            TerminalColorMode::from_env(env(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")]));
+
+        assert_eq!(mode, TerminalColorMode::Compatible);
+    }
+
+    #[test]
+    fn compatible_theme_preserves_name_and_avoids_rgb_palette() {
+        let theme =
+            Theme::from_name_with_color_mode(ThemeName::Green, TerminalColorMode::Compatible);
+
+        assert_eq!(theme.name, ThemeName::Green);
+        assert!(theme
+            .colors
+            .iter()
+            .all(|color| !matches!(color, Color::Rgb(..))));
+        assert!(!matches!(theme.background, Color::Rgb(..)));
+        assert_ne!(theme.background, Color::Reset);
+        assert!(!matches!(theme.foreground, Color::Rgb(..)));
+        assert!(!matches!(theme.selection, Color::Rgb(..)));
     }
 }

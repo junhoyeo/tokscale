@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { getSession } from "@/lib/auth/session";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
-import { db, submissions } from "@/lib/db";
+import { db, submissions, submittedDevices } from "@/lib/db";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { getBearerToken } from "../../../../lib/auth/bearerToken";
 
@@ -31,10 +31,18 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const deletedRows = await db
-      .delete(submissions)
-      .where(eq(submissions.userId, user.id))
-      .returning({ id: submissions.id });
+    const deletedRows = await db.transaction(async (tx) => {
+      const deleted = await tx
+        .delete(submissions)
+        .where(eq(submissions.userId, user.id))
+        .returning({ id: submissions.id });
+
+      await tx
+        .delete(submittedDevices)
+        .where(eq(submittedDevices.userId, user.id));
+
+      return deleted;
+    });
 
     try {
       const usernameCacheKey = normalizeUsernameCacheKey(user.username);
