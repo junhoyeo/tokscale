@@ -6,6 +6,11 @@ import styled from "styled-components";
 // Top-of-page segmented control that swaps between the global user leaderboard
 // and the group browser. Pure-link nav (no client state), so SSR + back/forward
 // behave naturally and the URL is shareable.
+//
+// Uses aria-current="page" rather than role="tablist": these are full-page
+// navigations, not in-page tab panels, so the link semantics are the honest
+// thing and keep ArrowLeft/Right doing whatever the browser would normally do
+// for in-page focus.
 
 export type LeaderboardView = "users" | "groups";
 
@@ -14,13 +19,18 @@ const Bar = styled.nav`
   display: flex;
   align-items: center;
   gap: 16px;
+  flex-wrap: wrap;
+
+  @media (max-width: 480px) {
+    gap: 12px;
+  }
 `;
 
 const Group = styled.div`
   display: inline-flex;
   padding: 4px;
   border: 1px solid var(--color-border-default);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--color-bg-subtle);
 `;
 
@@ -30,7 +40,7 @@ const Item = styled(Link)<{ $active: boolean }>`
   gap: 6px;
   min-height: 32px;
   padding: 0 14px;
-  border-radius: 8px;
+  border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
@@ -41,6 +51,11 @@ const Item = styled(Link)<{ $active: boolean }>`
   &:hover {
     color: var(--color-fg-default);
   }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 `;
 
 const Title = styled.h1`
@@ -48,6 +63,10 @@ const Title = styled.h1`
   font-size: 30px;
   font-weight: 700;
   color: var(--color-fg-default);
+
+  @media (max-width: 480px) {
+    font-size: 24px;
+  }
 `;
 
 interface ViewSelectorProps {
@@ -58,11 +77,19 @@ export default function ViewSelector({ current }: ViewSelectorProps) {
   return (
     <Bar aria-label="Leaderboard view">
       <Title>{current === "groups" ? "Groups" : "Leaderboard"}</Title>
-      <Group role="tablist">
-        <Item href="/leaderboard?view=users" $active={current === "users"} role="tab" aria-selected={current === "users"}>
+      <Group>
+        <Item
+          href="/leaderboard?view=users"
+          $active={current === "users"}
+          aria-current={current === "users" ? "page" : undefined}
+        >
           Users
         </Item>
-        <Item href="/leaderboard?view=groups" $active={current === "groups"} role="tab" aria-selected={current === "groups"}>
+        <Item
+          href="/leaderboard?view=groups"
+          $active={current === "groups"}
+          aria-current={current === "groups" ? "page" : undefined}
+        >
           Groups
         </Item>
       </Group>

@@ -90,6 +90,16 @@ const TabButton = styled.button<{ $active: boolean }>`
   color: ${({ $active }) => ($active ? "var(--color-fg-default)" : "var(--color-fg-muted)")};
   font-weight: 600;
   cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
 `;
 
 const Grid = styled.div`
@@ -113,6 +123,40 @@ const Card = styled(Link)`
   &:hover {
     border-color: var(--color-primary);
     background: var(--color-bg-subtle);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-color: var(--color-primary);
+  }
+`;
+
+const SkeletonGrid = styled(Grid)`
+  pointer-events: none;
+`;
+
+const SkeletonCard = styled.div`
+  min-height: 150px;
+  padding: 16px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--color-bg-default) 0%,
+    var(--color-bg-subtle) 50%,
+    var(--color-bg-default) 100%
+  );
+  background-size: 200% 100%;
+  animation: groups-skeleton-shimmer 1.6s ease-in-out infinite;
+
+  @keyframes groups-skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
   }
 `;
 
@@ -266,9 +310,13 @@ export default function GroupsBrowser({
         </TabButton>
       </Tabs>
 
-      {error && <ErrorText>{error}</ErrorText>}
+      {error && <ErrorText role="alert">{error}</ErrorText>}
       {isLoading ? (
-        <EmptyState>Loading groups...</EmptyState>
+        <SkeletonGrid aria-busy="true" aria-live="polite" aria-label="Loading groups">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <SkeletonCard key={i} />
+          ))}
+        </SkeletonGrid>
       ) : groups.length === 0 ? (
         <EmptyState>
           {activeTab === "mine"
