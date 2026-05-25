@@ -57,7 +57,6 @@ describe("GET /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.listPersonalTokens.mockResolvedValue([]);
 
@@ -74,7 +73,6 @@ describe("GET /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.listPersonalTokens.mockResolvedValue([
       {
@@ -130,7 +128,6 @@ describe("GET /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.listPersonalTokens.mockRejectedValue(
       new Error("Database error")
@@ -165,7 +162,6 @@ describe("POST /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.issuePersonalToken.mockResolvedValue({
       id: "token-1",
@@ -207,7 +203,6 @@ describe("POST /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.issuePersonalToken.mockResolvedValue({
       id: "token-1",

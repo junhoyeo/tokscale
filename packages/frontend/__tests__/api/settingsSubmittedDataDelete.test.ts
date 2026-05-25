@@ -161,7 +161,6 @@ describe("DELETE /api/settings/submitted-data", () => {
       username: "Alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.setDeletedRows([{ id: "submission-1" }]);
     mockState.revalidateUserGroupLeaderboards.mockRejectedValueOnce(
@@ -215,7 +214,6 @@ describe("DELETE /api/settings/submitted-data", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.setDeletedRows([]);
 
@@ -243,7 +241,6 @@ describe("DELETE /api/settings/submitted-data", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.setDeleteError(new Error("db unavailable"));
 

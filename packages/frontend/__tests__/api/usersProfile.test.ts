@@ -40,7 +40,6 @@ const mockState = vi.hoisted(() => {
       inputTokens: "dailyBreakdown.inputTokens",
       outputTokens: "dailyBreakdown.outputTokens",
       sourceBreakdown: "dailyBreakdown.sourceBreakdown",
-      modelBreakdown: "dailyBreakdown.modelBreakdown",
     },
   };
 

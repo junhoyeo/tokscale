@@ -168,7 +168,6 @@ describe("group invites", () => {
       username: "alice",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
 
     expect(accepted).toEqual({
@@ -197,7 +196,6 @@ describe("group invites", () => {
         username: "bob",
         displayName: null,
         avatarUrl: null,
-        isAdmin: false,
       })
     ).rejects.toMatchObject({
       code: "not_found",

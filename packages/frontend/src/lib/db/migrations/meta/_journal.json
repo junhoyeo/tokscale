@@ -78,6 +78,13 @@
       "when": 1780000000000,
       "tag": "0010_submit_count_safety",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1780086400000,
+      "tag": "0011_drop_dead_columns",
+      "breakpoints": true
     }
   ]
 }

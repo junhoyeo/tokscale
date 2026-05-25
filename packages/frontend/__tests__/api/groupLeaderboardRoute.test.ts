@@ -62,7 +62,6 @@ describe("GET /api/groups/[slug]/leaderboard", () => {
       username: "outsider",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.getGroupMembership.mockResolvedValue(null);
 
@@ -87,7 +86,6 @@ describe("GET /api/groups/[slug]/leaderboard", () => {
       username: "member",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.getGroupMembership.mockResolvedValue({ role: "member" });
     mockState.getGroupLeaderboardData.mockResolvedValue({
