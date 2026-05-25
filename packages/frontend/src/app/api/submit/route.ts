@@ -51,6 +51,13 @@ function normalizeSubmissionData(data: unknown): void {
   }
 }
 
+// Submission schema versions:
+//   0 = legacy CLI: no per-day timestamps, no device metadata.
+//   1 = timestamp-aware CLI (>=v2.1): per-day `timestampMs` set, still no device.
+//   2 = device-aware CLI (>=v2.1.x post-#517): caller sends a `device` object,
+//       so daily_breakdown rows are keyed by submittedDeviceId.
+// The submissions row keeps the GREATEST() of stored vs. incoming so a single
+// device-aware submit cannot regress an account back to v1 hash semantics.
 function getSubmitDevice(data: SubmissionData): { key: string; name: string | null; schemaVersion: number } {
   if (data.device) {
     return {

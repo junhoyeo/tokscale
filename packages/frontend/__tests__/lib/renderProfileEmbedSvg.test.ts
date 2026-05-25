@@ -198,9 +198,9 @@ describe("renderProfileEmbedSvg", () => {
 
 describe("renderProfileEmbedSvg with contributions graph", () => {
   const mockContributions = [
-    { date: "2026-01-15", intensity: 0 as const },
-    { date: "2026-02-10", intensity: 2 as const },
-    { date: "2026-02-20", intensity: 4 as const },
+    { date: "2026-01-15", intensity: 0 as const, totalTokens: 0, totalCost: 0 },
+    { date: "2026-02-10", intensity: 2 as const, totalTokens: 50_000, totalCost: 1.5 },
+    { date: "2026-02-20", intensity: 4 as const, totalTokens: 500_000, totalCost: 12.0 },
   ];
 
   it("extends card height when contributions provided", () => {
