@@ -40,8 +40,11 @@ export const users = pgTable(
       .defaultNow(),
   },
   (table) => [
-    // The .unique() on username already creates a covering btree; an explicit
-    // idx_users_username would be a 1:1 duplicate.
+    // Both indexes on username are intentional: the prod planner consistently
+    // picks the explicit non-unique idx_users_username (30k scans) over the
+    // unique-constraint sibling (0 scans). Removing this is a real re-plan
+    // event; don't.
+    index("idx_users_username").on(table.username),
     uniqueIndex(USERS_USERNAME_LOWER_UNIQUE_INDEX).on(
       usernameLowerExpression(table.username)
     ),
@@ -78,7 +81,9 @@ export const sessions = pgTable(
       .defaultNow(),
   },
   (table) => [
-    // The .unique() on token already creates a covering btree.
+    // Planner picks the explicit non-unique idx over the unique-constraint
+    // sibling (~89k vs 0 scans on prod 2026-05-25); keep both.
+    index("idx_sessions_token").on(table.token),
     index("idx_sessions_user_id").on(table.userId),
     index("idx_sessions_expires_at").on(table.expiresAt),
   ]
@@ -110,7 +115,9 @@ export const apiTokens = pgTable(
       .defaultNow(),
   },
   (table) => [
-    // The .unique() on token already creates a covering btree.
+    // Planner picks the explicit non-unique idx (~27k scans) over the
+    // unique-constraint sibling (0 scans); keep both.
+    index("idx_api_tokens_token").on(table.token),
     index("idx_api_tokens_user_id").on(table.userId),
     unique("api_tokens_user_name_unique").on(table.userId, table.name),
   ]
@@ -140,7 +147,10 @@ export const deviceCodes = pgTable(
       .defaultNow(),
   },
   (table) => [
-    // The .unique() on device_code / user_code already creates covering btrees.
+    // The .unique() siblings exist for device_code / user_code but the
+    // planner picks the explicit non-unique indexes; keep them.
+    index("idx_device_codes_device_code").on(table.deviceCode),
+    index("idx_device_codes_user_code").on(table.userCode),
     // idx_device_codes_user_id covers the FK so cascade-delete of a user
     // doesn't seq scan this table.
     index("idx_device_codes_user_id").on(table.userId),

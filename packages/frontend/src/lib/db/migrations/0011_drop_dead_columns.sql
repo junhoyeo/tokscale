@@ -56,23 +56,20 @@ ALTER TABLE "users" DROP COLUMN IF EXISTS "is_admin";--> statement-breakpoint
 --   actually used by leaderboard period filters is on daily_breakdown.date
 --   (which has its own index).
 --
+-- HOLD on the duplicate-of-unique-constraint indexes:
 -- idx_users_username, idx_sessions_token, idx_api_tokens_token,
--- idx_device_codes_device_code, idx_device_codes_user_code:
---   Postgres auto-creates a btree for every UNIQUE constraint. These
---   explicit btrees duplicate the existing *_unique indexes 1:1 and
---   only add write-amplification on every INSERT/UPDATE. The
---   case-insensitive users_username_lower_unique is a DIFFERENT index
---   (on lower(username)) and stays.
+-- idx_device_codes_device_code, idx_device_codes_user_code.
+-- The 2026-05-25 prod pg_stat_user_indexes audit showed these are HOT
+-- (sessions_token 89k scans, users_username 30k, api_tokens_token 27k)
+-- while their unique-constraint siblings show 0 scans — the planner
+-- consistently picks the explicit non-unique index. Dropping would
+-- invalidate cached plans; keep them until a controlled re-plan can
+-- be scheduled.
 
 DROP INDEX IF EXISTS "idx_submissions_status";--> statement-breakpoint
 DROP INDEX IF EXISTS "idx_submissions_user_id";--> statement-breakpoint
 DROP INDEX IF EXISTS "idx_submissions_total_tokens";--> statement-breakpoint
 DROP INDEX IF EXISTS "idx_submissions_date_range";--> statement-breakpoint
-DROP INDEX IF EXISTS "idx_users_username";--> statement-breakpoint
-DROP INDEX IF EXISTS "idx_sessions_token";--> statement-breakpoint
-DROP INDEX IF EXISTS "idx_api_tokens_token";--> statement-breakpoint
-DROP INDEX IF EXISTS "idx_device_codes_device_code";--> statement-breakpoint
-DROP INDEX IF EXISTS "idx_device_codes_user_code";--> statement-breakpoint
 
 -- FK coverage gap: three FK columns were lacking covering indexes.
 -- Cascade-delete of a user did a seq scan of device_codes / group_members
