@@ -8,11 +8,14 @@ import { getLeaderboardData, getUserRank } from "@/lib/leaderboard/getLeaderboar
 import type { LeaderboardData, Period, SortBy } from "@/lib/leaderboard/types";
 import { getSession } from "@/lib/auth/session";
 import { SORT_BY_COOKIE_NAME, isValidSortBy } from "@/lib/leaderboard/constants";
+import { listPublicGroups, listUserGroups } from "@/lib/groups/queries";
+import LeaderboardClient from "./LeaderboardClient";
+import GroupsBrowser from "./GroupsBrowser";
+import ViewSelector, { type LeaderboardView } from "./ViewSelector";
 
 function isMissingDatabaseUrl(error: unknown): boolean {
   return error instanceof Error && error.message === "DATABASE_URL environment variable is not set";
 }
-import LeaderboardClient from "./LeaderboardClient";
 
 const VALID_PERIODS: Period[] = ["all", "month", "last-month", "week", "custom"];
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -38,6 +41,10 @@ function createEmptyLeaderboardData(sortBy: SortBy): LeaderboardData {
     period: "all",
     sortBy,
   };
+}
+
+function resolveView(raw: string | string[] | undefined): LeaderboardView {
+  return raw === "groups" ? "groups" : "users";
 }
 
 interface PageProps {
@@ -68,23 +75,42 @@ export default function LeaderboardPage({ searchParams }: PageProps) {
   );
 }
 
-async function LeaderboardWithPreferences({ searchParams: searchParamsPromise }: { searchParams: Promise<{ [key: string]: string | string[] | undefined }> }) {
+async function LeaderboardWithPreferences({
+  searchParams: searchParamsPromise,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const [cookieStore, searchParams] = await Promise.all([cookies(), searchParamsPromise]);
-  const sortByCookie = cookieStore.get(SORT_BY_COOKIE_NAME)?.value;
+  const view = resolveView(searchParams.view);
 
+  if (view === "groups") {
+    return (
+      <>
+        <ViewSelector current="groups" />
+        <GroupsView />
+      </>
+    );
+  }
+
+  const sortByCookie = cookieStore.get(SORT_BY_COOKIE_NAME)?.value;
   const periodParam = typeof searchParams.period === "string" ? searchParams.period : null;
-  const pageParam = typeof searchParams.page === "string" ? Math.max(1, Number(searchParams.page) || 1) : 1;
+  const pageParam =
+    typeof searchParams.page === "string" ? Math.max(1, Number(searchParams.page) || 1) : 1;
   const sortByParam = typeof searchParams.sortBy === "string" ? searchParams.sortBy : null;
   const fromParam = typeof searchParams.from === "string" ? searchParams.from : null;
   const toParam = typeof searchParams.to === "string" ? searchParams.to : null;
 
-  const sortBy: SortBy = sortByParam && (sortByParam === "tokens" || sortByParam === "cost")
-    ? sortByParam
-    : isValidSortBy(sortByCookie) ? sortByCookie : "tokens";
+  const sortBy: SortBy =
+    sortByParam && (sortByParam === "tokens" || sortByParam === "cost")
+      ? sortByParam
+      : isValidSortBy(sortByCookie)
+      ? sortByCookie
+      : "tokens";
 
-  let period: Period = periodParam && VALID_PERIODS.includes(periodParam as Period)
-    ? (periodParam as Period)
-    : "all";
+  let period: Period =
+    periodParam && VALID_PERIODS.includes(periodParam as Period)
+      ? (periodParam as Period)
+      : "all";
 
   let customFrom: string | undefined;
   let customTo: string | undefined;
@@ -122,11 +148,55 @@ async function LeaderboardWithPreferences({ searchParams: searchParamsPromise }:
     : null;
 
   return (
-    <LeaderboardClient
-      initialData={initialData}
+    <>
+      <ViewSelector current="users" />
+      <LeaderboardClient
+        initialData={initialData}
+        currentUser={session}
+        initialSortBy={sortBy}
+        initialUserRank={initialUserRank}
+      />
+    </>
+  );
+}
+
+async function GroupsView() {
+  const emptyPagination = {
+    page: 1,
+    limit: 20,
+    total: 0,
+    totalPages: 0,
+    hasNext: false,
+    hasPrev: false,
+  } as const;
+
+  const session = await getSession().catch((error) => {
+    if (isMissingDatabaseUrl(error)) return null;
+    throw error;
+  });
+
+  const [publicGroups, myGroups] = await Promise.all([
+    listPublicGroups(1, 20).catch((error) => {
+      if (isMissingDatabaseUrl(error)) {
+        return { groups: [], pagination: emptyPagination };
+      }
+      throw error;
+    }),
+    session
+      ? listUserGroups(session.id, 1, 20).catch((error) => {
+          if (isMissingDatabaseUrl(error)) {
+            return { groups: [], pagination: emptyPagination };
+          }
+          throw error;
+        })
+      : Promise.resolve(null),
+  ]);
+
+  return (
+    <GroupsBrowser
       currentUser={session}
-      initialSortBy={sortBy}
-      initialUserRank={initialUserRank}
+      initialPublicGroups={publicGroups.groups}
+      initialMyGroups={myGroups?.groups ?? []}
     />
   );
 }

@@ -4,6 +4,11 @@ import Link from "next/link";
 import { useCallback, useState } from "react";
 import styled from "styled-components";
 
+// Inlined view of the groups list that lives under the /leaderboard ?view=groups
+// segmented control. The /groups/[slug], /groups/new, and /groups/join/[token]
+// subpages still exist as standalone routes; this component just replaces the
+// old /groups top-level listing page so groups is no longer a separate nav tab.
+
 type GroupRole = "owner" | "admin" | "member";
 
 interface SessionUser {
@@ -13,7 +18,7 @@ interface SessionUser {
   avatarUrl: string | null;
 }
 
-interface GroupCardData {
+export interface GroupCardData {
   id: string;
   name: string;
   slug: string;
@@ -24,7 +29,7 @@ interface GroupCardData {
   role?: GroupRole;
 }
 
-interface GroupsClientProps {
+interface GroupsBrowserProps {
   currentUser: SessionUser | null;
   initialPublicGroups: GroupCardData[];
   initialMyGroups: GroupCardData[];
@@ -32,8 +37,8 @@ interface GroupsClientProps {
 
 type ActiveTab = "public" | "mine";
 
-const PageHeader = styled.section`
-  margin: 32px 0 24px;
+const Header = styled.section`
+  margin: 16px 0 20px;
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -42,13 +47,6 @@ const PageHeader = styled.section`
   @media (max-width: 640px) {
     flex-direction: column;
   }
-`;
-
-const Title = styled.h1`
-  margin: 0 0 8px;
-  font-size: 30px;
-  font-weight: 700;
-  color: var(--color-fg-default);
 `;
 
 const Description = styled.p`
@@ -131,8 +129,8 @@ const Avatar = styled.div<{ $image?: string | null }>`
   border-radius: 8px;
   flex: 0 0 auto;
   border: 1px solid var(--color-border-default);
-  background:
-    ${({ $image }) => $image ? `url(${$image}) center/cover` : "linear-gradient(135deg, #0073ff, #13a10e)"};
+  background: ${({ $image }) =>
+    $image ? `url(${$image}) center/cover` : "linear-gradient(135deg, #0073ff, #13a10e)"};
 `;
 
 const CardTitle = styled.h2`
@@ -188,11 +186,11 @@ function GroupCard({ group }: { group: GroupCardData }) {
   );
 }
 
-export default function GroupsClient({
+export default function GroupsBrowser({
   currentUser,
   initialPublicGroups,
   initialMyGroups,
-}: GroupsClientProps) {
+}: GroupsBrowserProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>(currentUser ? "mine" : "public");
   const [publicGroups, setPublicGroups] = useState(initialPublicGroups);
   const [myGroups, setMyGroups] = useState(initialMyGroups);
@@ -237,27 +235,33 @@ export default function GroupsClient({
     loadGroups(tab);
   };
 
+  // Send unauthenticated users back to /leaderboard?view=groups so they land
+  // on the groups view after sign-in (was /groups before the consolidation).
+  const signInHref = "/api/auth/github?returnTo=/leaderboard?view=groups";
+
   return (
     <>
-      <PageHeader>
-        <div>
-          <Title>Groups</Title>
-          <Description>
-            Create private or public leaderboards for teams, friends, and workspaces without changing the global Tokscale rankings.
-          </Description>
-        </div>
+      <Header>
+        <Description>
+          Create private or public leaderboards for teams, friends, and workspaces without changing
+          the global Tokscale rankings.
+        </Description>
         {currentUser ? (
           <PrimaryLink href="/groups/new">New group</PrimaryLink>
         ) : (
-          <PrimaryLink href="/api/auth/github?returnTo=/groups">Sign in</PrimaryLink>
+          <PrimaryLink href={signInHref}>Sign in</PrimaryLink>
         )}
-      </PageHeader>
+      </Header>
 
       <Tabs aria-label="Group filters">
         <TabButton $active={activeTab === "public"} onClick={() => handleTabChange("public")}>
           Public
         </TabButton>
-        <TabButton $active={activeTab === "mine"} onClick={() => handleTabChange("mine")} disabled={!currentUser}>
+        <TabButton
+          $active={activeTab === "mine"}
+          onClick={() => handleTabChange("mine")}
+          disabled={!currentUser}
+        >
           My groups
         </TabButton>
       </Tabs>
