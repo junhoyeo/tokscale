@@ -87,24 +87,6 @@ export function mergeClientBreakdowns(
   return merged;
 }
 
-export function buildModelBreakdown(
-  clientBreakdown: Record<string, ClientBreakdownData>
-): Record<string, number> {
-  const result: Record<string, number> = {};
-
-  for (const client of Object.values(clientBreakdown)) {
-    if (client.models) {
-      for (const [modelId, modelData] of Object.entries(client.models)) {
-        result[modelId] = (result[modelId] || 0) + modelData.tokens;
-      }
-    } else if (client.modelId) {
-      result[client.modelId] = (result[client.modelId] || 0) + client.tokens;
-    }
-  }
-
-  return result;
-}
-
 export function clientContributionToBreakdownData(
   client_contrib: {
     tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning?: number };

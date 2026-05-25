@@ -107,7 +107,6 @@ export async function GET(_request: Request, { params }: RouteParams) {
           inputTokens: dailyBreakdown.inputTokens,
           outputTokens: dailyBreakdown.outputTokens,
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
-          modelBreakdown: dailyBreakdown.modelBreakdown,
         })
         .from(dailyBreakdown)
         .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))

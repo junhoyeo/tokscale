@@ -196,7 +196,6 @@ describe("POST /api/submit auth path", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
       expiresAt: null,
     });
     mockState.validateSubmission.mockReturnValue({
@@ -238,7 +237,6 @@ describe("POST /api/submit auth path", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
       expiresAt: null,
     });
     mockState.validateSubmission.mockReturnValue({
@@ -272,7 +270,6 @@ describe("POST /api/submit auth path", () => {
       username: "Alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
       expiresAt: null,
     });
 
@@ -455,7 +452,6 @@ describe("POST /api/submit auth path", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
       expiresAt: null,
     });
 

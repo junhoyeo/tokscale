@@ -28,7 +28,6 @@ export interface AuthenticatedPersonalToken {
   username: string;
   displayName: string | null;
   avatarUrl: string | null;
-  isAdmin: boolean;
   expiresAt: Date | null;
 }
 
@@ -204,7 +203,6 @@ export async function authenticatePersonalToken(
       username: users.username,
       displayName: users.displayName,
       avatarUrl: users.avatarUrl,
-      isAdmin: users.isAdmin,
       expiresAt: apiTokens.expiresAt,
     })
     .from(apiTokens)
@@ -236,7 +234,6 @@ export async function authenticatePersonalToken(
     username: record.username,
     displayName: record.displayName,
     avatarUrl: record.avatarUrl,
-    isAdmin: record.isAdmin,
     expiresAt: record.expiresAt,
   };
 }

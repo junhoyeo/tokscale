@@ -12,7 +12,6 @@ export interface SessionUser {
   username: string;
   displayName: string | null;
   avatarUrl: string | null;
-  isAdmin: boolean;
 }
 
 /**
@@ -48,7 +47,6 @@ export async function getSession(): Promise<SessionUser | null> {
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
-    isAdmin: user.isAdmin,
   };
 }
 
@@ -120,7 +118,6 @@ export async function validateApiToken(
     username: result.username,
     displayName: result.displayName,
     avatarUrl: result.avatarUrl,
-    isAdmin: result.isAdmin,
   };
 }
 
@@ -168,6 +165,5 @@ export async function getSessionFromHeader(
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
-    isAdmin: user.isAdmin,
   };
 }

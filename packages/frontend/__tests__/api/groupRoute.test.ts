@@ -150,7 +150,6 @@ describe("/api/groups/[slug]", () => {
       username: "admin",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.getGroupBySlug.mockResolvedValue(group());
     mockState.getGroupMembership.mockResolvedValue({ role: "admin" });
@@ -176,7 +175,6 @@ describe("/api/groups/[slug]", () => {
       username: "admin",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.getGroupBySlug.mockResolvedValue(group());
     mockState.getGroupMembership.mockResolvedValue({ role: "admin" });

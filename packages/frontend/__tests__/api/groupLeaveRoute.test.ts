@@ -84,7 +84,6 @@ describe("POST /api/groups/[slug]/leave", () => {
       username: "alice",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.getGroupBySlug.mockResolvedValue({
       id: "group-1",

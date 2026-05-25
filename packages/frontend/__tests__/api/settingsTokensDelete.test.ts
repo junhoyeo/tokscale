@@ -56,7 +56,6 @@ describe("DELETE /api/settings/tokens/[tokenId]", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.revokePersonalToken.mockResolvedValue(true);
 
@@ -78,7 +77,6 @@ describe("DELETE /api/settings/tokens/[tokenId]", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.revokePersonalToken.mockResolvedValue(false);
 

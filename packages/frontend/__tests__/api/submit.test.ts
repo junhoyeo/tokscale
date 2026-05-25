@@ -706,46 +706,6 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(Object.keys(result.cursor.models)).toEqual(['gpt-4o']);
     });
 
-    it('should build modelBreakdown from clients with multiple models', () => {
-      const clientBreakdown = {
-        claude: {
-          tokens: 2550,
-          cost: 30,
-          input: 1300,
-          output: 800,
-          cacheRead: 300,
-          cacheWrite: 150,
-          messages: 13,
-          models: {
-            'claude-sonnet-4': { tokens: 950, cost: 10, input: 500, output: 300, cacheRead: 100, cacheWrite: 50, messages: 5 },
-            'claude-opus-4': { tokens: 1600, cost: 20, input: 800, output: 500, cacheRead: 200, cacheWrite: 100, messages: 8 },
-          },
-        },
-        cursor: {
-          tokens: 375,
-          cost: 5,
-          input: 200,
-          output: 100,
-          cacheRead: 50,
-          cacheWrite: 25,
-          messages: 3,
-          models: {
-            'gpt-4o': { tokens: 375, cost: 5, input: 200, output: 100, cacheRead: 50, cacheWrite: 25, messages: 3 },
-          },
-        },
-      };
-
-      const modelBreakdown: Record<string, number> = {};
-      for (const client of Object.values(clientBreakdown)) {
-        for (const [modelId, modelData] of Object.entries(client.models)) {
-          modelBreakdown[modelId] = (modelBreakdown[modelId] || 0) + modelData.tokens;
-        }
-      }
-
-      expect(modelBreakdown['claude-sonnet-4']).toBe(950);
-      expect(modelBreakdown['claude-opus-4']).toBe(1600);
-      expect(modelBreakdown['gpt-4o']).toBe(375);
-    });
   });
 
   describe('Response Format', () => {

@@ -65,7 +65,17 @@ describe("GET /api/leaderboard", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(getLeaderboardData).toHaveBeenCalledWith("all", 1, 10, "tokens", "");
+    // #522 added customFrom/customTo as the 6th and 7th positional args; this
+    // request doesn't pass them, so they arrive as `undefined`.
+    expect(getLeaderboardData).toHaveBeenCalledWith(
+      "all",
+      1,
+      10,
+      "tokens",
+      "",
+      undefined,
+      undefined,
+    );
     expect(body.users[0].submissionFreshness).toEqual({
       lastUpdated: "2026-01-10T10:00:00.000Z",
       cliVersion: "1.4.2",

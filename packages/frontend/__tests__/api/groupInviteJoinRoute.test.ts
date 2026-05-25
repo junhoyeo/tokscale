@@ -86,7 +86,6 @@ describe("/api/groups/join/[token]", () => {
       username: "Alice",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.acceptGroupInvite.mockResolvedValue({
       group: { id: "group-1", name: "Team", slug: "team" },
@@ -104,7 +103,6 @@ describe("/api/groups/join/[token]", () => {
       username: "Alice",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
     });
     expect(await response.json()).toEqual({
       group: { id: "group-1", name: "Team", slug: "team" },

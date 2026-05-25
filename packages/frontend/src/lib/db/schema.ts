@@ -32,7 +32,6 @@ export const users = pgTable(
     displayName: varchar("display_name", { length: 255 }),
     avatarUrl: text("avatar_url"),
     email: varchar("email", { length: 255 }),
-    isAdmin: boolean("is_admin").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -177,8 +176,6 @@ export const submissions = pgTable(
     sourcesUsed: text("sources_used").array().notNull(),
     modelsUsed: text("models_used").array().notNull(),
 
-    status: varchar("status", { length: 20 }).notNull().default("verified"),
-
     cliVersion: varchar("cli_version", { length: 20 }),
     submissionHash: varchar("submission_hash", { length: 64 }),
     submitCount: integer("submit_count").notNull().default(1),
@@ -199,7 +196,6 @@ export const submissions = pgTable(
   },
   (table) => [
     index("idx_submissions_user_id").on(table.userId),
-    index("idx_submissions_status").on(table.status),
     index("idx_submissions_total_tokens").on(table.totalTokens),
     index("idx_submissions_created_at").on(table.createdAt),
     index("idx_submissions_date_range").on(table.dateStart, table.dateEnd),
@@ -273,9 +269,6 @@ export const dailyBreakdown = pgTable(
     /** Unix ms timestamp of earliest message in this UTC day bucket. NULL for legacy data. */
     timestampMs: bigint("timestamp_ms", { mode: "number" }),
 
-    providerBreakdown: jsonb("provider_breakdown").$type<
-      Record<string, number>
-    >(),
     sourceBreakdown: jsonb("source_breakdown").$type<
       Record<
         string,
@@ -302,7 +295,6 @@ export const dailyBreakdown = pgTable(
         }
       >
     >(),
-    modelBreakdown: jsonb("model_breakdown").$type<Record<string, number>>(),
     /** Total active coding time in this UTC day bucket (milliseconds). NULL for legacy data. */
     activeTimeMs: bigint("active_time_ms", { mode: "number" }),
   },
