@@ -170,7 +170,7 @@ jobs:
 
       - name: Generate coverage badge
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        uses: emibcn/badge-action@f6f18dd5b9f95a97e6bb87de327f3e12f4b5e462 # v2.0.4
+        uses: emibcn/badge-action@f9150fde070fcca0c4e832437611b44838fcd325 # v2.0.4
         with:
           label: 'coverage'
           status: ${{ steps.coverage.outputs.percentage_int }}%
