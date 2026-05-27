@@ -1341,6 +1341,8 @@ JSONL format with assistant messages containing usage data:
 
 Wrapper transcript files under `~/.claude/transcripts/` are counted only when they contain real Claude usage metadata. Files with user/tool events but no `usage` block are skipped rather than estimated.
 
+Tokscale's `claude` client is Claude Code token accounting, not Claude Desktop chat accounting. Claude Desktop stores app data under locations such as `~/Library/Application Support/Claude`, but Anthropic does not document a stable local per-message token ledger for consumer desktop chat or chat-history exports. Run `tokscale clients` to see a diagnostic when Claude Desktop data is present but only Claude Code JSONL roots are scannable. `tokscale usage` can show best-effort Claude subscription quota bars from Claude Code credentials, while organization/API usage belongs to Anthropic's Admin Usage and Cost APIs and is intentionally separate from local transcript scanning.
+
 ### Codex CLI
 
 Location: `~/.codex/sessions/*.jsonl`

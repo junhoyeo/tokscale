@@ -2302,6 +2302,76 @@ fn test_clients_command_includes_claude_transcripts_text() {
 }
 
 #[test]
+fn test_clients_json_includes_claude_desktop_diagnostic() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+    let diagnostics = claude["diagnostics"].as_array().unwrap();
+
+    assert!(diagnostics.iter().any(|item| {
+        item["code"] == "claude_desktop_not_scanned"
+            && item["severity"] == "warning"
+            && item["message"]
+                .as_str()
+                .unwrap()
+                .contains("Claude Desktop app data was detected")
+    }));
+}
+
+#[test]
+fn test_clients_command_includes_claude_desktop_diagnostic_text() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
+
+    cmd_with_home(tmp.path())
+        .arg("clients")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Claude Desktop app data was detected",
+        ))
+        .stdout(predicate::str::contains(
+            "Claude Code JSONL transcripts only",
+        ));
+}
+
+#[test]
+fn test_models_json_includes_claude_desktop_diagnostic_for_empty_explicit_claude_report() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--client", "claude", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let diagnostics = json["diagnostics"].as_array().unwrap();
+
+    assert!(diagnostics.iter().any(|item| {
+        item["code"] == "claude_desktop_not_scanned"
+            && item["message"]
+                .as_str()
+                .unwrap()
+                .contains("Tokscale counts Claude Code JSONL transcripts")
+    }));
+}
+
+#[test]
 fn test_clients_json_includes_settings_extra_paths() {
     let tmp = create_empty_fixture_dir();
     write_settings_json(

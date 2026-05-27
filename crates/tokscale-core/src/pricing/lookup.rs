@@ -269,9 +269,16 @@ impl PricingLookup {
             Some("openrouter") => self.lookup_openrouter_only(id, provider_id),
             _ => self.lookup_auto(id, provider_id),
         };
+        let requested_opus_minor = normalize_claude_opus_4_minor(lower_ref);
+        let unsafe_opus_minor_resolution = |result: &LookupResult| {
+            resolves_different_claude_opus_4_minor(requested_opus_minor.as_deref(), result)
+        };
 
         // 1. Try direct lookup
         if let Some(result) = do_lookup(lower_ref) {
+            if unsafe_opus_minor_resolution(&result) {
+                return None;
+            }
             return Some(result);
         }
 
@@ -279,14 +286,18 @@ impl PricingLookup {
             return None;
         }
 
+        let guarded_lookup = |candidate: &str| {
+            do_lookup(candidate).filter(|result| !unsafe_opus_minor_resolution(result))
+        };
+
         // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
-        if let Some(result) = try_strip_unknown_suffix(lower_ref, do_lookup) {
+        if let Some(result) = try_strip_unknown_suffix(lower_ref, guarded_lookup) {
             return Some(result);
         }
 
         // 3. Try stripping unknown prefixes (e.g., antigravity-, myplugin-)
         //    For each prefix candidate, also try suffix stripping
-        if let Some(result) = try_strip_unknown_prefix(lower_ref, do_lookup) {
+        if let Some(result) = try_strip_unknown_prefix(lower_ref, guarded_lookup) {
             return Some(result);
         }
 
@@ -1064,17 +1075,8 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
     let lower = model_id.to_lowercase();
 
     if lower.contains("opus") {
-        if contains_delimited_fragment(&lower, "4.7") || contains_delimited_fragment(&lower, "4-7")
-        {
-            return Some("claude-opus-4-7".into());
-        } else if contains_delimited_fragment(&lower, "4.6")
-            || contains_delimited_fragment(&lower, "4-6")
-        {
-            return Some("claude-opus-4-6".into());
-        } else if contains_delimited_fragment(&lower, "4.5")
-            || contains_delimited_fragment(&lower, "4-5")
-        {
-            return Some("claude-opus-4-5".into());
+        if let Some(model) = normalize_claude_opus_4_minor(&lower) {
+            return Some(model);
         } else if contains_delimited_fragment(&lower, "4") {
             return Some("claude-opus-4".into());
         }
@@ -1107,6 +1109,41 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
     }
 
     None
+}
+
+fn normalize_claude_opus_4_minor(lower: &str) -> Option<String> {
+    let parts: Vec<&str> = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    for window in parts.windows(3) {
+        if window[0] == "opus" && window[1] == "4" && is_single_digit_minor(window[2]) {
+            return Some(format!("claude-opus-4-{}", window[2]));
+        }
+        if window[0] == "4" && is_single_digit_minor(window[1]) && window[2] == "opus" {
+            return Some(format!("claude-opus-4-{}", window[1]));
+        }
+    }
+
+    None
+}
+
+fn resolves_different_claude_opus_4_minor(
+    requested_minor: Option<&str>,
+    result: &LookupResult,
+) -> bool {
+    let Some(requested_minor) = requested_minor else {
+        return false;
+    };
+
+    normalize_model_name(&result.matched_key).is_some_and(|resolved| {
+        resolved.starts_with("claude-opus-4") && resolved != requested_minor
+    })
+}
+
+fn is_single_digit_minor(value: &str) -> bool {
+    value.len() == 1 && value.as_bytes()[0].is_ascii_digit() && value.as_bytes()[0] != b'0'
 }
 
 fn normalize_version_separator(model_id: &str) -> Option<String> {
@@ -2827,6 +2864,27 @@ mod tests {
         assert!(
             (140.0..=180.0).contains(&cost),
             "expected opus-4-7 priced cost around $160, got ${cost:.2}"
+        );
+    }
+
+    #[test]
+    fn test_future_opus_4_minor_does_not_degrade_to_legacy_opus_4() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000015),
+                output_cost_per_token: Some(0.000075),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(HashMap::new(), openrouter, HashMap::new());
+        let result = lookup.lookup("aws.claude-opus-4-8");
+        assert!(
+            result.is_none(),
+            "unknown future opus minor versions must not price as legacy claude-opus-4; got {:?}",
+            result.map(|result| result.matched_key)
         );
     }
 

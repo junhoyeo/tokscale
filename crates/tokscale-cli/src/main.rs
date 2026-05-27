@@ -1,5 +1,6 @@
 mod antigravity;
 mod auth;
+mod claude_diagnostics;
 mod commands;
 mod cursor;
 mod device;
@@ -1459,6 +1460,36 @@ fn use_env_roots(home_dir: &Option<String>) -> bool {
     home_dir.is_none()
 }
 
+fn resolve_effective_home_dir(home_dir: &Option<String>) -> Option<PathBuf> {
+    home_dir.as_ref().map(PathBuf::from).or_else(dirs::home_dir)
+}
+
+fn model_usage_includes_client(entry: &tokscale_core::ModelUsage, client: &str) -> bool {
+    if entry.client == client {
+        return true;
+    }
+
+    entry
+        .merged_clients
+        .as_deref()
+        .is_some_and(|clients| clients.split(", ").any(|id| id == client))
+}
+
+fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientDiagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+
+    use colored::Colorize;
+    for diagnostic in diagnostics {
+        eprintln!(
+            "{}",
+            format!("  {}: {}", diagnostic.severity, diagnostic.message).yellow()
+        );
+        eprintln!("{}", format!("  {}", diagnostic.help).bright_black());
+    }
+}
+
 fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
     if home_dir.is_some() {
         return Err(anyhow::anyhow!(
@@ -1721,6 +1752,7 @@ fn run_models_report(
     use tokscale_core::{get_model_report, GroupBy, ReportOptions};
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let effective_home_dir = resolve_effective_home_dir(&home_dir);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -1759,6 +1791,22 @@ fn run_models_report(
         explicit_cursor_filter,
     );
     let processing_time_ms = start.elapsed().as_millis();
+    let claude_message_count = report
+        .entries
+        .iter()
+        .filter(|entry| model_usage_includes_client(entry, "claude"))
+        .map(|entry| entry.message_count)
+        .sum();
+    let diagnostics = effective_home_dir
+        .as_deref()
+        .map(|home| {
+            claude_diagnostics::diagnostics_for_empty_explicit_report(
+                home,
+                &clients,
+                claude_message_count,
+            )
+        })
+        .unwrap_or_default();
 
     if json {
         #[derive(serde::Serialize)]
@@ -1798,6 +1846,8 @@ fn run_models_report(
             processing_time_ms: u32,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
         }
 
         let output = ModelReportJson {
@@ -1847,10 +1897,12 @@ fn run_models_report(
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
             warnings: cursor_setup_warnings,
+            diagnostics,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
+        emit_client_diagnostics(&diagnostics);
 
         emit_cursor_setup_warnings(&cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);
@@ -3558,6 +3610,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
         exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
     }
 
     #[derive(serde::Serialize)]
@@ -3691,6 +3745,12 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     },
                 ));
 
+                let diagnostics = if client == ClientId::Claude {
+                    claude_diagnostics::diagnostics_for_clients_row(&home_dir)
+                } else {
+                    Vec::new()
+                };
+
                 ClientRow {
                     client: client.as_str().to_string(),
                     label,
@@ -3706,6 +3766,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         && copilot_exporter_path.is_some())
                     .then(|| "configured".to_string()),
                     extra_paths,
+                    diagnostics,
                 }
             })
             .collect();
@@ -3841,6 +3902,14 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     "  {}",
                     format!("messages: {}", format_number(row.message_count)).bright_black()
                 );
+            }
+
+            for diagnostic in &row.diagnostics {
+                println!(
+                    "  {}",
+                    format!("{}: {}", diagnostic.severity, diagnostic.message).yellow()
+                );
+                println!("  {}", diagnostic.help.bright_black());
             }
 
             println!();

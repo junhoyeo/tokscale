@@ -1901,6 +1901,22 @@ mod tests {
     }
 
     #[test]
+    fn test_opus_4_7_usage_is_parsed_when_usage_metadata_exists() {
+        let content = r#"{"type":"assistant","timestamp":"2026-04-16T10:00:00.000Z","requestId":"req_opus47","message":{"id":"msg_opus47","model":"claude-opus-4-7","usage":{"input_tokens":321,"output_tokens":654,"cache_read_input_tokens":987,"cache_creation_input_tokens":111}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-7");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 321);
+        assert_eq!(messages[0].tokens.output, 654);
+        assert_eq!(messages[0].tokens.cache_read, 987);
+        assert_eq!(messages[0].tokens.cache_write, 111);
+    }
+
+    #[test]
     fn test_tool_result_output_counts_as_input() {
         let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_input","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
 
