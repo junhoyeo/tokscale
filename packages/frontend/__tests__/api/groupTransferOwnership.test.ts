@@ -10,6 +10,7 @@ const mockState = vi.hoisted(() => {
   const getGroupMembership = vi.fn();
   const revalidateGroupCaches = vi.fn();
   const eq = vi.fn((left: unknown, right: unknown) => ({ kind: "eq", left, right }));
+  const ne = vi.fn((left: unknown, right: unknown) => ({ kind: "ne", left, right }));
   const and = vi.fn((...c: unknown[]) => ({ kind: "and", c }));
 
   let txUpdateRows: Array<Array<Record<string, unknown>>> = [];
@@ -33,6 +34,7 @@ const mockState = vi.hoisted(() => {
     getGroupMembership,
     revalidateGroupCaches,
     eq,
+    ne,
     and,
     db,
     tx,
@@ -45,6 +47,7 @@ const mockState = vi.hoisted(() => {
       getGroupMembership.mockReset();
       revalidateGroupCaches.mockReset();
       eq.mockClear();
+      ne.mockClear();
       and.mockClear();
       db.transaction.mockClear();
       tx.update.mockClear();
@@ -64,6 +67,7 @@ const mockState = vi.hoisted(() => {
 vi.mock("drizzle-orm", () => ({
   and: mockState.and,
   eq: mockState.eq,
+  ne: mockState.ne,
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -246,5 +250,60 @@ describe("POST /api/groups/[slug]/transfer-ownership", () => {
     expect(mockState.db.transaction).toHaveBeenCalledTimes(1);
     expect(mockState.tx.update).toHaveBeenCalledTimes(2);
     expect(mockState.revalidateGroupCaches).toHaveBeenCalledWith("group-1", "team");
+  });
+
+  it("returns 409 when the predicate-guarded caller update finds zero rows (race lost)", async () => {
+    mockState.getSessionFromRequest.mockResolvedValue(ownerSession());
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership
+      .mockResolvedValueOnce({ role: "owner" })
+      .mockResolvedValueOnce({ role: "admin" });
+
+    // Simulate a concurrent transfer demoting the caller before this tx commits:
+    // the role='owner' predicate in the caller UPDATE matches zero rows.
+    mockState.setTransactionRows({}, { id: "m2", userId: "bob", role: "owner" });
+    // Override callerRow specifically to be undefined (empty array)
+    (mockState as unknown as { setTransactionRows: (a: unknown, b: unknown) => void });
+    // Re-set txUpdateRows so the FIRST returning() call yields []
+    (mockState as unknown as { reset: () => void }).reset();
+    mockState.getSessionFromRequest.mockResolvedValue(ownerSession());
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership
+      .mockResolvedValueOnce({ role: "owner" })
+      .mockResolvedValueOnce({ role: "admin" });
+    // Wire returning() to return [] on the first call (caller race-lost)
+    let call = 0;
+    mockState.returning.mockImplementation(async () => (call++ === 0 ? [] : [{ id: "m2", userId: "bob", role: "owner" }]));
+
+    const response = await POST(makeRequest({ targetUserId: "bob" }), {
+      params: Promise.resolve({ slug: "team" }),
+    });
+
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body.error).toMatch(/changed|retry/i);
+    expect(mockState.revalidateGroupCaches).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 when the target became an owner before promotion (race lost)", async () => {
+    mockState.getSessionFromRequest.mockResolvedValue(ownerSession());
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership
+      .mockResolvedValueOnce({ role: "owner" })
+      .mockResolvedValueOnce({ role: "admin" });
+
+    // Caller demote succeeds, but target promotion finds zero rows because
+    // role != 'owner' predicate doesn't match (target was promoted concurrently).
+    let call = 0;
+    mockState.returning.mockImplementation(async () =>
+      call++ === 0 ? [{ id: "m1", userId: "owner-1", role: "admin" }] : []
+    );
+
+    const response = await POST(makeRequest({ targetUserId: "bob" }), {
+      params: Promise.resolve({ slug: "team" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(mockState.revalidateGroupCaches).not.toHaveBeenCalled();
   });
 });

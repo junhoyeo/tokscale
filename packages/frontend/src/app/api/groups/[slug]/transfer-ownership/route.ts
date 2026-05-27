@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { db, groupMembers } from "@/lib/db";
 import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { revalidateGroupCaches } from "@/lib/groups/cache";
@@ -70,39 +70,67 @@ export async function POST(
       );
     }
 
-    const updated = await db.transaction(async (tx) => {
-      const [callerRow] = await tx
-        .update(groupMembers)
-        .set({ role: "admin" as GroupRole })
-        .where(
-          and(
-            eq(groupMembers.groupId, group.id),
-            eq(groupMembers.userId, session.id)
-          )
-        )
-        .returning({ id: groupMembers.id, userId: groupMembers.userId, role: groupMembers.role });
-
-      const [targetRow] = await tx
-        .update(groupMembers)
-        .set({ role: "owner" as GroupRole })
-        .where(
-          and(
-            eq(groupMembers.groupId, group.id),
-            eq(groupMembers.userId, targetUserId)
-          )
-        )
-        .returning({ id: groupMembers.id, userId: groupMembers.userId, role: groupMembers.role });
-
-      return [callerRow, targetRow];
-    });
+    // Predicate-guarded updates inside the transaction prevent a race where
+    // two concurrent POSTs from the same owner both pass the pre-check above
+    // and both try to demote the caller / promote different targets. The
+    // `role = 'owner'` guard on the caller and `role != 'owner'` guard on
+    // the target ensure that whichever transaction commits second sees zero
+    // matching rows and aborts, preserving the single-owner invariant.
+    const TRANSFER_RACE = new Error("TRANSFER_RACE");
 
     try {
-      await revalidateGroupCaches(group.id, group.slug);
-    } catch (cacheError) {
-      console.error("Transfer ownership cache invalidation failed:", cacheError);
-    }
+      const updated = await db.transaction(async (tx) => {
+        const [callerRow] = await tx
+          .update(groupMembers)
+          .set({ role: "admin" as GroupRole })
+          .where(
+            and(
+              eq(groupMembers.groupId, group.id),
+              eq(groupMembers.userId, session.id),
+              eq(groupMembers.role, "owner")
+            )
+          )
+          .returning({ id: groupMembers.id, userId: groupMembers.userId, role: groupMembers.role });
 
-    return NextResponse.json({ members: updated });
+        if (!callerRow) {
+          throw TRANSFER_RACE;
+        }
+
+        const [targetRow] = await tx
+          .update(groupMembers)
+          .set({ role: "owner" as GroupRole })
+          .where(
+            and(
+              eq(groupMembers.groupId, group.id),
+              eq(groupMembers.userId, targetUserId),
+              ne(groupMembers.role, "owner")
+            )
+          )
+          .returning({ id: groupMembers.id, userId: groupMembers.userId, role: groupMembers.role });
+
+        if (!targetRow) {
+          throw TRANSFER_RACE;
+        }
+
+        return [callerRow, targetRow];
+      });
+
+      try {
+        await revalidateGroupCaches(group.id, group.slug);
+      } catch (cacheError) {
+        console.error("Transfer ownership cache invalidation failed:", cacheError);
+      }
+
+      return NextResponse.json({ members: updated });
+    } catch (txError) {
+      if (txError === TRANSFER_RACE) {
+        return NextResponse.json(
+          { error: "Ownership state changed during transfer; please retry" },
+          { status: 409 }
+        );
+      }
+      throw txError;
+    }
   } catch (error) {
     console.error("Transfer ownership error:", error);
     return NextResponse.json({ error: "Failed to transfer ownership" }, { status: 500 });
