@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, submittedDevices } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
+import { normalizeUsernameCacheKey } from "@/lib/db/usernameLookup";
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -106,9 +107,9 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     }
 
     try {
-      // Second arg "max" matches the rest of the codebase
-      // (settings/submitted-data/route.ts, submit/route.ts).
-      revalidateTag(`user:${session.username}`, "max");
+      // Normalize before building the cache key, matching submit/route.ts:535-540
+      // which also calls normalizeUsernameCacheKey before revalidateTag.
+      revalidateTag(`user:${normalizeUsernameCacheKey(session.username)}`, "max");
     } catch (e) {
       console.error("Cache invalidation failed after device rename:", e);
     }

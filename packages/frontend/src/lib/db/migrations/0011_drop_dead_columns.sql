@@ -1,3 +1,29 @@
+-- =============================================================================
+-- LOCK-WINDOW NOTICE (read before running on large tables)
+-- =============================================================================
+-- This migration acquires ACCESS EXCLUSIVE locks on multiple tables
+-- (submissions, daily_breakdown, users) in a single transaction:
+--   ALTER TABLE submissions   DROP COLUMN status
+--   ALTER TABLE daily_breakdown DROP COLUMN provider_breakdown
+--   ALTER TABLE daily_breakdown DROP COLUMN model_breakdown
+--   ALTER TABLE users          DROP COLUMN is_admin
+--   + four DROP INDEX / three CREATE INDEX statements
+--
+-- Each statement takes its own ACCESS EXCLUSIVE lock, which blocks all reads
+-- and writes on that table for the duration of the statement. Running several
+-- such statements in sequence extends the effective lock window.
+--
+-- This is ACCEPTABLE TODAY because all affected tables are small (< 100k rows)
+-- and the DDL completes in milliseconds. On larger datasets, ACCESS EXCLUSIVE
+-- holds can cause visible latency spikes or queue pile-ups under high concurrency.
+--
+-- FUTURE GUIDANCE: if table sizes grow significantly, split multi-table DDL into
+-- separate migration files so lock windows do not overlap. Similarly, any future
+-- migration adding multiple CREATE INDEX statements should use CREATE INDEX
+-- CONCURRENTLY in separate transactions — CONCURRENTLY is not allowed inside an
+-- explicit transaction block and cannot be batched with other DDL here.
+-- =============================================================================
+
 -- Drop dead schema surface confirmed by full-codebase audit on 2026-05-25.
 -- Combines three cleanup categories surfaced by the audit:
 --   (A) dead columns (no reads anywhere in src/)

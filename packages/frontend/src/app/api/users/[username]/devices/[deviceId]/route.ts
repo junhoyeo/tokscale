@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 // `and` is used to enforce ownership and id match in a single WHERE.
 import { db, dailyBreakdown, submittedDevices, users } from "@/lib/db";
 import {
@@ -91,19 +91,24 @@ export async function GET(_request: Request, { params }: RouteParams) {
       .where(eq(dailyBreakdown.submittedDeviceId, device.id))
       .orderBy(desc(dailyBreakdown.date));
 
-    let totalTokens = 0;
-    let totalCost = 0;
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let activeDays = 0;
-    for (const row of dailyRows) {
-      const tokens = Number(row.tokens) || 0;
-      totalTokens += tokens;
-      totalCost += Number(row.cost) || 0;
-      inputTokens += Number(row.inputTokens) || 0;
-      outputTokens += Number(row.outputTokens) || 0;
-      if (tokens > 0) activeDays += 1;
-    }
+    // Aggregate totals in SQL, matching the pattern in the listing endpoint
+    // (src/app/api/users/[username]/devices/route.ts), rather than summing in JS.
+    const [totalsRow] = await db
+      .select({
+        totalTokens: sql<string>`COALESCE(SUM(${dailyBreakdown.tokens}), 0)`,
+        totalCost: sql<string>`COALESCE(SUM(${dailyBreakdown.cost}), 0)`,
+        inputTokens: sql<string>`COALESCE(SUM(${dailyBreakdown.inputTokens}), 0)`,
+        outputTokens: sql<string>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)`,
+        activeDays: sql<string>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)`,
+      })
+      .from(dailyBreakdown)
+      .where(eq(dailyBreakdown.submittedDeviceId, device.id));
+
+    const totalTokens = Number(totalsRow?.totalTokens) || 0;
+    const totalCost = Number(totalsRow?.totalCost) || 0;
+    const inputTokens = Number(totalsRow?.inputTokens) || 0;
+    const outputTokens = Number(totalsRow?.outputTokens) || 0;
+    const activeDays = Number(totalsRow?.activeDays) || 0;
 
     return NextResponse.json({
       user: {

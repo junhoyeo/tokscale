@@ -112,19 +112,6 @@ function withDerivedProvenance(breakdown: ClientBreakdownData): ClientBreakdownD
   };
 }
 
-function hasLowerCoverage(
-  existing: ClientBreakdownData,
-  incoming: ClientBreakdownData
-): boolean {
-  const existingProvenance = deriveClientBreakdownProvenance(existing);
-  const incomingProvenance = deriveClientBreakdownProvenance(incoming);
-
-  return (
-    incomingProvenance.messageCount < existingProvenance.messageCount ||
-    incomingProvenance.modelCount < existingProvenance.modelCount
-  );
-}
-
 export function mergeClientBreakdowns(
   existing: Record<string, ClientBreakdownData> | null | undefined,
   incoming: Record<string, ClientBreakdownData>,
@@ -168,16 +155,17 @@ export function mergeClientBreakdownsWithRegressionGuard(
     }
 
     const nextClient = withDerivedProvenance(incomingClient);
-    if (
-      existingClient &&
-      nextClient.tokens < existingClient.tokens &&
-      hasLowerCoverage(existingClient, nextClient)
-    ) {
+    if (existingClient && nextClient.tokens < existingClient.tokens) {
+      // A token decrease alone signals a parser regression (e.g. the CLI
+      // re-parsed only a subset of history). Preserve the existing row even
+      // when coverage metrics are equal, because equal coverage + fewer tokens
+      // still indicates data loss. The old AND-gate (tokens < existing AND lower
+      // coverage) let equal-coverage regressions slip through undetected.
       merged[clientName] = withDerivedProvenance(existingClient);
       const existingTokens = formatTokens(existingClient.tokens);
       const nextTokens = formatTokens(nextClient.tokens);
       warnings.push(
-        `Preserved ${clientName} because this same-device resubmit would reduce ${existingTokens} tokens to ${nextTokens} with lower coverage.`
+        `Preserved ${clientName} because this same-device resubmit would reduce ${existingTokens} tokens to ${nextTokens}.`
       );
       continue;
     }

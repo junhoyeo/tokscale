@@ -389,15 +389,17 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
   describe("Submission validation guardrails", () => {
     it("accepts internally consistent high-volume one-day token totals", () => {
+      // Cap is 10B (MAX_DAILY_TOKENS). Use a value just under to confirm the
+      // cap boundary is respected without triggering a rejection.
       const payload = createValidationPayload({
-        totalTokens: 20_000_000_000,
-        totalCost: 2_000,
+        totalTokens: 8_000_000_000,
+        totalCost: 800,
         tokenBreakdown: {
-          input: 12_000_000_000,
-          output: 5_000_000_000,
-          cacheRead: 2_000_000_000,
-          cacheWrite: 750_000_000,
-          reasoning: 250_000_000,
+          input: 4_800_000_000,
+          output: 2_000_000_000,
+          cacheRead: 800_000_000,
+          cacheWrite: 300_000_000,
+          reasoning: 100_000_000,
         },
       });
 
@@ -423,7 +425,7 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(result.valid).toBe(false);
       expect(result.errors.join("\n")).toContain("Daily token total exceeds");
-      expect(result.errors.join("\n")).toContain("100,000,000,000");
+      expect(result.errors.join("\n")).toContain("10,000,000,000");
       expect(result.errors.join("\n")).toContain("Client claude");
     });
 
@@ -588,7 +590,10 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(result.warnings[0]).toContain('3,600');
     });
 
-    it('allows lower token resubmits when coverage does not regress', () => {
+    it('preserves existing on lower token resubmit even when coverage does not regress (A2)', () => {
+      // A token decrease alone signals a parser regression regardless of whether
+      // coverage metrics are equal or higher. The old AND-gate (fewer tokens AND
+      // lower coverage) let equal-coverage regressions slip through — fixed in A2.
       const existing = { codex: breakdown(5_000, 30) };
       const incoming = { codex: breakdown(4_800, 32) };
 
@@ -598,8 +603,9 @@ describe('POST /api/submit - Client-Level Merge', () => {
         new Set(['codex'])
       );
 
-      expect(result.merged.codex).toEqual(incoming.codex);
-      expect(result.warnings).toEqual([]);
+      expect(result.merged.codex.tokens).toBe(5_000);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain('codex');
     });
 
     it('preserves a submitted client that disappears from a same-device resubmit', () => {

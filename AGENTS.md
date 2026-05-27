@@ -102,6 +102,15 @@ fix(tui): harden unreleased changes — P0-P3    ❌  (PR title)
 fix: hardening wave 1 compliance fixes         ❌  (PR title)
 ```
 
+## Migration journal hygiene
+
+Never hand-edit `drizzle/meta/_journal.json` timestamps or sequence numbers. Always run `drizzle-kit generate` to claim a migration slot — the tool assigns the correct monotonic index and timestamp atomically.
+
+Migrations 0010 and 0011 have round-number hand-edited timestamps (`"when": 1780000000000` and `"when": 1780086400000`) as a one-time historical exception made during the 2026-05-25 schema audit. No future migration should follow this pattern; use `drizzle-kit generate` exclusively.
+
+
+If two branches generate migrations with the same index, resolve the conflict by re-running `drizzle-kit generate` on the branch that was merged later — do not manually renumber files or edit `_journal.json`.
+
 ## Agent Command Execution
 
 - When running `tokscale` CLI commands from an automated agent (tests, CI, or tool-driven shells), always pass `--no-spinner` unless spinner behavior is the thing being tested.

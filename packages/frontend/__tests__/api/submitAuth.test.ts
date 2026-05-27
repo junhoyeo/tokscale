@@ -15,7 +15,6 @@ const mockState = vi.hoisted(() => {
     messageCount: breakdown.messages ?? 0,
     modelCount: breakdown.models ? Object.keys(breakdown.models).length : 0,
   }));
-  const buildModelBreakdown = vi.fn();
   const clientContributionToBreakdownData = vi.fn();
   const mergeTimestampMs = vi.fn();
 
@@ -34,7 +33,6 @@ const mockState = vi.hoisted(() => {
     mergeClientBreakdownsWithRegressionGuard,
     recalculateDayTotals,
     deriveClientBreakdownProvenance,
-    buildModelBreakdown,
     clientContributionToBreakdownData,
     mergeTimestampMs,
     db,
@@ -49,7 +47,6 @@ const mockState = vi.hoisted(() => {
       mergeClientBreakdownsWithRegressionGuard.mockReset();
       recalculateDayTotals.mockReset();
       deriveClientBreakdownProvenance.mockClear();
-      buildModelBreakdown.mockReset();
       clientContributionToBreakdownData.mockReset();
       mergeTimestampMs.mockReset();
       db.transaction.mockReset();
@@ -120,7 +117,6 @@ vi.mock("@/lib/db/helpers", () => ({
   mergeClientBreakdownsWithRegressionGuard: mockState.mergeClientBreakdownsWithRegressionGuard,
   recalculateDayTotals: mockState.recalculateDayTotals,
   deriveClientBreakdownProvenance: mockState.deriveClientBreakdownProvenance,
-  buildModelBreakdown: mockState.buildModelBreakdown,
   clientContributionToBreakdownData: mockState.clientContributionToBreakdownData,
   mergeTimestampMs: mockState.mergeTimestampMs,
 }));
@@ -340,7 +336,6 @@ describe("POST /api/submit auth path", () => {
       inputTokens: 7,
       outputTokens: 5,
     });
-    mockState.buildModelBreakdown.mockReturnValue({ "gpt-5.5": 12 });
     mockState.mergeTimestampMs.mockImplementation((_existing: unknown, incoming: unknown) => incoming);
     mockState.revalidateUserGroupLeaderboards.mockRejectedValueOnce(
       new Error("group cache unavailable")
@@ -546,7 +541,6 @@ describe("POST /api/submit auth path", () => {
       inputTokens: 10,
       outputTokens: 5,
     });
-    mockState.buildModelBreakdown.mockReturnValue({ "gpt-5.5": 15 });
     mockState.mergeTimestampMs.mockReturnValue(456);
 
     const selectResults = [

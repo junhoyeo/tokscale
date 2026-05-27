@@ -13,9 +13,12 @@ import { z } from "zod";
 // SCHEMAS
 // ============================================================================
 
-// Self-reported usage still needs a hard ceiling, but legitimate high-volume
-// local usage can exceed tens of billions of tokens in a day.
-const MAX_DAILY_TOKENS = 100_000_000_000;
+// Hard cap: 10B tokens per day. f6aeca7 raised this to 100B; reverting because
+// 100B/day is implausible for any single device and would hide data errors.
+// A warn band at 5B logs structured warnings for high-but-plausible volumes
+// without rejecting them (see warnIfHighDailyTokens below).
+const MAX_DAILY_TOKENS = 10_000_000_000;
+const WARN_DAILY_TOKENS = 5_000_000_000;
 const MAX_DAILY_COST = 10_000;
 const MAX_COST_PER_MILLION_TOKENS = 10_000;
 const COST_RELATIVE_TOLERANCE = 0.01;
@@ -372,6 +375,13 @@ export function validateSubmission(data: unknown): ValidationResult {
       errors.push(
         `Daily token total exceeds ${MAX_DAILY_TOKENS.toLocaleString("en-US")} on ${day.date}: ${day.totals.tokens.toLocaleString("en-US")}`
       );
+    } else if (day.totals.tokens > WARN_DAILY_TOKENS) {
+      console.warn("[submission] high daily token count", {
+        date: day.date,
+        tokens: day.totals.tokens,
+        warnThreshold: WARN_DAILY_TOKENS,
+        cap: MAX_DAILY_TOKENS,
+      });
     }
 
     if (day.totals.cost > MAX_DAILY_COST) {
@@ -535,7 +545,9 @@ export function generateSubmissionHash(data: SubmissionData): string {
             tokens: client.tokens,
             cost: client.cost,
             messages: client.messages,
-            provenance: client.provenance ?? null,
+            // provenance intentionally excluded: it is derived metadata that can
+            // be back-filled without changing usage data, so it must not affect
+            // idempotency. Hash ordering uses client/providerId/modelId only.
           }))
           .sort((a, b) =>
             `${a.client}\u0000${a.providerId ?? ""}\u0000${a.modelId}`.localeCompare(

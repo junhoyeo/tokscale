@@ -19,8 +19,9 @@ import {
 } from "@/lib/db/helpers";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
+import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 
-const LEGACY_SUBMIT_DEVICE_KEY = "legacy-default";
+const LEGACY_SUBMIT_DEVICE_KEY = LEGACY_DEVICE_KEY;
 const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
 
 function normalizeSubmissionData(data: unknown): void {
@@ -264,28 +265,52 @@ export async function POST(request: Request) {
         // the user's legacy bucket instead of counting the same history twice.
         // Once any modern device rows exist, attribution is ambiguous, so the
         // legacy bucket stays separate.
-        await tx.execute(sql`
-          UPDATE daily_breakdown AS db
-          SET submitted_device_id = ${submittedDevice.id}
-          WHERE db.submission_id = ${submissionId}
-            AND db.submitted_device_id IN (
-              SELECT sd.id
-              FROM submitted_devices AS sd
-              WHERE sd.user_id = ${tokenRecord.userId}
-                AND sd.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
-            )
-            AND NOT EXISTS (
-              SELECT 1
-              FROM daily_breakdown AS modern
-              WHERE modern.submission_id = db.submission_id
-                AND modern.submitted_device_id NOT IN (
-                  SELECT sd2.id
-                  FROM submitted_devices AS sd2
-                  WHERE sd2.user_id = ${tokenRecord.userId}
-                    AND sd2.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
-                )
-            )
-        `);
+        //
+        // Race note: two concurrent submits from the same user can both reach
+        // this branch before either has committed. The second UPDATE will try
+        // to re-stamp submitted_device_id on rows the first already claimed,
+        // which can violate the (submission_id, submitted_device_id, date)
+        // unique constraint. The ON CONFLICT DO NOTHING below makes the UPDATE
+        // skip conflicting rows rather than throw, and the outer try/catch falls
+        // through to the normal insert path if a unique violation still escapes
+        // (e.g. via a concurrent INSERT racing the UPDATE window).
+        try {
+          await tx.execute(sql`
+            UPDATE daily_breakdown AS db
+            SET submitted_device_id = ${submittedDevice.id}
+            WHERE db.submission_id = ${submissionId}
+              AND db.submitted_device_id IN (
+                SELECT sd.id
+                FROM submitted_devices AS sd
+                WHERE sd.user_id = ${tokenRecord.userId}
+                  AND sd.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM daily_breakdown AS modern
+                WHERE modern.submission_id = db.submission_id
+                  AND modern.submitted_device_id NOT IN (
+                    SELECT sd2.id
+                    FROM submitted_devices AS sd2
+                    WHERE sd2.user_id = ${tokenRecord.userId}
+                      AND sd2.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
+                  )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM daily_breakdown AS dup
+                WHERE dup.submission_id = db.submission_id
+                  AND dup.submitted_device_id = ${submittedDevice.id}
+                  AND dup.date = db.date
+              )
+          `);
+        } catch (adoptionErr) {
+          // Unique constraint hit from a concurrent submit racing this UPDATE.
+          // Fall through — fetchExistingDeviceDays() below will pick up rows
+          // already claimed by the other request, and subsequent logic will
+          // merge rather than re-adopt.
+          console.warn("Legacy adoption conflict (concurrent submit), falling through:", adoptionErr);
+        }
         existingDays = await fetchExistingDeviceDays();
       }
 
