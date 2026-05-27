@@ -4987,8 +4987,8 @@ fn write_light_cache(
 }
 
 fn run_warm_tui_cache() -> Result<()> {
-    use crate::tui::{save_cached_data, DataLoader};
-    use tokscale_core::{ClientId, GroupBy};
+    use crate::tui::{save_cached_data, DataLoader, TUI_DEFAULT_GROUP_BY};
+    use tokscale_core::ClientId;
 
     // Warm the cache using the same default filter set the TUI uses on
     // a no-flag launch. Going through `resolve_default_tui_filter_set()`
@@ -4997,6 +4997,14 @@ fn run_warm_tui_cache() -> Result<()> {
     // `build_client_filter`. If they drift, every TUI launch after
     // `submit` becomes a cache miss instead of a fresh hit, defeating
     // the warming.
+    //
+    // The `group_by` MUST be `TUI_DEFAULT_GROUP_BY`, NOT
+    // `GroupBy::default()`. Using `GroupBy::default()` here is the bug
+    // that motivated this constant — the TUI's cache reader keys on
+    // `TUI_DEFAULT_GROUP_BY` (= `GroupBy::Model`) while
+    // `GroupBy::default()` is `GroupBy::ClientModel`, so the warm cache
+    // was written under a key the TUI never queried. Every submit
+    // silently invalidated the next TUI launch.
     let enabled_set = resolve_default_tui_filter_set();
     let scan_clients: Vec<ClientId> = enabled_set
         .iter()
@@ -5004,8 +5012,8 @@ fn run_warm_tui_cache() -> Result<()> {
         .collect();
     let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
     let loader = DataLoader::with_filters(None, None, None, None);
-    if let Ok(data) = loader.load(&scan_clients, &GroupBy::default(), include_synthetic) {
-        save_cached_data(&data, &enabled_set, &GroupBy::default());
+    if let Ok(data) = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY, include_synthetic) {
+        save_cached_data(&data, &enabled_set, &TUI_DEFAULT_GROUP_BY);
     }
     Ok(())
 }

@@ -23,6 +23,25 @@ use super::data::{
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
 const CACHE_SCHEMA_VERSION: u32 = 8;
 
+/// Single source of truth for the `group_by` value used to key the TUI
+/// cache. The cache file's `groupBy` field is compared verbatim against
+/// this on load (`cache.rs::load_cache`), so any code path that writes
+/// the cache — most importantly the detached `warm-tui-cache` subprocess
+/// fired after `tokscale submit` — must use this exact value, NOT
+/// `GroupBy::default()`.
+///
+/// Historical bug: the warm-tui-cache writer keyed on `GroupBy::default()`
+/// (= `ClientModel`) while the TUI loaded with the hard-coded
+/// `GroupBy::Model`, so every submit silently invalidated the next TUI
+/// launch's cache and the "show cached data while refreshing" contract
+/// never triggered. Anchoring both ends on this constant prevents the
+/// two from drifting again — change here ⇒ change everywhere.
+///
+/// The value matches the TUI's runtime default (`App.group_by` in
+/// `app.rs`) so swapping `GroupBy::Model` → `TUI_DEFAULT_GROUP_BY` is
+/// purely a refactor with no user-visible presentation change.
+pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
+
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
 fn cache_dir() -> Option<PathBuf> {
@@ -1673,6 +1692,108 @@ mod tests {
             CacheResult::Fresh(_) => "Fresh",
             CacheResult::Stale(_) => "Stale",
             CacheResult::Miss => "Miss",
+        }
+    }
+
+    /// Regression test for the TUI cache `group_by` mismatch bug.
+    ///
+    /// Symptom: `npx tokscale@latest` (TUI launch) silently dropped the
+    /// on-disk cache and showed an empty dashboard until the background
+    /// scan finished, even though `~/.config/tokscale/cache/tui-data-cache.json`
+    /// existed and was well-formed.
+    ///
+    /// Root cause: the warm-tui-cache writer (`run_warm_tui_cache` in
+    /// `main.rs`, spawned as a detached subprocess after every successful
+    /// `tokscale submit`) saved the cache with `GroupBy::default()`
+    /// (= `ClientModel`, serialized as `"client,model"`), while the TUI
+    /// reader (`tui::run`) loaded with the hard-coded `GroupBy::Model`
+    /// (serialized as `"model"`). `cache.rs::load_cache` does a strict
+    /// inequality check on the cached vs. requested `group_by`, so the
+    /// two never matched and every submit silently invalidated the next
+    /// TUI launch's cache.
+    ///
+    /// Fix: anchor both ends on `TUI_DEFAULT_GROUP_BY`. This test pins
+    /// the contract — round-tripping a save→load under the canonical key
+    /// must return `Fresh`, never `Miss`.
+    #[test]
+    #[serial]
+    fn warm_cache_round_trip_under_canonical_key_is_fresh() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let enabled = ClientFilter::default_set();
+
+        // Write with the canonical key (mirrors what `run_warm_tui_cache`
+        // does after the fix).
+        save_cached_data(&UsageData::default(), &enabled, &TUI_DEFAULT_GROUP_BY);
+
+        // Read with the canonical key (mirrors what `tui::run` does on
+        // launch). The bug would have returned `Miss` here because the
+        // historical writer used `GroupBy::default()` (= ClientModel)
+        // while the reader used `GroupBy::Model`.
+        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY);
+        assert!(
+            matches!(result, CacheResult::Fresh(_)),
+            "expected Fresh after writing with TUI_DEFAULT_GROUP_BY, got {}",
+            other_variant_name(&result)
+        );
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+    }
+
+    /// Documents the historical bug as a frozen regression: writing with
+    /// `GroupBy::default()` (the pre-fix `run_warm_tui_cache` behavior)
+    /// and reading with `TUI_DEFAULT_GROUP_BY` returns `Miss`. If
+    /// anyone re-introduces `GroupBy::default()` at any TUI cache write
+    /// site, this assertion proves the cache breaks.
+    #[test]
+    #[serial]
+    fn pre_fix_writer_key_misses_under_canonical_reader_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let enabled = ClientFilter::default_set();
+
+        // Pre-fix: writer used `GroupBy::default()`.
+        save_cached_data(&UsageData::default(), &enabled, &GroupBy::default());
+
+        // Reader uses the canonical key. If `GroupBy::default()` and
+        // `TUI_DEFAULT_GROUP_BY` ever coincide (e.g. someone changes
+        // `impl Default for GroupBy` to return `Model`), this assertion
+        // will start failing — at which point the divergent-write site
+        // in `run_warm_tui_cache` is no longer dangerous and the test
+        // should be updated accordingly.
+        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY);
+        assert!(
+            matches!(result, CacheResult::Miss),
+            "expected Miss when reader uses TUI_DEFAULT_GROUP_BY and writer used GroupBy::default(), got {}",
+            other_variant_name(&result)
+        );
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
         }
     }
 }

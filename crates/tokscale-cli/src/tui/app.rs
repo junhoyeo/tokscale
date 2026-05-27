@@ -302,7 +302,7 @@ impl App {
             data,
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
-            group_by: Rc::new(RefCell::new(tokscale_core::GroupBy::Model)),
+            group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
             sort_field,
             sort_direction,
             tab_sort_state: HashMap::new(),
