@@ -20,6 +20,13 @@ const MAX_DAILY_COST = 10_000;
 const MAX_COST_PER_MILLION_TOKENS = 10_000;
 const COST_RELATIVE_TOLERANCE = 0.01;
 const COST_ABSOLUTE_TOLERANCE = 0.1;
+// Sub-cent epsilon for "is there real cost left after subtracting the
+// Cursor-legacy carve-out?" comparisons. Strict `> 0` would falsely reject
+// an all-legacy submission when floating-point summation leaves a tiny
+// residue (e.g. 0.1 + 0.2 === 0.30000000000000004, IEEE 0.3 ≈
+// 0.299999999999999988, diff ≈ 5.5e-17). 1e-6 is well below any real LLM
+// charge, so legitimate non-legacy cost will still trip the check.
+const LEGACY_COST_FLOAT_EPSILON = 1e-6;
 const TOKEN_RELATIVE_TOLERANCE = 0.01;
 const TOKEN_ABSOLUTE_TOLERANCE = 100;
 
@@ -408,7 +415,7 @@ export function validateSubmission(data: unknown): ValidationResult {
     const checkableCost = Math.max(0, submission.summary.totalCost - legacyCost);
 
     if (submission.summary.totalCost > 0 && submission.summary.totalTokens === 0) {
-      if (checkableCost > 0) {
+      if (checkableCost > LEGACY_COST_FLOAT_EPSILON) {
         const offenders = describeTokenlessOffenders(
           allClients.filter((c) => !isLegacyTokenlessCursorClient(c))
         );
@@ -459,7 +466,7 @@ export function validateSubmission(data: unknown): ValidationResult {
       const checkableCost = Math.max(0, day.totals.cost - legacyCost);
 
       if (day.totals.cost > 0 && day.totals.tokens === 0) {
-        if (checkableCost > 0) {
+        if (checkableCost > LEGACY_COST_FLOAT_EPSILON) {
           const offenders = describeTokenlessOffenders(
             day.clients.filter((c) => !isLegacyTokenlessCursorClient(c))
           );

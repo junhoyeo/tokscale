@@ -658,6 +658,87 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(errorBlob).toContain("cost=$0.0400");
     });
 
+    it("tolerates floating-point residue when subtracting cursor legacy cost", () => {
+      // Regression for PR #612 review (cubic P2): strict `> 0` float
+      // comparison can falsely reject an all-legacy submission when IEEE
+      // 754 summation leaves a tiny positive remainder.
+      //
+      // Concretely: `0.1 + 0.2 === 0.30000000000000004` while the literal
+      // `0.3` is IEEE `0.299999999999999988…`, so `(0.1+0.2) - 0.3 ≈ 5.5e-17`
+      // — a non-zero positive number even though the user truly has $0.30 of
+      // legacy cost and nothing else. Without an epsilon, the
+      // cost-without-tokens check fires on noise.
+      const totalCostWithFpResidue = 0.1 + 0.2; // 0.30000000000000004
+      const legacyClientCost = 0.3; // 0.299999999999999988…
+      expect(totalCostWithFpResidue - legacyClientCost).toBeGreaterThan(0);
+      expect(totalCostWithFpResidue - legacyClientCost).toBeLessThan(1e-10);
+
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: totalCostWithFpResidue,
+          totalDays: 1,
+          activeDays: 0,
+          averagePerDay: totalCostWithFpResidue,
+          maxCostInSingleDay: totalCostWithFpResidue,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: totalCostWithFpResidue,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: {
+              tokens: 0,
+              cost: totalCostWithFpResidue,
+              messages: 6,
+            },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: legacyClientCost,
+                messages: 6,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
     it("excludes cursor legacy cost from the cost-per-million sanity cap", () => {
       // Regression for PR #612 review (codex P1): when a legacy
       // `premium-tool-call` row shares a day with a small amount of
