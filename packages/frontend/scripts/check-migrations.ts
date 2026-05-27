@@ -23,8 +23,61 @@ const journalPath = resolve(
   "../src/lib/db/migrations/meta/_journal.json"
 );
 const migrationJournal = JSON.parse(readFileSync(journalPath, "utf8")) as {
-  entries: unknown[];
+  entries: { idx: number; tag: string; when: number }[];
 };
+
+const idxValues = migrationJournal.entries.map((entry) => entry.idx);
+const idxSet = new Set(idxValues);
+if (idxSet.size !== idxValues.length) {
+  const seen = new Set<number>();
+  const dupes = idxValues.filter((idx) => {
+    if (seen.has(idx)) return true;
+    seen.add(idx);
+    return false;
+  });
+  throw new Error(
+    `_journal.json contains duplicate idx values: ${Array.from(new Set(dupes)).join(", ")}. ` +
+      `Re-run drizzle-kit generate on the conflicting branch.`
+  );
+}
+
+const sortedIdx = [...idxValues].sort((a, b) => a - b);
+for (let i = 0; i < sortedIdx.length; i++) {
+  if (sortedIdx[i] !== i) {
+    throw new Error(
+      `_journal.json has a gap or non-contiguous idx sequence at position ${i}: ` +
+        `expected ${i}, got ${sortedIdx[i]}. Sequence must be 0..N-1.`
+    );
+  }
+}
+console.log(`ok - migration journal idx sequence is contiguous (0..${sortedIdx.length - 1})`);
+
+const migrationsDir = resolve(import.meta.dir, "../src/lib/db/migrations");
+for (const entry of migrationJournal.entries) {
+  const sqlPath = resolve(migrationsDir, `${entry.tag}.sql`);
+  let sqlBody: string;
+  try {
+    sqlBody = readFileSync(sqlPath, "utf8");
+  } catch {
+    continue;
+  }
+  const stripped = sqlBody
+    .replace(/--[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const tables = new Set<string>();
+  const re = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+(?:ONLY\s+)?(?:["`]([^"`]+)["`]|(\w+))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(stripped)) !== null) {
+    tables.add((match[1] ?? match[2]).toLowerCase());
+  }
+  if (tables.size > 1) {
+    console.warn(
+      `warn - migration ${entry.tag}.sql creates indexes on ${tables.size} tables ` +
+        `(${Array.from(tables).join(", ")}). Drizzle wraps each migration in one transaction; ` +
+        `multi-table index builds hold ACCESS EXCLUSIVE across all of them. Consider splitting.`
+    );
+  }
+}
 
 try {
   const [{ count: appliedMigrationCount }] = await sql<

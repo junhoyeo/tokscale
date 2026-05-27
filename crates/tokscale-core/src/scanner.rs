@@ -12,6 +12,21 @@ use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Emit a one-time `tracing::warn!` if `path` does not start with the user's
+/// home directory. The scan is NOT blocked — this is a heads-up only.
+fn warn_if_escapes_home(client_id: ClientId, path: &Path) {
+    if let Some(home) = dirs::home_dir() {
+        if !path.starts_with(&home) {
+            tracing::warn!(
+                client = client_id.as_str(),
+                path = %path.display(),
+                home = %home.display(),
+                "extra scan path is outside $HOME — verify this is intentional"
+            );
+        }
+    }
+}
+
 /// User-controlled scanner settings loaded from a config file.
 ///
 /// This is the persistent, declarative counterpart to environment variables
@@ -640,6 +655,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+        warn_if_escapes_home(client_id, &path);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
@@ -652,6 +668,7 @@ fn scan_all_clients_with_env_strategy_inner(
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
         for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+            warn_if_escapes_home(client_id, &PathBuf::from(&path));
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
     }
@@ -2748,5 +2765,50 @@ mod tests {
         assert_eq!(result.get(ClientId::Claude).len(), 1);
 
         restore_env("TOKSCALE_EXTRA_DIRS", previous);
+    }
+
+    /// Verify that an extra scan path outside $HOME does not abort the scan.
+    /// `warn_if_escapes_home` must only warn, never block.
+    #[test]
+    #[serial]
+    fn test_extra_scan_path_outside_home_does_not_block_scan() {
+        // Use a tempdir that is guaranteed to be outside the real $HOME
+        // (tempfile creates dirs under /tmp on Unix, %TEMP% on Windows).
+        let outside_home = TempDir::new().unwrap();
+        let outside_path = outside_home.path();
+
+        // Ensure it is truly outside home (skip the test if somehow inside).
+        if let Some(home) = dirs::home_dir() {
+            if outside_path.starts_with(&home) {
+                return; // unexpected environment — skip rather than false-fail
+            }
+        }
+
+        // Populate with a valid session file so the scanner has something to find.
+        let session_dir = outside_path.join("sessions");
+        fs::create_dir_all(&session_dir).unwrap();
+        File::create(session_dir.join("session-abc123.json")).unwrap();
+
+        // Set TOKSCALE_EXTRA_DIRS to point claude at the outside path.
+        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+        unsafe {
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("claude:{}", outside_path.to_string_lossy()),
+            )
+        };
+
+        // The scan must complete without panicking.
+        let fake_home = TempDir::new().unwrap();
+        let _result = scan_all_clients_with_env_strategy(
+            fake_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            true, // use_env_roots = true so TOKSCALE_EXTRA_DIRS is picked up
+        );
+
+        restore_env("TOKSCALE_EXTRA_DIRS", previous);
+        // No assertion on result.get(ClientId::Claude) — the outside dir might
+        // not match the expected file patterns. The test goal is only liveness:
+        // the scan must not panic when an extra path escapes $HOME.
     }
 }

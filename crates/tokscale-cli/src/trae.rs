@@ -43,7 +43,9 @@ pub mod auth {
     //! 4. Decryption fails / no `storage.json` → fall back to
     //!    `trae login --manual` (paste a JWT).
     //!
-    //! Cache path: `~/.config/tokscale/trae-cache/credentials-{solo,ide}.json`
+    //! Cache filenames: `credentials-solo.json` (Solo) and `credentials-ide.json` (Ide).
+    //! These are fixed names, not derived from the report client id (`client_str()`).
+    //! Cache directory: `~/.config/tokscale/trae-cache/`
 
     use crate::trae::safestorage;
     use anyhow::{Context, Result};
@@ -1283,7 +1285,20 @@ pub mod sync {
 
         if batch_wins_manifest {
             let json = serde_json::to_string_pretty(&sessions)?;
-            std::fs::write(&artifact_path, json)?;
+            // Atomic write: serialize to a temp file next to the destination,
+            // then rename (POSIX-atomic on the same filesystem).
+            let tmp_path = artifact_path.with_extension(format!(
+                "json.tmp.{}.{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+            ));
+            std::fs::write(&tmp_path, &json)?;
+            std::fs::rename(&tmp_path, &artifact_path).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp_path);
+            })?;
         }
 
         let valid_paths: std::collections::HashSet<String> = next_manifest
