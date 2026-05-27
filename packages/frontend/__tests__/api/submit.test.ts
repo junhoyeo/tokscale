@@ -658,6 +658,96 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(errorBlob).toContain("cost=$0.0400");
     });
 
+    it("excludes cursor legacy cost from the cost-per-million sanity cap", () => {
+      // Regression for PR #612 review (codex P1): when a legacy
+      // `premium-tool-call` row shares a day with a small amount of
+      // token-bearing usage, the day-level branch falls through to the
+      // cost-per-million check because `day.totals.tokens > 0`. If the full
+      // day cost (including the legacy charge) is used as the numerator,
+      // tiny token counts trip the $10k/M ceiling even though the legacy
+      // row is meant to be skipped. The legacy cost must be subtracted
+      // before computing cost-per-million as well.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 100,
+          totalCost: 2.06,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 2.06,
+          maxCostInSingleDay: 2.06,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call", "claude-3.5-sonnet"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 100,
+            totalCost: 2.06,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 100, cost: 2.06, messages: 45 },
+            intensity: 1 as const,
+            tokenBreakdown: {
+              input: 100,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 2.05,
+                messages: 44,
+              },
+              {
+                client: "cursor" as const,
+                modelId: "claude-3.5-sonnet",
+                providerId: "anthropic",
+                tokens: {
+                  input: 100,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 0.01,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      // Without the legacy-cost subtraction the day-level cost-per-million
+      // would be ($2.06 / 100 tokens) * 1e6 = $20,600/M, well above the
+      // $10,000/M ceiling. After subtracting the legacy $2.05, the
+      // checkable cost is $0.01, which is below the $1 floor in
+      // pushCostPerMillionError and the check is skipped entirely.
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
     it("allows cursor legacy rows mixed with normal token-bearing rows", () => {
       // Same day, two clients: a legacy premium-tool-call entry (cost only)
       // and a regular cursor call that has both tokens and cost. The day

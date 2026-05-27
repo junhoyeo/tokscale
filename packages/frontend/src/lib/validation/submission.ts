@@ -395,29 +395,36 @@ export function validateSubmission(data: unknown): ValidationResult {
     );
   }
 
-  if (submission.summary.totalCost > 0 && submission.summary.totalTokens === 0) {
+  {
     const allClients: ClientLike[] = submission.contributions.flatMap(
       (d) => d.clients
     );
+    // Cursor legacy: subtract premium-tool-call cost before both sanity caps
+    // so a legacy charge cannot inflate the cost-per-million ratio either,
+    // not just the tokenless-cost error.
     const legacyCost = allClients
       .filter(isLegacyTokenlessCursorClient)
       .reduce((sum, c) => sum + c.cost, 0);
-    if (submission.summary.totalCost - legacyCost > 0) {
-      const offenders = describeTokenlessOffenders(
-        allClients.filter((c) => !isLegacyTokenlessCursorClient(c))
+    const checkableCost = Math.max(0, submission.summary.totalCost - legacyCost);
+
+    if (submission.summary.totalCost > 0 && submission.summary.totalTokens === 0) {
+      if (checkableCost > 0) {
+        const offenders = describeTokenlessOffenders(
+          allClients.filter((c) => !isLegacyTokenlessCursorClient(c))
+        );
+        const detail =
+          `cost=${formatCost(submission.summary.totalCost)}, total tokens=0` +
+          (offenders ? `; offending clients: ${offenders}` : "");
+        errors.push(`Submission summary: Cost submitted without tokens (${detail})`);
+      }
+    } else {
+      pushCostPerMillionError(
+        errors,
+        "Submission summary",
+        checkableCost,
+        submission.summary.totalTokens
       );
-      const detail =
-        `cost=${formatCost(submission.summary.totalCost)}, total tokens=0` +
-        (offenders ? `; offending clients: ${offenders}` : "");
-      errors.push(`Submission summary: Cost submitted without tokens (${detail})`);
     }
-  } else {
-    pushCostPerMillionError(
-      errors,
-      "Submission summary",
-      submission.summary.totalCost,
-      submission.summary.totalTokens
-    );
   }
 
   // 3b. Active days should match
@@ -442,26 +449,33 @@ export function validateSubmission(data: unknown): ValidationResult {
       );
     }
 
-    if (day.totals.cost > 0 && day.totals.tokens === 0) {
+    {
+      // Cursor legacy: subtract premium-tool-call cost before both sanity
+      // caps so legacy charges that share a day with normal token-bearing
+      // usage cannot inflate the cost-per-million ratio either.
       const legacyCost = day.clients
         .filter(isLegacyTokenlessCursorClient)
         .reduce((sum, c) => sum + c.cost, 0);
-      if (day.totals.cost - legacyCost > 0) {
-        const offenders = describeTokenlessOffenders(
-          day.clients.filter((c) => !isLegacyTokenlessCursorClient(c))
+      const checkableCost = Math.max(0, day.totals.cost - legacyCost);
+
+      if (day.totals.cost > 0 && day.totals.tokens === 0) {
+        if (checkableCost > 0) {
+          const offenders = describeTokenlessOffenders(
+            day.clients.filter((c) => !isLegacyTokenlessCursorClient(c))
+          );
+          const detail =
+            `cost=${formatCost(day.totals.cost)}, total tokens=0` +
+            (offenders ? `; offending clients: ${offenders}` : "");
+          errors.push(`Day ${day.date}: Cost submitted without tokens (${detail})`);
+        }
+      } else {
+        pushCostPerMillionError(
+          errors,
+          `Day ${day.date}`,
+          checkableCost,
+          day.totals.tokens
         );
-        const detail =
-          `cost=${formatCost(day.totals.cost)}, total tokens=0` +
-          (offenders ? `; offending clients: ${offenders}` : "");
-        errors.push(`Day ${day.date}: Cost submitted without tokens (${detail})`);
       }
-    } else {
-      pushCostPerMillionError(
-        errors,
-        `Day ${day.date}`,
-        day.totals.cost,
-        day.totals.tokens
-      );
     }
 
     const dayBreakdownTokens = tokenTotal(day.tokenBreakdown);
