@@ -164,8 +164,6 @@ export async function acceptGroupInvite(token: string, session: SessionUser) {
     throw new GroupInviteError("forbidden", "This invite is not for your GitHub username");
   }
 
-  const acceptedAt = new Date();
-
   await db.transaction(async (tx) => {
     // Lock the inviter's membership row for the duration of this
     // transaction so a concurrent role change cannot slip between the
@@ -181,6 +179,12 @@ export async function acceptGroupInvite(token: string, session: SessionUser) {
     if (!inviterMembership[0] || !canManageGroupRole(inviterMembership[0].role, invite.role)) {
       throw new GroupInviteError("forbidden", "Inviter no longer has permission to grant this role");
     }
+
+    // Capture `acceptedAt` AFTER the FOR UPDATE lock has been acquired so
+    // an invite that expires while the request was queued is rejected.
+    // A pre-transaction timestamp could pass `expiresAt > acceptedAt`
+    // even though wall-clock time has now advanced past `expiresAt`.
+    const acceptedAt = new Date();
 
     const claimed = await tx
       .update(groupInvites)

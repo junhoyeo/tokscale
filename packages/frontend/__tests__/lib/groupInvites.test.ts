@@ -40,8 +40,10 @@ const mockState = vi.hoisted(() => {
   const innerJoin = vi.fn(() => ({ where }));
   const from = vi.fn(() => ({ innerJoin }));
 
-  // tx.select used by the inviter re-check (B1)
-  const txLimit = vi.fn(async () => inviterRows);
+  // tx.select used by the inviter re-check (B1).
+  // Chain: tx.select().from().where().limit().for("update")
+  const txForUpdate = vi.fn(async () => inviterRows);
+  const txLimit = vi.fn(() => ({ for: txForUpdate }));
   const txWhere = vi.fn(() => ({ limit: txLimit }));
   const txFrom = vi.fn(() => ({ where: txWhere }));
 
@@ -91,6 +93,7 @@ const mockState = vi.hoisted(() => {
       where.mockClear();
       innerJoin.mockClear();
       from.mockClear();
+      txForUpdate.mockClear();
       txLimit.mockClear();
       txWhere.mockClear();
       txFrom.mockClear();
