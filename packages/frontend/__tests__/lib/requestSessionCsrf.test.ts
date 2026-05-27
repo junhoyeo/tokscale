@@ -4,7 +4,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
  * B6: CSRF origin allowlist for cookie-based sessions.
  * - Mutating requests (POST/PATCH/PUT/DELETE) with a mismatched Origin are rejected.
  * - Requests with a valid Bearer token bypass the origin check.
- * - Requests without an Origin header are allowed (same-origin / non-browser clients).
+ * - Requests without an Origin header are rejected on mutating cookie sessions (non-browser clients should use Bearer).
  */
 
 const mockState = vi.hoisted(() => {
@@ -109,13 +109,16 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(result).toEqual(validUser);
   });
 
-  it("allows cookie session on mutating method with no Origin header (non-browser / same-origin)", async () => {
+  it("rejects cookie session on mutating method with no Origin header (non-browser clients must use Bearer)", async () => {
     mockState.getSession.mockResolvedValue(validUser);
 
     const result = await getSessionFromRequest(makeRequest("POST"));
 
-    expect(result).toEqual(validUser);
-    expect(mockState.getSession).toHaveBeenCalledTimes(1);
+    expect(result).toBeNull();
+    // Stricter than before: a missing Origin is now treated as untrusted
+    // for cookie-authenticated mutations. Non-browser clients should
+    // present a Bearer token (covered by the next test).
+    expect(mockState.getSession).not.toHaveBeenCalled();
   });
 
   it("allows GET requests regardless of Origin", async () => {

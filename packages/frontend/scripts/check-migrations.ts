@@ -58,17 +58,29 @@ for (const entry of migrationJournal.entries) {
   let sqlBody: string;
   try {
     sqlBody = readFileSync(sqlPath, "utf8");
-  } catch {
-    continue;
+  } catch (err) {
+    // A missing file referenced by the journal is a real bug (someone
+    // deleted a migration). Anything else (EACCES, etc.) is also unexpected
+    // — surface it loudly rather than silently skip.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(
+        `_journal.json references ${entry.tag}.sql but the file is missing on disk`
+      );
+    }
+    throw err;
   }
   const stripped = sqlBody
     .replace(/--[^\n]*/g, "")
     .replace(/\/\*[\s\S]*?\*\//g, "");
   const tables = new Set<string>();
-  const re = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+(?:ONLY\s+)?(?:["`]([^"`]+)["`]|(\w+))/gi;
+  // Capture the table name from `ON [ONLY] [<schema>.]<table>`. The
+  // optional non-capturing schema prefix lets us count schema-qualified
+  // targets (`ON public.users`) the same as bare names (`ON users`).
+  const re = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+(?:ONLY\s+)?(?:(?:"[^"]+"|`[^`]+`|\w+)\.)?(?:"([^"]+)"|`([^`]+)`|(\w+))/gi;
   let match: RegExpExecArray | null;
   while ((match = re.exec(stripped)) !== null) {
-    tables.add((match[1] ?? match[2]).toLowerCase());
+    const name = match[1] ?? match[2] ?? match[3];
+    if (name) tables.add(name.toLowerCase());
   }
   if (tables.size > 1) {
     console.warn(

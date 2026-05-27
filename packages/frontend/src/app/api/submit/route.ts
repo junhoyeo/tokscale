@@ -275,40 +275,48 @@ export async function POST(request: Request) {
         // through to the normal insert path if a unique violation still escapes
         // (e.g. via a concurrent INSERT racing the UPDATE window).
         try {
-          await tx.execute(sql`
-            UPDATE daily_breakdown AS db
-            SET submitted_device_id = ${submittedDevice.id}
-            WHERE db.submission_id = ${submissionId}
-              AND db.submitted_device_id IN (
-                SELECT sd.id
-                FROM submitted_devices AS sd
-                WHERE sd.user_id = ${tokenRecord.userId}
-                  AND sd.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM daily_breakdown AS modern
-                WHERE modern.submission_id = db.submission_id
-                  AND modern.submitted_device_id NOT IN (
-                    SELECT sd2.id
-                    FROM submitted_devices AS sd2
-                    WHERE sd2.user_id = ${tokenRecord.userId}
-                      AND sd2.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
-                  )
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM daily_breakdown AS dup
-                WHERE dup.submission_id = db.submission_id
-                  AND dup.submitted_device_id = ${submittedDevice.id}
-                  AND dup.date = db.date
-              )
-          `);
+          // Wrap the UPDATE in a savepoint so a unique-constraint violation
+          // from a concurrent submit does not poison the enclosing
+          // transaction. Drizzle's nested transaction maps to a Postgres
+          // SAVEPOINT; throwing inside the inner block rolls back to the
+          // savepoint and leaves the outer tx in a usable state.
+          await tx.transaction(async (sp) => {
+            await sp.execute(sql`
+              UPDATE daily_breakdown AS db
+              SET submitted_device_id = ${submittedDevice.id}
+              WHERE db.submission_id = ${submissionId}
+                AND db.submitted_device_id IN (
+                  SELECT sd.id
+                  FROM submitted_devices AS sd
+                  WHERE sd.user_id = ${tokenRecord.userId}
+                    AND sd.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM daily_breakdown AS modern
+                  WHERE modern.submission_id = db.submission_id
+                    AND modern.submitted_device_id NOT IN (
+                      SELECT sd2.id
+                      FROM submitted_devices AS sd2
+                      WHERE sd2.user_id = ${tokenRecord.userId}
+                        AND sd2.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
+                    )
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM daily_breakdown AS dup
+                  WHERE dup.submission_id = db.submission_id
+                    AND dup.submitted_device_id = ${submittedDevice.id}
+                    AND dup.date = db.date
+                )
+            `);
+          });
         } catch (adoptionErr) {
           // Unique constraint hit from a concurrent submit racing this UPDATE.
-          // Fall through — fetchExistingDeviceDays() below will pick up rows
-          // already claimed by the other request, and subsequent logic will
-          // merge rather than re-adopt.
+          // Savepoint rolled back; outer tx is still usable.
+          // fetchExistingDeviceDays() below will pick up rows already claimed
+          // by the other request, and subsequent logic will merge rather than
+          // re-adopt.
           console.warn("Legacy adoption conflict (concurrent submit), falling through:", adoptionErr);
         }
         existingDays = await fetchExistingDeviceDays();

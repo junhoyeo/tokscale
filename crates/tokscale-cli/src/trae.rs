@@ -45,7 +45,10 @@ pub mod auth {
     //!
     //! Cache filenames: `credentials-solo.json` (Solo) and `credentials-ide.json` (Ide).
     //! These are fixed names, not derived from the report client id (`client_str()`).
-    //! Cache directory: `~/.config/tokscale/trae-cache/`
+    //! Cache directory: `<tokscale config dir>/trae-cache/`, where the
+    //! config dir is resolved by [`paths::get_config_dir`] and honors
+    //! `TOKSCALE_CONFIG_DIR` plus XDG defaults (typically
+    //! `~/.config/tokscale` on Linux/macOS).
 
     use crate::trae::safestorage;
     use anyhow::{Context, Result};

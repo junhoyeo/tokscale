@@ -18,12 +18,15 @@ export async function getSessionFromRequest(request: Request): Promise<SessionUs
   }
 
   if (MUTATING_METHODS.has(request.method)) {
+    // Cookie-authenticated mutations must carry an Origin header that
+    // matches the allowlist. A missing Origin header is also rejected:
+    // modern browsers always set Origin on cross-origin mutating
+    // requests, so a missing value typically means a non-browser client
+    // that should be using a Bearer token instead.
     const origin = request.headers.get("Origin");
-    if (origin !== null) {
-      const allowed = getAllowedOrigins();
-      if (!allowed.includes(origin)) {
-        return null;
-      }
+    const allowed = getAllowedOrigins();
+    if (!origin || !allowed.includes(origin)) {
+      return null;
     }
   }
 

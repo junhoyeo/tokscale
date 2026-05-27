@@ -274,18 +274,26 @@ export default function GroupsBrowser({
     mine: false,
   });
   const [error, setError] = useState<string | null>(null);
-  // Tracks in-flight fetch so tab switches or unmount can abort it.
-  const inflight = useRef<AbortController | null>(null);
+  // Tracks the in-flight fetch per tab so we can:
+  //   1. Cancel a same-tab duplicate (rapid Load More clicks) without
+  //      stomping a request from the other tab.
+  //   2. Always clear the loading state on completion or abort — the
+  //      previous implementation skipped the `setTabLoading(tab, false)`
+  //      reset when the request was aborted, which left the tab stuck
+  //      with loading=true if the abort happened mid-flight.
+  const inflightByTab = useRef<Map<ActiveTab, AbortController>>(new Map());
 
   const setTabLoading = useCallback((tab: ActiveTab, isLoading: boolean) => {
     setLoadingState((current) => ({ ...current, [tab]: isLoading }));
   }, []);
 
   const loadGroups = useCallback((tab: ActiveTab, append = false) => {
-    // Abort any in-flight request before starting a new one.
-    inflight.current?.abort();
+    // Abort any in-flight request for THIS tab (a fresh Load More
+    // supersedes the previous one). Requests for the other tab keep
+    // running so a tab switch does not lose work.
+    inflightByTab.current.get(tab)?.abort();
     const controller = new AbortController();
-    inflight.current = controller;
+    inflightByTab.current.set(tab, controller);
 
     const page =
       append && tab === "mine"
@@ -338,16 +346,24 @@ export default function GroupsBrowser({
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted) {
+        // Only clear loading if this controller is still the active one
+        // for this tab. If a newer request superseded it, leave the
+        // newer loading state alone (it owns the spinner now).
+        if (inflightByTab.current.get(tab) === controller) {
           setTabLoading(tab, false);
+          inflightByTab.current.delete(tab);
         }
       });
   }, [myPagination.page, publicPagination.page, setTabLoading]);
 
-  // Abort any in-flight request on unmount.
+  // Abort every in-flight request on unmount.
   useEffect(() => {
+    const inflight = inflightByTab.current;
     return () => {
-      inflight.current?.abort();
+      for (const controller of inflight.values()) {
+        controller.abort();
+      }
+      inflight.clear();
     };
   }, []);
 
