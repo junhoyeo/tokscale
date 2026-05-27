@@ -35,6 +35,8 @@ export function parseCustomDateRange(
     return null;
   }
 
+  // Lexicographic comparison is correct here because isValidDateString above
+  // enforces the YYYY-MM-DD format, making string order identical to date order.
   if (from > to) {
     return null;
   }

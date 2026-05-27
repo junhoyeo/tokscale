@@ -1039,6 +1039,11 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   const [data, setData] = useState<LeaderboardData>(initialData);
   const [error, setError] = useState<string | null>(null);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  // Server/client divergence note: when ?period=custom&from=BAD&to=BAD is
+  // requested, the server falls back to period="all" (see page.tsx) while the
+  // client keeps period="custom" from the URL. This is intentionally safe
+  // because the client will not fire a fetch until the user applies a valid
+  // date range (isCustomWithoutDates guard), so no mismatched data is shown.
   const [period, setPeriod] = useState<Period>(initialData.period);
   const [page, setPage] = useState(urlPage || initialData.pagination.page);
   const [currentUserRank, setCurrentUserRank] = useState<LeaderboardUser | null>(initialUserRank);
@@ -1094,6 +1099,9 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       return;
     }
     const params = new URLSearchParams();
+    // Preserve ?view= when it's present (e.g. view=users navigated explicitly)
+    const currentView = searchParams.get("view");
+    if (currentView) params.set("view", currentView);
     if (period !== "all") params.set("period", period);
     if (requestedPage > 1) params.set("page", String(requestedPage));
     if (effectiveSortBy !== "tokens") params.set("sortBy", effectiveSortBy);
@@ -1103,7 +1111,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
     const qs = params.toString();
     const url = qs ? `${pathname}?${qs}` : pathname;
     window.history.replaceState(null, "", url);
-  }, [period, requestedPage, effectiveSortBy, appliedFrom, appliedTo, pathname, debouncedSearch]);
+  }, [period, requestedPage, effectiveSortBy, appliedFrom, appliedTo, pathname, debouncedSearch, searchParams]);
 
   // Debounce search input so URL/search sync updates after typing stops.
   const isSearchMounted = useRef(false);

@@ -48,7 +48,7 @@ export async function listPublicGroups(page: number, limit: number) {
       .leftJoin(groupMembers, eq(groupMembers.groupId, groups.id))
       .where(eq(groups.isPublic, true))
       .groupBy(groups.id)
-      .orderBy(desc(groups.updatedAt))
+      .orderBy(desc(groups.updatedAt), desc(groups.id))
       .limit(limit)
       .offset(offset),
     db
@@ -92,7 +92,7 @@ export async function listUserGroups(userId: string, page: number, limit: number
       .from(groupMembers)
       .innerJoin(groups, eq(groupMembers.groupId, groups.id))
       .where(eq(groupMembers.userId, userId))
-      .orderBy(desc(groups.updatedAt))
+      .orderBy(desc(groups.updatedAt), desc(groups.id))
       .limit(limit)
       .offset(offset),
     db

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import styled from "styled-components";
 
 // Top-of-page segmented control that swaps between the global user leaderboard
@@ -69,6 +70,18 @@ const Title = styled.h1`
   }
 `;
 
+const VisuallyHidden = styled.span`
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+`;
+
 export type LeaderboardSearchParams = Record<string, string | string[] | undefined>;
 
 interface ViewSelectorProps {
@@ -81,9 +94,16 @@ export function buildLeaderboardViewHref(
   view: LeaderboardView
 ): string {
   const params = new URLSearchParams();
+  const currentPeriod = typeof searchParams.period === "string" ? searchParams.period : undefined;
 
   for (const [key, value] of Object.entries(searchParams)) {
     if (key === "page" || key === "view" || value === undefined) {
+      continue;
+    }
+
+    // Only carry from/to when the current period is "custom"; otherwise they
+    // would prime stale date inputs on the destination view.
+    if ((key === "from" || key === "to") && currentPeriod !== "custom") {
       continue;
     }
 
@@ -100,7 +120,23 @@ export function buildLeaderboardViewHref(
   return `/leaderboard?${params.toString()}`;
 }
 
+const VIEW_LABELS: Record<LeaderboardView, string> = {
+  users: "Users",
+  groups: "Groups",
+};
+
 export default function ViewSelector({ current, searchParams }: ViewSelectorProps) {
+  const [announcement, setAnnouncement] = useState("");
+  const isFirstRender = useRef(true);
+
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    setAnnouncement(`Showing ${VIEW_LABELS[current]}`);
+  }, [current]);
+
   return (
     <Bar aria-label="Leaderboard view">
       <Title>{current === "groups" ? "Groups" : "Leaderboard"}</Title>
@@ -120,6 +156,9 @@ export default function ViewSelector({ current, searchParams }: ViewSelectorProp
           Groups
         </Item>
       </Group>
+      <VisuallyHidden role="status" aria-live="polite">
+        {announcement}
+      </VisuallyHidden>
     </Bar>
   );
 }

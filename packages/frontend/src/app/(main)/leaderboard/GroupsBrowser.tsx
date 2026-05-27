@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import styled from "styled-components";
 
 // Inlined view of the groups list that lives under the /leaderboard ?view=groups
@@ -274,12 +274,19 @@ export default function GroupsBrowser({
     mine: false,
   });
   const [error, setError] = useState<string | null>(null);
+  // Tracks in-flight fetch so tab switches or unmount can abort it.
+  const inflight = useRef<AbortController | null>(null);
 
   const setTabLoading = useCallback((tab: ActiveTab, isLoading: boolean) => {
     setLoadingState((current) => ({ ...current, [tab]: isLoading }));
   }, []);
 
-  const loadGroups = useCallback((tab: ActiveTab, append = false, signal?: AbortSignal) => {
+  const loadGroups = useCallback((tab: ActiveTab, append = false) => {
+    // Abort any in-flight request before starting a new one.
+    inflight.current?.abort();
+    const controller = new AbortController();
+    inflight.current = controller;
+
     const page =
       append && tab === "mine"
         ? myPagination.page + 1
@@ -299,7 +306,7 @@ export default function GroupsBrowser({
     setTabLoading(tab, true);
     setError(null);
 
-    fetch(url, { signal })
+    fetch(url, { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -331,11 +338,18 @@ export default function GroupsBrowser({
         }
       })
       .finally(() => {
-        if (!signal?.aborted) {
+        if (!controller.signal.aborted) {
           setTabLoading(tab, false);
         }
       });
   }, [myPagination.page, publicPagination.page, setTabLoading]);
+
+  // Abort any in-flight request on unmount.
+  useEffect(() => {
+    return () => {
+      inflight.current?.abort();
+    };
+  }, []);
 
   const groups = activeTab === "mine" ? myGroups : publicGroups;
   const activePagination = activeTab === "mine" ? myPagination : publicPagination;
@@ -346,6 +360,15 @@ export default function GroupsBrowser({
     }
 
     setActiveTab(tab);
+
+    // Skip the network fetch when the tab's SSR data is still on page 1 and
+    // already has rows — no stale data to refresh.
+    const currentGroups = tab === "mine" ? myGroups : publicGroups;
+    const currentPagination = tab === "mine" ? myPagination : publicPagination;
+    if (currentPagination.page === 1 && currentGroups.length > 0) {
+      return;
+    }
+
     loadGroups(tab);
   };
 
