@@ -485,6 +485,261 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(result.errors.join("\n")).toContain("Cost submitted without tokens");
     });
 
+    it("includes client/provider/model/cost/tokens detail in tokenless-cost errors", () => {
+      const payload = createValidationPayload({
+        totalTokens: 0,
+        totalCost: 25,
+        tokenBreakdown: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+        },
+      });
+
+      const result = validateSubmission(payload);
+      const errorBlob = result.errors.join("\n");
+
+      expect(result.valid).toBe(false);
+      // Client-level error must name client, provider, modelId, full cost,
+      // and the full token breakdown so an operator can read the failed row
+      // straight from the error output without re-running the CLI in debug mode.
+      expect(errorBlob).toContain("Client claude/claude-sonnet-4-20250514");
+      expect(errorBlob).toContain("(provider=anthropic)");
+      expect(errorBlob).toContain("Cost submitted without tokens");
+      expect(errorBlob).toContain("cost=$25.0000");
+      expect(errorBlob).toContain("tokens={input=0");
+      expect(errorBlob).toContain("output=0");
+      expect(errorBlob).toContain("reasoning=0");
+
+      // Day-level error must include the date, day total cost, and which
+      // clients on that day were responsible (so multi-client days are still
+      // actionable).
+      expect(errorBlob).toContain("Day 2024-12-01: Cost submitted without tokens");
+      expect(errorBlob).toContain("offending clients:");
+    });
+
+    it("allows cursor legacy premium-tool-call rows that lack token attribution", () => {
+      // Cursor's pre-2025-05 usage exports include `premium-tool-call` rows
+      // that are billed per tool invocation and carry no token counts. They
+      // legitimately have cost > 0 and tokens = 0 and must bypass the
+      // cost-without-tokens sanity check; otherwise any user with historical
+      // Cursor data is permanently locked out of `tokscale submit`.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: 2.05,
+          totalDays: 1,
+          activeDays: 0,
+          averagePerDay: 2.05,
+          maxCostInSingleDay: 2.05,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: 2.05,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 0, cost: 2.05, messages: 44 },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 2.05,
+                messages: 44,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
+    it("does not extend the cursor legacy bypass to other cursor models", () => {
+      // Only `premium-tool-call` is grandfathered. Any other cursor model with
+      // cost > 0 and tokens = 0 should still be flagged so legitimate parser
+      // regressions remain visible.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-05-18", end: "2025-05-18" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: 0.04,
+          totalDays: 1,
+          activeDays: 0,
+          averagePerDay: 0.04,
+          maxCostInSingleDay: 0.04,
+          clients: ["cursor" as const],
+          models: ["claude-3.5-sonnet"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: 0.04,
+            range: { start: "2025-05-18", end: "2025-05-18" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-05-18",
+            totals: { tokens: 0, cost: 0.04, messages: 1 },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "claude-3.5-sonnet",
+                providerId: "anthropic",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 0.04,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+      const errorBlob = result.errors.join("\n");
+
+      expect(result.valid).toBe(false);
+      expect(errorBlob).toContain("Client cursor/claude-3.5-sonnet");
+      expect(errorBlob).toContain("(provider=anthropic)");
+      expect(errorBlob).toContain("Cost submitted without tokens");
+      expect(errorBlob).toContain("cost=$0.0400");
+    });
+
+    it("allows cursor legacy rows mixed with normal token-bearing rows", () => {
+      // Same day, two clients: a legacy premium-tool-call entry (cost only)
+      // and a regular cursor call that has both tokens and cost. The day
+      // total has nonzero tokens, so the day-level check does not fire; the
+      // per-client legacy carve-out keeps the premium-tool-call row from
+      // tripping the client-level check.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 1500,
+          totalCost: 3.55,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 3.55,
+          maxCostInSingleDay: 3.55,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call", "claude-3.5-sonnet"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 1500,
+            totalCost: 3.55,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 1500, cost: 3.55, messages: 50 },
+            intensity: 2 as const,
+            tokenBreakdown: {
+              input: 1000,
+              output: 500,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 2.05,
+                messages: 44,
+              },
+              {
+                client: "cursor" as const,
+                modelId: "claude-3.5-sonnet",
+                providerId: "anthropic",
+                tokens: {
+                  input: 1000,
+                  output: 500,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 1.5,
+                messages: 6,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
     it("rejects day cost totals that do not match client costs", () => {
       const payload = createValidationPayload({
         totalTokens: 1000,
