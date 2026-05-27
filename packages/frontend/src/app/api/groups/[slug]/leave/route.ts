@@ -29,7 +29,7 @@ export async function POST(
 
     if (membership.role === "owner") {
       return NextResponse.json(
-        { error: "Owners must delete the group or transfer ownership before leaving" },
+        { error: "Owners must transfer ownership (POST /api/groups/:slug/transfer-ownership) or delete the group before leaving" },
         { status: 400 }
       );
     }

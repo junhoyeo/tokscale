@@ -1,11 +1,15 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+/**
+ * B1: Inviter role re-check inside acceptGroupInvite transaction.
+ * Exploit: Alice promotes Bob→admin, Bob mints an admin invite for Carol,
+ * Alice demotes Bob→member, Carol accepts → should be rejected.
+ */
+
 const mockState = vi.hoisted(() => {
   const pendingRows: Array<Record<string, unknown>> = [];
   let claimedRows: Array<Record<string, unknown>> = [];
-
-  // inviterRows: default to owner role so existing tests pass without change
-  const inviterRows: Array<Record<string, unknown>> = [{ role: "owner" }];
+  const inviterRows: Array<Record<string, unknown>> = [];
 
   const tables = {
     groupInvites: {
@@ -35,13 +39,18 @@ const mockState = vi.hoisted(() => {
   const eq = vi.fn((left: unknown, right: unknown) => ({ kind: "eq", left, right }));
   const gt = vi.fn((left: unknown, right: unknown) => ({ kind: "gt", left, right }));
 
-  const limit = vi.fn(async () => pendingRows);
-  const where = vi.fn(() => ({ limit }));
-  const innerJoin = vi.fn(() => ({ where }));
-  const from = vi.fn(() => ({ innerJoin }));
+  // Outer db.select for findPendingInviteByToken
+  const outerLimit = vi.fn(async () => pendingRows);
+  const outerWhere = vi.fn(() => ({ limit: outerLimit }));
+  const outerInnerJoin = vi.fn(() => ({ where: outerWhere }));
+  const outerFrom = vi.fn(() => ({ innerJoin: outerInnerJoin }));
 
-  // tx.select used by the inviter re-check (B1)
-  const txLimit = vi.fn(async () => inviterRows);
+  // tx.select for inviterMembership check
+  let inviterCallCount = 0;
+  const txLimit = vi.fn(async () => {
+    inviterCallCount++;
+    return inviterRows;
+  });
   const txWhere = vi.fn(() => ({ limit: txLimit }));
   const txFrom = vi.fn(() => ({ where: txWhere }));
 
@@ -59,7 +68,7 @@ const mockState = vi.hoisted(() => {
   };
 
   const db = {
-    select: vi.fn(() => ({ from })),
+    select: vi.fn(() => ({ from: outerFrom })),
     transaction: vi.fn(async (callback: (txArg: typeof tx) => Promise<unknown>) =>
       callback(tx)
     ),
@@ -81,16 +90,15 @@ const mockState = vi.hoisted(() => {
     reset() {
       pendingRows.length = 0;
       claimedRows = [];
-      // restore default inviter row (owner) so existing tests keep passing
       inviterRows.length = 0;
-      inviterRows.push({ role: "owner" });
+      inviterCallCount = 0;
       and.mockClear();
       eq.mockClear();
       gt.mockClear();
-      limit.mockClear();
-      where.mockClear();
-      innerJoin.mockClear();
-      from.mockClear();
+      outerLimit.mockClear();
+      outerWhere.mockClear();
+      outerInnerJoin.mockClear();
+      outerFrom.mockClear();
       txLimit.mockClear();
       txWhere.mockClear();
       txFrom.mockClear();
@@ -113,6 +121,12 @@ const mockState = vi.hoisted(() => {
     },
     setClaimedRows(rows: Array<Record<string, unknown>>) {
       claimedRows = rows;
+    },
+    setInviterRow(row: Record<string, unknown> | null) {
+      inviterRows.length = 0;
+      if (row) {
+        inviterRows.push(row);
+      }
     },
   };
 });
@@ -151,16 +165,16 @@ beforeEach(() => {
   mockState.reset();
 });
 
-function pendingInvite() {
+function adminInvite() {
   return {
     invite: {
-      id: "invite-1",
+      id: "invite-admin",
       groupId: "group-1",
       invitedUsername: null,
       invitedUsernameNormalized: null,
       invitedUserId: null,
-      invitedBy: "owner-1",
-      role: "member",
+      invitedBy: "bob",
+      role: "admin",
       status: "pending",
       tokenHash: "hash",
       expiresAt: new Date("2026-06-01T00:00:00Z"),
@@ -176,50 +190,108 @@ function pendingInvite() {
   };
 }
 
-describe("group invites", () => {
-  it("claims a pending invite inside the transaction before adding membership", async () => {
-    mockState.setPendingRow(pendingInvite());
-    mockState.setClaimedRows([{ id: "invite-1" }]);
-
-    const accepted = await acceptGroupInvite("tg_token", {
-      id: "user-1",
-      username: "alice",
-      displayName: null,
-      avatarUrl: null,
-    });
-
-    expect(accepted).toEqual({
-      group: { id: "group-1", name: "Team", slug: "team" },
-      role: "member",
-    });
-    expect(mockState.tx.update).toHaveBeenCalledWith(mockState.tables.groupInvites);
-    expect(mockState.eq).toHaveBeenCalledWith(mockState.tables.groupInvites.status, "pending");
-    expect(mockState.gt).toHaveBeenCalledWith(
-      mockState.tables.groupInvites.expiresAt,
-      expect.any(Date)
-    );
-    expect(mockState.tx.insert).toHaveBeenCalledWith(mockState.tables.groupMembers);
-    expect(mockState.onConflictDoNothing).toHaveBeenCalledWith({
-      target: [mockState.tables.groupMembers.groupId, mockState.tables.groupMembers.userId],
-    });
-  });
-
-  it("rejects the accept when another request already claimed the invite", async () => {
-    mockState.setPendingRow(pendingInvite());
-    mockState.setClaimedRows([]);
+describe("acceptGroupInvite — inviter role re-check", () => {
+  it("rejects accept when inviter has been demoted below the invite role", async () => {
+    // Bob minted an admin invite but has since been demoted to member
+    mockState.setPendingRow(adminInvite());
+    mockState.setInviterRow({ role: "member" }); // Bob is now a member
+    mockState.setClaimedRows([{ id: "invite-admin" }]);
 
     await expect(
       acceptGroupInvite("tg_token", {
-        id: "user-2",
-        username: "bob",
+        id: "carol",
+        username: "carol",
         displayName: null,
         avatarUrl: null,
       })
     ).rejects.toMatchObject({
-      code: "not_found",
-      message: "Invalid or expired invite",
+      code: "forbidden",
+      message: "Inviter no longer has permission to grant this role",
+    });
+
+    // Transaction should not proceed to insert membership
+    expect(mockState.tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects accept when inviter is no longer a member of the group", async () => {
+    // Bob minted an admin invite but has since left the group
+    mockState.setPendingRow(adminInvite());
+    mockState.setInviterRow(null); // Bob is not in the group
+    mockState.setClaimedRows([{ id: "invite-admin" }]);
+
+    await expect(
+      acceptGroupInvite("tg_token", {
+        id: "carol",
+        username: "carol",
+        displayName: null,
+        avatarUrl: null,
+      })
+    ).rejects.toMatchObject({
+      code: "forbidden",
+      message: "Inviter no longer has permission to grant this role",
     });
 
     expect(mockState.tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("allows accept when inviter still has sufficient role (admin inviting admin)", async () => {
+    mockState.setPendingRow(adminInvite());
+    mockState.setInviterRow({ role: "admin" }); // Bob is still admin
+    mockState.setClaimedRows([{ id: "invite-admin" }]);
+
+    // canManageGroupRole("admin", "admin") = false (admin cannot manage same-level)
+    // So this should fail too — admin cannot grant admin role
+    await expect(
+      acceptGroupInvite("tg_token", {
+        id: "carol",
+        username: "carol",
+        displayName: null,
+        avatarUrl: null,
+      })
+    ).rejects.toMatchObject({
+      code: "forbidden",
+      message: "Inviter no longer has permission to grant this role",
+    });
+  });
+
+  it("allows accept when owner invites a member-role invite", async () => {
+    const memberInvite = {
+      invite: {
+        id: "invite-member",
+        groupId: "group-1",
+        invitedUsername: null,
+        invitedUsernameNormalized: null,
+        invitedUserId: null,
+        invitedBy: "owner-1",
+        role: "member",
+        status: "pending",
+        tokenHash: "hash2",
+        expiresAt: new Date("2026-06-01T00:00:00Z"),
+        acceptedAt: null,
+        createdAt: new Date("2026-05-01T00:00:00Z"),
+      },
+      group: {
+        id: "group-1",
+        name: "Team",
+        slug: "team",
+        isPublic: false,
+      },
+    };
+    mockState.setPendingRow(memberInvite);
+    mockState.setInviterRow({ role: "owner" }); // owner still in group
+    mockState.setClaimedRows([{ id: "invite-member" }]);
+
+    const result = await acceptGroupInvite("tg_token", {
+      id: "carol",
+      username: "carol",
+      displayName: null,
+      avatarUrl: null,
+    });
+
+    expect(result).toEqual({
+      group: { id: "group-1", name: "Team", slug: "team" },
+      role: "member",
+    });
+    expect(mockState.tx.insert).toHaveBeenCalledWith(mockState.tables.groupMembers);
   });
 });

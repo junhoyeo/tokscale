@@ -98,12 +98,11 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    let body: Record<string, unknown>;
-    try {
-      body = await request.json();
-    } catch {
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
+    const b = body as Record<string, unknown>;
 
     const updateData: {
       name?: string;
@@ -114,8 +113,8 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       updatedAt: Date;
     } = { updatedAt: new Date() };
 
-    if (body.name !== undefined) {
-      const name = parseString(body.name);
+    if (b.name !== undefined) {
+      const name = parseString(b.name);
       if (!name) {
         return NextResponse.json({ error: "Group name cannot be empty" }, { status: 400 });
       }
@@ -128,22 +127,22 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       }
     }
 
-    if (body.description !== undefined) {
-      const description = parseNullableStringField(body.description, "description");
+    if (b.description !== undefined) {
+      const description = parseNullableStringField(b.description, "description");
       if ("response" in description) {
         return description.response;
       }
       updateData.description = description.value;
     }
-    if (body.avatarUrl !== undefined) {
-      const avatarUrl = parseNullableStringField(body.avatarUrl, "avatarUrl");
+    if (b.avatarUrl !== undefined) {
+      const avatarUrl = parseNullableStringField(b.avatarUrl, "avatarUrl");
       if ("response" in avatarUrl) {
         return avatarUrl.response;
       }
       updateData.avatarUrl = avatarUrl.value;
     }
-    if (typeof body.isPublic === "boolean") {
-      updateData.isPublic = body.isPublic;
+    if (typeof b.isPublic === "boolean") {
+      updateData.isPublic = b.isPublic;
     }
 
     const [updated] = await db

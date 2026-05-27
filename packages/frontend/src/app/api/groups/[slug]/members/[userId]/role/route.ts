@@ -25,14 +25,12 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       return NextResponse.json({ error: "Group not found" }, { status: 404 });
     }
 
-    let body: Record<string, unknown>;
-    try {
-      body = await request.json();
-    } catch {
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const nextRole = body.role;
+    const nextRole = (body as Record<string, unknown>).role;
     if (!isGroupRole(nextRole) || nextRole === "owner") {
       return NextResponse.json({ error: "Role must be member or admin" }, { status: 400 });
     }
@@ -74,7 +72,7 @@ export async function PATCH(request: Request, { params }: RouteParams) {
         return NextResponse.json(
           {
             error:
-              "Cannot demote the last owner. Transfer ownership to another member first.",
+              "Cannot demote the last owner. Use POST /api/groups/:slug/transfer-ownership to assign a new owner first.",
           },
           { status: 400 }
         );

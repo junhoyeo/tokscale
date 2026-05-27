@@ -75,7 +75,7 @@ export async function POST(
         invite,
         joinUrl: `/groups/join/${invite.token}`,
       },
-      { status: 201 }
+      { status: 201, headers: { "Cache-Control": "no-store, private" } }
     );
   } catch (error) {
     if (error instanceof GroupInviteError) {

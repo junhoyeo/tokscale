@@ -16,8 +16,8 @@ function parseString(value: unknown): string | null {
 }
 
 export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
   try {
-    const { searchParams } = new URL(request.url);
     const page = Math.max(1, parseIntSafe(searchParams.get("page"), 1));
     const limit = Math.min(100, Math.max(1, parseIntSafe(searchParams.get("limit"), 20)));
     const session = await getSessionFromRequest(request);
@@ -44,14 +44,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    let body: Record<string, unknown>;
-    try {
-      body = await request.json();
-    } catch {
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const name = parseString(body.name);
+    const b = body as Record<string, unknown>;
+    const name = parseString(b.name);
     if (!name) {
       return NextResponse.json({ error: "Group name is required" }, { status: 400 });
     }
@@ -60,8 +59,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Group name must be 100 characters or less" }, { status: 400 });
     }
 
-    const description = parseString(body.description);
-    const isPublic = typeof body.isPublic === "boolean" ? body.isPublic : true;
+    const description = parseString(b.description);
+    const isPublic = typeof b.isPublic === "boolean" ? b.isPublic : true;
 
     const createdGroup = await db.transaction(async (tx) => {
       const slug = await generateUniqueGroupSlug(name, tx);

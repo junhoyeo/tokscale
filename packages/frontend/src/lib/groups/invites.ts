@@ -3,6 +3,7 @@ import { db, groupInvites, groupMembers, groups, type GroupRole } from "@/lib/db
 import type { SessionUser } from "@/lib/auth/session";
 import { isValidGitHubUsername } from "@/lib/validation/username";
 import {
+  canManageGroupRole,
   createGroupInviteToken,
   hashGroupInviteToken,
   isGroupRole,
@@ -166,6 +167,15 @@ export async function acceptGroupInvite(token: string, session: SessionUser) {
   const acceptedAt = new Date();
 
   await db.transaction(async (tx) => {
+    const inviterMembership = await tx
+      .select({ role: groupMembers.role })
+      .from(groupMembers)
+      .where(and(eq(groupMembers.groupId, group.id), eq(groupMembers.userId, invite.invitedBy)))
+      .limit(1);
+    if (!inviterMembership[0] || !canManageGroupRole(inviterMembership[0].role, invite.role)) {
+      throw new GroupInviteError("forbidden", "Inviter no longer has permission to grant this role");
+    }
+
     const claimed = await tx
       .update(groupInvites)
       .set({
