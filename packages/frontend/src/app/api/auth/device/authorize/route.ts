@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { db, deviceCodes } from "@/lib/db";
 import { eq, and, gt, isNull } from "drizzle-orm";
-import { getSession } from "@/lib/auth/session";
+import { getSessionFromRequest } from "@/lib/auth/requestSession";
 
 export async function POST(request: Request) {
   try {
     // Check if user is authenticated
-    const session = await getSession();
+    const session = await getSessionFromRequest(request, {
+      allowAuthorizationHeader: false,
+    });
     if (!session) {
       return NextResponse.json(
         { error: "Not authenticated" },

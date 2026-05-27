@@ -3,7 +3,7 @@ import { revalidateTag } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, submittedDevices } from "@/lib/db";
-import { getSession } from "@/lib/auth/session";
+import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { normalizeUsernameCacheKey } from "@/lib/db/usernameLookup";
 
 const UUID_REGEX =
@@ -44,7 +44,9 @@ interface RouteParams {
  */
 export async function PATCH(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSession();
+    const session = await getSessionFromRequest(request, {
+      allowAuthorizationHeader: false,
+    });
     if (!session) {
       return NextResponse.json(
         { error: "Not authenticated" },
