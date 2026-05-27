@@ -409,6 +409,12 @@ describe("POST /api/submit auth path", () => {
         };
       }),
       execute: vi.fn(() => Promise.resolve()),
+      // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
+      // callback with the same tx so calls inside the savepoint still
+      // count toward tx.execute / tx.update / etc.
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
     };
     type MockTransaction = typeof tx;
 
@@ -582,6 +588,12 @@ describe("POST /api/submit auth path", () => {
         return builder;
       }),
       execute: vi.fn(() => Promise.resolve()),
+      // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
+      // callback with the same tx so calls inside the savepoint still
+      // count toward tx.execute / tx.update / etc.
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
     };
     type MockTransaction = typeof tx;
 
@@ -787,6 +799,12 @@ describe("POST /api/submit auth path", () => {
         return builder;
       }),
       execute: vi.fn(() => Promise.resolve()),
+      // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
+      // callback with the same tx so calls inside the savepoint still
+      // count toward tx.execute / tx.update / etc.
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
     };
     type MockTransaction = typeof tx;
 
@@ -952,6 +970,12 @@ describe("POST /api/submit auth path", () => {
         return builder;
       }),
       execute: vi.fn(() => Promise.resolve()),
+      // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
+      // callback with the same tx so calls inside the savepoint still
+      // count toward tx.execute / tx.update / etc.
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
     };
     type MockTransaction = typeof tx;
 
