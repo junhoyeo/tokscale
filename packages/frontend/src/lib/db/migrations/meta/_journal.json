@@ -85,6 +85,13 @@
       "when": 1780086400000,
       "tag": "0011_drop_dead_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1779948193133,
+      "tag": "0012_hash_browser_session_tokens",
+      "breakpoints": true
     }
   ]
 }

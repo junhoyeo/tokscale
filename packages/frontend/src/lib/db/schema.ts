@@ -72,7 +72,7 @@ export const sessions = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    token: varchar("token", { length: 64 }).notNull().unique(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     source: varchar("source", { length: 10 }).notNull().default("web"),
     userAgent: text("user_agent"),
@@ -81,9 +81,7 @@ export const sessions = pgTable(
       .defaultNow(),
   },
   (table) => [
-    // Planner picks the explicit non-unique idx over the unique-constraint
-    // sibling (~89k vs 0 scans on prod 2026-05-25); keep both.
-    index("idx_sessions_token").on(table.token),
+    index("idx_sessions_token_hash").on(table.tokenHash),
     index("idx_sessions_user_id").on(table.userId),
     index("idx_sessions_expires_at").on(table.expiresAt),
   ]
