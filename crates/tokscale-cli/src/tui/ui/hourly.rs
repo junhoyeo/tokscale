@@ -5,7 +5,7 @@ use ratatui::widgets::{
 };
 
 use super::hourly_profile;
-use super::widgets::{format_cache_hit_rate, format_cost, format_tokens};
+use super::widgets::{format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens};
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -65,12 +65,12 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if has_turn_data {
         vec![
             "Hour", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×",
-            "Total", "Cost",
+            "Total", "Cost", "Cost/1M",
         ]
     } else {
         vec![
             "Hour", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
-            "Cost",
+            "Cost", "Cost/1M",
         ]
     };
 
@@ -216,6 +216,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     .style(Style::default().fg(Color::Cyan)),
                     Cell::from(format_tokens(hour.tokens.total())),
                     Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
+                    Cell::from(format_cost_per_million(hour.cost, hour.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]);
                 cells
             };
@@ -266,6 +268,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Length(10),
         ]
     } else {
         vec![
@@ -277,6 +280,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(8),
+            Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
         ]

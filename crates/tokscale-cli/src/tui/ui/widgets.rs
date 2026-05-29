@@ -43,6 +43,16 @@ pub fn format_cost(cost: f64) -> String {
     }
 }
 
+/// Cost per million tokens: useful for comparing model efficiency across sessions.
+/// Returns "—" when there are no tokens to avoid division by zero.
+pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
+    if total_tokens == 0 || !cost.is_finite() || cost < 0.0 {
+        return "\u{2014}".to_string(); // —
+    }
+    let per_m = cost / (total_tokens as f64) * 1_000_000.0;
+    format!("${:.2}", per_m)
+}
+
 /// Cache reuse multiplier: cached reads per full-price input token.
 /// `cache_read / (input + cache_write)` — how many low-cost reads you
 /// got for every token you paid full price (fresh input or cache write).

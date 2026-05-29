@@ -4,8 +4,8 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
-    get_provider_display_name,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
+    get_client_display_name, get_provider_display_name,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -83,11 +83,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             "Total",
             "ms/1K",
             "Cost",
+            "Cost/1M",
         ]
     } else {
         vec![
             "#", "Model", "Provider", "Source", "Input", "Output", "Cache R", "Cache W", "Cache×",
-            "Total", "ms/1K", "Cost",
+            "Total", "ms/1K", "Cost", "Cost/1M",
         ]
     };
 
@@ -184,6 +185,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
                         .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
+                    Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]
             } else {
                 vec![
@@ -214,6 +217,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
                         .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
+                    Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]
             };
 
@@ -251,6 +256,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Length(10),
         ]
     } else {
         vec![
@@ -263,6 +269,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(8),
+            Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
