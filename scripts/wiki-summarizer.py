@@ -81,6 +81,10 @@ def build_prompt(session: dict) -> str:
     return "\n".join(parts)
 
 
+VALID_CATEGORIES = {"feature", "bugfix", "refactor", "research", "debug", "review", "docs", "config", "other"}
+VALID_COMPLEXITIES = {"trivial", "moderate", "complex"}
+
+
 def fallback_classify(session: dict) -> dict:
     total_tokens = session.get("total_tokens", 0)
     duration = session.get("duration_minutes", 0)
@@ -122,18 +126,25 @@ async def summarize_with_fm(sessions: list[dict]) -> list[dict]:
             response_text = str(response)
 
             parsed = json.loads(response_text)
+            task_category = parsed.get("task_category", "other")
+            if task_category not in VALID_CATEGORIES:
+                task_category = "other"
+            complexity = parsed.get("complexity", "moderate")
+            if complexity not in VALID_COMPLEXITIES:
+                complexity = "moderate"
             results.append(
                 {
                     "session_id": session["session_id"],
                     "title": parsed.get("title", "Untitled session"),
-                    "task_category": parsed.get("task_category", "other"),
+                    "task_category": task_category,
                     "description": parsed.get("description", ""),
-                    "complexity": parsed.get("complexity", "moderate"),
+                    "complexity": complexity,
                     "fm_version": "apple-fm-on-device",
                 }
             )
         except (json.JSONDecodeError, Exception) as e:
-            print(f"FM error for {session['session_id']}: {e}", file=sys.stderr)
+            session_id = session.get("session_id", "unknown")
+            print(f"FM error for {session_id}: {e}", file=sys.stderr)
             results.append(fallback_classify(session))
 
     return results

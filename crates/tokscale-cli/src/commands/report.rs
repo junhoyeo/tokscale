@@ -728,7 +728,7 @@ fn parse_date_range(since: &Option<String>, until: &Option<String>) -> (Option<i
     let until_ts = until.as_ref().and_then(|s| {
         chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
             .ok()
-            .map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp_millis())
+            .map(|d| d.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() - 1)
     });
     (since_ts, until_ts)
 }

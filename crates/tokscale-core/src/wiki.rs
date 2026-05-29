@@ -113,7 +113,7 @@ impl WikiDb {
     /// Default wiki DB path: ~/.config/tokscale/wiki.db
     pub fn default_path() -> PathBuf {
         let config_dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("~/.config"))
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config"))
             .join("tokscale");
         config_dir.join("wiki.db")
     }
@@ -372,7 +372,7 @@ impl WikiDb {
             param_values.push(Box::new(s));
         }
         if let Some(u) = until {
-            sql.push_str(" AND created_at <= ?");
+            sql.push_str(" AND created_at < ?");
             param_values.push(Box::new(u));
         }
         if let Some(w) = workspace {
