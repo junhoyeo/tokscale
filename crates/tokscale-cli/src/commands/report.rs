@@ -28,8 +28,8 @@ pub struct ReportOptions {
 
 pub fn run_report(opts: ReportOptions) -> Result<()> {
     let wiki_path = WikiDb::default_path();
-    let db = WikiDb::open(&wiki_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open wiki DB: {}", e))?;
+    let db =
+        WikiDb::open(&wiki_path).map_err(|e| anyhow::anyhow!("Failed to open wiki DB: {}", e))?;
 
     populate_wiki_from_sessions(&db, &opts)?;
 
@@ -62,7 +62,9 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let needs_grouping = entries.iter().any(|e| e.title.is_some() && e.task_group.is_none());
+    let needs_grouping = entries
+        .iter()
+        .any(|e| e.title.is_some() && e.task_group.is_none());
     if needs_grouping && !opts.no_summarize {
         run_task_grouping(&db, &entries, &opts.summarizer)?;
         let entries = db
@@ -225,7 +227,7 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
             eprint!(
                 "\r  Batch {}/{} ({} done)...",
                 batch_idx + 1,
-                (payloads.len() + batch_size - 1) / batch_size,
+                payloads.len().div_ceil(batch_size),
                 total_summarized
             );
         }
@@ -249,8 +251,15 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
             let complexity = result["complexity"].as_str().unwrap_or("moderate");
             let fm_version = result["fm_version"].as_str();
 
-            db.update_summary(session_id, title, category, description, complexity, fm_version)
-                .map_err(|e| anyhow::anyhow!("Failed to save summary for {}: {}", session_id, e))?;
+            db.update_summary(
+                session_id,
+                title,
+                category,
+                description,
+                complexity,
+                fm_version,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to save summary for {}: {}", session_id, e))?;
         }
 
         total_summarized += results.len();
@@ -285,7 +294,10 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
         return Ok(());
     }
 
-    eprint!("  Grouping {} sessions into tasks...", summarized.len().to_string().cyan());
+    eprint!(
+        "  Grouping {} sessions into tasks...",
+        summarized.len().to_string().cyan()
+    );
 
     let mut parts = Vec::new();
     parts.push("Group these coding sessions by project/feature:\n".to_string());
@@ -327,7 +339,9 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
             .stderr(Stdio::piped())
             .output()?,
         _ => {
-            eprintln!(" skipped (task grouping requires a CLI backend: claude, codex, gemini, or kiro)");
+            eprintln!(
+                " skipped (task grouping requires a CLI backend: claude, codex, gemini, or kiro)"
+            );
             return Ok(());
         }
     };
@@ -347,14 +361,19 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
                 let session_id = result["session_id"].as_str().unwrap_or_default();
                 let task_group = result["task_group"].as_str().unwrap_or_default();
                 if !session_id.is_empty() && !task_group.is_empty() {
-                    db.update_task_group(session_id, task_group)
-                        .map_err(|e| anyhow::anyhow!("Failed to save task_group for {}: {}", session_id, e))?;
+                    db.update_task_group(session_id, task_group).map_err(|e| {
+                        anyhow::anyhow!("Failed to save task_group for {}: {}", session_id, e)
+                    })?;
                 }
             }
             eprintln!(" {}", "✓".green());
         }
         Err(e) => {
-            eprintln!("\n  {} Failed to parse grouping response: {}", "⚠".yellow(), e);
+            eprintln!(
+                "\n  {} Failed to parse grouping response: {}",
+                "⚠".yellow(),
+                e
+            );
         }
     }
 
@@ -419,13 +438,19 @@ fn build_cli_prompt(payloads: &[serde_json::Value]) -> String {
     parts.join("\n")
 }
 
-fn run_cli_summarizer(backend: &str, payloads: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
+fn run_cli_summarizer(
+    backend: &str,
+    payloads: &[serde_json::Value],
+) -> Result<Vec<serde_json::Value>> {
     let prompt = build_cli_prompt(payloads);
 
     let output = match backend {
         "claude" => Command::new("claude")
             .args(["-p", "--output-format", "text"])
-            .arg(format!("System: {}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
+            .arg(format!(
+                "System: {}\n\n{}",
+                SUMMARIZER_SYSTEM_PROMPT, prompt
+            ))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()?,
@@ -452,7 +477,12 @@ fn run_cli_summarizer(backend: &str, payloads: &[serde_json::Value]) -> Result<V
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("  {} {} summarizer failed: {}", "⚠".yellow(), backend, stderr.trim());
+        eprintln!(
+            "  {} {} summarizer failed: {}",
+            "⚠".yellow(),
+            backend,
+            stderr.trim()
+        );
         return Ok(Vec::new());
     }
 
@@ -462,7 +492,12 @@ fn run_cli_summarizer(backend: &str, payloads: &[serde_json::Value]) -> Result<V
     match serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
         Ok(results) => Ok(results),
         Err(e) => {
-            eprintln!("  {} Failed to parse {} response: {}", "⚠".yellow(), backend, e);
+            eprintln!(
+                "  {} Failed to parse {} response: {}",
+                "⚠".yellow(),
+                backend,
+                e
+            );
             Ok(Vec::new())
         }
     }
@@ -515,7 +550,10 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
     let mut models: Vec<_> = by_model.iter().collect();
     models.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
 
-    println!("  {:<30} {:>8} {:>12} {:>8}", "Model", "Sessions", "Tokens", "Cost");
+    println!(
+        "  {:<30} {:>8} {:>12} {:>8}",
+        "Model", "Sessions", "Tokens", "Cost"
+    );
     println!("  {}", "─".repeat(62));
     for (model, (cost, tokens, count)) in &models {
         println!(
@@ -538,9 +576,10 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
 
     let mut by_group: HashMap<&str, (f64, i64, usize, Vec<&str>)> = HashMap::new();
     for entry in entries {
-        let group = entry.task_group.as_deref().unwrap_or(
-            entry.title.as_deref().unwrap_or("(unsummarized)")
-        );
+        let group = entry
+            .task_group
+            .as_deref()
+            .unwrap_or(entry.title.as_deref().unwrap_or("(unsummarized)"));
         let title = entry.title.as_deref().unwrap_or("(unsummarized)");
         let agg = by_group.entry(group).or_insert((0.0, 0, 0, Vec::new()));
         agg.0 += entry.total_cost;
@@ -554,7 +593,10 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
     let mut groups: Vec<_> = by_group.iter().collect();
     groups.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
 
-    println!("  {:<40} {:>5} {:>10} {:>8}", "Task Group", "Sess", "Tokens", "Cost");
+    println!(
+        "  {:<40} {:>5} {:>10} {:>8}",
+        "Task Group", "Sess", "Tokens", "Cost"
+    );
     println!("  {}", "─".repeat(67));
     for (group, (cost, tokens, count, titles)) in groups.iter().take(15) {
         let display_group: String = if group.len() > 40 {
@@ -614,9 +656,7 @@ fn print_daily_breakdown(entries: &[WikiEntry]) {
             .map(|dt| dt.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let agg = by_date
-            .entry(date_key)
-            .or_insert((0.0, 0, 0, Vec::new()));
+        let agg = by_date.entry(date_key).or_insert((0.0, 0, 0, Vec::new()));
         agg.0 += entry.total_cost;
         agg.1 += entry.total_input_tokens + entry.total_output_tokens;
         agg.2 += 1;
@@ -639,7 +679,11 @@ fn print_daily_breakdown(entries: &[WikiEntry]) {
         for s in sessions.iter().take(5) {
             let title = s.title.as_deref().unwrap_or("(pending)");
             let model = s.models_used.first().map(|m| m.as_str()).unwrap_or("-");
-            let display_title: &str = if title.len() > 40 { &title[..40] } else { title };
+            let display_title: &str = if title.len() > 40 {
+                &title[..40]
+            } else {
+                title
+            };
             println!(
                 "    {:>6} {:<18} {}",
                 format!("${:.2}", s.total_cost),
@@ -666,10 +710,7 @@ fn print_session_list(entries: &[WikiEntry]) {
                 .map(|dt| dt.format("%H:%M").to_string())
                 .unwrap_or_else(|| "??:??".to_string());
 
-            let title = entry
-                .title
-                .as_deref()
-                .unwrap_or("(pending summarization)");
+            let title = entry.title.as_deref().unwrap_or("(pending summarization)");
             let model = entry.models_used.first().map(|s| s.as_str()).unwrap_or("-");
             let cost = format!("${:.2}", entry.total_cost);
 
@@ -728,7 +769,15 @@ fn parse_date_range(since: &Option<String>, until: &Option<String>) -> (Option<i
     let until_ts = until.as_ref().and_then(|s| {
         chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
             .ok()
-            .map(|d| d.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() - 1)
+            .map(|d| {
+                d.succ_opt()
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_millis()
+                    - 1
+            })
     });
     (since_ts, until_ts)
 }

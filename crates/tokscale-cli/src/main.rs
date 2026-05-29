@@ -319,7 +319,11 @@ enum Commands {
         date: DateRangeFlags,
         #[arg(long, help = "Skip LLM summarization (show raw data only)")]
         no_summarize: bool,
-        #[arg(long, default_value = "apple-fm", help = "Summarizer backend: apple-fm, claude, codex, gemini, kiro")]
+        #[arg(
+            long,
+            default_value = "apple-fm",
+            help = "Summarizer backend: apple-fm, claude, codex, gemini, kiro"
+        )]
         summarizer: String,
         #[arg(long, help = "Reset all summaries and re-summarize from scratch")]
         rebuild: bool,

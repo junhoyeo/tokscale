@@ -50,7 +50,7 @@ pub enum TaskCategory {
 }
 
 impl TaskCategory {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "feature" | "feat" => Self::Feature,
             "bugfix" | "bug" | "fix" => Self::Bugfix,
@@ -113,7 +113,11 @@ impl WikiDb {
     /// Default wiki DB path: ~/.config/tokscale/wiki.db
     pub fn default_path() -> PathBuf {
         let config_dir = dirs::config_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config"))
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".config")
+            })
             .join("tokscale");
         config_dir.join("wiki.db")
     }
@@ -193,7 +197,11 @@ impl WikiDb {
         Ok(count)
     }
 
-    pub fn reset_summaries_in_range(&self, since: Option<i64>, until: Option<i64>) -> Result<usize, WikiError> {
+    pub fn reset_summaries_in_range(
+        &self,
+        since: Option<i64>,
+        until: Option<i64>,
+    ) -> Result<usize, WikiError> {
         let (sql, params_vec) = match (since, until) {
             (Some(s), Some(u)) => (
                 "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE created_at >= ?1 AND created_at < ?2".to_string(),
@@ -220,7 +228,11 @@ impl WikiDb {
         Ok(count)
     }
 
-    pub fn get_unsummarized_session_ids_in_range(&self, since: Option<i64>, until: Option<i64>) -> Result<Vec<String>, WikiError> {
+    pub fn get_unsummarized_session_ids_in_range(
+        &self,
+        since: Option<i64>,
+        until: Option<i64>,
+    ) -> Result<Vec<String>, WikiError> {
         let (sql, params_vec) = match (since, until) {
             (Some(s), Some(u)) => (
                 "SELECT session_id FROM wiki_entries WHERE title IS NULL AND created_at >= ?1 AND created_at < ?2".to_string(),
@@ -246,7 +258,9 @@ impl WikiDb {
             .map_err(|e| WikiError::Sqlite(e.to_string()))?;
 
         let ids = stmt
-            .query_map(rusqlite::params_from_iter(params_vec.iter()), |row| row.get::<_, String>(0))
+            .query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(|e| WikiError::Sqlite(e.to_string()))?
             .filter_map(|r| r.ok())
             .collect();
@@ -339,7 +353,15 @@ impl WikiDb {
                     fm_version = ?6
                 WHERE session_id = ?7
                 "#,
-                params![title, task_category, description, complexity, now, fm_version, session_id],
+                params![
+                    title,
+                    task_category,
+                    description,
+                    complexity,
+                    now,
+                    fm_version,
+                    session_id
+                ],
             )
             .map_err(|e| WikiError::Sqlite(e.to_string()))?;
 
@@ -397,8 +419,7 @@ impl WikiDb {
         let entries = stmt
             .query_map(params_refs.as_slice(), |row| {
                 let models_str: String = row.get(15)?;
-                let models: Vec<String> =
-                    serde_json::from_str(&models_str).unwrap_or_default();
+                let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
 
                 Ok(WikiEntry {
                     session_id: row.get(0)?,
@@ -440,8 +461,7 @@ impl WikiDb {
         let entry = stmt
             .query_row(params![session_id], |row| {
                 let models_str: String = row.get(15)?;
-                let models: Vec<String> =
-                    serde_json::from_str(&models_str).unwrap_or_default();
+                let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
 
                 Ok(WikiEntry {
                     session_id: row.get(0)?,

@@ -143,10 +143,7 @@ pub fn extract_codex_content(jsonl_path: &Path, session_id: &str) -> Option<Sess
             Err(_) => continue,
         };
 
-        let msg_type = value
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let msg_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         if msg_type == "user_message" || msg_type == "input" {
             let text = value
@@ -259,7 +256,7 @@ fn extract_text_from_claude_message(value: &Value) -> Option<String> {
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
+    if s.chars().count() <= max_chars {
         s.to_string()
     } else {
         let boundary = s
