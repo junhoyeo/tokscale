@@ -234,8 +234,10 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
             "apple-fm" => run_apple_fm_summarizer(chunk)?,
             "claude" | "codex" | "gemini" | "kiro" => run_cli_summarizer(backend, chunk)?,
             other => {
-                eprintln!("  {} Unknown summarizer: {}", "⚠".yellow(), other);
-                return Ok(());
+                return Err(anyhow::anyhow!(
+                    "Unknown summarizer backend: '{}'. Valid options: apple-fm, claude, codex, gemini, kiro",
+                    other
+                ));
             }
         };
 
@@ -247,7 +249,8 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
             let complexity = result["complexity"].as_str().unwrap_or("moderate");
             let fm_version = result["fm_version"].as_str();
 
-            let _ = db.update_summary(session_id, title, category, description, complexity, fm_version);
+            db.update_summary(session_id, title, category, description, complexity, fm_version)
+                .map_err(|e| anyhow::anyhow!("Failed to save summary for {}: {}", session_id, e))?;
         }
 
         total_summarized += results.len();
@@ -324,7 +327,7 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
             .stderr(Stdio::piped())
             .output()?,
         _ => {
-            eprintln!(" skipped (unsupported backend)");
+            eprintln!(" skipped (task grouping requires a CLI backend: claude, codex, gemini, or kiro)");
             return Ok(());
         }
     };
@@ -344,7 +347,8 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
                 let session_id = result["session_id"].as_str().unwrap_or_default();
                 let task_group = result["task_group"].as_str().unwrap_or_default();
                 if !session_id.is_empty() && !task_group.is_empty() {
-                    let _ = db.update_task_group(session_id, task_group);
+                    db.update_task_group(session_id, task_group)
+                        .map_err(|e| anyhow::anyhow!("Failed to save task_group for {}: {}", session_id, e))?;
                 }
             }
             eprintln!(" {}", "✓".green());
