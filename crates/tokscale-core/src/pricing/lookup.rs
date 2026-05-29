@@ -1063,30 +1063,21 @@ fn contains_model_id(key: &str, model_id: &str) -> bool {
 fn normalize_model_name(model_id: &str) -> Option<String> {
     let lower = model_id.to_lowercase();
 
-    if lower.contains("opus") {
-        if contains_delimited_fragment(&lower, "4.7") || contains_delimited_fragment(&lower, "4-7")
-        {
-            return Some("claude-opus-4-7".into());
-        } else if contains_delimited_fragment(&lower, "4.6")
-            || contains_delimited_fragment(&lower, "4-6")
-        {
-            return Some("claude-opus-4-6".into());
-        } else if contains_delimited_fragment(&lower, "4.5")
-            || contains_delimited_fragment(&lower, "4-5")
-        {
-            return Some("claude-opus-4-5".into());
-        } else if contains_delimited_fragment(&lower, "4") {
-            return Some("claude-opus-4".into());
+    // Modern Claude line (major >= 4) follows the regular
+    // `claude-{family}-{major}[-{minor}]` scheme, so the version is read
+    // straight from the id — new minor releases need no code change.
+    for family in ["opus", "sonnet", "haiku"] {
+        if lower.contains(family) {
+            if let Some(key) = normalize_modern_claude(&lower, family) {
+                return Some(key);
+            }
         }
     }
+
+    // Legacy 3.x line uses irregular naming (family after the version, dotted
+    // 3.5) and is matched explicitly.
     if lower.contains("sonnet") {
-        if contains_delimited_fragment(&lower, "4.5") || contains_delimited_fragment(&lower, "4-5")
-        {
-            return Some("claude-sonnet-4-5".into());
-        } else if contains_delimited_fragment(&lower, "4") {
-            return Some("claude-sonnet-4".into());
-        } else if contains_delimited_fragment(&lower, "3.7")
-            || contains_delimited_fragment(&lower, "3-7")
+        if contains_delimited_fragment(&lower, "3.7") || contains_delimited_fragment(&lower, "3-7")
         {
             return Some("claude-3-7-sonnet".into());
         } else if contains_delimited_fragment(&lower, "3.5")
@@ -1095,14 +1086,66 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
             return Some("claude-3.5-sonnet".into());
         }
     }
-    if lower.contains("haiku") {
-        if contains_delimited_fragment(&lower, "4.5") || contains_delimited_fragment(&lower, "4-5")
-        {
-            return Some("claude-haiku-4-5".into());
-        } else if contains_delimited_fragment(&lower, "3.5")
-            || contains_delimited_fragment(&lower, "3-5")
-        {
-            return Some("claude-3.5-haiku".into());
+    if lower.contains("haiku")
+        && (contains_delimited_fragment(&lower, "3.5") || contains_delimited_fragment(&lower, "3-5"))
+    {
+        return Some("claude-3.5-haiku".into());
+    }
+
+    None
+}
+
+/// Builds the canonical pricing key for the modern Claude line (major >= 4),
+/// which follows the regular `claude-{family}-{major}[-{minor}]` scheme
+/// (e.g. `claude-opus-4-7`). The version is parsed from the id rather than
+/// matched against a hardcoded list, so new minor releases (4.8, 4.9, …) are
+/// priced correctly with no code change.
+///
+/// Boundary rules mirror [`contains_delimited_fragment`]: the version must be
+/// delimited by non-alphanumeric chars (or string ends), and major/minor are
+/// each a single digit. So `opus-4-60` yields `claude-opus-4` (two-digit "60"
+/// is not a recognized minor), `opus-14-6` yields `None` (two-digit major is
+/// not the modern line), and `opus4`/`opus-4x` yield `None` (undelimited). The
+/// legacy 3.x series uses irregular naming and is handled by the caller.
+fn normalize_modern_claude(lower: &str, family: &str) -> Option<String> {
+    let bytes = lower.as_bytes();
+    let is_boundary = |i: usize| i >= bytes.len() || !bytes[i].is_ascii_alphanumeric();
+
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(family) {
+        let fam_end = from + rel + family.len();
+        from = from + rel + 1;
+
+        // Require a single non-alphanumeric separator between family and version.
+        match bytes.get(fam_end) {
+            Some(&c) if !c.is_ascii_alphanumeric() => {}
+            _ => continue,
+        }
+
+        // Major: a single digit >= 4.
+        let major_idx = fam_end + 1;
+        let major = match bytes.get(major_idx) {
+            Some(&c) if c.is_ascii_digit() => c - b'0',
+            _ => continue,
+        };
+        if major < 4 {
+            continue;
+        }
+        let after_major = major_idx + 1;
+
+        // Optional minor: a `-`/`.` separator, a single digit, then a boundary.
+        if matches!(bytes.get(after_major), Some(b'-') | Some(b'.')) {
+            let minor_idx = after_major + 1;
+            if let Some(&mc) = bytes.get(minor_idx) {
+                if mc.is_ascii_digit() && is_boundary(minor_idx + 1) {
+                    return Some(format!("claude-{family}-{major}-{}", mc - b'0'));
+                }
+            }
+        }
+
+        // Major only: the major digit must itself be delimited on the right.
+        if is_boundary(after_major) {
+            return Some(format!("claude-{family}-{major}"));
         }
     }
 
@@ -2788,6 +2831,108 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_opus_4_8_prefers_4_8_over_4() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000015),
+                output_cost_per_token: Some(0.000075),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "claude-opus-4-8".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("opus-4-8").unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-8");
+        assert_eq!(result.source, "LiteLLM");
+    }
+
+    #[test]
+    fn test_normalize_opus_4_8_dot_prefers_4_8_over_4() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000015),
+                output_cost_per_token: Some(0.000075),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "claude-opus-4-8".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("opus-4.8").unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-8");
+        assert_eq!(result.source, "LiteLLM");
+    }
+
+    /// Regression: same degradation path as `test_aws_opus_4_7_does_not_degrade_to_opus_4`,
+    /// for the next minor version. Without an explicit 4.8 branch, `aws.claude-opus-4-8`
+    /// falls through `normalize_model_name` to the bare `claude-opus-4` branch and resolves
+    /// to OpenRouter's legacy `anthropic/claude-opus-4` ($15/$75/$1.50/$18.75 per M) — ~3x overcharge.
+    #[test]
+    fn test_aws_opus_4_8_does_not_degrade_to_opus_4() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4-8".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                cache_read_input_token_cost: Some(5e-7),
+                cache_creation_input_token_cost: Some(0.00000625),
+                ..Default::default()
+            },
+        );
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000015),
+                output_cost_per_token: Some(0.000075),
+                cache_read_input_token_cost: Some(0.0000015),
+                cache_creation_input_token_cost: Some(0.00001875),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+        let result = lookup.lookup("aws.claude-opus-4-8").unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-8");
+        assert_ne!(result.matched_key, "anthropic/claude-opus-4");
+
+        // 8.4M input + 873K output + 41.3M cache_read + 12.1M cache_write
+        // at opus-4-8 rates should be ~$160, not ~$480 (legacy opus 4).
+        let cost = lookup.calculate_cost(
+            "aws.claude-opus-4-8",
+            8_400_000,
+            873_000,
+            41_300_000,
+            12_100_000,
+            0,
+        );
+        assert!(
+            (140.0..=180.0).contains(&cost),
+            "expected opus-4-8 priced cost around $160, got ${cost:.2}"
+        );
+    }
+
+    #[test]
     fn test_normalize_opus_14_6_does_not_map_to_4_6() {
         let mut litellm = HashMap::new();
         litellm.insert(
@@ -2811,6 +2956,54 @@ mod tests {
     #[test]
     fn test_normalize_haiku_14_5_does_not_map_to_4_5() {
         assert_eq!(normalize_model_name("haiku-14-5"), None);
+    }
+
+    /// The modern Claude normalizer parses the version from the id instead of
+    /// matching a hardcoded list, so minor releases that predate this code
+    /// (4.9, 5.0, …) resolve to their own pricing key with no code change.
+    /// This is the regression guard against the recurring "new model degrades
+    /// to the catch-all" overcharge that affected 4.7 and 4.8.
+    #[test]
+    fn test_normalize_future_minor_versions_resolve_without_hardcoding() {
+        assert_eq!(
+            normalize_model_name("claude-opus-4-9"),
+            Some("claude-opus-4-9".into())
+        );
+        assert_eq!(
+            normalize_model_name("opus-4.9"),
+            Some("claude-opus-4-9".into())
+        );
+        assert_eq!(
+            normalize_model_name("aws.claude-opus-5-0"),
+            Some("claude-opus-5-0".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-sonnet-5"),
+            Some("claude-sonnet-5".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-haiku-4-7"),
+            Some("claude-haiku-4-7".into())
+        );
+    }
+
+    /// Boundary contract preserved from the old hardcoded matcher: two-digit
+    /// minor falls back to the major, two-digit major is unrecognized, and an
+    /// undelimited version does not match.
+    #[test]
+    fn test_normalize_modern_claude_boundaries() {
+        // Two-digit minor: not a recognized minor, degrade to bare major.
+        assert_eq!(
+            normalize_model_name("opus-4-60"),
+            Some("claude-opus-4".into())
+        );
+        // Two-digit major: not the modern line.
+        assert_eq!(normalize_model_name("opus-14-6"), None);
+        // Undelimited version: not a match.
+        assert_eq!(normalize_model_name("opus4"), None);
+        assert_eq!(normalize_model_name("opus-4x"), None);
+        // Pre-4 majors are left to the legacy 3.x / fallback handling.
+        assert_eq!(normalize_model_name("opus-3"), None);
     }
 
     #[test]
