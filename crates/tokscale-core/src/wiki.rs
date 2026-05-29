@@ -21,6 +21,7 @@ pub struct WikiEntry {
     pub task_category: Option<String>,
     pub description: Option<String>,
     pub complexity: Option<String>,
+    pub task_group: Option<String>,
 
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -98,6 +99,14 @@ impl WikiDb {
         conn.execute_batch(Self::SCHEMA)
             .map_err(|e| WikiError::Sqlite(e.to_string()))?;
 
+        let has_task_group: bool = conn
+            .prepare("SELECT task_group FROM wiki_entries LIMIT 0")
+            .is_ok();
+        if !has_task_group {
+            conn.execute_batch("ALTER TABLE wiki_entries ADD COLUMN task_group TEXT")
+                .map_err(|e| WikiError::Sqlite(e.to_string()))?;
+        }
+
         Ok(Self { conn })
     }
 
@@ -121,6 +130,7 @@ impl WikiDb {
             task_category TEXT,
             description TEXT,
             complexity TEXT,
+            task_group TEXT,
             total_input_tokens INTEGER NOT NULL DEFAULT 0,
             total_output_tokens INTEGER NOT NULL DEFAULT 0,
             total_cache_read INTEGER NOT NULL DEFAULT 0,
@@ -136,6 +146,7 @@ impl WikiDb {
         CREATE INDEX IF NOT EXISTS idx_wiki_category ON wiki_entries(task_category);
         CREATE INDEX IF NOT EXISTS idx_wiki_created ON wiki_entries(created_at);
         CREATE INDEX IF NOT EXISTS idx_wiki_client ON wiki_entries(client);
+        CREATE INDEX IF NOT EXISTS idx_wiki_task_group ON wiki_entries(task_group);
     "#;
 
     /// Get all session IDs that are already in the wiki.
@@ -170,6 +181,79 @@ impl WikiDb {
         Ok(ids)
     }
 
+    /// Reset all summaries (set title/category/description/complexity to NULL).
+    pub fn reset_all_summaries(&self) -> Result<usize, WikiError> {
+        let count = self
+            .conn
+            .execute(
+                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL",
+                [],
+            )
+            .map_err(|e| WikiError::Sqlite(e.to_string()))?;
+        Ok(count)
+    }
+
+    pub fn reset_summaries_in_range(&self, since: Option<i64>, until: Option<i64>) -> Result<usize, WikiError> {
+        let (sql, params_vec) = match (since, until) {
+            (Some(s), Some(u)) => (
+                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE created_at >= ?1 AND created_at < ?2".to_string(),
+                vec![s, u],
+            ),
+            (Some(s), None) => (
+                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE created_at >= ?1".to_string(),
+                vec![s],
+            ),
+            (None, Some(u)) => (
+                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE created_at < ?1".to_string(),
+                vec![u],
+            ),
+            (None, None) => (
+                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL".to_string(),
+                vec![],
+            ),
+        };
+
+        let count = self
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(params_vec.iter()))
+            .map_err(|e| WikiError::Sqlite(e.to_string()))?;
+        Ok(count)
+    }
+
+    pub fn get_unsummarized_session_ids_in_range(&self, since: Option<i64>, until: Option<i64>) -> Result<Vec<String>, WikiError> {
+        let (sql, params_vec) = match (since, until) {
+            (Some(s), Some(u)) => (
+                "SELECT session_id FROM wiki_entries WHERE title IS NULL AND created_at >= ?1 AND created_at < ?2".to_string(),
+                vec![s, u],
+            ),
+            (Some(s), None) => (
+                "SELECT session_id FROM wiki_entries WHERE title IS NULL AND created_at >= ?1".to_string(),
+                vec![s],
+            ),
+            (None, Some(u)) => (
+                "SELECT session_id FROM wiki_entries WHERE title IS NULL AND created_at < ?1".to_string(),
+                vec![u],
+            ),
+            (None, None) => (
+                "SELECT session_id FROM wiki_entries WHERE title IS NULL".to_string(),
+                vec![],
+            ),
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| WikiError::Sqlite(e.to_string()))?;
+
+        let ids = stmt
+            .query_map(rusqlite::params_from_iter(params_vec.iter()), |row| row.get::<_, String>(0))
+            .map_err(|e| WikiError::Sqlite(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(ids)
+    }
+
     /// Insert or update a wiki entry (upsert).
     pub fn upsert_entry(&self, entry: &WikiEntry) -> Result<(), WikiError> {
         let models_json =
@@ -181,17 +265,18 @@ impl WikiDb {
                 INSERT INTO wiki_entries (
                     session_id, client, workspace, workspace_label,
                     created_at, last_active,
-                    title, task_category, description, complexity,
+                    title, task_category, description, complexity, task_group,
                     total_input_tokens, total_output_tokens, total_cache_read, total_cost,
                     models_used, message_count, duration_minutes,
                     summarized_at, fm_version
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT(session_id) DO UPDATE SET
                     last_active = excluded.last_active,
                     title = COALESCE(excluded.title, wiki_entries.title),
                     task_category = COALESCE(excluded.task_category, wiki_entries.task_category),
                     description = COALESCE(excluded.description, wiki_entries.description),
                     complexity = COALESCE(excluded.complexity, wiki_entries.complexity),
+                    task_group = COALESCE(excluded.task_group, wiki_entries.task_group),
                     total_input_tokens = excluded.total_input_tokens,
                     total_output_tokens = excluded.total_output_tokens,
                     total_cache_read = excluded.total_cache_read,
@@ -213,6 +298,7 @@ impl WikiDb {
                     entry.task_category,
                     entry.description,
                     entry.complexity,
+                    entry.task_group,
                     entry.total_input_tokens,
                     entry.total_output_tokens,
                     entry.total_cache_read,
@@ -260,6 +346,16 @@ impl WikiDb {
         Ok(())
     }
 
+    pub fn update_task_group(&self, session_id: &str, task_group: &str) -> Result<(), WikiError> {
+        self.conn
+            .execute(
+                "UPDATE wiki_entries SET task_group = ?1 WHERE session_id = ?2",
+                params![task_group, session_id],
+            )
+            .map_err(|e| WikiError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
     /// Query entries filtered by date range and optional workspace/client.
     pub fn query_entries(
         &self,
@@ -300,7 +396,7 @@ impl WikiDb {
 
         let entries = stmt
             .query_map(params_refs.as_slice(), |row| {
-                let models_str: String = row.get(14)?;
+                let models_str: String = row.get(15)?;
                 let models: Vec<String> =
                     serde_json::from_str(&models_str).unwrap_or_default();
 
@@ -315,15 +411,16 @@ impl WikiDb {
                     task_category: row.get(7)?,
                     description: row.get(8)?,
                     complexity: row.get(9)?,
-                    total_input_tokens: row.get(10)?,
-                    total_output_tokens: row.get(11)?,
-                    total_cache_read: row.get(12)?,
-                    total_cost: row.get(13)?,
+                    task_group: row.get(10)?,
+                    total_input_tokens: row.get(11)?,
+                    total_output_tokens: row.get(12)?,
+                    total_cache_read: row.get(13)?,
+                    total_cost: row.get(14)?,
                     models_used: models,
-                    message_count: row.get(15)?,
-                    duration_minutes: row.get(16)?,
-                    summarized_at: row.get(17)?,
-                    fm_version: row.get(18)?,
+                    message_count: row.get(16)?,
+                    duration_minutes: row.get(17)?,
+                    summarized_at: row.get(18)?,
+                    fm_version: row.get(19)?,
                 })
             })
             .map_err(|e| WikiError::Sqlite(e.to_string()))?
@@ -342,7 +439,7 @@ impl WikiDb {
 
         let entry = stmt
             .query_row(params![session_id], |row| {
-                let models_str: String = row.get(14)?;
+                let models_str: String = row.get(15)?;
                 let models: Vec<String> =
                     serde_json::from_str(&models_str).unwrap_or_default();
 
@@ -357,15 +454,16 @@ impl WikiDb {
                     task_category: row.get(7)?,
                     description: row.get(8)?,
                     complexity: row.get(9)?,
-                    total_input_tokens: row.get(10)?,
-                    total_output_tokens: row.get(11)?,
-                    total_cache_read: row.get(12)?,
-                    total_cost: row.get(13)?,
+                    task_group: row.get(10)?,
+                    total_input_tokens: row.get(11)?,
+                    total_output_tokens: row.get(12)?,
+                    total_cache_read: row.get(13)?,
+                    total_cost: row.get(14)?,
                     models_used: models,
-                    message_count: row.get(15)?,
-                    duration_minutes: row.get(16)?,
-                    summarized_at: row.get(17)?,
-                    fm_version: row.get(18)?,
+                    message_count: row.get(16)?,
+                    duration_minutes: row.get(17)?,
+                    summarized_at: row.get(18)?,
+                    fm_version: row.get(19)?,
                 })
             })
             .optional()

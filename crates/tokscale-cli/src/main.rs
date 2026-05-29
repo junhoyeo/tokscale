@@ -307,7 +307,7 @@ enum Commands {
     },
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
-    #[command(about = "Task-attributed usage report powered by Apple FM")]
+    #[command(about = "Task-attributed usage report")]
     Report {
         #[arg(long, help = "Output as JSON")]
         json: bool,
@@ -317,8 +317,12 @@ enum Commands {
         client: Option<String>,
         #[command(flatten)]
         date: DateRangeFlags,
-        #[arg(long, help = "Skip FM summarization (show raw data only)")]
+        #[arg(long, help = "Skip LLM summarization (show raw data only)")]
         no_summarize: bool,
+        #[arg(long, default_value = "apple-fm", help = "Summarizer backend: apple-fm, claude, codex, gemini, kiro")]
+        summarizer: String,
+        #[arg(long, help = "Reset all summaries and re-summarize from scratch")]
+        rebuild: bool,
     },
 }
 
@@ -756,6 +760,8 @@ fn main() -> Result<()> {
             client,
             date,
             no_summarize,
+            summarizer,
+            rebuild,
         }) => {
             let today = date.today;
             let week = date.week;
@@ -768,6 +774,8 @@ fn main() -> Result<()> {
                 workspace,
                 client,
                 no_summarize,
+                summarizer,
+                rebuild,
                 home_dir: cli.home.clone(),
                 scanner_settings: tui::settings::load_scanner_settings(),
                 today,

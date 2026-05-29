@@ -17,6 +17,8 @@ pub struct ReportOptions {
     pub workspace: Option<String>,
     pub client: Option<String>,
     pub no_summarize: bool,
+    pub summarizer: String,
+    pub rebuild: bool,
     pub home_dir: Option<String>,
     pub scanner_settings: tokscale_core::scanner::ScannerSettings,
     pub today: bool,
@@ -31,15 +33,25 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
 
     populate_wiki_from_sessions(&db, &opts)?;
 
-    let unsummarized = db
-        .get_unsummarized_session_ids()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let (since_ts, until_ts) = parse_date_range(&opts.since, &opts.until);
 
-    if !unsummarized.is_empty() && !opts.no_summarize {
-        run_summarizer(&db, &unsummarized)?;
+    if opts.rebuild {
+        let count = db
+            .reset_summaries_in_range(since_ts, until_ts)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        eprintln!("  Reset {} session summaries", count.to_string().cyan());
     }
 
-    let (since_ts, until_ts) = parse_date_range(&opts.since, &opts.until);
+    let unsummarized = if opts.no_summarize {
+        Vec::new()
+    } else {
+        db.get_unsummarized_session_ids_in_range(since_ts, until_ts)
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+    };
+
+    if !unsummarized.is_empty() {
+        run_summarizer(&db, &unsummarized, &opts.summarizer)?;
+    }
 
     let entries = db
         .query_entries(
@@ -50,12 +62,33 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if opts.json {
-        let json = serde_json::to_string_pretty(&entries)?;
-        println!("{}", json);
+    let needs_grouping = entries.iter().any(|e| e.title.is_some() && e.task_group.is_none());
+    if needs_grouping && !opts.no_summarize {
+        run_task_grouping(&db, &entries, &opts.summarizer)?;
+        let entries = db
+            .query_entries(
+                since_ts,
+                until_ts,
+                opts.workspace.as_deref(),
+                opts.client.as_deref(),
+            )
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if opts.json {
+            let json = serde_json::to_string_pretty(&entries)?;
+            println!("{}", json);
+        } else {
+            let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
+            print_report_table(&entries, &db, is_multi_day)?;
+        }
     } else {
-        let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
-        print_report_table(&entries, &db, is_multi_day)?;
+        if opts.json {
+            let json = serde_json::to_string_pretty(&entries)?;
+            println!("{}", json);
+        } else {
+            let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
+            print_report_table(&entries, &db, is_multi_day)?;
+        }
     }
 
     Ok(())
@@ -126,6 +159,7 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
             task_category: None,
             description: None,
             complexity: None,
+            task_group: None,
             total_input_tokens: agg.total_input,
             total_output_tokens: agg.total_output,
             total_cache_read: agg.total_cache_read,
@@ -152,9 +186,7 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
     Ok(())
 }
 
-fn run_summarizer(db: &WikiDb, session_ids: &[String]) -> Result<()> {
-    let script_path = find_summarizer_script()?;
-
+fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<()> {
     let mut payloads: Vec<serde_json::Value> = Vec::new();
     for sid in session_ids {
         if let Ok(Some(entry)) = db.get_entry(sid) {
@@ -177,11 +209,157 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String]) -> Result<()> {
     }
 
     eprintln!(
-        "  Summarizing {} sessions with Apple FM...",
-        payloads.len().to_string().cyan()
+        "  Summarizing {} sessions with {}...",
+        payloads.len().to_string().cyan(),
+        backend.cyan()
     );
 
-    let input_json = serde_json::to_string(&payloads)?;
+    let batch_size = match backend {
+        "apple-fm" => payloads.len(),
+        _ => 20,
+    };
+
+    let mut total_summarized = 0;
+    for (batch_idx, chunk) in payloads.chunks(batch_size).enumerate() {
+        if batch_size < payloads.len() {
+            eprint!(
+                "\r  Batch {}/{} ({} done)...",
+                batch_idx + 1,
+                (payloads.len() + batch_size - 1) / batch_size,
+                total_summarized
+            );
+        }
+
+        let results = match backend {
+            "apple-fm" => run_apple_fm_summarizer(chunk)?,
+            "claude" | "codex" | "gemini" | "kiro" => run_cli_summarizer(backend, chunk)?,
+            other => {
+                eprintln!("  {} Unknown summarizer: {}", "⚠".yellow(), other);
+                return Ok(());
+            }
+        };
+
+        for result in &results {
+            let session_id = result["session_id"].as_str().unwrap_or_default();
+            let title = result["title"].as_str().unwrap_or("Untitled");
+            let category = result["task_category"].as_str().unwrap_or("other");
+            let description = result["description"].as_str().unwrap_or("");
+            let complexity = result["complexity"].as_str().unwrap_or("moderate");
+            let fm_version = result["fm_version"].as_str();
+
+            let _ = db.update_summary(session_id, title, category, description, complexity, fm_version);
+        }
+
+        total_summarized += results.len();
+    }
+
+    eprintln!(
+        "\n  {} {} sessions summarized",
+        "✓".green(),
+        total_summarized
+    );
+
+    Ok(())
+}
+
+const GROUPING_SYSTEM_PROMPT: &str = r#"You are a task grouping assistant. Given a list of coding session titles, group them into high-level project tasks (2-5 words each).
+
+Rules:
+- Group related sessions under a single short label (e.g. "Kiro Auth", "Tokscale Report", "System Config")
+- Each group should represent a coherent project or feature area
+- Sessions that don't fit any group get their own group name
+- Aim for 3-8 groups total. Fewer is better.
+
+Respond ONLY with a JSON array where each element has: session_id, task_group"#;
+
+fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Result<()> {
+    let summarized: Vec<&WikiEntry> = entries
+        .iter()
+        .filter(|e| e.title.is_some() && e.task_group.is_none())
+        .collect();
+
+    if summarized.is_empty() {
+        return Ok(());
+    }
+
+    eprint!("  Grouping {} sessions into tasks...", summarized.len().to_string().cyan());
+
+    let mut parts = Vec::new();
+    parts.push("Group these coding sessions by project/feature:\n".to_string());
+    for (i, entry) in summarized.iter().enumerate() {
+        parts.push(format!(
+            "  {} (id: {}): {} [{}]",
+            i + 1,
+            entry.session_id,
+            entry.title.as_deref().unwrap_or("?"),
+            entry.workspace.as_deref().unwrap_or("?"),
+        ));
+    }
+    parts.push("\nRespond with a JSON array.".to_string());
+    let prompt = parts.join("\n");
+
+    let output = match backend {
+        "claude" => Command::new("claude")
+            .args(["-p", "--output-format", "text"])
+            .arg(format!("System: {}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        "codex" => Command::new("codex")
+            .args(["--quiet", "--approval-mode", "never"])
+            .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        "gemini" => Command::new("gemini")
+            .args(["-p"])
+            .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        "kiro" => Command::new("kiro")
+            .args(["--non-interactive", "--prompt"])
+            .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        _ => {
+            eprintln!(" skipped (unsupported backend)");
+            return Ok(());
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("\n  {} grouping failed: {}", "⚠".yellow(), stderr.trim());
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_str = extract_json_array(&stdout);
+
+    match serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+        Ok(results) => {
+            for result in &results {
+                let session_id = result["session_id"].as_str().unwrap_or_default();
+                let task_group = result["task_group"].as_str().unwrap_or_default();
+                if !session_id.is_empty() && !task_group.is_empty() {
+                    let _ = db.update_task_group(session_id, task_group);
+                }
+            }
+            eprintln!(" {}", "✓".green());
+        }
+        Err(e) => {
+            eprintln!("\n  {} Failed to parse grouping response: {}", "⚠".yellow(), e);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_apple_fm_summarizer(payloads: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
+    let script_path = find_summarizer_script()?;
+    let input_json = serde_json::to_string(payloads)?;
 
     let mut child = Command::new("python3")
         .arg(&script_path)
@@ -198,30 +376,101 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String]) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("  {} FM summarizer: {}", "⚠".yellow(), stderr.trim());
-        return Ok(());
+        eprintln!("  {} Apple FM summarizer: {}", "⚠".yellow(), stderr.trim());
+        return Ok(Vec::new());
     }
 
     let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
+    Ok(results)
+}
 
-    for result in &results {
-        let session_id = result["session_id"].as_str().unwrap_or_default();
-        let title = result["title"].as_str().unwrap_or("Untitled");
-        let category = result["task_category"].as_str().unwrap_or("other");
-        let description = result["description"].as_str().unwrap_or("");
-        let complexity = result["complexity"].as_str().unwrap_or("moderate");
-        let fm_version = result["fm_version"].as_str();
+const SUMMARIZER_SYSTEM_PROMPT: &str = r#"You are a coding session classifier. Given metadata about an AI coding session, produce a structured summary.
 
-        let _ = db.update_summary(session_id, title, category, description, complexity, fm_version);
+Rules:
+- title: 3-8 word description of what was done (imperative mood, e.g. "Add JWT auth middleware")
+- task_category: exactly one of: feature, bugfix, refactor, research, debug, review, docs, config, other
+- description: 1-2 sentences explaining what happened in the session
+- complexity: exactly one of: trivial, moderate, complex
+
+Respond ONLY with a JSON array where each element has: session_id, title, task_category, description, complexity."#;
+
+fn build_cli_prompt(payloads: &[serde_json::Value]) -> String {
+    let mut parts = Vec::new();
+    parts.push("Classify these coding sessions:\n".to_string());
+    for (i, p) in payloads.iter().enumerate() {
+        parts.push(format!(
+            "Session {} (id: {}):\n  Workspace: {}\n  Client: {}\n  Models: {}\n  Tokens: {}\n  Duration: {} min\n  Messages: {}\n  First message: {}\n",
+            i + 1,
+            p["session_id"].as_str().unwrap_or("?"),
+            p["workspace"].as_str().unwrap_or("?"),
+            p["client"].as_str().unwrap_or("?"),
+            p["models_used"],
+            p["total_tokens"],
+            p["duration_minutes"],
+            p["message_count"],
+            p["first_user_message"].as_str().unwrap_or("(none)").chars().take(200).collect::<String>(),
+        ));
+    }
+    parts.push("Respond with a JSON array.".to_string());
+    parts.join("\n")
+}
+
+fn run_cli_summarizer(backend: &str, payloads: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
+    let prompt = build_cli_prompt(payloads);
+
+    let output = match backend {
+        "claude" => Command::new("claude")
+            .args(["-p", "--output-format", "text"])
+            .arg(format!("System: {}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        "codex" => Command::new("codex")
+            .args(["--quiet", "--approval-mode", "never"])
+            .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        "gemini" => Command::new("gemini")
+            .args(["-p"])
+            .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        "kiro" => Command::new("kiro")
+            .args(["--non-interactive", "--prompt"])
+            .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?,
+        _ => return Ok(Vec::new()),
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("  {} {} summarizer failed: {}", "⚠".yellow(), backend, stderr.trim());
+        return Ok(Vec::new());
     }
 
-    eprintln!(
-        "  {} {} sessions summarized",
-        "✓".green(),
-        results.len()
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_str = extract_json_array(&stdout);
 
-    Ok(())
+    match serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+        Ok(results) => Ok(results),
+        Err(e) => {
+            eprintln!("  {} Failed to parse {} response: {}", "⚠".yellow(), backend, e);
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn extract_json_array(text: &str) -> &str {
+    if let Some(start) = text.find('[') {
+        if let Some(end) = text.rfind(']') {
+            return &text[start..=end];
+        }
+    }
+    text
 }
 
 fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -> Result<()> {
@@ -283,41 +532,56 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
     );
     println!();
 
-    let mut by_category: HashMap<&str, (f64, i64, usize)> = HashMap::new();
+    let mut by_group: HashMap<&str, (f64, i64, usize, Vec<&str>)> = HashMap::new();
     for entry in entries {
+        let group = entry.task_group.as_deref().unwrap_or(
+            entry.title.as_deref().unwrap_or("(unsummarized)")
+        );
         let title = entry.title.as_deref().unwrap_or("(unsummarized)");
-        let agg = by_category.entry(title).or_insert((0.0, 0, 0));
+        let agg = by_group.entry(group).or_insert((0.0, 0, 0, Vec::new()));
         agg.0 += entry.total_cost;
         agg.1 += entry.total_input_tokens + entry.total_output_tokens;
         agg.2 += 1;
+        if !agg.3.contains(&title) {
+            agg.3.push(title);
+        }
     }
 
-    let mut categories: Vec<_> = by_category.iter().collect();
-    categories.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+    let mut groups: Vec<_> = by_group.iter().collect();
+    groups.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
 
-    println!("  {:<40} {:>5} {:>10} {:>8}", "Task", "Sess", "Tokens", "Cost");
+    println!("  {:<40} {:>5} {:>10} {:>8}", "Task Group", "Sess", "Tokens", "Cost");
     println!("  {}", "─".repeat(67));
-    for (title, (cost, tokens, count)) in categories.iter().take(15) {
-        let display_title: String = if title.len() > 40 {
-            format!("{}…", &title[..39])
+    for (group, (cost, tokens, count, titles)) in groups.iter().take(15) {
+        let display_group: String = if group.len() > 40 {
+            format!("{}…", &group[..39])
         } else {
-            title.to_string()
+            group.to_string()
         };
         println!(
             "  {:<40} {:>5} {:>10} {:>8}",
-            display_title,
+            display_group.bold(),
             count,
             format_tokens(*tokens),
             format!("${:.2}", cost),
         );
+        if *count > 1 {
+            for t in titles.iter().take(3) {
+                let display_t: &str = if t.len() > 38 { &t[..38] } else { t };
+                println!("    {}", display_t.dimmed());
+            }
+            if titles.len() > 3 {
+                println!("    … +{} more", titles.len() - 3);
+            }
+        }
     }
-    if categories.len() > 15 {
-        let rest_count: usize = categories.iter().skip(15).map(|(_, v)| v.2).sum();
-        let rest_cost: f64 = categories.iter().skip(15).map(|(_, v)| v.0).sum();
-        let rest_tokens: i64 = categories.iter().skip(15).map(|(_, v)| v.1).sum();
+    if groups.len() > 15 {
+        let rest_count: usize = groups.iter().skip(15).map(|(_, v)| v.2).sum();
+        let rest_cost: f64 = groups.iter().skip(15).map(|(_, v)| v.0).sum();
+        let rest_tokens: i64 = groups.iter().skip(15).map(|(_, v)| v.1).sum();
         println!(
             "  {:<40} {:>5} {:>10} {:>8}",
-            format!("… +{} more", categories.len() - 15),
+            format!("… +{} more", groups.len() - 15),
             rest_count,
             format_tokens(rest_tokens),
             format!("${:.2}", rest_cost),
