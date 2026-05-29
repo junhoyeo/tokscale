@@ -1087,7 +1087,8 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
         }
     }
     if lower.contains("haiku")
-        && (contains_delimited_fragment(&lower, "3.5") || contains_delimited_fragment(&lower, "3-5"))
+        && (contains_delimited_fragment(&lower, "3.5")
+            || contains_delimited_fragment(&lower, "3-5"))
     {
         return Some("claude-3.5-haiku".into());
     }
