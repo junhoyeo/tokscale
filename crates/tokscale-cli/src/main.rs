@@ -307,6 +307,19 @@ enum Commands {
     },
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
+    #[command(about = "Task-attributed usage report powered by Apple FM")]
+    Report {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+        #[arg(long, help = "Filter by workspace path")]
+        workspace: Option<String>,
+        #[arg(long, help = "Filter by client (opencode, claude, codex, etc.)")]
+        client: Option<String>,
+        #[command(flatten)]
+        date: DateRangeFlags,
+        #[arg(long, help = "Skip FM summarization (show raw data only)")]
+        no_summarize: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -737,6 +750,31 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::WarmTuiCache) => run_warm_tui_cache(),
+        Some(Commands::Report {
+            json,
+            workspace,
+            client,
+            date,
+            no_summarize,
+        }) => {
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            commands::report::run_report(commands::report::ReportOptions {
+                json,
+                since,
+                until,
+                workspace,
+                client,
+                no_summarize,
+                home_dir: cli.home.clone(),
+                scanner_settings: tui::settings::load_scanner_settings(),
+                today,
+                week,
+                month,
+            })
+        }
         None => {
             let today = cli.date.today;
             let week = cli.date.week;
