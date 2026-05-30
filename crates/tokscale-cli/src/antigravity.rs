@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -14,9 +15,23 @@ const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
 #[cfg(test)]
 const SYNC_LOCK_STALE_SECS: u64 = 600;
+static HTTPS_RPC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static HTTPS_RPC_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
+}
+
+fn antigravity_data_roots() -> Result<Vec<PathBuf>> {
+    let gemini_dir = home_dir()?.join(".gemini");
+    let mut roots = Vec::new();
+    for name in ["antigravity-ide", "antigravity", "antigravity-backup"] {
+        let root = gemini_dir.join(name);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
 }
 
 pub fn get_antigravity_cache_dir() -> Result<PathBuf> {
@@ -1099,6 +1114,32 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
 }
 
 fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
+    if probe_plain_http_heartbeat(port, csrf_token) {
+        return true;
+    }
+
+    probe_https_heartbeat(port, csrf_token)
+}
+
+fn probe_https_heartbeat(port: u16, csrf_token: &str) -> bool {
+    let connection = AntigravityConnection {
+        pid: 0,
+        port,
+        csrf_token: csrf_token.to_string(),
+        fingerprint: format!("port:{port}"),
+    };
+    let body = serde_json::json!({ "uuid": "00000000-0000-0000-0000-000000000000" });
+    let Ok(response) = https_rpc_request(&connection, "Heartbeat", &body) else {
+        return false;
+    };
+    if !heartbeat_value_looks_well_formed(&response) {
+        return false;
+    }
+
+    true
+}
+
+fn probe_plain_http_heartbeat(port: u16, csrf_token: &str) -> bool {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;
     };
@@ -1157,6 +1198,10 @@ fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
     probe_endpoint_identity(port, csrf_token)
 }
 
+fn heartbeat_value_looks_well_formed(value: &Value) -> bool {
+    value.is_object() || value.is_array()
+}
+
 fn heartbeat_response_looks_well_formed(body: &str) -> bool {
     let trimmed = body.trim_start();
     let json_start = trimmed.find(['{', '[']).map(|idx| &trimmed[idx..]);
@@ -1181,6 +1226,25 @@ fn probe_endpoint_identity(port: u16, csrf_token: &str) -> bool {
 }
 
 fn identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
+    if let Some(body) = plain_http_identity_probe_request(port, csrf_token, method) {
+        return Some(body);
+    }
+
+    https_identity_probe_request(port, csrf_token, method)
+}
+
+fn https_identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
+    let connection = AntigravityConnection {
+        pid: 0,
+        port,
+        csrf_token: csrf_token.to_string(),
+        fingerprint: format!("port:{port}"),
+    };
+    let response = https_rpc_request(&connection, method, &serde_json::json!({})).ok()?;
+    serde_json::to_string(&response).ok()
+}
+
+fn plain_http_identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -1441,57 +1505,59 @@ fn merge_summary(merged: &mut HashMap<String, TrajectorySummary>, summary: Traje
 }
 
 fn scan_filesystem_session_candidates() -> Result<Vec<SessionCandidate>> {
-    let root = home_dir()?.join(".gemini/antigravity");
-    let brain_dir = root.join("brain");
-    let conversations_dir = root.join("conversations");
     let mut candidates: HashMap<String, SessionCandidate> = HashMap::new();
 
-    if brain_dir.exists() {
-        for entry in fs::read_dir(&brain_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
+    for root in antigravity_data_roots()? {
+        let brain_dir = root.join("brain");
+        let conversations_dir = root.join("conversations");
 
-            let session_id = entry.file_name().to_string_lossy().to_string();
-            if session_id.trim().is_empty() {
-                continue;
-            }
+        if brain_dir.exists() {
+            for entry in fs::read_dir(&brain_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
 
-            let modified = latest_modified_in_dir(&path)?;
-            merge_candidate(
-                &mut candidates,
-                SessionCandidate {
-                    session_id,
-                    last_modified_ms: modified,
-                    artifact_path: None,
-                },
-            );
+                let session_id = entry.file_name().to_string_lossy().to_string();
+                if session_id.trim().is_empty() {
+                    continue;
+                }
+
+                let modified = latest_modified_in_dir(&path)?;
+                merge_candidate(
+                    &mut candidates,
+                    SessionCandidate {
+                        session_id,
+                        last_modified_ms: modified,
+                        artifact_path: None,
+                    },
+                );
+            }
         }
-    }
 
-    if conversations_dir.exists() {
-        for entry in fs::read_dir(&conversations_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("pb") {
-                continue;
+        if conversations_dir.exists() {
+            for entry in fs::read_dir(&conversations_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("pb") {
+                    continue;
+                }
+
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+
+                let modified = file_modified_ms(&path)?;
+                merge_candidate(
+                    &mut candidates,
+                    SessionCandidate {
+                        session_id: stem.to_string(),
+                        last_modified_ms: modified,
+                        artifact_path: None,
+                    },
+                );
             }
-
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-
-            let modified = file_modified_ms(&path)?;
-            merge_candidate(
-                &mut candidates,
-                SessionCandidate {
-                    session_id: stem.to_string(),
-                    last_modified_ms: modified,
-                    artifact_path: None,
-                },
-            );
         }
     }
 
@@ -1627,6 +1693,97 @@ fn fetch_historical_session_artifact(
 }
 
 fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
+    match rpc_request_plain_http(connection, method, body) {
+        Ok(value) => Ok(value),
+        Err(http_err) => https_rpc_request(connection, method, body).with_context(|| {
+            format!(
+                "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
+            )
+        }),
+    }
+}
+
+fn https_rpc_request(
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+) -> Result<Value> {
+    antigravity_https_runtime().block_on(async {
+        let url = format!(
+            "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
+            connection.port, method
+        );
+        let response = antigravity_https_client()
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Connect-Protocol-Version", "1")
+            .header("X-Codeium-Csrf-Token", &connection.csrf_token)
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        let response_body = read_reqwest_response_with_cap(response, MAX_RPC_BODY_BYTES).await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Antigravity HTTPS RPC {} failed with status {}: {}",
+                method,
+                status,
+                response_body
+            );
+        }
+        Ok(serde_json::from_str(&response_body)?)
+    })
+}
+
+fn antigravity_https_runtime() -> &'static tokio::runtime::Runtime {
+    HTTPS_RPC_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create Antigravity HTTPS RPC runtime")
+    })
+}
+
+fn antigravity_https_client() -> &'static reqwest::Client {
+    HTTPS_RPC_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("failed to create Antigravity HTTPS RPC client")
+    })
+}
+
+async fn read_reqwest_response_with_cap(
+    mut response: reqwest::Response,
+    max_body_bytes: usize,
+) -> Result<String> {
+    if let Some(length) = response.content_length() {
+        if length > max_body_bytes as u64 {
+            anyhow::bail!("Antigravity RPC body of {length} bytes exceeds {max_body_bytes} cap");
+        }
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > max_body_bytes {
+            anyhow::bail!(
+                "Antigravity RPC body of {} bytes exceeds {} cap",
+                body.len().saturating_add(chunk.len()),
+                max_body_bytes
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(String::from_utf8(body)?)
+}
+
+fn rpc_request_plain_http(
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+) -> Result<Value> {
     let mut stream = TcpStream::connect(("127.0.0.1", connection.port)).with_context(|| {
         format!(
             "Failed to connect to Antigravity RPC on port {}",
@@ -2464,6 +2621,13 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_process_detection_accepts_antigravity_ide_language_server() {
+        assert!(is_antigravity_process(
+            "/opt/antigravity-ide/resources/app/extensions/antigravity/bin/language_server_linux_x64 --csrf_token abc --app_data_dir antigravity-ide"
+        ));
+    }
+
+    #[test]
     fn normalize_session_metadata_emits_meta_and_usage_rows() {
         let metadata = vec![serde_json::json!({
             "chatModel": {
@@ -2618,11 +2782,20 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
-        let root = temp_dir.path().join(".gemini/antigravity");
-        std::fs::create_dir_all(root.join("brain/session-a")).unwrap();
-        std::fs::create_dir_all(root.join("brain/session-b")).unwrap();
-        std::fs::create_dir_all(root.join("conversations")).unwrap();
-        std::fs::write(root.join("conversations/session-c.pb"), b"pb").unwrap();
+        let legacy_root = temp_dir.path().join(".gemini/antigravity");
+        std::fs::create_dir_all(legacy_root.join("brain/session-a")).unwrap();
+        std::fs::create_dir_all(legacy_root.join("brain/session-b")).unwrap();
+        std::fs::create_dir_all(legacy_root.join("conversations")).unwrap();
+        std::fs::write(legacy_root.join("conversations/session-c.pb"), b"pb").unwrap();
+
+        let ide_root = temp_dir.path().join(".gemini/antigravity-ide");
+        std::fs::create_dir_all(ide_root.join("brain/session-d")).unwrap();
+        std::fs::create_dir_all(ide_root.join("conversations")).unwrap();
+        std::fs::write(ide_root.join("conversations/session-e.pb"), b"pb").unwrap();
+
+        let backup_root = temp_dir.path().join(".gemini/antigravity-backup");
+        std::fs::create_dir_all(backup_root.join("conversations")).unwrap();
+        std::fs::write(backup_root.join("conversations/session-f.pb"), b"pb").unwrap();
 
         let candidates = scan_filesystem_session_candidates().unwrap();
         let ids: Vec<String> = candidates
@@ -2632,6 +2805,9 @@ mod tests {
         assert!(ids.contains(&"session-a".to_string()));
         assert!(ids.contains(&"session-b".to_string()));
         assert!(ids.contains(&"session-c".to_string()));
+        assert!(ids.contains(&"session-d".to_string()));
+        assert!(ids.contains(&"session-e".to_string()));
+        assert!(ids.contains(&"session-f".to_string()));
     }
 
     #[test]
