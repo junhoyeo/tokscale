@@ -1748,6 +1748,7 @@ fn antigravity_https_client() -> &'static reqwest::Client {
     HTTPS_RPC_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
+            .no_proxy()
             .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to create Antigravity HTTPS RPC client")
