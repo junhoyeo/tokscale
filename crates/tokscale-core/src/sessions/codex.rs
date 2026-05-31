@@ -32,6 +32,7 @@ pub struct CodexPayload {
     pub model_name: Option<String>,
     pub model_info: Option<CodexModelInfo>,
     pub info: Option<CodexInfo>,
+    pub turn_id: Option<String>,
     pub source: Option<Value>,
     /// Current working directory from session_meta.
     pub cwd: Option<String>,
@@ -171,6 +172,8 @@ pub(crate) struct CodexParseState {
     pub session_is_headless: bool,
     pub session_id_from_meta: Option<String>,
     pub session_forked_from_id: Option<String>,
+    pub forked_child_session_id: Option<String>,
+    pub forked_child_replay_session_id: Option<String>,
     pub session_provider: Option<String>,
     pub session_agent: Option<String>,
     pub session_workspace_key: Option<String>,
@@ -285,11 +288,33 @@ fn parse_codex_reader<R: BufRead>(
                 let event_model = payload_model.clone().or(info_model.clone());
 
                 if state.forked_child_waiting_for_turn_context {
-                    if entry.entry_type == "turn_context" {
+                    if entry.entry_type == "turn_context"
+                        && forked_child_turn_starts_own_session(&state, payload.turn_id.as_deref())
+                    {
                         state.forked_child_waiting_for_turn_context = false;
+                        state.forked_child_replay_session_id = None;
+                        if let Some(ref id) = state.forked_child_session_id {
+                            state.session_id_from_meta = Some(id.clone());
+                        }
                         state.current_model = payload_model.clone();
                         handled = true;
                     } else {
+                        if entry.entry_type == "session_meta" {
+                            if let Some(ref id) = payload.id {
+                                if state
+                                    .forked_child_session_id
+                                    .as_deref()
+                                    .is_some_and(|child_id| child_id != id)
+                                {
+                                    // Newer Codex fork logs can embed the
+                                    // parent session metadata before replaying
+                                    // parent token_count history. Keep
+                                    // skipping while that copied upstream
+                                    // transcript is active.
+                                    state.forked_child_replay_session_id = Some(id.clone());
+                                }
+                            }
+                        }
                         if is_token_count {
                             if let Some(info) = payload.info.as_ref() {
                                 remember_forked_child_inherited_baseline(&mut state, info);
@@ -326,7 +351,9 @@ fn parse_codex_reader<R: BufRead>(
                         .or_else(|| forked_from_id_from_source(payload.source.as_ref()));
                     if let Some(forked_from_id) = forked_from_id {
                         state.session_forked_from_id = Some(forked_from_id.to_string());
+                        state.forked_child_session_id = payload.id.clone();
                         state.forked_child_waiting_for_turn_context = true;
+                        state.forked_child_replay_session_id = None;
                         state.forked_child_inherited_baseline = None;
                         state.forked_child_inherited_reported_total = None;
                     }
@@ -504,10 +531,13 @@ fn parse_codex_reader<R: BufRead>(
                         message.is_turn_start = true;
                         state.pending_turn_start = false;
                     }
-                    if parsed_timestamp.is_some() {
-                        if let Some(model) = model.as_deref() {
-                            set_codex_dedup_key(&mut message, model);
-                        }
+                    if parsed_timestamp.is_some() || total_usage.is_some() {
+                        set_codex_dedup_key(
+                            &mut message,
+                            model.as_deref().unwrap_or("unknown"),
+                            state.session_id_from_meta.as_deref().unwrap_or(session_id),
+                            total_usage,
+                        );
                     }
                     message.set_workspace(
                         state.session_workspace_key.clone(),
@@ -618,6 +648,52 @@ fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option<&str>) -> bool {
+    if state.forked_child_replay_session_id.is_none() {
+        return true;
+    }
+
+    let Some(child_session_id) = state.forked_child_session_id.as_deref() else {
+        return true;
+    };
+
+    match (turn_id, codex_uuid_v7_order_key(child_session_id)) {
+        (Some(turn_id), Some(child_key)) => {
+            codex_uuid_v7_order_key(turn_id).is_none_or(|turn_key| turn_key >= child_key)
+        }
+        _ => true,
+    }
+}
+
+fn codex_uuid_v7_order_key(id: &str) -> Option<String> {
+    let mut parts = id.split('-');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    let third = parts.next()?;
+    let fourth = parts.next()?;
+    let fifth = parts.next()?;
+
+    if parts.next().is_some()
+        || first.len() != 8
+        || second.len() != 4
+        || third.len() != 4
+        || fourth.len() != 4
+        || fifth.len() != 12
+        || !third.starts_with('7')
+    {
+        return None;
+    }
+
+    let mut key = String::with_capacity(32);
+    for part in [first, second, third, fourth, fifth] {
+        if !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        key.push_str(&part.to_ascii_lowercase());
+    }
+    Some(key)
+}
+
 fn parse_codex_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
     timestamp
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
@@ -629,7 +705,29 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
     (duration > 0).then_some(duration)
 }
 
-fn codex_token_count_dedup_key(message: &UnifiedMessage, model: &str) -> String {
+fn codex_token_count_dedup_key(
+    message: &UnifiedMessage,
+    model: &str,
+    upstream_session_id: &str,
+    total_usage: Option<CodexTotals>,
+) -> String {
+    if let Some(total) = total_usage {
+        // Codex fork/subagent logs can replay the same upstream token_count
+        // history into many child files with child-local timestamps. The
+        // cumulative total is the stable upstream identity; timestamp is only
+        // a fallback when older rows do not carry totals.
+        return format!(
+            "codex:token_count-total:{}:{}:{}:{}:{}:{}:{}",
+            upstream_session_id,
+            message.provider_id,
+            model,
+            total.input,
+            total.output,
+            total.cached,
+            total.reasoning
+        );
+    }
+
     format!(
         "codex:token_count:{}:{}:{}:{}:{}:{}:{}:{}",
         message.timestamp,
@@ -643,9 +741,19 @@ fn codex_token_count_dedup_key(message: &UnifiedMessage, model: &str) -> String 
     )
 }
 
-fn set_codex_dedup_key(message: &mut UnifiedMessage, model: &str) {
+fn set_codex_dedup_key(
+    message: &mut UnifiedMessage,
+    model: &str,
+    upstream_session_id: &str,
+    total_usage: Option<CodexTotals>,
+) {
     if message.dedup_key.is_none() {
-        message.dedup_key = Some(codex_token_count_dedup_key(message, model));
+        message.dedup_key = Some(codex_token_count_dedup_key(
+            message,
+            model,
+            upstream_session_id,
+            total_usage,
+        ));
     }
 }
 
@@ -657,7 +765,8 @@ fn flush_pending_model_messages(
 ) {
     for (mut message, used_fallback_timestamp) in pending_model_messages.drain(..) {
         if !used_fallback_timestamp {
-            set_codex_dedup_key(&mut message, model);
+            let upstream_session_id = message.session_id.clone();
+            set_codex_dedup_key(&mut message, model, &upstream_session_id, None);
         }
         message.model_id = model.to_string();
         messages.push(message);
@@ -1673,6 +1782,43 @@ mod tests {
         assert_eq!(messages[0].model_id, "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_forked_child_skips_nested_parent_replay_until_own_turn() {
+        let parent = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.000Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n"
+        ));
+        let child = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5c03-1e99-7000-8000-000000000001","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.100Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-6425-7000-8000-000000000001"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-6425-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":320,"output_tokens":32,"total_tokens":352},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+            "\n"
+        ));
+
+        let parent_messages = parse_codex_file(parent.path());
+        let child_messages = parse_codex_file(child.path());
+
+        assert_eq!(parent_messages.len(), 1);
+        assert_eq!(child_messages.len(), 1);
+        assert_ne!(parent_messages[0].dedup_key, child_messages[0].dedup_key);
+        assert_eq!(child_messages[0].tokens.input, 20);
+        assert_eq!(child_messages[0].tokens.output, 2);
     }
 
     #[test]
