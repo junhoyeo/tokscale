@@ -4542,18 +4542,9 @@ fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let include_cursor = home_dir.is_none()
-        && clients
-            .as_ref()
-            .is_none_or(|s| s.iter().any(|src| src == "cursor"));
+    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
-    let has_cursor_cache = include_cursor && has_cursor_usage_cache_for_report(&home_dir);
-    let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
-
-    if include_cursor && cursor::is_cursor_logged_in() {
-        let rt_sync = tokio::runtime::Runtime::new()?;
-        cursor_sync_result = Some(rt_sync.block_on(async { cursor::sync_cursor_cache().await }));
-    }
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
 
     if show_progress {
@@ -4583,7 +4574,7 @@ fn run_graph_command(
         .map_err(|e| anyhow::anyhow!(e))?;
     emit_cursor_sync_warning(
         cursor_sync_result.as_ref(),
-        has_cursor_cache,
+        had_cursor_cache,
         explicit_cursor_filter,
     );
     emit_cursor_setup_warnings(&cursor_setup_warnings);
@@ -4634,7 +4625,7 @@ fn run_graph_command(
                         .bright_black()
                     );
                 } else if let Some(err) = sync.error {
-                    if has_cursor_cache {
+                    if had_cursor_cache {
                         eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
                     }
                 }

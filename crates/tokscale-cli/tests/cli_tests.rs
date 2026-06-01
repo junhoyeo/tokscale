@@ -1336,6 +1336,32 @@ fn test_graph_cursor_explicit_missing_cache_reports_setup_warning_text() {
 }
 
 #[test]
+fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
+    let tmp = create_empty_fixture_dir();
+    write_cursor_credentials(tmp.path());
+    write_cursor_usage_cache(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        .args(["graph", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Cursor sync failed") && !stderr.contains("Cursor sync warning"),
+        "fresh Cursor cache should skip implicit graph sync; stderr: {stderr}"
+    );
+}
+
+#[test]
 fn test_submit_cursor_explicit_missing_cache_reports_setup_warning_text() {
     let tmp = create_empty_fixture_dir();
     cmd_with_home(tmp.path())
