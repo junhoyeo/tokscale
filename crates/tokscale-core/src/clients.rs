@@ -368,7 +368,7 @@ define_clients!(
         pattern: "*.jsonl",
         headless: false,
         parse_local: true,
-        submit_default: false
+        submit_default: true
     },
     Zed = 21 => {
         id: "zed",
@@ -738,8 +738,8 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_submit_default_is_false() {
-        assert!(!ClientId::Antigravity.submit_default());
+    fn test_antigravity_submit_default_is_true() {
+        assert!(ClientId::Antigravity.submit_default());
     }
 
     #[test]

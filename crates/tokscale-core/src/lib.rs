@@ -2590,10 +2590,11 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        generate_graph_with_loaded_pricing, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
+        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -5924,6 +5925,54 @@ mod tests {
         );
         assert_eq!(parsed_with_settings.messages[0].input, 42);
         assert_eq!(parsed_with_settings.messages[0].output, 7);
+    }
+
+    #[test]
+    fn test_submit_default_graph_includes_antigravity_cache_rows() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = temp_dir
+            .path()
+            .join(".config/tokscale/antigravity-cache/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("ag-submit.jsonl"),
+            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+"#,
+        )
+        .unwrap();
+
+        let mut clients: Vec<String> = ClientId::iter()
+            .filter(|client| client.submit_default())
+            .map(|client| client.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let graph = rt
+            .block_on(generate_graph_with_loaded_pricing(
+                ReportOptions {
+                    home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    use_env_roots: false,
+                    clients: Some(clients),
+                    since: None,
+                    until: None,
+                    year: None,
+                    group_by: GroupBy::default(),
+                    scanner_settings: scanner::ScannerSettings::default(),
+                },
+                None,
+            ))
+            .unwrap();
+
+        assert_eq!(graph.summary.clients, vec!["antigravity"]);
+        assert_eq!(graph.summary.models, vec!["model_placeholder_m84"]);
+        assert_eq!(graph.summary.total_tokens, 19);
+        assert_eq!(graph.contributions.len(), 1);
+        assert_eq!(graph.contributions[0].clients[0].client, "antigravity");
+        assert_eq!(
+            graph.contributions[0].clients[0].model_id,
+            "model_placeholder_m84"
+        );
     }
 
     #[test]

@@ -87,6 +87,8 @@ mod tests {
             resolve_alias("anthropic/claude-4-6-sonnet"),
             Some("claude-sonnet-4-6")
         );
+        assert_eq!(resolve_alias("model_placeholder_m84"), None);
+        assert_eq!(resolve_alias("model_placeholder_m16"), None);
     }
 
     #[test]
