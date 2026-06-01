@@ -31,10 +31,9 @@ export async function POST(request: Request) {
         ? `${normalizedCode.slice(0, 4)}-${normalizedCode.slice(4)}`
         : userCode.toUpperCase();
 
-    // Find the device code record
     const [record] = await db
-      .select()
-      .from(deviceCodes)
+      .update(deviceCodes)
+      .set({ userId: session.id })
       .where(
         and(
           eq(deviceCodes.userCode, formattedCode),
@@ -42,7 +41,7 @@ export async function POST(request: Request) {
           isNull(deviceCodes.userId)
         )
       )
-      .limit(1);
+      .returning({ id: deviceCodes.id });
 
     if (!record) {
       return NextResponse.json(
@@ -50,12 +49,6 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-
-    // Link user to device code
-    await db
-      .update(deviceCodes)
-      .set({ userId: session.id })
-      .where(eq(deviceCodes.id, record.id));
 
     return NextResponse.json({ success: true });
   } catch (error) {
