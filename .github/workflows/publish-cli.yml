@@ -42,63 +42,35 @@ jobs:
 
       - name: Calculate version
         id: bump
+        env:
+          RELEASE_BUMP: ${{ inputs.bump }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_RECOVERY: ${{ inputs.recovery }}
         run: |
           # Read current version from packages/cli/package.json (source of truth)
           CURRENT_VERSION=$(jq -r '.version' packages/cli/package.json)
           echo "📦 Current version: $CURRENT_VERSION"
-          echo "base_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
-          if [ "${{ inputs.recovery }}" = "true" ] && [ -z "${{ inputs.version }}" ]; then
-            echo "Recovery publishes must provide the existing release version." >&2
-            exit 1
-          fi
-          
-          # Calculate new version
-          if [ -n "${{ inputs.version }}" ]; then
-            NEW_VERSION="${{ inputs.version }}"
+          VERSION_FILE="$(mktemp)"
+          RELEASE_VERSION_FILE="$VERSION_FILE" bash scripts/calculate-release-version.sh
+          NEW_VERSION="$(cat "$VERSION_FILE")"
+          rm -f "$VERSION_FILE"
+
+          if [ -n "$RELEASE_VERSION" ]; then
             echo "📌 Using override version: $NEW_VERSION"
           else
-            # Strip any prerelease suffix for calculation
-            BASE="${CURRENT_VERSION%%-*}"
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-            
-            case "${{ inputs.bump }}" in
-              "major (X.0.0)")
-                NEW_VERSION="$((MAJOR + 1)).0.0"
-                ;;
-              "minor (x.X.0)")
-                NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
-                ;;
-              *)
-                NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-                ;;
-            esac
-            echo "🎯 Bump type: ${{ inputs.bump }}"
+            echo "🎯 Bump type: $RELEASE_BUMP"
           fi
           echo "🚀 New version: $NEW_VERSION"
           
           # Update packages/cli/package.json (version + platform optionalDependencies)
           jq --arg v "$NEW_VERSION" '.version = $v
-            | .optionalDependencies["@tokscale/cli-darwin-arm64"] = $v
-            | .optionalDependencies["@tokscale/cli-darwin-x64"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-x64-gnu"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-x64-musl"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-arm64-gnu"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-arm64-musl"] = $v
-            | .optionalDependencies["@tokscale/cli-win32-x64-msvc"] = $v
-            | .optionalDependencies["@tokscale/cli-win32-arm64-msvc"] = $v' packages/cli/package.json > tmp.json && mv tmp.json packages/cli/package.json
+            | .optionalDependencies = ((.optionalDependencies // {}) | with_entries(.value = $v))' packages/cli/package.json > tmp.json && mv tmp.json packages/cli/package.json
           echo "✅ Updated packages/cli/package.json"
 
           # Update platform package versions
-          for pkg in \
-            cli-darwin-arm64 \
-            cli-darwin-x64 \
-            cli-linux-x64-gnu \
-            cli-linux-x64-musl \
-            cli-linux-arm64-gnu \
-            cli-linux-arm64-musl \
-            cli-win32-x64-msvc \
-            cli-win32-arm64-msvc; do
+          mapfile -t PLATFORM_PACKAGES < <(jq -r '.optionalDependencies | keys[] | sub("^@tokscale/"; "")' packages/cli/package.json | sort)
+          for pkg in "${PLATFORM_PACKAGES[@]}"; do
             jq --arg v "$NEW_VERSION" '.version = $v' "packages/$pkg/package.json" > tmp.json && mv tmp.json "packages/$pkg/package.json"
             echo "✅ Updated packages/$pkg/package.json"
           done
@@ -147,13 +119,11 @@ jobs:
           echo "  cli -> darwin arm64: $(jq -r '.optionalDependencies["@tokscale/cli-darwin-arm64"]' packages/cli/package.json)"
           echo "  tokscale -> cli: $(jq -r '.dependencies["@tokscale/cli"]' packages/tokscale/package.json)"
           echo "  Platform packages:"
-          for pkg in cli-darwin-arm64 cli-darwin-x64 cli-linux-x64-gnu cli-linux-x64-musl cli-linux-arm64-gnu cli-linux-arm64-musl cli-win32-x64-msvc cli-win32-arm64-msvc; do
+          for pkg in "${PLATFORM_PACKAGES[@]}"; do
             echo "    $pkg: $(jq -r '.version' "packages/$pkg/package.json")"
           done
 
           bash scripts/check-version-coherence.sh --expect-version "$NEW_VERSION"
-          
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "📝 Version bump prepared (will commit after successful publish)"
 
       - name: Upload bumped manifest files
@@ -164,14 +134,7 @@ jobs:
             Cargo.toml
             Cargo.lock
             packages/cli/package.json
-            packages/cli-darwin-arm64/package.json
-            packages/cli-darwin-x64/package.json
-            packages/cli-linux-x64-gnu/package.json
-            packages/cli-linux-x64-musl/package.json
-            packages/cli-linux-arm64-gnu/package.json
-            packages/cli-linux-arm64-musl/package.json
-            packages/cli-win32-x64-msvc/package.json
-            packages/cli-win32-arm64-msvc/package.json
+            packages/cli-*/package.json
             packages/tokscale/package.json
           retention-days: 1
 

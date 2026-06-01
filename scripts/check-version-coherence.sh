@@ -56,6 +56,17 @@ if not platform_packages:
 
 errors: list[str] = []
 
+required_platform_names = {
+    "@tokscale/cli-darwin-arm64",
+    "@tokscale/cli-darwin-x64",
+    "@tokscale/cli-linux-arm64-gnu",
+    "@tokscale/cli-linux-arm64-musl",
+    "@tokscale/cli-linux-x64-gnu",
+    "@tokscale/cli-linux-x64-musl",
+    "@tokscale/cli-win32-arm64-msvc",
+    "@tokscale/cli-win32-x64-msvc",
+}
+
 def expect_equal(label: str, actual: str, expected: str) -> None:
     if actual != expected:
         errors.append(f"{label}: expected {expected}, found {actual}")
@@ -75,20 +86,28 @@ for path in platform_packages:
     if not name:
         errors.append(f"{path} missing package name")
         continue
+    if not name.startswith("@tokscale/cli-"):
+        errors.append(f"{path} package name must start with @tokscale/cli-")
+        continue
     platform_names.add(name)
     expect_equal(f"{path} version", manifest["version"], workspace_version)
 
-expected_optional = {
-    "@tokscale/cli-darwin-arm64",
-    "@tokscale/cli-darwin-x64",
-    "@tokscale/cli-linux-x64-gnu",
-    "@tokscale/cli-linux-x64-musl",
-    "@tokscale/cli-linux-arm64-gnu",
-    "@tokscale/cli-linux-arm64-musl",
-    "@tokscale/cli-win32-x64-msvc",
-    "@tokscale/cli-win32-arm64-msvc",
-}
+expected_optional = platform_names
 actual_optional = set(cli_package["optionalDependencies"].keys())
+missing_required_manifests = required_platform_names - platform_names
+if missing_required_manifests:
+    errors.append(
+        "Missing required platform package manifests: "
+        f"{sorted(missing_required_manifests)}"
+    )
+
+missing_required_optional = required_platform_names - actual_optional
+if missing_required_optional:
+    errors.append(
+        "Missing required platform optionalDependencies: "
+        f"{sorted(missing_required_optional)}"
+    )
+
 if actual_optional != expected_optional:
     errors.append(
         "packages/cli optionalDependencies keys mismatch: "

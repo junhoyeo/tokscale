@@ -143,8 +143,67 @@ EOF_LOCK
   )
 }
 
+test_accepts_new_platform_package_when_manifest_and_optional_dependency_match() {
+  local work="${TMP_DIR}/new-platform-package"
+  mkdir -p "${work}/scripts"
+  cp "${SCRIPT_UNDER_TEST}" "${work}/scripts/check-version-coherence.sh"
+  (
+    cd "${work}"
+    write_release_manifests "3.0.0"
+    mkdir -p packages/cli-linux-riscv64-gnu
+    cat > packages/cli-linux-riscv64-gnu/package.json <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli-linux-riscv64-gnu",
+  "version": "3.0.0"
+}
+EOF_MANIFEST
+    python3 - <<'PY'
+import json
+import pathlib
+
+path = pathlib.Path("packages/cli/package.json")
+manifest = json.loads(path.read_text())
+manifest["optionalDependencies"]["@tokscale/cli-linux-riscv64-gnu"] = "3.0.0"
+path.write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+
+    bash scripts/check-version-coherence.sh --expect-version "3.0.0" >"${TMP_DIR}/new-platform-package-output.txt" 2>&1
+  )
+}
+
+test_rejects_missing_canonical_platform_when_manifest_and_optional_dependency_are_removed() {
+  local work="${TMP_DIR}/missing-canonical-platform"
+  mkdir -p "${work}/scripts"
+  cp "${SCRIPT_UNDER_TEST}" "${work}/scripts/check-version-coherence.sh"
+  (
+    cd "${work}"
+    write_release_manifests "3.0.0"
+    rm -rf packages/cli-win32-arm64-msvc
+    python3 - <<'PY'
+import json
+import pathlib
+
+path = pathlib.Path("packages/cli/package.json")
+manifest = json.loads(path.read_text())
+manifest["optionalDependencies"].pop("@tokscale/cli-win32-arm64-msvc")
+path.write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+
+    local output="${TMP_DIR}/missing-canonical-platform-output.txt"
+    if bash scripts/check-version-coherence.sh --expect-version "3.0.0" >"${output}" 2>&1; then
+      echo "Expected missing canonical platform to fail" >&2
+      return 1
+    fi
+
+    grep -q "Missing required platform package manifests: \\['@tokscale/cli-win32-arm64-msvc'\\]" "${output}"
+    grep -q "Missing required platform optionalDependencies: \\['@tokscale/cli-win32-arm64-msvc'\\]" "${output}"
+  )
+}
+
 test_rejects_stale_workspace_versions_in_cargo_lock
 test_accepts_matching_workspace_versions_in_cargo_lock
 test_ignores_registry_duplicate_names_in_cargo_lock
+test_accepts_new_platform_package_when_manifest_and_optional_dependency_match
+test_rejects_missing_canonical_platform_when_manifest_and_optional_dependency_are_removed
 
 echo "check-version-coherence tests passed"

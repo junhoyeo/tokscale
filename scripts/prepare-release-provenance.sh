@@ -11,24 +11,31 @@ EXPECTED_RELEASE_BASE_SHA="${EXPECTED_RELEASE_BASE_SHA:-}"
 GITHUB_OUTPUT="${GITHUB_OUTPUT:-}"
 RELEASE_RECOVERY="${RELEASE_RECOVERY:-false}"
 
-MANIFEST_PATHS=(
-  Cargo.toml
-  Cargo.lock
-  packages/cli/package.json
-  packages/cli-darwin-arm64/package.json
-  packages/cli-darwin-x64/package.json
-  packages/cli-linux-x64-gnu/package.json
-  packages/cli-linux-x64-musl/package.json
-  packages/cli-linux-arm64-gnu/package.json
-  packages/cli-linux-arm64-musl/package.json
-  packages/cli-win32-x64-msvc/package.json
-  packages/cli-win32-arm64-msvc/package.json
-  packages/tokscale/package.json
-)
-
 fail() {
   echo "ERROR: $*" >&2
   exit 1
+}
+
+release_manifest_paths() {
+  python3 - <<'PY'
+import json
+import pathlib
+
+root = pathlib.Path(".")
+paths = [
+    pathlib.Path("Cargo.toml"),
+    pathlib.Path("Cargo.lock"),
+    pathlib.Path("packages/cli/package.json"),
+]
+cli = json.loads((root / paths[-1]).read_text())
+for package_name in sorted(cli.get("optionalDependencies", {})):
+    if not package_name.startswith("@tokscale/cli-"):
+        raise SystemExit(f"Unexpected optional dependency package name: {package_name}")
+    paths.append(pathlib.Path("packages") / package_name.removeprefix("@tokscale/") / "package.json")
+paths.append(pathlib.Path("packages/tokscale/package.json"))
+for path in paths:
+    print(path.as_posix())
+PY
 }
 
 [[ -n "${NEW_VERSION}" ]] || fail "NEW_VERSION is required"
@@ -66,6 +73,7 @@ fi
 
 bash scripts/check-version-coherence.sh --expect-version "${NEW_VERSION}"
 
+mapfile -t MANIFEST_PATHS < <(release_manifest_paths)
 git add -- "${MANIFEST_PATHS[@]}"
 if git diff --cached --quiet; then
   if [[ "${RELEASE_RECOVERY}" == "true" ]]; then
