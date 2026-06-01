@@ -1174,6 +1174,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let cline_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Cline)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::cline::parse_cline_file(path)
+            })
+        })
+        .collect();
+    for outcome in cline_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let mux_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Mux)
         .par_iter()
@@ -2298,6 +2314,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let kilocode_count = summed_parsed_message_count(&kilocode_msgs);
     counts.set(ClientId::KiloCode, kilocode_count);
     messages.extend(kilocode_msgs);
+
+    let cline_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Cline)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::cline::parse_cline_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let cline_count = summed_parsed_message_count(&cline_msgs);
+    counts.set(ClientId::Cline, cline_count);
+    messages.extend(cline_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Mux)

@@ -405,6 +405,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: false
+    },
+    Cline = 25 => {
+        id: "cline",
+        root: PathRoot::Home,
+        relative: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
+        pattern: "ui_messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 

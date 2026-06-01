@@ -24,6 +24,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "zed",
   "trae",
   "warp",
+  "cline",
   "synthetic",
 ] as const;
 

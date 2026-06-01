@@ -63,6 +63,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
         return "/assets/logos/kiro.ico";
       case "zed":
         return "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp";
+      case "cline":
+        return "/assets/logos/cline.png";
       case "synthetic":
         return "/assets/logos/synthetic.png";
       default:
