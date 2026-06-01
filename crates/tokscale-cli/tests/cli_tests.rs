@@ -3,7 +3,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 // ── Fixture helpers ────────────────────────────────────────────────────────
@@ -119,6 +119,122 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
 
 fn create_temp_fixture_dir() -> TempDir {
     create_temp_fixture_dir_with_pricing_cache(true)
+}
+
+fn create_fake_codex_bin() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create fake codex dir");
+    let codex_path = tmp.path().join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+case "$TOKSCALE_FAKE_CODEX_MODE" in
+  success)
+    printf 'captured ok'
+    exit 0
+    ;;
+  fail)
+    printf 'captured fail'
+    exit 17
+    ;;
+  slow)
+    exec sleep 20
+    ;;
+  *)
+    echo "unknown TOKSCALE_FAKE_CODEX_MODE" >&2
+    exit 2
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&codex_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&codex_path, permissions).unwrap();
+    }
+
+    tmp
+}
+
+fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> Command {
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let joined_path = std::env::join_paths(
+        std::iter::once(fake_bin.to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+
+    cmd.env("HOME", fake_bin)
+        .env("TOKSCALE_FAKE_CODEX_MODE", mode)
+        .env("TOKSCALE_NATIVE_TIMEOUT_MS", "10000")
+        .env("PATH", joined_path)
+        .args([
+            "headless",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--no-auto-flags",
+            "codex",
+        ]);
+
+    cmd
+}
+
+#[test]
+fn headless_capture_fast_success_does_not_wait_for_timeout() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("success.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(fake_bin.path(), &output_path, "success")
+        .assert()
+        .success();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "fast success waited too long: {elapsed:?}"
+    );
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "captured ok");
+}
+
+#[test]
+fn headless_capture_fast_nonzero_preserves_exit_code() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("fail.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(fake_bin.path(), &output_path, "fail")
+        .assert()
+        .failure()
+        .code(17);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "fast failure waited too long: {elapsed:?}"
+    );
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "captured fail");
+}
+
+#[test]
+fn headless_capture_slow_command_times_out() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("slow.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(fake_bin.path(), &output_path, "slow")
+        .assert()
+        .failure()
+        .code(124);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(14),
+        "slow command timeout duration was unexpected: {elapsed:?}"
+    );
 }
 
 fn create_temp_fixture_dir_without_pricing_cache() -> TempDir {

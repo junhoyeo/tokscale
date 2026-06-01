@@ -5476,6 +5476,96 @@ fn format_tokens_with_commas(n: i64) -> String {
     result
 }
 
+struct CaptureCommandOutcome {
+    exit_code: i32,
+    timed_out: bool,
+}
+
+fn run_capture_command(
+    command: &str,
+    args: &[String],
+    output_path: &Path,
+    timeout: Duration,
+) -> Result<CaptureCommandOutcome> {
+    use std::io::{Read, Write};
+    use std::process::Command;
+    use std::thread;
+    use std::time::Instant;
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", command, e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
+
+    let mut output_file = std::fs::File::create(output_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create output file '{}': {}",
+            output_path.display(),
+            e
+        )
+    })?;
+
+    let output_handle = thread::spawn(move || -> Result<()> {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buffer = [0; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(n) => output_file
+                    .write_all(&buffer[..n])
+                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to read from subprocess stdout: {}",
+                        e
+                    ));
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?
+        {
+            break status;
+        }
+
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child
+                .wait()
+                .map_err(|e| anyhow::anyhow!("Failed to wait for timed-out subprocess: {}", e))?;
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let output_result = output_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
+    if !timed_out {
+        output_result?;
+    }
+
+    Ok(CaptureCommandOutcome {
+        exit_code: status.code().unwrap_or(1),
+        timed_out,
+    })
+}
+
 fn run_headless_command(
     source: &str,
     args: Vec<String>,
@@ -5484,10 +5574,6 @@ fn run_headless_command(
     no_auto_flags: bool,
 ) -> Result<()> {
     use chrono::Utc;
-    use std::io::{Read, Write};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use uuid::Uuid;
 
     let source_lower = source.to_lowercase();
@@ -5558,76 +5644,10 @@ fn run_headless_command(
     );
     println!();
 
-    let mut child = Command::new(&source_lower)
-        .args(&final_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .stdin(std::process::Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", source_lower, e))?;
+    let outcome =
+        run_capture_command(&source_lower, &final_args, Path::new(&output_path), timeout)?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
-
-    let mut output_file = std::fs::File::create(&output_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create output file '{}': {}", output_path, e))?;
-
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let timed_out_clone = Arc::clone(&timed_out);
-    let child_id = child.id();
-
-    let timeout_handle = std::thread::spawn(move || {
-        std::thread::sleep(timeout);
-        if !timed_out_clone.load(Ordering::SeqCst) {
-            timed_out_clone.store(true, Ordering::SeqCst);
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(child_id.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &child_id.to_string()])
-                    .output();
-            }
-        }
-    });
-
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut buffer = [0; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                output_file
-                    .write_all(&buffer[..n])
-                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?;
-            }
-            Err(e) => {
-                if timed_out.load(Ordering::SeqCst) {
-                    break;
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to read from subprocess stdout: {}",
-                    e
-                ));
-            }
-        }
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?;
-
-    timed_out.store(true, Ordering::SeqCst);
-    let _ = timeout_handle.join();
-
-    if timed_out.load(Ordering::SeqCst) && !status.success() {
+    if outcome.timed_out {
         eprintln!(
             "{}",
             format!("\n  Subprocess timed out after {}s", timeout.as_secs()).red()
@@ -5637,16 +5657,14 @@ fn run_headless_command(
         std::process::exit(124);
     }
 
-    let exit_code = status.code().unwrap_or(1);
-
     println!(
         "{}",
         format!("✓ Saved headless output to {}", output_path).green()
     );
     println!();
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    if outcome.exit_code != 0 {
+        std::process::exit(outcome.exit_code);
     }
 
     Ok(())
