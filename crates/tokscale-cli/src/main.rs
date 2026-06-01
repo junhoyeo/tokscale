@@ -165,7 +165,7 @@ enum Commands {
         json: bool,
         #[arg(
             long,
-            help = "Force specific provider (custom, litellm, or openrouter)"
+            help = "Force specific pricing source (custom, litellm, openrouter, or models.dev)"
         )]
         provider: Option<String>,
         #[arg(long, help = "Disable spinner")]
@@ -3119,14 +3119,14 @@ fn run_pricing_lookup(
 
     let provider_normalized = provider.map(|p| p.to_lowercase());
     if let Some(ref p) = provider_normalized {
-        if p != "custom" && p != "litellm" && p != "openrouter" {
+        if p != "custom" && p != "litellm" && p != "openrouter" && p != "models.dev" {
             println!(
                 "\n  {}",
                 format!("Invalid provider: {}", provider.unwrap_or("")).red()
             );
             println!(
                 "{}\n",
-                "  Valid providers: custom, litellm, openrouter".bright_black()
+                "  Valid providers: custom, litellm, openrouter, models.dev".bright_black()
             );
             std::process::exit(1);
         }
@@ -3242,6 +3242,7 @@ fn run_pricing_lookup(
                     "custom" => "Custom",
                     "litellm" => "LiteLLM",
                     "openrouter" => "OpenRouter",
+                    "models.dev" => "Models.dev",
                     _ => pricing.source.as_str(),
                 };
                 println!("  Source: {}", source_label);

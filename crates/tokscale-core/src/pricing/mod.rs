@@ -3,6 +3,7 @@ pub mod cache;
 pub mod custom;
 pub mod litellm;
 pub mod lookup;
+pub mod models_dev;
 pub mod openrouter;
 
 use custom::CustomPricing;
@@ -41,12 +42,22 @@ impl PricingService {
         litellm_data: HashMap<String, ModelPricing>,
         openrouter_data: HashMap<String, ModelPricing>,
     ) -> Self {
+        Self::new_with_custom_and_models_dev(custom, litellm_data, openrouter_data, HashMap::new())
+    }
+
+    pub fn new_with_custom_and_models_dev(
+        custom: CustomPricing,
+        litellm_data: HashMap<String, ModelPricing>,
+        openrouter_data: HashMap<String, ModelPricing>,
+        models_dev_data: HashMap<String, ModelPricing>,
+    ) -> Self {
         Self {
             custom,
-            lookup: PricingLookup::new(
+            lookup: PricingLookup::new_with_models_dev(
                 litellm_data,
                 openrouter_data,
                 Self::build_cursor_overrides(),
+                models_dev_data,
             ),
         }
     }
@@ -117,31 +128,44 @@ impl PricingService {
     }
 
     async fn fetch_inner() -> Result<Self, String> {
-        let (litellm_result, openrouter_data) =
-            tokio::join!(litellm::fetch(), openrouter::fetch_all_mapped());
+        let (litellm_result, openrouter_data, models_dev_result) = tokio::join!(
+            litellm::fetch(),
+            openrouter::fetch_all_mapped(),
+            models_dev::fetch()
+        );
 
         let litellm_data = litellm_result.map_err(|e| e.to_string())?;
         let litellm_data = Self::filter_litellm_data(litellm_data);
+        let models_dev_data = match models_dev_result {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("[tokscale] models.dev fetch failed: {}", e);
+                HashMap::new()
+            }
+        };
 
-        Ok(Self::new_with_custom(
+        Ok(Self::new_with_custom_and_models_dev(
             CustomPricing::load_from_default_path(),
             litellm_data,
             openrouter_data,
+            models_dev_data,
         ))
     }
 
     fn from_cached_datasets(
         litellm_data: Option<HashMap<String, ModelPricing>>,
         openrouter_data: Option<HashMap<String, ModelPricing>>,
+        models_dev_data: Option<HashMap<String, ModelPricing>>,
     ) -> Option<Self> {
-        if litellm_data.is_none() && openrouter_data.is_none() {
+        if litellm_data.is_none() && openrouter_data.is_none() && models_dev_data.is_none() {
             return None;
         }
 
-        Some(Self::new_with_custom(
+        Some(Self::new_with_custom_and_models_dev(
             CustomPricing::load_from_default_path(),
             Self::filter_litellm_data(litellm_data.unwrap_or_default()),
             openrouter_data.unwrap_or_default(),
+            models_dev_data.unwrap_or_default(),
         ))
     }
 
@@ -149,6 +173,7 @@ impl PricingService {
         Self::from_cached_datasets(
             litellm::load_cached_any_age(),
             openrouter::load_cached_any_age(),
+            models_dev::load_cached_any_age(),
         )
     }
 
@@ -270,6 +295,167 @@ mod tests {
         openrouter: HashMap<String, ModelPricing>,
     ) -> PricingService {
         PricingService::new_with_custom(CustomPricing::from_models(custom), litellm, openrouter)
+    }
+
+    fn fixture_models_dev() -> HashMap<String, ModelPricing> {
+        models_dev::parse_dataset(include_str!("../../tests/fixtures/models_dev_pricing.json"))
+            .unwrap()
+    }
+
+    fn custom_service_with_models_dev(
+        custom: HashMap<String, ModelPricing>,
+        litellm: HashMap<String, ModelPricing>,
+        openrouter: HashMap<String, ModelPricing>,
+        models_dev: HashMap<String, ModelPricing>,
+    ) -> PricingService {
+        PricingService::new_with_custom_and_models_dev(
+            CustomPricing::from_models(custom),
+            litellm,
+            openrouter,
+            models_dev,
+        )
+    }
+
+    #[test]
+    fn models_dev_parses_fixture_prices_per_token() {
+        let data = fixture_models_dev();
+        let pricing = data.get("openai/gpt-fixture-model").unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(0.00000125));
+        assert_eq!(pricing.output_cost_per_token, Some(0.00001));
+        assert_eq!(pricing.cache_read_input_token_cost, Some(0.000000125));
+        assert_eq!(pricing.cache_creation_input_token_cost, Some(0.000001875));
+        assert!(!data.contains_key("openai/missing-output-price"));
+    }
+
+    #[test]
+    fn models_dev_fills_provider_aware_fallback_prices() {
+        let service = custom_service_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            fixture_models_dev(),
+        );
+
+        let result = service
+            .lookup_with_source_and_provider("gpt-fixture-model", None, Some("openai"))
+            .unwrap();
+
+        assert_eq!(result.source, "Models.dev");
+        assert_eq!(result.matched_key, "openai/gpt-fixture-model");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.00000125));
+    }
+
+    #[test]
+    fn models_dev_cache_prices_are_used_for_cost_fallback() {
+        let service = custom_service_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            fixture_models_dev(),
+        );
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            output: 100_000,
+            cache_read: 50_000,
+            cache_write: 20_000,
+            reasoning: 0,
+        };
+
+        let cost =
+            service.calculate_cost_with_provider("gpt-fixture-model", Some("openai"), &usage);
+
+        let expected = 1.25 + 1.0 + 0.00625 + 0.0375;
+        assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn existing_sources_beat_models_dev_fallback() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-fixture-model".into(),
+            model_pricing(0.000002, 0.000008),
+        );
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-fixture-sonnet".into(),
+            model_pricing(0.000004, 0.000016),
+        );
+
+        let service = custom_service_with_models_dev(
+            HashMap::new(),
+            litellm,
+            openrouter,
+            fixture_models_dev(),
+        );
+
+        let litellm_result = service
+            .lookup_with_source_and_provider("gpt-fixture-model", None, Some("openai"))
+            .unwrap();
+        assert_eq!(litellm_result.source, "LiteLLM");
+        assert_eq!(litellm_result.pricing.input_cost_per_token, Some(0.000002));
+
+        let openrouter_result = service
+            .lookup_with_source_and_provider("claude-fixture-sonnet", None, Some("anthropic"))
+            .unwrap();
+        assert_eq!(openrouter_result.source, "OpenRouter");
+        assert_eq!(
+            openrouter_result.pricing.input_cost_per_token,
+            Some(0.000004)
+        );
+    }
+
+    #[test]
+    fn models_dev_respects_forced_source_boundaries() {
+        let service = custom_service_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            fixture_models_dev(),
+        );
+
+        assert!(service
+            .lookup_with_source_and_provider("gpt-fixture-model", Some("litellm"), Some("openai"))
+            .is_none());
+        assert!(service
+            .lookup_with_source_and_provider(
+                "gpt-fixture-model",
+                Some("openrouter"),
+                Some("openai")
+            )
+            .is_none());
+
+        let result = service
+            .lookup_with_source_and_provider(
+                "gpt-fixture-model",
+                Some("models.dev"),
+                Some("openai"),
+            )
+            .unwrap();
+        assert_eq!(result.source, "Models.dev");
+    }
+
+    #[test]
+    fn custom_override_beats_models_dev_fallback() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "gpt-fixture-model".into(),
+            model_pricing(0.000009, 0.000018),
+        );
+
+        let service = custom_service_with_models_dev(
+            custom,
+            HashMap::new(),
+            HashMap::new(),
+            fixture_models_dev(),
+        );
+
+        let result = service
+            .lookup_with_source_and_provider("gpt-fixture-model", None, Some("openai"))
+            .unwrap();
+
+        assert_eq!(result.source, "Custom");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.000009));
     }
 
     #[test]
@@ -617,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_from_cached_datasets_returns_none_when_both_sources_missing() {
-        assert!(PricingService::from_cached_datasets(None, None).is_none());
+        assert!(PricingService::from_cached_datasets(None, None, None).is_none());
     }
 
     #[test]
@@ -638,7 +824,7 @@ mod tests {
             },
         );
 
-        let service = PricingService::from_cached_datasets(Some(litellm), None).unwrap();
+        let service = PricingService::from_cached_datasets(Some(litellm), None, None).unwrap();
 
         assert!(service
             .lookup_with_source("github_copilot/gpt-5.3-codex", Some("litellm"))
@@ -646,6 +832,19 @@ mod tests {
         assert!(service
             .lookup_with_source("gpt-5.2", Some("litellm"))
             .is_some());
+    }
+
+    #[test]
+    fn test_from_cached_datasets_uses_models_dev_when_other_sources_missing() {
+        let service =
+            PricingService::from_cached_datasets(None, None, Some(fixture_models_dev())).unwrap();
+
+        let result = service
+            .lookup_with_source_and_provider("gpt-fixture-model", None, Some("openai"))
+            .unwrap();
+
+        assert_eq!(result.source, "Models.dev");
+        assert_eq!(result.matched_key, "openai/gpt-fixture-model");
     }
 
     #[test]
