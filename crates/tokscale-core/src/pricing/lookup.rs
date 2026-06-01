@@ -587,11 +587,9 @@ impl PricingLookup {
             let key = format!("{}{}", prefix, model_id);
             if let Some(litellm_key) = self.litellm_lower.get(&key) {
                 if let Some(pricing) = self.litellm.get(litellm_key) {
-                    return Some(LookupResult {
-                        pricing: pricing.clone(),
-                        source: "LiteLLM".into(),
-                        matched_key: litellm_key.clone(),
-                    });
+                    if let Some(result) = lookup_result_if_usable(pricing, "LiteLLM", litellm_key) {
+                        return Some(result);
+                    }
                 }
             }
         }
@@ -657,30 +655,18 @@ impl PricingLookup {
     fn exact_match_litellm(&self, model_id: &str) -> Option<LookupResult> {
         let key = self.litellm_lower.get(model_id)?;
         let pricing = self.litellm.get(key)?;
-        Some(LookupResult {
-            pricing: pricing.clone(),
-            source: "LiteLLM".into(),
-            matched_key: key.clone(),
-        })
+        lookup_result_if_usable(pricing, "LiteLLM", key)
     }
 
     fn exact_match_openrouter(&self, model_id: &str) -> Option<LookupResult> {
         if let Some(key) = self.openrouter_lower.get(model_id) {
             if let Some(pricing) = self.openrouter.get(key) {
-                return Some(LookupResult {
-                    pricing: pricing.clone(),
-                    source: "OpenRouter".into(),
-                    matched_key: key.clone(),
-                });
+                return lookup_result_if_usable(pricing, "OpenRouter", key);
             }
         }
         if let Some(key) = self.openrouter_model_part.get(model_id) {
             if let Some(pricing) = self.openrouter.get(key) {
-                return Some(LookupResult {
-                    pricing: pricing.clone(),
-                    source: "OpenRouter".into(),
-                    matched_key: key.clone(),
-                });
+                return lookup_result_if_usable(pricing, "OpenRouter", key);
             }
         }
         None
@@ -688,20 +674,12 @@ impl PricingLookup {
 
     fn exact_match_cursor(&self, model_id: &str) -> Option<LookupResult> {
         if let Some(key) = self.cursor_lower.get(model_id) {
-            return Some(LookupResult {
-                pricing: self.cursor.get(key).unwrap().clone(),
-                source: "Cursor".into(),
-                matched_key: key.clone(),
-            });
+            return lookup_result_if_usable(self.cursor.get(key).unwrap(), "Cursor", key);
         }
         if let Some(model_part) = model_id.split('/').next_back() {
             if model_part != model_id {
                 if let Some(key) = self.cursor_lower.get(model_part) {
-                    return Some(LookupResult {
-                        pricing: self.cursor.get(key).unwrap().clone(),
-                        source: "Cursor".into(),
-                        matched_key: key.clone(),
-                    });
+                    return lookup_result_if_usable(self.cursor.get(key).unwrap(), "Cursor", key);
                 }
             }
         }
@@ -721,11 +699,9 @@ impl PricingLookup {
             let key = format!("{}{}", prefix, model_id);
             if let Some(litellm_key) = self.litellm_lower.get(&key) {
                 if let Some(pricing) = self.litellm.get(litellm_key) {
-                    return Some(LookupResult {
-                        pricing: pricing.clone(),
-                        source: "LiteLLM".into(),
-                        matched_key: litellm_key.clone(),
-                    });
+                    if let Some(result) = lookup_result_if_usable(pricing, "LiteLLM", litellm_key) {
+                        return Some(result);
+                    }
                 }
             }
         }
@@ -745,11 +721,9 @@ impl PricingLookup {
             let key = format!("{}{}", prefix, model_id);
             if let Some(or_key) = self.openrouter_lower.get(&key) {
                 if let Some(pricing) = self.openrouter.get(or_key) {
-                    return Some(LookupResult {
-                        pricing: pricing.clone(),
-                        source: "OpenRouter".into(),
-                        matched_key: or_key.clone(),
-                    });
+                    if let Some(result) = lookup_result_if_usable(pricing, "OpenRouter", or_key) {
+                        return Some(result);
+                    }
                 }
             }
         }
@@ -1077,6 +1051,8 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
     if lower.contains("opus") {
         if let Some(model) = normalize_claude_opus_4_minor(&lower) {
             return Some(model);
+        } else if contains_delimited_major_minor(&lower, '4') {
+            return None;
         } else if contains_delimited_fragment(&lower, "4") {
             return Some("claude-opus-4".into());
         }
@@ -1085,6 +1061,8 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
         if contains_delimited_fragment(&lower, "4.5") || contains_delimited_fragment(&lower, "4-5")
         {
             return Some("claude-sonnet-4-5".into());
+        } else if contains_delimited_major_minor(&lower, '4') {
+            return None;
         } else if contains_delimited_fragment(&lower, "4") {
             return Some("claude-sonnet-4".into());
         } else if contains_delimited_fragment(&lower, "3.7")
@@ -1101,6 +1079,8 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
         if contains_delimited_fragment(&lower, "4.5") || contains_delimited_fragment(&lower, "4-5")
         {
             return Some("claude-haiku-4-5".into());
+        } else if contains_delimited_major_minor(&lower, '4') {
+            return None;
         } else if contains_delimited_fragment(&lower, "3.5")
             || contains_delimited_fragment(&lower, "3-5")
         {
@@ -1221,6 +1201,18 @@ fn has_any_usable_pricing(pricing: &ModelPricing) -> bool {
     .any(|opt| opt.is_some_and(is_valid_price_value))
 }
 
+fn lookup_result_if_usable(
+    pricing: &ModelPricing,
+    source: &str,
+    matched_key: &str,
+) -> Option<LookupResult> {
+    has_any_usable_pricing(pricing).then(|| LookupResult {
+        pricing: pricing.clone(),
+        source: source.into(),
+        matched_key: matched_key.into(),
+    })
+}
+
 fn has_any_valid_above_tier_value(pricing: &ModelPricing) -> bool {
     [
         pricing.input_cost_per_token_above_128k_tokens,
@@ -1305,6 +1297,26 @@ fn contains_delimited_fragment(haystack: &str, fragment: &str) -> bool {
     false
 }
 
+fn contains_delimited_major_minor(haystack: &str, major: char) -> bool {
+    for (pos, _) in haystack.match_indices(major) {
+        let before_ok = pos == 0 || !haystack[..pos].chars().last().unwrap().is_alphanumeric();
+        let after_pos = pos + major.len_utf8();
+        let mut after = haystack[after_pos..].chars();
+        let Some(separator) = after.next() else {
+            continue;
+        };
+        let Some(minor_start) = after.next() else {
+            continue;
+        };
+
+        if before_ok && matches!(separator, '.' | '-') && minor_start.is_ascii_digit() {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn is_fuzzy_eligible(model_id: &str) -> bool {
     if model_id.len() < MIN_FUZZY_MATCH_LEN {
         return false;
@@ -1319,6 +1331,10 @@ fn try_strip_unknown_suffix<F>(model_id: &str, do_lookup: F) -> Option<LookupRes
 where
     F: Fn(&str) -> Option<LookupResult>,
 {
+    if has_unrecognized_claude_four_minor(model_id) {
+        return None;
+    }
+
     let parts: Vec<&str> = model_id.split('-').collect();
 
     if parts.len() < 2 {
@@ -1331,6 +1347,10 @@ where
         let candidate: String = parts[..parts.len() - strip].join("-");
 
         if candidate.len() >= MIN_MODEL_NAME_LEN {
+            if strips_claude_numeric_minor(&candidate, parts[parts.len() - strip]) {
+                continue;
+            }
+
             if let Some(result) = do_lookup(&candidate) {
                 return Some(result);
             }
@@ -1338,6 +1358,30 @@ where
     }
 
     None
+}
+
+fn strips_claude_numeric_minor(candidate: &str, first_stripped_segment: &str) -> bool {
+    !first_stripped_segment.is_empty()
+        && first_stripped_segment.chars().all(|c| c.is_ascii_digit())
+        && (candidate.contains("claude")
+            || candidate.contains("opus")
+            || candidate.contains("sonnet")
+            || candidate.contains("haiku"))
+        && contains_delimited_fragment(candidate, "4")
+}
+
+fn has_unrecognized_claude_four_minor(model_id: &str) -> bool {
+    (model_id.contains("claude")
+        || model_id.contains("opus")
+        || model_id.contains("sonnet")
+        || model_id.contains("haiku"))
+        && contains_delimited_major_minor(model_id, '4')
+        && !contains_delimited_fragment(model_id, "4.5")
+        && !contains_delimited_fragment(model_id, "4-5")
+        && !contains_delimited_fragment(model_id, "4.6")
+        && !contains_delimited_fragment(model_id, "4-6")
+        && !contains_delimited_fragment(model_id, "4.7")
+        && !contains_delimited_fragment(model_id, "4-7")
 }
 
 /// Attempts to find a model by progressively stripping leading segments.
@@ -2739,7 +2783,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_opus_4_60_does_not_map_to_4_6() {
+    fn test_normalize_opus_4_60_does_not_degrade_to_opus_4() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "claude-opus-4".into(),
@@ -2759,9 +2803,7 @@ mod tests {
         );
 
         let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
-        let result = lookup.lookup("opus-4-60").unwrap();
-        assert_eq!(result.matched_key, "claude-opus-4");
-        assert_ne!(result.matched_key, "claude-opus-4-6");
+        assert!(lookup.lookup("opus-4-60").is_none());
     }
 
     #[test]
@@ -2868,7 +2910,7 @@ mod tests {
     }
 
     #[test]
-    fn test_future_opus_4_minor_does_not_degrade_to_legacy_opus_4() {
+    fn test_unknown_future_opus_minor_does_not_degrade_to_opus_4() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "anthropic/claude-opus-4".into(),
@@ -2880,12 +2922,9 @@ mod tests {
         );
 
         let lookup = PricingLookup::new(HashMap::new(), openrouter, HashMap::new());
-        let result = lookup.lookup("aws.claude-opus-4-8");
-        assert!(
-            result.is_none(),
-            "unknown future opus minor versions must not price as legacy claude-opus-4; got {:?}",
-            result.map(|result| result.matched_key)
-        );
+
+        assert!(lookup.lookup("claude-opus-4-8").is_none());
+        assert!(lookup.lookup("aws.claude-opus-4-8").is_none());
     }
 
     #[test]
@@ -3833,6 +3872,79 @@ mod tests {
         assert_eq!(result.matched_key, "claude-opus-4-6-20250301");
         assert_eq!(result.source, "LiteLLM");
         assert!(result.pricing.input_cost_per_token.is_some());
+    }
+
+    #[test]
+    fn test_none_pricing_exact_litellm_does_not_shadow_openrouter_model_part() {
+        let mut litellm = HashMap::new();
+        litellm.insert("claude-opus-4-6".into(), ModelPricing::default());
+
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4-6".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000025),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+        let result = lookup.lookup("claude-opus-4-6").unwrap();
+
+        assert_eq!(result.source, "OpenRouter");
+        assert_eq!(result.matched_key, "anthropic/claude-opus-4-6");
+
+        let cost = lookup.calculate_cost("claude-opus-4-6", 100, 20, 0, 0, 0);
+        assert!(cost > 0.0, "cost should use priced fallback, got {cost}");
+    }
+
+    #[test]
+    fn test_none_pricing_provider_exact_does_not_shadow_stripped_priced_entry() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "anthropic/claude-sonnet-4-5".into(),
+            ModelPricing::default(),
+        );
+        litellm.insert(
+            "claude-sonnet-4-5".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000003),
+                output_cost_per_token: Some(0.000015),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("anthropic/claude-sonnet-4-5").unwrap();
+
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.matched_key, "claude-sonnet-4-5");
+
+        let cost = lookup.calculate_cost("anthropic/claude-sonnet-4-5", 100, 20, 0, 0, 0);
+        assert!(
+            cost > 0.0,
+            "cost should use stripped priced entry, got {cost}"
+        );
+    }
+
+    #[test]
+    fn test_zero_pricing_exact_entry_is_usable() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "free-model".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("free-model").unwrap();
+
+        assert_eq!(result.matched_key, "free-model");
+        assert_eq!(lookup.calculate_cost("free-model", 100, 20, 0, 0, 0), 0.0);
     }
 
     #[test]
