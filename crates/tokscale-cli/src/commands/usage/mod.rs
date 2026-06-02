@@ -2,6 +2,7 @@ mod amp;
 mod claude;
 mod codex;
 mod copilot;
+mod grok;
 pub mod helpers;
 mod kimi;
 mod minimax;
@@ -87,6 +88,7 @@ pub fn fetch_all() -> Vec<UsageOutput> {
         ("Z.ai", zai::has_credentials, zai::fetch),
         ("Amp", amp::has_credentials, amp::fetch),
         ("Copilot", copilot::has_credentials, copilot::fetch),
+        ("Grok Build", grok::has_credentials, grok::fetch),
         ("Kimi", kimi::has_credentials, kimi::fetch),
         ("MiniMax", minimax::has_credentials, minimax::fetch),
         ("Warp/Oz", warp::has_credentials, warp::fetch),
