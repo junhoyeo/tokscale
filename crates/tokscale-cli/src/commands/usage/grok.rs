@@ -43,38 +43,46 @@ pub fn has_credentials() -> bool {
     auth_path().exists()
 }
 
-fn read_credentials() -> Result<Credentials> {
+fn read_credentials() -> Result<Vec<Credentials>> {
     let content = std::fs::read_to_string(auth_path())?;
     let doc: Value = serde_json::from_str(&content)?;
+    credential_candidates_from_value(&doc)
+}
+
+fn credential_candidates_from_value(doc: &Value) -> Result<Vec<Credentials>> {
     let entries = doc
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("Grok auth.json must contain an object."))?;
 
     let mut candidates: Vec<_> = entries
         .iter()
-        .filter_map(|(scope, value)| value.as_object().map(|entry| (scope.as_str(), entry)))
-        .filter(|(_, entry)| entry.get("key").and_then(Value::as_str).is_some())
+        .filter_map(|(scope, value)| {
+            let entry = value.as_object()?;
+            let token = entry
+                .get("key")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            let email = entry
+                .get("email")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let priority = if scope.contains("auth.x.ai") { 0 } else { 1 };
+            Some((priority, Credentials { token, email }))
+        })
         .collect();
 
-    candidates.sort_by_key(|(scope, _)| if scope.contains("auth.x.ai") { 0 } else { 1 });
-
-    let (_, entry) = candidates
+    candidates.sort_by_key(|(priority, _)| *priority);
+    let credentials: Vec<_> = candidates
         .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No Grok token found. Run 'grok login'."))?;
+        .map(|(_, credentials)| credentials)
+        .collect();
 
-    let token = entry
-        .get("key")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("No Grok token found. Run 'grok login'."))?
-        .to_string();
-    let email = entry
-        .get("email")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-
-    Ok(Credentials { token, email })
+    if credentials.is_empty() {
+        anyhow::bail!("No Grok token found. Run 'grok login'.");
+    }
+    Ok(credentials)
 }
 
 fn bearer_request(client: &reqwest::Client, token: &str, url: &str) -> reqwest::RequestBuilder {
@@ -244,10 +252,10 @@ fn parse_subscription_plan(value: &Value) -> Option<String> {
 
 fn numeric_value(value: &Value) -> Option<f64> {
     if let Some(number) = value.as_f64() {
-        return Some(number);
+        return number.is_finite().then_some(number);
     }
     if let Some(text) = value.as_str() {
-        return text.parse().ok();
+        return text.parse::<f64>().ok().filter(|number| number.is_finite());
     }
     value
         .as_object()
@@ -330,6 +338,7 @@ fn parse_billing_json_object(value: &Value) -> Option<UsageMetric> {
             .or_else(|| number_at(value, &["usagePercent"]))
             .or_else(|| number_at(value, &["creditUsagePercent"]))
     }?;
+    let percent = percent.is_finite().then(|| percent.clamp(0.0, 100.0))?;
 
     let start = string_at(value, &["billingCycle", "billingPeriodStart"])
         .or_else(|| string_at(value, &["billingPeriodStart"]))
@@ -561,8 +570,7 @@ fn parse_grpc_billing_metric(body: &[u8]) -> Option<UsageMetric> {
     None
 }
 
-pub fn fetch() -> Result<UsageOutput> {
-    let credentials = read_credentials()?;
+fn fetch_network_usage(credentials: &Credentials) -> Result<UsageOutput> {
     let mut plan: Option<String> = None;
     let mut metrics = Vec::new();
     let mut errors = Vec::new();
@@ -605,17 +613,6 @@ pub fn fetch() -> Result<UsageOutput> {
         Ok::<_, anyhow::Error>(())
     })?;
 
-    if metrics.is_empty() {
-        if let Some(billing) = fetch_agent_billing(Duration::from_secs(4)) {
-            if let Some(metric) = parse_billing_json_metric(&billing) {
-                metrics.push(metric);
-            }
-            collect_task_usage_metrics(&billing, &mut metrics);
-        } else {
-            errors.push("Grok agent billing RPC unavailable".to_string());
-        }
-    }
-
     if metrics.is_empty() && plan.is_none() {
         let detail = if errors.is_empty() {
             "no usage or active subscription data returned".to_string()
@@ -628,9 +625,75 @@ pub fn fetch() -> Result<UsageOutput> {
     Ok(UsageOutput {
         provider: "Grok Build".into(),
         plan,
-        email: credentials.email,
+        email: credentials.email.clone(),
         metrics,
     })
+}
+
+fn usage_output(
+    plan: Option<String>,
+    email: Option<String>,
+    metrics: Vec<UsageMetric>,
+) -> UsageOutput {
+    UsageOutput {
+        provider: "Grok Build".into(),
+        plan,
+        email,
+        metrics,
+    }
+}
+
+pub fn fetch() -> Result<UsageOutput> {
+    let credentials = read_credentials()?;
+    let mut errors = Vec::new();
+    let mut plan_only: Option<UsageOutput> = None;
+
+    for (index, credential) in credentials.iter().enumerate() {
+        match fetch_network_usage(credential) {
+            Ok(output) if !output.metrics.is_empty() => return Ok(output),
+            Ok(output) => {
+                if plan_only.is_none() {
+                    plan_only = Some(output);
+                }
+            }
+            Err(error) => errors.push(format!("Grok credential #{} failed: {error}", index + 1)),
+        }
+    }
+
+    if let Some(billing) = fetch_agent_billing(Duration::from_secs(4)) {
+        let mut metrics = Vec::new();
+        if let Some(metric) = parse_billing_json_metric(&billing) {
+            metrics.push(metric);
+        }
+        collect_task_usage_metrics(&billing, &mut metrics);
+        if !metrics.is_empty() {
+            return Ok(usage_output(
+                plan_only.as_ref().and_then(|output| output.plan.clone()),
+                plan_only
+                    .as_ref()
+                    .and_then(|output| output.email.clone())
+                    .or_else(|| {
+                        credentials
+                            .first()
+                            .and_then(|credential| credential.email.clone())
+                    }),
+                metrics,
+            ));
+        }
+    } else {
+        errors.push("Grok agent billing RPC unavailable".to_string());
+    }
+
+    if let Some(output) = plan_only {
+        return Ok(output);
+    }
+
+    let detail = if errors.is_empty() {
+        "no usage or active subscription data returned".to_string()
+    } else {
+        errors.join("; ")
+    };
+    anyhow::bail!("Grok usage unavailable: {detail}");
 }
 
 #[cfg(test)]
@@ -686,6 +749,44 @@ mod tests {
             Some("$87.50/$100.00 left")
         );
         assert_eq!(metric.resets_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn rejects_non_finite_billing_json_percentages() {
+        for value in [
+            serde_json::json!({ "usedPercent": "NaN" }),
+            serde_json::json!({ "usedPercent": "inf" }),
+            serde_json::json!({
+                "monthlyLimit": "NaN",
+                "usage": { "totalUsed": 10 }
+            }),
+        ] {
+            assert!(parse_billing_json_metric(&value).is_none());
+        }
+    }
+
+    #[test]
+    fn reads_multiple_credential_candidates_with_auth_scope_first() {
+        let value = serde_json::json!({
+            "https://example.com": {
+                "key": "secondary-token",
+                "email": "secondary@example.com"
+            },
+            "https://auth.x.ai": {
+                "key": "primary-token",
+                "email": "primary@example.com"
+            }
+        });
+
+        let credentials = credential_candidates_from_value(&value).expect("credential candidates");
+        assert_eq!(credentials.len(), 2);
+        assert_eq!(credentials[0].token, "primary-token");
+        assert_eq!(credentials[0].email.as_deref(), Some("primary@example.com"));
+        assert_eq!(credentials[1].token, "secondary-token");
+        assert_eq!(
+            credentials[1].email.as_deref(),
+            Some("secondary@example.com")
+        );
     }
 
     #[test]

@@ -110,9 +110,9 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
         .clone()
         .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
     let mut last_total: Option<i64> = None;
+    let mut last_total_timestamp = metadata.timestamp;
     let mut active_turn: Option<ActiveTurn> = None;
     let mut turn_index = 0usize;
-    let mut observed_model = metadata.model_id.is_some();
 
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -125,7 +125,6 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
 
         if let Some(model_id) = extract_model_id(&value) {
             current_model = model_id;
-            observed_model = true;
             if let Some(turn) = active_turn.as_mut() {
                 if turn.model_id == UNKNOWN_MODEL {
                     turn.model_id = current_model.clone();
@@ -163,9 +162,11 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
                 // streaming tool updates. Treat cumulative totals as monotonic.
                 continue;
             }
-            Some(previous) if total_tokens == previous => {}
+            Some(previous) if total_tokens == previous => {
+                last_total_timestamp = timestamp;
+            }
             Some(previous) => {
-                if active_turn.is_none() && observed_model {
+                if active_turn.is_none() {
                     active_turn = Some(ActiveTurn::new(
                         previous,
                         timestamp,
@@ -177,12 +178,14 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
                 if let Some(turn) = active_turn.as_mut() {
                     turn.observe_total(total_tokens, timestamp);
                 }
+                last_total_timestamp = timestamp;
                 last_total = Some(total_tokens);
             }
             None => {
                 if let Some(turn) = active_turn.as_mut() {
                     turn.observe_total(total_tokens, timestamp);
                 }
+                last_total_timestamp = timestamp;
                 last_total = Some(total_tokens);
             }
         }
@@ -194,12 +197,12 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     }
 
-    if messages.is_empty() && observed_model {
+    if messages.is_empty() {
         if let Some(total_tokens) = last_total.filter(|tokens| *tokens > 0) {
             let aggregate_turn = ActiveTurn {
                 baseline_total: 0,
                 max_total: total_tokens,
-                timestamp: metadata.timestamp,
+                timestamp: last_total_timestamp,
                 model_id: current_model,
                 turn_index: 0,
             };
@@ -477,5 +480,34 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].timestamp, 1700000005000);
+    }
+
+    #[test]
+    fn preserves_total_tokens_without_model_metadata() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"available_commands_update"},"_meta":{"totalTokens":120,"agentTimestampMs":1700000000000}}}"#,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, UNKNOWN_MODEL);
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].timestamp, 1700000000000);
+    }
+
+    #[test]
+    fn creates_unknown_model_turn_without_model_metadata() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"available_commands_update"},"_meta":{"totalTokens":100,"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":250,"agentTimestampMs":1700000002000}}}"#,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, UNKNOWN_MODEL);
+        assert_eq!(messages[0].tokens.input, 150);
+        assert_eq!(messages[0].timestamp, 1700000002000);
     }
 }
