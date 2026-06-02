@@ -13,6 +13,7 @@ pub mod cursor;
 pub mod droid;
 pub mod gemini;
 pub mod goose;
+pub mod grok;
 pub mod hermes;
 pub mod kilo;
 pub mod kilocode;

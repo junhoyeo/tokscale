@@ -405,6 +405,18 @@ define_clients!(
         headless: false,
         parse_local: false,
         submit_default: false
+    },
+    Grok = 25 => {
+        id: "grok",
+        root: PathRoot::EnvVar {
+            var: "GROK_HOME",
+            fallback_relative: ".grok",
+        },
+        relative: "sessions",
+        pattern: "updates.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -457,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 25);
+        assert_eq!(ClientId::COUNT, 26);
     }
 
     #[test]
@@ -480,6 +492,15 @@ mod tests {
         assert_eq!(client.data().pattern, "usage*.json");
         assert!(!client.data().parse_local);
         assert!(!client.data().submit_default);
+    }
+
+    #[test]
+    fn test_grok_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("grok").expect("grok client should be registered");
+        assert_eq!(client.data().relative_path, "sessions");
+        assert_eq!(client.data().pattern, "updates.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
     }
 
     #[test]
