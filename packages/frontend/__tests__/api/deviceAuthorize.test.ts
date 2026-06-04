@@ -1,7 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockState = vi.hoisted(() => {
-  const selectResults: Array<Array<Record<string, unknown>>> = [];
   const updateResults: Array<Array<Record<string, unknown>>> = [];
   const updateSets: Array<Record<string, unknown>> = [];
   const updateWhereConditions: unknown[] = [];
@@ -21,8 +20,8 @@ const mockState = vi.hoisted(() => {
   const gt = vi.fn((left: unknown, right: unknown) => ({ kind: "gt", left, right }));
   const isNull = vi.fn((left: unknown) => ({ kind: "isNull", left }));
 
-  function nextResult(queue: Array<Array<Record<string, unknown>>>) {
-    return queue.shift() ?? [];
+  function nextUpdateResult() {
+    return updateResults.shift() ?? [];
   }
 
   const db = {
@@ -30,7 +29,7 @@ const mockState = vi.hoisted(() => {
       const builder = {
         from: vi.fn(() => builder),
         where: vi.fn(() => builder),
-        limit: vi.fn(async () => nextResult(selectResults)),
+        limit: vi.fn(async () => []),
       };
 
       return builder;
@@ -45,7 +44,7 @@ const mockState = vi.hoisted(() => {
           updateWhereConditions.push(condition);
           return builder;
         }),
-        returning: vi.fn(async () => nextResult(updateResults)),
+        returning: vi.fn(async () => nextUpdateResult()),
       };
 
       return builder;
@@ -63,7 +62,6 @@ const mockState = vi.hoisted(() => {
     updateSets,
     updateWhereConditions,
     reset() {
-      selectResults.length = 0;
       updateResults.length = 0;
       updateSets.length = 0;
       updateWhereConditions.length = 0;
@@ -74,9 +72,6 @@ const mockState = vi.hoisted(() => {
       and.mockClear();
       gt.mockClear();
       isNull.mockClear();
-    },
-    pushSelectResult(rows: Array<Record<string, unknown>>) {
-      selectResults.push(rows);
     },
     pushUpdateResult(rows: Array<Record<string, unknown>>) {
       updateResults.push(rows);
@@ -126,6 +121,14 @@ function flattenedTerms(condition: unknown): Array<Record<string, unknown>> {
   return [record];
 }
 
+function createAuthorizeRequest(userCode: string) {
+  return new Request("http://localhost:3000/api/auth/device/authorize", {
+    method: "POST",
+    headers: { Origin: "http://localhost:3000" },
+    body: JSON.stringify({ userCode }),
+  });
+}
+
 describe("POST /api/auth/device/authorize", () => {
   it("claims a valid device code with a guarded update", async () => {
     mockState.getSession.mockResolvedValue({
@@ -136,12 +139,7 @@ describe("POST /api/auth/device/authorize", () => {
     });
     mockState.pushUpdateResult([{ id: "device-1" }]);
 
-    const response = await POST(
-      new Request("http://localhost:3000/api/auth/device/authorize", {
-        method: "POST",
-        body: JSON.stringify({ userCode: "ABCD-1234" }),
-      })
-    );
+    const response = await POST(createAuthorizeRequest("ABCD-1234"));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -158,22 +156,9 @@ describe("POST /api/auth/device/authorize", () => {
       displayName: "Alice",
       avatarUrl: null,
     });
-    mockState.pushSelectResult([
-      {
-        id: "device-1",
-        userCode: "ABCD-1234",
-        expiresAt: new Date("2026-03-08T05:00:00.000Z"),
-        userId: null,
-      },
-    ]);
     mockState.pushUpdateResult([]);
 
-    const response = await POST(
-      new Request("http://localhost:3000/api/auth/device/authorize", {
-        method: "POST",
-        body: JSON.stringify({ userCode: "abcd1234" }),
-      })
-    );
+    const response = await POST(createAuthorizeRequest("abcd1234"));
     const body = await response.json();
     const updateTerms = flattenedTerms(mockState.updateWhereConditions[0]);
 

@@ -11,7 +11,8 @@ const mockState = vi.hoisted(() => {
   const whereSelect = vi.fn(() => ({ limit }));
   const from = vi.fn(() => ({ where: whereSelect }));
   const select = vi.fn(() => ({ from }));
-  const whereUpdate = vi.fn(async () => undefined);
+  const returning = vi.fn(async () => records);
+  const whereUpdate = vi.fn(() => ({ returning }));
   const set = vi.fn(() => ({ where: whereUpdate }));
   const update = vi.fn(() => ({ set }));
   let records: Array<{ id: string }> = [];
@@ -46,6 +47,7 @@ const mockState = vi.hoisted(() => {
       whereSelect.mockClear();
       from.mockClear();
       select.mockClear();
+      returning.mockClear();
       whereUpdate.mockClear();
       set.mockClear();
       update.mockClear();
