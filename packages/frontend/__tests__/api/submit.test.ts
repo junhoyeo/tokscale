@@ -441,8 +441,7 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
   describe("Submission validation guardrails", () => {
     it("accepts internally consistent high-volume one-day token totals", () => {
-      // Cap is 10B (MAX_DAILY_TOKENS). Use a value just under to confirm the
-      // cap boundary is respected without triggering a rejection.
+      // Well under the warn band (10B). Confirms ordinary high days stay clean.
       const payload = createValidationPayload({
         totalTokens: 8_000_000_000,
         totalCost: 800,
@@ -461,7 +460,29 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(result.errors).toHaveLength(0);
     });
 
-    it("rejects one-day fabricated token totals above the submission cap", () => {
+    it("accepts a real cache-read-heavy day above the prior 10B/$10k caps", () => {
+      // Single-client day that the old caps rejected: 12.9B tokens (mostly
+      // cacheRead) and $11,185.52, with a plausible ~$0.87/M blended rate. Sits
+      // in the warn band for both tokens and cost, so it logs but does not reject.
+      const payload = createValidationPayload({
+        totalTokens: 12_910_573_877,
+        totalCost: 11_185.52,
+        tokenBreakdown: {
+          input: 1_000_000_000,
+          output: 700_000_000,
+          cacheRead: 11_000_000_000,
+          cacheWrite: 200_000_000,
+          reasoning: 10_573_877,
+        },
+      });
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("rejects one-day fabricated token totals above the hard ceiling", () => {
       const payload = createValidationPayload({
         totalTokens: 1_000_000_000_000,
         tokenBreakdown: {
@@ -477,8 +498,28 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(result.valid).toBe(false);
       expect(result.errors.join("\n")).toContain("Daily token total exceeds");
-      expect(result.errors.join("\n")).toContain("10,000,000,000");
+      expect(result.errors.join("\n")).toContain("50,000,000,000");
       expect(result.errors.join("\n")).toContain("Client claude");
+    });
+
+    it("rejects one-day cost above the hard ceiling", () => {
+      const payload = createValidationPayload({
+        totalTokens: 1_000_000_000,
+        totalCost: 60_000,
+        tokenBreakdown: {
+          input: 600_000_000,
+          output: 200_000_000,
+          cacheRead: 150_000_000,
+          cacheWrite: 50_000_000,
+          reasoning: 0,
+        },
+      });
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors.join("\n")).toContain("Daily cost exceeds");
+      expect(result.errors.join("\n")).toContain("50,000");
     });
 
     it("keeps structural validation for high-volume payloads", () => {

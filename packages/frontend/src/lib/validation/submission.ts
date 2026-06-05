@@ -14,13 +14,31 @@ import { SUPPORTED_CLIENT_TYPES } from "../types";
 // SCHEMAS
 // ============================================================================
 
-// Hard cap: 10B tokens per day. f6aeca7 raised this to 100B; reverting because
-// 100B/day is implausible for any single device and would hide data errors.
-// A warn band at 5B logs structured warnings for high-but-plausible volumes
-// without rejecting them (see warnIfHighDailyTokens below).
-const MAX_DAILY_TOKENS = 10_000_000_000;
-const WARN_DAILY_TOKENS = 5_000_000_000;
-const MAX_DAILY_COST = 10_000;
+// Per-day sanity ceilings for self-reported usage. These are anti-data-error
+// guards, not throughput models. Two things make the old 10B-token / $10k-cost
+// limits reachable in a single legitimate day:
+//   1. cacheRead dominates modern agentic usage. Tools re-read large contexts
+//      every turn, so cacheRead routinely runs 10-100x output tokens. A day's
+//      token total is mostly cache reads, which carry little to no cost.
+//   2. Heavy parallel multi-agent runs on high-end hardware fan out dozens of
+//      concurrent sessions, multiplying a single device's daily volume.
+//
+// Two-tier design (the token band already worked this way; cost now matches):
+//   - WARN_* : high-but-plausible. Logs a structured warning for visibility but
+//              does NOT reject, so real outliers still submit and anomalies stay
+//              greppable in server logs.
+//   - MAX_*  : hard reject. Still catches order-of-magnitude data errors (a
+//              stray 10x, a unit bug) instead of hiding them behind a silent pass.
+//
+// f6aeca7 raised the token cap to 100B with no warn band and was reverted for
+// hiding data errors. This keeps a hard ceiling (50B) AND a warn band, so the
+// visibility concern is answered rather than removed. The real fraud backstop is
+// MAX_COST_PER_MILLION_TOKENS below, left unchanged on purpose: it rejects
+// "huge tokens + huge cost" fabrications regardless of these per-day caps.
+const MAX_DAILY_TOKENS = 50_000_000_000;
+const WARN_DAILY_TOKENS = 10_000_000_000;
+const MAX_DAILY_COST = 50_000;
+const WARN_DAILY_COST = 10_000;
 const MAX_COST_PER_MILLION_TOKENS = 10_000;
 const COST_RELATIVE_TOLERANCE = 0.01;
 const COST_ABSOLUTE_TOLERANCE = 0.1;
@@ -444,6 +462,13 @@ export function validateSubmission(data: unknown): ValidationResult {
       errors.push(
         `Daily cost exceeds ${MAX_DAILY_COST.toLocaleString("en-US")} on ${day.date}: ${day.totals.cost.toFixed(2)}`
       );
+    } else if (day.totals.cost > WARN_DAILY_COST) {
+      console.warn("[submission] high daily cost", {
+        date: day.date,
+        cost: day.totals.cost,
+        warnThreshold: WARN_DAILY_COST,
+        cap: MAX_DAILY_COST,
+      });
     }
 
     {
