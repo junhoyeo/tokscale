@@ -270,6 +270,42 @@ describe("POST /api/submit auth path", () => {
     });
   });
 
+  it("returns validation errors for a null JSON body without entering the transaction path", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+    mockState.validateSubmission.mockReturnValue({
+      valid: false,
+      data: null,
+      errors: ["Submission data must be an object"],
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: "null",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockState.validateSubmission).toHaveBeenCalledWith(null);
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({
+      error: "Validation failed",
+      details: ["Submission data must be an object"],
+    });
+  });
+
   it("revalidates username ISR paths after a successful submit", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",
@@ -370,10 +406,20 @@ describe("POST /api/submit auth path", () => {
     let insertCall = 0;
     let submittedDeviceValues: unknown;
     let dailyInsertValues: unknown;
+    let submissionUpdateValues: unknown;
     const tx = {
-      update: vi.fn(() => {
+      update: vi.fn((table: unknown) => {
         const builder = {
-          set: vi.fn(() => builder),
+          set: vi.fn((values: unknown) => {
+            if (
+              table &&
+              typeof table === "object" &&
+              (table as { userId?: unknown }).userId === "submissions.userId"
+            ) {
+              submissionUpdateValues = values;
+            }
+            return builder;
+          }),
           where: vi.fn(() => Promise.resolve()),
         };
         return builder;
@@ -429,7 +475,11 @@ describe("POST /api/submit auth path", () => {
           Authorization: "Bearer tt_valid",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ meta: {}, contributions: [] }),
+        body: JSON.stringify({
+          meta: {},
+          contributions: [],
+          mcpServers: ["github", "", "slack", 123, null],
+        }),
       })
     );
 
@@ -449,6 +499,11 @@ describe("POST /api/submit auth path", () => {
         date: "2026-04-30",
       }),
     ]);
+    expect(submissionUpdateValues).toEqual(
+      expect.objectContaining({
+        mcpServers: ["github", "slack"],
+      })
+    );
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "leaderboard", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "user:alice", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user-rank", "max");
