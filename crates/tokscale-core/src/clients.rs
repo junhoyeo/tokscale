@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 25);
+        assert_eq!(ClientId::COUNT, 26);
     }
 
     #[test]
