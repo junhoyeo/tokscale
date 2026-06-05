@@ -198,6 +198,8 @@ export const submissions = pgTable(
     maxConcurrentSessions: integer("max_concurrent_sessions"),
     sessionCount: integer("session_count"),
 
+    mcpServers: jsonb("mcp_servers").$type<string[]>(),
+
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

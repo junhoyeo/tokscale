@@ -47,6 +47,7 @@ interface ProfileData {
   updatedAt: string | null;
   clients: string[];
   models: string[];
+  mcpServers?: string[];
   modelUsage?: ModelUsage[];
   contributions: DailyContribution[];
 }
@@ -182,6 +183,7 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
                     data={graphData}
                     totalActiveTimeMs={data.stats.totalActiveTimeMs}
                     sessionCount={data.stats.sessionCount}
+                    mcpServers={data.mcpServers}
                   />
                   <ProfileStats
                     stats={stats}

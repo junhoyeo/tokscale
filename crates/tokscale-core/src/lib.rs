@@ -4,6 +4,7 @@ mod aggregator;
 mod cc_mirror;
 pub mod clients;
 pub mod fs_atomic;
+pub mod mcp;
 mod message_cache;
 mod parser;
 pub mod paths;

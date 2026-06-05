@@ -92,6 +92,13 @@
       "when": 1779948193133,
       "tag": "0012_hash_browser_session_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1780172800000,
+      "tag": "0013_add_mcp_servers",
+      "breakpoints": true
     }
   ]
 }
