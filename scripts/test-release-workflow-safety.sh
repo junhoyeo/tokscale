@@ -77,6 +77,20 @@ test_accepts_matching_publish_and_native_workflows() {
   grep -q "Release workflow safety OK" "${TMP_DIR}/good-output.txt"
 }
 
+test_reads_workflows_as_utf8_when_locale_is_non_utf8() {
+  local work="${TMP_DIR}/utf8-locale"
+  write_good_workflows "${work}"
+  printf '# UTF-8 sentinel: 🧪\n' >> "${work}/.github/workflows/publish-cli.yml"
+  printf '# UTF-8 sentinel: 🧪\n' >> "${work}/.github/workflows/build-native.yml"
+
+  (
+    cd "${work}"
+    LC_ALL=C PYTHONUTF8=0 python3 "${SCRIPT_UNDER_TEST}" >"${TMP_DIR}/utf8-locale-output.txt" 2>&1
+  )
+
+  grep -q "Release workflow safety OK" "${TMP_DIR}/utf8-locale-output.txt"
+}
+
 test_rejects_build_matrix_target_drift() {
   local work="${TMP_DIR}/target-drift"
   write_good_workflows "${work}"
@@ -167,6 +181,7 @@ PY
 }
 
 test_accepts_matching_publish_and_native_workflows
+test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
 test_rejects_release_env_drift
 test_rejects_missing_required_release_env

@@ -30,7 +30,7 @@ def fail(message: str) -> None:
 def read_lines(path: pathlib.Path) -> list[str]:
     if not path.exists():
         fail(f"Missing workflow: {path}")
-    return path.read_text().splitlines()
+    return path.read_text(encoding="utf-8").splitlines()
 
 
 def strip_yaml_scalar(value: str) -> str:
@@ -130,7 +130,7 @@ def package_manifest_name(package_dir: str) -> str:
     manifest_path = ROOT / "packages" / package_dir / "package.json"
     if not manifest_path.exists():
         fail(f"Missing platform package manifest: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     name = manifest.get("name")
     if not isinstance(name, str) or not name:
         fail(f"{manifest_path} missing package name")
