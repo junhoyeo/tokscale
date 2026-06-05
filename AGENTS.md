@@ -34,7 +34,7 @@ This applies to all GitHub-content authoring through the CLI — PR bodies, issu
 
 ## Git Identity & Merge Discipline
 
-- Before making any commit, verify the local git identity is exactly `Junho Yeo <i@junho.io>`. If it is not, set `git config user.name "Junho Yeo"` and `git config user.email "i@junho.io"` before committing.
+- Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
 - Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
 - When merging pull requests through `gh`, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
 - Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
