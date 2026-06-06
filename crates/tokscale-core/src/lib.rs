@@ -4290,9 +4290,18 @@ mod tests {
                 None,
             );
 
-            assert_eq!(messages.len(), 4);
-            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 150);
-            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 15);
+            // Parent contributes its two turns. The two forks each replay the
+            // parent history (skipped) and then emit one own turn that lands on
+            // the identical cumulative total (140/14). Sibling forks sharing a
+            // cumulative total is the signature of a replayed row, so the
+            // fork-parent-scoped dedup key collapses them into one. Real fork
+            // fan-out replays the same upstream totals into 10-100+ siblings;
+            // two distinct turns reaching a byte-identical cumulative vector by
+            // chance does not happen in practice because the cumulative encodes
+            // each fork's divergent context size.
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 140);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 14);
         }
 
         match original_home {

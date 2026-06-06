@@ -532,10 +532,23 @@ fn parse_codex_reader<R: BufRead>(
                         state.pending_turn_start = false;
                     }
                     if parsed_timestamp.is_some() || total_usage.is_some() {
+                        // Fork/subagent children replay the same upstream
+                        // token_count history into many sibling files. Those
+                        // replays carry identical cumulative totals but a
+                        // distinct per-file session id, so a session-scoped key
+                        // never collapses them and the totals get counted once
+                        // per sibling. Scope the key to the fork parent instead
+                        // so sibling replays share one key. Unrelated sessions
+                        // keep their own id and never merge.
+                        let dedup_scope_id = state
+                            .session_forked_from_id
+                            .as_deref()
+                            .or(state.session_id_from_meta.as_deref())
+                            .unwrap_or(session_id);
                         set_codex_dedup_key(
                             &mut message,
                             model.as_deref().unwrap_or("unknown"),
-                            state.session_id_from_meta.as_deref().unwrap_or(session_id),
+                            dedup_scope_id,
                             total_usage,
                         );
                     }
