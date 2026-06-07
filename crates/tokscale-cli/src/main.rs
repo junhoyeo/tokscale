@@ -846,6 +846,7 @@ pub enum ClientFilter {
     Trae,
     Warp,
     Cline,
+    Gjc,
     Synthetic,
 }
 
@@ -881,6 +882,7 @@ impl ClientFilter {
             Self::Trae => "trae",
             Self::Warp => "warp",
             Self::Cline => "cline",
+            Self::Gjc => "gjc",
             Self::Synthetic => "synthetic",
         }
     }
@@ -919,6 +921,7 @@ impl ClientFilter {
             Self::Trae => Some(ClientId::Trae),
             Self::Warp => Some(ClientId::Warp),
             Self::Cline => Some(ClientId::Cline),
+            Self::Gjc => Some(ClientId::Gjc),
             Self::Synthetic => None,
         }
     }
@@ -954,6 +957,7 @@ impl ClientFilter {
             ClientId::Trae => Self::Trae,
             ClientId::Warp => Self::Warp,
             ClientId::Cline => Self::Cline,
+            ClientId::Gjc => Self::Gjc,
         }
     }
 
@@ -1059,6 +1063,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub cline: bool,
     #[arg(long, hide = true)]
+    pub gjc: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -1112,7 +1118,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 27] = [
+    let legacy: [(bool, ClientFilter); 28] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1139,6 +1145,7 @@ fn build_client_filter_with_defaults(
         (flags.trae, ClientFilter::Trae),
         (flags.warp, ClientFilter::Warp),
         (flags.cline, ClientFilter::Cline),
+        (flags.gjc, ClientFilter::Gjc),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -3555,6 +3562,7 @@ fn capitalize_client(client: &str) -> String {
         "goose" => "Goose".to_string(),
         "warp" => "Warp".to_string(),
         "pi" => "Pi".to_string(),
+        "gjc" => "Gajae-Code".to_string(),
         other => other.to_string(),
     }
 }
@@ -5938,6 +5946,7 @@ mod tests {
             trae: true,
             warp: true,
             cline: true,
+            gjc: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -5974,6 +5983,7 @@ mod tests {
             "trae",
             "warp",
             "cline",
+            "gjc",
             "synthetic",
         ] {
             assert!(
@@ -6083,6 +6093,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_client_filter_gjc_round_trip() {
+        use tokscale_core::ClientId;
+        // gjc parses as the canonical lowercase id and round-trips through
+        // both the ClientId<->ClientFilter conversions and the id string.
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
+        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
+        assert_eq!(ClientFilter::from_client_id(ClientId::Gjc), ClientFilter::Gjc);
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
     }
 
     #[test]
