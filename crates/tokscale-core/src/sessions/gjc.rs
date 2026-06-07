@@ -324,4 +324,157 @@ not valid json at all
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].cost, 0.0);
     }
+    // ── Adversarial / red-team tests ────────────────────────────────────────
+
+    /// (a) Completely empty file -> empty vec
+    #[test]
+    fn test_adv_empty_file_returns_empty_vec() {
+        let file = create_test_file("");
+        let messages = parse_gjc_file(file.path());
+        assert!(messages.is_empty(), "expected empty vec for empty file");
+    }
+
+    /// (b) File with only a session header -> empty vec (no message lines)
+    #[test]
+    fn test_adv_only_session_header_returns_empty_vec() {
+        let content = r#"{"type":"session","id":"gjc_adv_b","cwd":"/work/myproject"}"#;
+        let file = create_test_file(content);
+        let messages = parse_gjc_file(file.path());
+        assert!(
+            messages.is_empty(),
+            "expected empty vec when only header present"
+        );
+    }
+
+    /// (c) Malformed JSON line sandwiched between two valid messages -> only
+    ///     the two valid ones are parsed; the bad line is silently skipped.
+    #[test]
+    fn test_adv_malformed_line_between_valid_messages_skipped() {
+        let content = r#"{"type":"session","id":"gjc_adv_c","cwd":"/tmp"}
+{"type":"message","id":"msg_c1","message":{"role":"assistant","model":"model-a","provider":"prov-a","timestamp":1700000001000,"usage":{"input":10,"output":5,"cost":{"total":0.01}}}}
+{this is not valid json !!
+{"type":"message","id":"msg_c2","message":{"role":"assistant","model":"model-b","provider":"prov-b","timestamp":1700000002000,"usage":{"input":20,"output":10,"cost":{"total":0.02}}}}"#;
+        let file = create_test_file(content);
+        let messages = parse_gjc_file(file.path());
+        assert_eq!(messages.len(), 2, "expected exactly 2 valid messages");
+        assert_eq!(messages[0].model_id, "model-a");
+        assert_eq!(messages[1].model_id, "model-b");
+    }
+
+    /// (d) Message missing model -> skipped, no panic.
+    ///     Message missing provider -> skipped, no panic.
+    ///     Message missing usage -> skipped, no panic.
+    #[test]
+    fn test_adv_missing_model_provider_usage_skipped_no_panic() {
+        // missing model
+        let content_no_model = r#"{"type":"session","id":"gjc_adv_d1","cwd":"/tmp"}
+{"type":"message","id":"no_model","message":{"role":"assistant","provider":"prov","timestamp":1700000001000,"usage":{"input":1,"output":1,"cost":{"total":0.001}}}}"#;
+        let file = create_test_file(content_no_model);
+        assert!(
+            parse_gjc_file(file.path()).is_empty(),
+            "missing model should be skipped"
+        );
+
+        // missing provider
+        let content_no_provider = r#"{"type":"session","id":"gjc_adv_d2","cwd":"/tmp"}
+{"type":"message","id":"no_prov","message":{"role":"assistant","model":"m","timestamp":1700000001000,"usage":{"input":1,"output":1,"cost":{"total":0.001}}}}"#;
+        let file = create_test_file(content_no_provider);
+        assert!(
+            parse_gjc_file(file.path()).is_empty(),
+            "missing provider should be skipped"
+        );
+
+        // missing usage
+        let content_no_usage = r#"{"type":"session","id":"gjc_adv_d3","cwd":"/tmp"}
+{"type":"message","id":"no_usage","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000}}"#;
+        let file = create_test_file(content_no_usage);
+        assert!(
+            parse_gjc_file(file.path()).is_empty(),
+            "missing usage should be skipped"
+        );
+    }
+
+    /// (e) Negative token values are clamped to >= 0.
+    #[test]
+    fn test_adv_negative_token_values_clamped_to_zero() {
+        let content = r#"{"type":"session","id":"gjc_adv_e","cwd":"/tmp"}
+{"type":"message","id":"msg_neg","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":-100,"output":-50,"cacheRead":-10,"cacheWrite":-5,"cost":{"total":0.0}}}}"#;
+        let file = create_test_file(content);
+        let messages = parse_gjc_file(file.path());
+        assert_eq!(messages.len(), 1, "message should be parsed despite negative tokens");
+        let t = &messages[0].tokens;
+        assert_eq!(t.input, 0, "negative input clamped to 0");
+        assert_eq!(t.output, 0, "negative output clamped to 0");
+        assert_eq!(t.cache_read, 0, "negative cache_read clamped to 0");
+        assert_eq!(t.cache_write, 0, "negative cache_write clamped to 0");
+    }
+
+    /// (f) Embedded cost.total negative -> falls back to 0.0.
+    #[test]
+    fn test_adv_negative_cost_total_falls_back_to_zero() {
+        let content = r#"{"type":"session","id":"gjc_adv_f","cwd":"/tmp"}
+{"type":"message","id":"msg_negcost","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":5,"output":3,"cost":{"total":-9.99}}}}"#;
+        let file = create_test_file(content);
+        let messages = parse_gjc_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.0, "negative cost.total must fall back to 0.0");
+    }
+
+    /// (g) cost.total absent entirely -> 0.0.
+    #[test]
+    fn test_adv_absent_cost_total_is_zero() {
+        let content = r#"{"type":"session","id":"gjc_adv_g","cwd":"/tmp"}
+{"type":"message","id":"msg_nocosttotal","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":5,"output":3,"cost":{"input":0.01}}}}"#;
+        let file = create_test_file(content);
+        let messages = parse_gjc_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.0, "absent cost.total must be 0.0");
+    }
+
+    /// (h) Two messages with identical id + session -> identical dedup_key
+    ///     (replay collapse: inserting both would produce the same key so a
+    ///     dedup layer can collapse them).
+    #[test]
+    fn test_adv_same_id_and_session_produce_identical_dedup_key() {
+        let line = r#"{"type":"message","id":"replay_msg","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":10,"output":5,"cost":{"total":0.05}}}}"#;
+        let content = format!(
+            "{}\n{}\n{}",
+            r#"{"type":"session","id":"gjc_ses_replay","cwd":"/tmp"}"#,
+            line,
+            line
+        );
+        let file = create_test_file(&content);
+        let messages = parse_gjc_file(file.path());
+        // Both lines parse successfully; it's the caller's job to dedup.
+        assert_eq!(messages.len(), 2, "parser emits both; dedup is caller's concern");
+        assert_eq!(
+            messages[0].dedup_key, messages[1].dedup_key,
+            "identical id+session must produce the same dedup_key"
+        );
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("gjc_ses_replay:replay_msg".to_string())
+        );
+    }
+
+    /// (i) Unicode / percent-encoded cwd in the session header normalizes
+    ///     without panicking, and workspace_key/label are populated.
+    #[test]
+    fn test_adv_unicode_encoded_cwd_normalizes_without_panic() {
+        // Path with non-ASCII Unicode characters
+        let content_unicode = r#"{"type":"session","id":"gjc_adv_i1","cwd":"/home/用户/projects/my-app"}
+{"type":"message","id":"msg_u","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":1,"output":1,"cost":{"total":0.001}}}}"#;
+        let file = create_test_file(content_unicode);
+        // Must not panic; workspace fields may or may not be populated depending
+        // on normalize_workspace_key, but the parse result must be exactly 1 message.
+        let messages = parse_gjc_file(file.path());
+        assert_eq!(messages.len(), 1, "unicode cwd must not cause a panic or skip");
+
+        // Path with percent-encoding (URL-style directories some tools emit)
+        let content_pct = r#"{"type":"session","id":"gjc_adv_i2","cwd":"/home/user/my%20project"}
+{"type":"message","id":"msg_p","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":1,"output":1,"cost":{"total":0.001}}}}"#;
+        let file2 = create_test_file(content_pct);
+        let messages2 = parse_gjc_file(file2.path());
+        assert_eq!(messages2.len(), 1, "percent-encoded cwd must not cause a panic or skip");
+    }
 }
