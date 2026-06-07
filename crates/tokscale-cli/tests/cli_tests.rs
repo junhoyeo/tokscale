@@ -2877,3 +2877,132 @@ fn test_submit_offline_without_pricing_cache_fails() {
         "stderr should contain a pricing/network error: {stderr}"
     );
 }
+// ── gjc client filter tests ────────────────────────────────────────────────
+
+/// Write a gjc session JSONL file at
+/// <home>/.gjc/agent/sessions/<slug>/sess.jsonl
+/// with one assistant message: model claude-sonnet-4, provider anthropic,
+/// input 1000 / output 500, usage.cost.total 0.5.
+fn write_gjc_session_fixture(base: &Path) {
+    let session_dir = base.join(".gjc/agent/sessions/test-project");
+    fs::create_dir_all(&session_dir).unwrap();
+    let jsonl = concat!(
+        r#"{"type":"session","id":"gjc_e2e_session","timestamp":"2025-06-15T12:00:00.000Z","cwd":"/work/test-project"}"#,
+        "\n",
+        r#"{"type":"message","id":"gjc_e2e_msg_1","parentId":null,"timestamp":"2025-06-15T12:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4","provider":"anthropic","api":"anthropic","timestamp":1750082401000,"usage":{"input":1000,"output":500,"cacheRead":0,"cacheWrite":0,"totalTokens":1500,"cost":{"input":0.3,"output":0.2,"cacheRead":0.0,"cacheWrite":0.0,"total":0.5}}}}"#,
+        "\n"
+    );
+    fs::write(session_dir.join("sess.jsonl"), jsonl).unwrap();
+}
+
+/// Build a Command that uses HOME=tmp AND removes gjc-related env overrides
+/// so the scanner uses only the home-derived ~/.gjc/agent/sessions path.
+fn gjc_cmd_with_home(tmp: &Path) -> Command {
+    let mut cmd = cmd_with_home(tmp);
+    cmd.env_remove("GJC_CODING_AGENT_DIR")
+        .env_remove("GJC_CONFIG_DIR")
+        .env_remove("PI_CONFIG_DIR");
+    cmd
+}
+
+#[test]
+fn test_models_with_client_filter_gjc() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+    write_gjc_session_fixture(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "gjc", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().expect("entries must be an array");
+
+    assert!(
+        !entries.is_empty(),
+        "expected gjc entries but got none; full JSON: {json}"
+    );
+
+    // Every returned entry must be from the gjc client.
+    for entry in entries {
+        assert_eq!(
+            entry["client"].as_str().unwrap_or(""),
+            "gjc",
+            "unexpected client in entry: {entry}"
+        );
+    }
+
+    // The fixture model claude-sonnet-4 must appear.
+    let has_sonnet = entries
+        .iter()
+        .any(|e| e["model"].as_str().unwrap_or("").contains("claude-sonnet-4"));
+    assert!(
+        has_sonnet,
+        "expected claude-sonnet-4 in gjc entries; got: {entries:?}"
+    );
+}
+
+#[test]
+fn test_client_filter_gjc_empty_is_clean() {
+    // No gjc fixture data on disk — command must still exit successfully
+    // and return an empty (zero-entry) result without panicking.
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "gjc", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed with no gjc data; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().expect("entries must be an array");
+    assert!(
+        entries.is_empty(),
+        "expected zero entries for empty gjc fixture, got: {entries:?}"
+    );
+}
+
+#[test]
+fn test_client_filter_gjc_isolation() {
+    // Write gjc fixture, then query with --client claude (NOT gjc).
+    // The gjc model must NOT appear in the output (filter isolation).
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+    write_gjc_session_fixture(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "claude", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().expect("entries must be an array");
+
+    // No gjc entry should leak through when filtering for claude.
+    for entry in entries {
+        assert_ne!(
+            entry["client"].as_str().unwrap_or(""),
+            "gjc",
+            "gjc entry leaked into --client claude output: {entry}"
+        );
+    }
+}
