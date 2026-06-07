@@ -163,3 +163,188 @@ async fn test_gjc_cost_precedence_end_to_end() {
         msg_b.cost
     );
 }
+
+/// G8: workspace key derives from the session `cwd` header.
+///
+/// gjc project dirs are dash-encoded cwds (e.g. `--work--pi--`). The parser
+/// prefers the session header `cwd` (a real path) for the workspace key, and
+/// `normalize_workspace_key` / `workspace_label_from_key` produce a sensible
+/// key + label. This also exercises the public normalization helpers directly
+/// for the decode + graceful-fallback contract.
+#[tokio::test]
+async fn test_gjc_workspace_key_from_dashed_slug() {
+    use tokscale_core::sessions::{normalize_workspace_key, workspace_label_from_key};
+
+    // The session header carries a real cwd; the on-disk slug is dash-encoded.
+    let decoded = "/work/pi";
+    let key = normalize_workspace_key(decoded).expect("cwd should normalize");
+    assert_eq!(key, "/work/pi");
+    assert_eq!(workspace_label_from_key(&key).as_deref(), Some("pi"));
+
+    // Trailing slash + duplicate separators collapse; empty input is None.
+    assert_eq!(
+        normalize_workspace_key("/work//pi/").as_deref(),
+        Some("/work/pi")
+    );
+    assert_eq!(normalize_workspace_key("   "), None);
+
+    // End-to-end: a session whose cwd header is set drives the message
+    // workspace key/label, taking precedence over the on-disk dash-slug dir.
+    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_path = home_dir.path();
+    let session_dir = home_path
+        .join(".gjc")
+        .join("agent")
+        .join("sessions")
+        .join("--work--pi--"); // dash-encoded slug on disk
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let jsonl = concat!(
+        r#"{"type":"session","id":"gjc_g8","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/work/pi"}"#,
+        "\n",
+        r#"{"type":"message","id":"m1","timestamp":"2026-01-01T00:01:00.000Z","message":{"role":"assistant","model":"gjc-priceable-model","provider":"anthropic","timestamp":1767225661000,"usage":{"input":10,"output":5,"cost":{"total":0.01}}}}"#,
+        "\n",
+    );
+    {
+        let mut f = std::fs::File::create(session_dir.join("sess.jsonl")).unwrap();
+        f.write_all(jsonl.as_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+    let options = LocalParseOptions {
+        home_dir: Some(home_path.to_str().unwrap().to_string()),
+        use_env_roots: false,
+        clients: Some(vec!["gjc".to_string()]),
+        since: None,
+        until: None,
+        year: None,
+        scanner_settings: ScannerSettings::default(),
+    };
+    let messages = parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
+        .await
+        .expect("parse failed");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].workspace_key.as_deref(), Some("/work/pi"));
+    assert_eq!(messages[0].workspace_label.as_deref(), Some("pi"));
+}
+
+/// G9a: recursive glob discovers depth-1 and depth-2 transcripts.
+///
+/// gjc emits depth-1 session files `<slug>/<id>.jsonl` AND depth-2 per-pass
+/// sub-agent children `<slug>/<session>/N-*.jsonl`. Both must be discovered and
+/// their (distinct) messages counted.
+#[tokio::test]
+async fn test_gjc_recursive_glob_depth1_and_depth2() {
+    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_path = home_dir.path();
+    let slug_dir = home_path
+        .join(".gjc")
+        .join("agent")
+        .join("sessions")
+        .join("proj");
+    std::fs::create_dir_all(&slug_dir).unwrap();
+
+    // depth-1: <slug>/d1.jsonl with one assistant message (distinct id/tokens).
+    let d1 = concat!(
+        r#"{"type":"session","id":"s_depth1","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/work/proj"}"#,
+        "\n",
+        r#"{"type":"message","id":"d1_m1","timestamp":"2026-01-01T00:01:00.000Z","message":{"role":"assistant","model":"gjc-priceable-model","provider":"anthropic","timestamp":1767225661000,"usage":{"input":10,"output":5,"cost":{"total":0.01}}}}"#,
+        "\n",
+    );
+    {
+        let mut f = std::fs::File::create(slug_dir.join("d1.jsonl")).unwrap();
+        f.write_all(d1.as_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+
+    // depth-2: <slug>/<session>/0-Pass.jsonl with a DIFFERENT message.
+    let depth2_dir = slug_dir.join("s_depth1");
+    std::fs::create_dir_all(&depth2_dir).unwrap();
+    let d2 = concat!(
+        r#"{"type":"session","id":"s_depth2","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/work/proj"}"#,
+        "\n",
+        r#"{"type":"message","id":"d2_m1","timestamp":"2026-01-01T00:03:00.000Z","message":{"role":"assistant","model":"gjc-priceable-model","provider":"anthropic","timestamp":1767225841000,"usage":{"input":20,"output":7,"cost":{"total":0.02}}}}"#,
+        "\n",
+    );
+    {
+        let mut f = std::fs::File::create(depth2_dir.join("0-Pass.jsonl")).unwrap();
+        f.write_all(d2.as_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+
+    let options = LocalParseOptions {
+        home_dir: Some(home_path.to_str().unwrap().to_string()),
+        use_env_roots: false,
+        clients: Some(vec!["gjc".to_string()]),
+        since: None,
+        until: None,
+        year: None,
+        scanner_settings: ScannerSettings::default(),
+    };
+    let messages = parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
+        .await
+        .expect("parse failed");
+    // Both the depth-1 and the distinct depth-2 message are discovered.
+    assert_eq!(messages.len(), 2, "expected depth1 + depth2 messages: {messages:#?}");
+    let mut ids: Vec<String> = messages
+        .iter()
+        .map(|m| m.dedup_key.clone().unwrap_or_default())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["s_depth1:d1_m1".to_string(), "s_depth2:d2_m1".to_string()]);
+}
+
+/// G9b: message-level dedup collapses a replayed parent message id across files.
+///
+/// Per Architect N6, real depth-2 children are distinct sub-agent sessions;
+/// this is a defensive regression guard: if a depth-2 child replays a parent's
+/// message id (same session id + message id → same dedup_key), it is counted
+/// ONCE via should_keep_deduped_message.
+#[tokio::test]
+async fn test_gjc_message_dedup_across_replayed_files() {
+    let home_dir = tempfile::TempDir::new().unwrap();
+    let home_path = home_dir.path();
+    let slug_dir = home_path
+        .join(".gjc")
+        .join("agent")
+        .join("sessions")
+        .join("proj");
+    std::fs::create_dir_all(&slug_dir).unwrap();
+
+    // Same session id "S" and same message id "SHARED" in BOTH files → same
+    // dedup_key "S:SHARED" → counted once.
+    let shared_msg = r#"{"type":"message","id":"SHARED","timestamp":"2026-01-01T00:01:00.000Z","message":{"role":"assistant","model":"gjc-priceable-model","provider":"anthropic","timestamp":1767225661000,"usage":{"input":10,"output":5,"cost":{"total":0.01}}}}"#;
+    let header = r#"{"type":"session","id":"S","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/work/proj"}"#;
+    let content = format!("{header}\n{shared_msg}\n");
+
+    {
+        let mut f = std::fs::File::create(slug_dir.join("parent.jsonl")).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+    let child_dir = slug_dir.join("S");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    {
+        // child replays the SAME session+message id
+        let mut f = std::fs::File::create(child_dir.join("0-replay.jsonl")).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+
+    let options = LocalParseOptions {
+        home_dir: Some(home_path.to_str().unwrap().to_string()),
+        use_env_roots: false,
+        clients: Some(vec!["gjc".to_string()]),
+        since: None,
+        until: None,
+        year: None,
+        scanner_settings: ScannerSettings::default(),
+    };
+    let messages = parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
+        .await
+        .expect("parse failed");
+    assert_eq!(
+        messages.len(),
+        1,
+        "replayed message id must be deduped to one: {messages:#?}"
+    );
+    assert_eq!(messages[0].dedup_key.as_deref(), Some("S:SHARED"));
+}
