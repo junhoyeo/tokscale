@@ -1109,6 +1109,36 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // gjc (gajae-code) JSONL sessions. Binding note N1: this cached cluster
+    // MUST obtain messages via the non-repricing parser and apply the A1
+    // Hermes guard explicitly (reprice only when the embedded usage.cost.total
+    // was absent, i.e. cost <= 0.0). Routing through load_or_parse_source /
+    // apply_pricing_to_messages / cached_messages would reprice unconditionally
+    // and overwrite gjc's authoritative embedded cost, silently downgrading to
+    // A2 on the dominant cached path. Message-level dedup via
+    // should_keep_deduped_message collapses depth-1/depth-2 replays.
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::gjc::parse_gjc_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    if msg.cost <= 0.0 {
+                        apply_pricing_if_available(&mut msg, pricing);
+                    }
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(
+        gjc_messages
+            .into_iter()
+            .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
+    );
+
     let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
@@ -2256,6 +2286,27 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let pi_count = pi_msgs.len() as i32;
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
+
+    // gjc (gajae-code) JSONL sessions. This non-cached path produces
+    // ParsedMessage (no cost field) and has no pricing service in scope, so
+    // the A1 cost guard is a no-op here — cost correctness is enforced on the
+    // cached pricing path (see the gjc_outcomes block). What matters here is
+    // message-level dedup (codebuff-style key via should_keep_deduped_message)
+    // to collapse depth-1/depth-2 replays, mirroring the codex cluster.
+    let gjc_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| sessions::gjc::parse_gjc_file(path))
+        .collect();
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_msgs: Vec<ParsedMessage> = gjc_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut gjc_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let gjc_count = gjc_msgs.len() as i32;
+    counts.set(ClientId::Gjc, gjc_count);
+    messages.extend(gjc_msgs);
 
     // Parse Kimi wire.jsonl files in parallel
     let kimi_msgs: Vec<ParsedMessage> = scan_result
