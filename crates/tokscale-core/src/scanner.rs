@@ -719,6 +719,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Zed
                 | ClientId::Crush
                 | ClientId::Codebuff
+                | ClientId::Gjc
         ) {
             continue;
         }
@@ -1095,6 +1096,62 @@ fn scan_all_clients_with_env_strategy_inner(
 
         for root in codebuff_roots {
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Codebuff, root);
+        }
+    }
+
+    if enabled.contains(&ClientId::Gjc) {
+        // gajae-code (gjc) persists sessions as
+        // <agent-dir>/sessions/<project-slug>/*.jsonl, with depth-2 per-pass
+        // sub-agent children <slug>/<session>/N-*.jsonl. scan_directory's
+        // WalkDir + "*.jsonl" suffix match covers both depths.
+        //
+        // The agent dir is resolved under several env overrides gjc honors,
+        // plus the Linux/macOS $XDG_DATA_HOME/gjc redirect (which FLATTENS the
+        // `agent/` segment to `<xdg>/gjc/sessions`). Binding note N4: push
+        // EVERY resolved root that exists (NOT first-match), letting the
+        // cross-directory file dedup collapse overlap — first-match could read
+        // a wrong empty root when the XDG redirect is the populated one.
+        // Everything is gated on use_env_roots so `--home` disables overrides.
+        let mut gjc_roots: Vec<PathBuf> = Vec::new();
+
+        // (1) GJC_CODING_AGENT_DIR/sessions (the PathRoot::EnvVar default also
+        // resolves here; existence-gated push + dedup keep it single).
+        let agent_dir_root = ClientId::Gjc
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        gjc_roots.push(PathBuf::from(agent_dir_root));
+
+        if use_env_roots {
+            // (2) GJC_CONFIG_DIR / PI_CONFIG_DIR joined with agent/sessions.
+            for var in ["GJC_CONFIG_DIR", "PI_CONFIG_DIR"] {
+                if let Ok(config_dir) = std::env::var(var) {
+                    let trimmed = config_dir.trim();
+                    if !trimmed.is_empty() {
+                        gjc_roots.push(
+                            PathBuf::from(trimmed.trim_end_matches('/')).join("agent/sessions"),
+                        );
+                    }
+                }
+            }
+
+            // (3) $XDG_DATA_HOME/gjc/sessions — the redirect flattens `agent/`.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
+                let trimmed = xdg_data.trim();
+                if !trimmed.is_empty() {
+                    gjc_roots
+                        .push(PathBuf::from(trimmed.trim_end_matches('/')).join("gjc/sessions"));
+                }
+            }
+        }
+
+        // (4) ~/.gjc/agent/sessions home fallback (always available).
+        gjc_roots.push(PathBuf::from(format!("{}/.gjc/agent/sessions", home_dir)));
+
+        for root in gjc_roots {
+            if root.exists() {
+                push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Gjc, root);
+            }
         }
     }
 
@@ -3048,5 +3105,111 @@ mod tests {
         // No assertion on result.get(ClientId::Claude) — the outside dir might
         // not match the expected file patterns. The test goal is only liveness:
         // the scan must not panic when an extra path escapes $HOME.
+    }
+    /// Write a gjc session JSONL file at
+    /// <home>/.gjc/agent/sessions/<slug>/<name> and return its path.
+    fn setup_mock_gjc_session(home: &Path, slug: &str, name: &str) -> PathBuf {
+        let dir = home.join(".gjc/agent/sessions").join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join(name);
+        File::create(&file_path).unwrap();
+        file_path
+    }
+
+    #[test]
+    #[serial]
+    fn test_gjc_discovery_recursive_glob_depth1_and_depth2() {
+        let previous = std::env::var("GJC_CODING_AGENT_DIR").ok();
+        unsafe { std::env::remove_var("GJC_CODING_AGENT_DIR") };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // depth 1: <slug>/<id>.jsonl
+        setup_mock_gjc_session(home, "--work--proj--", "sess-001.jsonl");
+        // depth 2: <slug>/<session>/N-Pass.jsonl
+        let depth2 = home
+            .join(".gjc/agent/sessions/--work--proj--/sess-001");
+        fs::create_dir_all(&depth2).unwrap();
+        File::create(depth2.join("0-Pass.jsonl")).unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
+        assert_eq!(result.get(ClientId::Gjc).len(), 2);
+
+        restore_env("GJC_CODING_AGENT_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_gjc_discovery_home_fallback_when_env_disabled() {
+        let previous = std::env::var("GJC_CODING_AGENT_DIR").ok();
+        // Even with the env var set, use_env_roots=false must ignore it and
+        // read only the home fallback.
+        let other = TempDir::new().unwrap();
+        unsafe {
+            std::env::set_var("GJC_CODING_AGENT_DIR", other.path().to_string_lossy().as_ref())
+        };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_gjc_session(home, "slug", "a.jsonl");
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["gjc".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Gjc).len(), 1);
+
+        restore_env("GJC_CODING_AGENT_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_gjc_discovery_env_override() {
+        let previous = std::env::var("GJC_CODING_AGENT_DIR").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // Override target lives OUTSIDE ~/.gjc to prove the override is read.
+        let agent_dir = dir.path().join("custom-gjc-agent");
+        let override_sessions = agent_dir.join("sessions").join("slug");
+        fs::create_dir_all(&override_sessions).unwrap();
+        File::create(override_sessions.join("o.jsonl")).unwrap();
+
+        unsafe {
+            std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref())
+        };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
+        assert!(result
+            .get(ClientId::Gjc)
+            .iter()
+            .any(|p| p.to_string_lossy().contains("custom-gjc-agent")));
+
+        restore_env("GJC_CODING_AGENT_DIR", previous);
+    }
+
+    #[test]
+    #[serial]
+    fn test_gjc_discovery_multi_root_files_dedup_to_one() {
+        // When GJC_CODING_AGENT_DIR points at the same on-disk location the
+        // home fallback also resolves, the file must be counted ONCE.
+        let previous = std::env::var("GJC_CODING_AGENT_DIR").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_gjc_session(home, "slug", "dup.jsonl");
+
+        // Point the env var at <home>/.gjc/agent so root (1) and root (4)
+        // resolve to the same directory.
+        let agent_dir = home.join(".gjc/agent");
+        unsafe {
+            std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref())
+        };
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
+        assert_eq!(result.get(ClientId::Gjc).len(), 1);
+
+        restore_env("GJC_CODING_AGENT_DIR", previous);
     }
 }
