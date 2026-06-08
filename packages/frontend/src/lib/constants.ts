@@ -54,6 +54,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   warp: "Warp",
   cline: "Cline",
   synthetic: "Synthetic",
+  gjc: "Gajae Code",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -86,6 +87,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   warp: `${GITHUB_CDN_BASE}/client-warp.png`,
   cline: `${GITHUB_CDN_BASE}/client-cline.png`,
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
+  gjc: `${GITHUB_CDN_BASE}/client-gjc.png`,
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -116,6 +118,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   warp: "#01A4A4",
   cline: "#5B8DEF",
   synthetic: "#4ADE80",
+  gjc: "#FF6B6B",
 };
 
 export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {
