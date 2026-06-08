@@ -14,14 +14,6 @@ import { SUPPORTED_CLIENT_TYPES } from "../types";
 // SCHEMAS
 // ============================================================================
 
-// Hard cap: 10B tokens per day. f6aeca7 raised this to 100B; reverting because
-// 100B/day is implausible for any single device and would hide data errors.
-// A warn band at 5B logs structured warnings for high-but-plausible volumes
-// without rejecting them (see warnIfHighDailyTokens below).
-const MAX_DAILY_TOKENS = 10_000_000_000;
-const WARN_DAILY_TOKENS = 5_000_000_000;
-const MAX_DAILY_COST = 10_000;
-const MAX_COST_PER_MILLION_TOKENS = 10_000;
 const COST_RELATIVE_TOLERANCE = 0.01;
 const COST_ABSOLUTE_TOLERANCE = 0.1;
 // Sub-cent epsilon for "is there real cost left after subtracting the
@@ -272,24 +264,6 @@ function describeTokenlessOffenders(clients: ClientLike[]): string {
     .join("; ");
 }
 
-function pushCostPerMillionError(
-  errors: string[],
-  label: string,
-  cost: number,
-  tokens: number
-): void {
-  if (cost <= 1 || tokens === 0) {
-    return;
-  }
-
-  const costPerMillion = (cost * 1_000_000) / tokens;
-  if (costPerMillion > MAX_COST_PER_MILLION_TOKENS) {
-    errors.push(
-      `${label}: Cost per million tokens exceeds ${MAX_COST_PER_MILLION_TOKENS.toLocaleString("en-US")}: ${costPerMillion.toFixed(2)}`
-    );
-  }
-}
-
 /**
  * Validate submission data (Level 1 validation)
  */
@@ -363,57 +337,25 @@ export function validateSubmission(data: unknown): ValidationResult {
     );
   }
 
-  const claimedDays = Math.max(submission.summary.totalDays, submission.contributions.length, 1);
-  const maxSubmissionTokens = MAX_DAILY_TOKENS * claimedDays;
-  const maxSubmissionCost = MAX_DAILY_COST * claimedDays;
-
-  if (submission.summary.totalTokens > maxSubmissionTokens) {
-    errors.push(
-      `Submission token total exceeds ${maxSubmissionTokens.toLocaleString("en-US")} for ${claimedDays} day(s): ${submission.summary.totalTokens.toLocaleString("en-US")}`
-    );
-  }
-
-  if (submission.summary.totalCost > maxSubmissionCost) {
-    errors.push(
-      `Submission cost exceeds ${maxSubmissionCost.toLocaleString("en-US")} for ${claimedDays} day(s): ${submission.summary.totalCost.toFixed(2)}`
-    );
-  }
-
-  if (submission.summary.maxCostInSingleDay > MAX_DAILY_COST) {
-    errors.push(
-      `Summary maxCostInSingleDay exceeds ${MAX_DAILY_COST.toLocaleString("en-US")}: ${submission.summary.maxCostInSingleDay.toFixed(2)}`
-    );
-  }
-
-  {
+  if (submission.summary.totalCost > 0 && submission.summary.totalTokens === 0) {
+    // Cursor legacy: subtract premium-tool-call cost before the tokenless-cost
+    // detection so a legacy charge cannot trip the error.
     const allClients: ClientLike[] = submission.contributions.flatMap(
       (d) => d.clients
     );
-    // Cursor legacy: subtract premium-tool-call cost before both sanity caps
-    // so a legacy charge cannot inflate the cost-per-million ratio either,
-    // not just the tokenless-cost error.
     const legacyCost = allClients
       .filter(isLegacyTokenlessCursorClient)
       .reduce((sum, c) => sum + c.cost, 0);
     const checkableCost = Math.max(0, submission.summary.totalCost - legacyCost);
 
-    if (submission.summary.totalCost > 0 && submission.summary.totalTokens === 0) {
-      if (checkableCost > LEGACY_COST_FLOAT_EPSILON) {
-        const offenders = describeTokenlessOffenders(
-          allClients.filter((c) => !isLegacyTokenlessCursorClient(c))
-        );
-        const detail =
-          `cost=${formatCost(submission.summary.totalCost)}, total tokens=0` +
-          (offenders ? `; offending clients: ${offenders}` : "");
-        errors.push(`Submission summary: Cost submitted without tokens (${detail})`);
-      }
-    } else {
-      pushCostPerMillionError(
-        errors,
-        "Submission summary",
-        checkableCost,
-        submission.summary.totalTokens
+    if (checkableCost > LEGACY_COST_FLOAT_EPSILON) {
+      const offenders = describeTokenlessOffenders(
+        allClients.filter((c) => !isLegacyTokenlessCursorClient(c))
       );
+      const detail =
+        `cost=${formatCost(submission.summary.totalCost)}, total tokens=0` +
+        (offenders ? `; offending clients: ${offenders}` : "");
+      errors.push(`Submission summary: Cost submitted without tokens (${detail})`);
     }
   }
 
@@ -427,25 +369,6 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   // 3c. Day token breakdown should sum to totals
   for (const day of submission.contributions) {
-    if (day.totals.tokens > MAX_DAILY_TOKENS) {
-      errors.push(
-        `Daily token total exceeds ${MAX_DAILY_TOKENS.toLocaleString("en-US")} on ${day.date}: ${day.totals.tokens.toLocaleString("en-US")}`
-      );
-    } else if (day.totals.tokens > WARN_DAILY_TOKENS) {
-      console.warn("[submission] high daily token count", {
-        date: day.date,
-        tokens: day.totals.tokens,
-        warnThreshold: WARN_DAILY_TOKENS,
-        cap: MAX_DAILY_TOKENS,
-      });
-    }
-
-    if (day.totals.cost > MAX_DAILY_COST) {
-      errors.push(
-        `Daily cost exceeds ${MAX_DAILY_COST.toLocaleString("en-US")} on ${day.date}: ${day.totals.cost.toFixed(2)}`
-      );
-    }
-
     {
       // Cursor legacy: subtract premium-tool-call cost before both sanity
       // caps so legacy charges that share a day with normal token-bearing
@@ -465,13 +388,6 @@ export function validateSubmission(data: unknown): ValidationResult {
             (offenders ? `; offending clients: ${offenders}` : "");
           errors.push(`Day ${day.date}: Cost submitted without tokens (${detail})`);
         }
-      } else {
-        pushCostPerMillionError(
-          errors,
-          `Day ${day.date}`,
-          checkableCost,
-          day.totals.tokens
-        );
       }
     }
 
@@ -506,17 +422,6 @@ export function validateSubmission(data: unknown): ValidationResult {
 
     for (const client of day.clients) {
       const clientTokens = tokenTotal(client.tokens);
-      if (clientTokens > MAX_DAILY_TOKENS) {
-        errors.push(
-          `Client ${client.client} on ${day.date}: token total exceeds ${MAX_DAILY_TOKENS.toLocaleString("en-US")}: ${clientTokens.toLocaleString("en-US")}`
-        );
-      }
-
-      if (client.cost > MAX_DAILY_COST) {
-        errors.push(
-          `Client ${client.client} on ${day.date}: cost exceeds ${MAX_DAILY_COST.toLocaleString("en-US")}: ${client.cost.toFixed(2)}`
-        );
-      }
 
       if (client.cost > 0 && clientTokens === 0) {
         if (!isLegacyTokenlessCursorClient(client)) {
@@ -529,13 +434,6 @@ export function validateSubmission(data: unknown): ValidationResult {
               `(cost=${formatCost(client.cost)}, tokens={${formatTokenBreakdown(client.tokens)}})`
           );
         }
-      } else {
-        pushCostPerMillionError(
-          errors,
-          `Client ${client.client}/${client.modelId} on ${day.date}`,
-          client.cost,
-          clientTokens
-        );
       }
     }
   }
