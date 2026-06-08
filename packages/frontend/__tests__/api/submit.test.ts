@@ -441,8 +441,9 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
   describe("Submission validation guardrails", () => {
     it("accepts internally consistent high-volume one-day token totals", () => {
-      // Cap is 10B (MAX_DAILY_TOKENS). Use a value just under to confirm the
-      // cap boundary is respected without triggering a rejection.
+      // Size caps were removed in feat/remove-submission-size-caps; this test
+      // now confirms that an arbitrarily large but internally-consistent
+      // payload still validates.
       const payload = createValidationPayload({
         totalTokens: 8_000_000_000,
         totalCost: 800,
@@ -461,9 +462,10 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(result.errors).toHaveLength(0);
     });
 
-    it("rejects one-day fabricated token totals above the submission cap", () => {
+    it("accepts trillion-token internally consistent payloads (no size cap)", () => {
       const payload = createValidationPayload({
         totalTokens: 1_000_000_000_000,
+        totalCost: 100_000,
         tokenBreakdown: {
           input: 1_000_000_000_000,
           output: 0,
@@ -475,10 +477,8 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       const result = validateSubmission(payload);
 
-      expect(result.valid).toBe(false);
-      expect(result.errors.join("\n")).toContain("Daily token total exceeds");
-      expect(result.errors.join("\n")).toContain("10,000,000,000");
-      expect(result.errors.join("\n")).toContain("Client claude");
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
     });
 
     it("keeps structural validation for high-volume payloads", () => {
@@ -499,25 +499,6 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(result.valid).toBe(false);
       expect(result.errors.join("\n")).toContain("modelId");
-    });
-
-    it("rejects submitted cost that is implausible for the reported tokens", () => {
-      const payload = createValidationPayload({
-        totalTokens: 5,
-        totalCost: 1_000_000_000,
-        tokenBreakdown: {
-          input: 5,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          reasoning: 0,
-        },
-      });
-
-      const result = validateSubmission(payload);
-
-      expect(result.valid).toBe(false);
-      expect(result.errors.join("\n")).toContain("Cost per million tokens exceeds");
     });
 
     it("rejects submitted cost without corresponding tokens", () => {

@@ -3127,8 +3127,7 @@ mod tests {
         // depth 1: <slug>/<id>.jsonl
         setup_mock_gjc_session(home, "--work--proj--", "sess-001.jsonl");
         // depth 2: <slug>/<session>/N-Pass.jsonl
-        let depth2 = home
-            .join(".gjc/agent/sessions/--work--proj--/sess-001");
+        let depth2 = home.join(".gjc/agent/sessions/--work--proj--/sess-001");
         fs::create_dir_all(&depth2).unwrap();
         File::create(depth2.join("0-Pass.jsonl")).unwrap();
 
@@ -3146,18 +3145,18 @@ mod tests {
         // read only the home fallback.
         let other = TempDir::new().unwrap();
         unsafe {
-            std::env::set_var("GJC_CODING_AGENT_DIR", other.path().to_string_lossy().as_ref())
+            std::env::set_var(
+                "GJC_CODING_AGENT_DIR",
+                other.path().to_string_lossy().as_ref(),
+            )
         };
 
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         setup_mock_gjc_session(home, "slug", "a.jsonl");
 
-        let result = scan_all_clients_with_env_strategy(
-            home.to_str().unwrap(),
-            &["gjc".to_string()],
-            false,
-        );
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["gjc".to_string()], false);
         assert_eq!(result.get(ClientId::Gjc).len(), 1);
 
         restore_env("GJC_CODING_AGENT_DIR", previous);
@@ -3176,9 +3175,7 @@ mod tests {
         fs::create_dir_all(&override_sessions).unwrap();
         File::create(override_sessions.join("o.jsonl")).unwrap();
 
-        unsafe {
-            std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref())
-        };
+        unsafe { std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref()) };
 
         let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
         assert!(result
@@ -3203,9 +3200,7 @@ mod tests {
         // Point the env var at <home>/.gjc/agent so root (1) and root (4)
         // resolve to the same directory.
         let agent_dir = home.join(".gjc/agent");
-        unsafe {
-            std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref())
-        };
+        unsafe { std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref()) };
 
         let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
         assert_eq!(result.get(ClientId::Gjc).len(), 1);
@@ -3242,7 +3237,10 @@ mod tests {
         File::create(sessions.join("x.jsonl")).unwrap();
 
         unsafe {
-            std::env::set_var("GJC_CONFIG_DIR", config_dir.path().to_string_lossy().as_ref())
+            std::env::set_var(
+                "GJC_CONFIG_DIR",
+                config_dir.path().to_string_lossy().as_ref(),
+            )
         };
 
         let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
@@ -3288,9 +3286,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         File::create(sessions.join("x.jsonl")).unwrap();
 
-        unsafe {
-            std::env::set_var("PI_CONFIG_DIR", pi_config.path().to_string_lossy().as_ref())
-        };
+        unsafe { std::env::set_var("PI_CONFIG_DIR", pi_config.path().to_string_lossy().as_ref()) };
 
         let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
@@ -3337,9 +3333,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         File::create(sessions.join("x.jsonl")).unwrap();
 
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", xdg_data.path().to_string_lossy().as_ref())
-        };
+        unsafe { std::env::set_var("XDG_DATA_HOME", xdg_data.path().to_string_lossy().as_ref()) };
 
         let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
@@ -3389,9 +3383,7 @@ mod tests {
         fs::create_dir_all(&xdg_sessions).unwrap();
         File::create(xdg_sessions.join("xdg.jsonl")).unwrap();
 
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", xdg_data.path().to_string_lossy().as_ref())
-        };
+        unsafe { std::env::set_var("XDG_DATA_HOME", xdg_data.path().to_string_lossy().as_ref()) };
 
         let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert_eq!(
@@ -3436,7 +3428,10 @@ mod tests {
 
         unsafe {
             std::env::remove_var("GJC_CODING_AGENT_DIR");
-            std::env::set_var("GJC_CONFIG_DIR", config_dir.path().to_string_lossy().as_ref());
+            std::env::set_var(
+                "GJC_CONFIG_DIR",
+                config_dir.path().to_string_lossy().as_ref(),
+            );
             std::env::set_var("XDG_DATA_HOME", xdg_data.path().to_string_lossy().as_ref());
         }
 
@@ -3480,7 +3475,10 @@ mod tests {
 
         // Point GJC_CODING_AGENT_DIR at a path that does not exist.
         unsafe {
-            std::env::set_var("GJC_CODING_AGENT_DIR", "/nonexistent/path/that/does/not/exist");
+            std::env::set_var(
+                "GJC_CODING_AGENT_DIR",
+                "/nonexistent/path/that/does/not/exist",
+            );
             std::env::remove_var("GJC_CONFIG_DIR");
             std::env::remove_var("PI_CONFIG_DIR");
             std::env::remove_var("XDG_DATA_HOME");
