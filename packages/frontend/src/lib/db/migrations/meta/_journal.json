@@ -99,6 +99,13 @@
       "when": 1780172800000,
       "tag": "0013_add_mcp_servers",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1780915651573,
+      "tag": "0014_widen_cost_columns",
+      "breakpoints": true
     }
   ]
 }

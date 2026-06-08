@@ -168,7 +168,7 @@ export const submissions = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
 
     totalTokens: bigint("total_tokens", { mode: "number" }).notNull(),
-    totalCost: decimal("total_cost", { precision: 12, scale: 4 }).notNull(),
+    totalCost: decimal("total_cost", { precision: 18, scale: 4 }).notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
     cacheCreationTokens: bigint("cache_creation_tokens", { mode: "number" })
@@ -275,7 +275,7 @@ export const dailyBreakdown = pgTable(
 
     date: date("date").notNull(),
     tokens: bigint("tokens", { mode: "number" }).notNull(),
-    cost: decimal("cost", { precision: 10, scale: 4 }).notNull(),
+    cost: decimal("cost", { precision: 14, scale: 4 }).notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
     /** Unix ms timestamp of earliest message in this UTC day bucket. NULL for legacy data. */
