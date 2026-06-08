@@ -1535,8 +1535,12 @@ where
 }
 
 fn strips_claude_numeric_minor(candidate: &str, first_stripped_segment: &str) -> bool {
-    !first_stripped_segment.is_empty()
-        && first_stripped_segment.chars().all(|c| c.is_ascii_digit())
+    // Only block stripping when the segment is a single-digit minor version
+    // (e.g. "8" from "claude-opus-4-8"). Multi-digit segments like dates
+    // ("20260601") or brackets ("1m") should not block suffix stripping.
+    first_stripped_segment.len() == 1
+        && first_stripped_segment.as_bytes()[0].is_ascii_digit()
+        && first_stripped_segment.as_bytes()[0] != b'0'
         && (candidate.contains("claude")
             || candidate.contains("opus")
             || candidate.contains("sonnet")
@@ -1550,12 +1554,22 @@ fn has_unrecognized_claude_four_minor(model_id: &str) -> bool {
         || model_id.contains("sonnet")
         || model_id.contains("haiku"))
         && contains_delimited_major_minor(model_id, '4')
-        && !contains_delimited_fragment(model_id, "4.5")
-        && !contains_delimited_fragment(model_id, "4-5")
-        && !contains_delimited_fragment(model_id, "4.6")
-        && !contains_delimited_fragment(model_id, "4-6")
-        && !contains_delimited_fragment(model_id, "4.7")
-        && !contains_delimited_fragment(model_id, "4-7")
+        && !has_known_claude_four_minor(model_id)
+}
+
+/// Returns true if `model_id` contains a recognized Claude 4.x minor version
+/// (single digit 1–9, e.g. `4-5`, `4.8`).
+fn has_known_claude_four_minor(model_id: &str) -> bool {
+    let parts: Vec<&str> = model_id
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|p| !p.is_empty())
+        .collect();
+    for window in parts.windows(2) {
+        if window[0] == "4" && is_single_digit_minor(window[1]) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Attempts to find a model by progressively stripping leading segments.
@@ -4492,5 +4506,117 @@ mod tests {
             r_unknown.matched_key, r_none.matched_key,
             "unknown hint via source_and_provider should behave like None"
         );
+    }
+
+    /// Suffixed opus-4-8 ids (dated snapshot, bracket tag) should resolve to
+    /// `claude-opus-4-8` when the dataset carries that key, NOT degrade to
+    /// legacy `claude-opus-4` ($15/$75 per M).
+    /// Regression test for https://github.com/junhoyeo/tokscale/issues/631
+    #[test]
+    fn test_opus_4_8_dated_snapshot_resolves_to_4_8() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4-8".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000_005),
+                output_cost_per_token: Some(0.000_025),
+                ..Default::default()
+            },
+        );
+        // Legacy entry that should NOT be matched
+        litellm.insert(
+            "claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000_015),
+                output_cost_per_token: Some(0.000_075),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        // Dated snapshot
+        let r = lookup.lookup("claude-opus-4-8-20260601").unwrap();
+        assert_eq!(r.matched_key, "claude-opus-4-8");
+        assert!((r.pricing.input_cost_per_token.unwrap() - 0.000_005).abs() < 1e-10);
+
+        // Bracket tag
+        let r = lookup.lookup("claude-opus-4-8[1m]").unwrap();
+        assert_eq!(r.matched_key, "claude-opus-4-8");
+        assert!((r.pricing.input_cost_per_token.unwrap() - 0.000_005).abs() < 1e-10);
+
+        // Bare id still works
+        let r = lookup.lookup("claude-opus-4-8").unwrap();
+        assert_eq!(r.matched_key, "claude-opus-4-8");
+    }
+
+    /// Suffixed opus-4-9 (not yet in any dataset) should return None rather
+    /// than silently degrading to legacy claude-opus-4.
+    #[test]
+    fn test_opus_4_9_unknown_suffix_returns_none() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000_015),
+                output_cost_per_token: Some(0.000_075),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        // No 4-9 key in dataset → should not silently fall back to 4
+        assert!(lookup.lookup("claude-opus-4-9-20270101").is_none());
+        assert!(lookup.lookup("claude-opus-4-9").is_none());
+    }
+
+    /// Existing 4-5 / 4-6 / 4-7 suffix handling must keep working.
+    #[test]
+    fn test_opus_4_7_dated_snapshot_still_works() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-4-7".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000_01),
+                output_cost_per_token: Some(0.000_05),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let r = lookup.lookup("claude-opus-4-7-20260301").unwrap();
+        assert_eq!(r.matched_key, "claude-opus-4-7");
+    }
+
+    /// `strips_claude_numeric_minor` must allow date suffixes (multi-digit) to
+    /// be stripped while still protecting single-digit minor versions.
+    #[test]
+    fn test_strip_suffix_allows_date_not_minor() {
+        let mut do_lookup = |id: &str| -> Option<()> {
+            if id == "claude-opus-4-8" { Some(()) } else { None }
+        };
+
+        // Date suffix should be strippable
+        let result = try_strip_unknown_suffix("claude-opus-4-8-20260601", |id| {
+            do_lookup(id).map(|_| LookupResult {
+                pricing: ModelPricing::default(),
+                source: "test".into(),
+                matched_key: id.into(),
+            })
+        });
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().matched_key, "claude-opus-4-8");
+
+        // Single-digit minor must NOT be stripped from a bare id
+        let result = try_strip_unknown_suffix("claude-opus-4-8", |id| {
+            do_lookup(id).map(|_| LookupResult {
+                pricing: ModelPricing::default(),
+                source: "test".into(),
+                matched_key: id.into(),
+            })
+        });
+        assert!(result.is_none());
     }
 }
