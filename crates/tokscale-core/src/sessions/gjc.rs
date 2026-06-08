@@ -291,7 +291,10 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key, Some("gjc_ses_005:msg_abc".to_string()));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("gjc_ses_005:msg_abc".to_string())
+        );
     }
 
     #[test]
@@ -302,7 +305,10 @@ not valid json at all
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
         let key = messages[0].dedup_key.clone().unwrap();
-        assert!(key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:10-5:"), "key={key}");
+        assert!(
+            key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:10-5:"),
+            "key={key}"
+        );
     }
 
     #[test]
@@ -401,7 +407,11 @@ not valid json at all
 {"type":"message","id":"msg_neg","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":-100,"output":-50,"cacheRead":-10,"cacheWrite":-5,"cost":{"total":0.0}}}}"#;
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
-        assert_eq!(messages.len(), 1, "message should be parsed despite negative tokens");
+        assert_eq!(
+            messages.len(),
+            1,
+            "message should be parsed despite negative tokens"
+        );
         let t = &messages[0].tokens;
         assert_eq!(t.input, 0, "negative input clamped to 0");
         assert_eq!(t.output, 0, "negative output clamped to 0");
@@ -417,7 +427,10 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].cost, 0.0, "negative cost.total must fall back to 0.0");
+        assert_eq!(
+            messages[0].cost, 0.0,
+            "negative cost.total must fall back to 0.0"
+        );
     }
 
     /// (g) cost.total absent entirely -> 0.0.
@@ -439,14 +452,16 @@ not valid json at all
         let line = r#"{"type":"message","id":"replay_msg","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":10,"output":5,"cost":{"total":0.05}}}}"#;
         let content = format!(
             "{}\n{}\n{}",
-            r#"{"type":"session","id":"gjc_ses_replay","cwd":"/tmp"}"#,
-            line,
-            line
+            r#"{"type":"session","id":"gjc_ses_replay","cwd":"/tmp"}"#, line, line
         );
         let file = create_test_file(&content);
         let messages = parse_gjc_file(file.path());
         // Both lines parse successfully; it's the caller's job to dedup.
-        assert_eq!(messages.len(), 2, "parser emits both; dedup is caller's concern");
+        assert_eq!(
+            messages.len(),
+            2,
+            "parser emits both; dedup is caller's concern"
+        );
         assert_eq!(
             messages[0].dedup_key, messages[1].dedup_key,
             "identical id+session must produce the same dedup_key"
@@ -468,13 +483,21 @@ not valid json at all
         // Must not panic; workspace fields may or may not be populated depending
         // on normalize_workspace_key, but the parse result must be exactly 1 message.
         let messages = parse_gjc_file(file.path());
-        assert_eq!(messages.len(), 1, "unicode cwd must not cause a panic or skip");
+        assert_eq!(
+            messages.len(),
+            1,
+            "unicode cwd must not cause a panic or skip"
+        );
 
         // Path with percent-encoding (URL-style directories some tools emit)
         let content_pct = r#"{"type":"session","id":"gjc_adv_i2","cwd":"/home/user/my%20project"}
 {"type":"message","id":"msg_p","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":1,"output":1,"cost":{"total":0.001}}}}"#;
         let file2 = create_test_file(content_pct);
         let messages2 = parse_gjc_file(file2.path());
-        assert_eq!(messages2.len(), 1, "percent-encoded cwd must not cause a panic or skip");
+        assert_eq!(
+            messages2.len(),
+            1,
+            "percent-encoded cwd must not cause a panic or skip"
+        );
     }
 }

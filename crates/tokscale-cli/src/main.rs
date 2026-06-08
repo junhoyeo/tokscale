@@ -6112,7 +6112,10 @@ mod tests {
         // both the ClientId<->ClientFilter conversions and the id string.
         assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
         assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
-        assert_eq!(ClientFilter::from_client_id(ClientId::Gjc), ClientFilter::Gjc);
+        assert_eq!(
+            ClientFilter::from_client_id(ClientId::Gjc),
+            ClientFilter::Gjc
+        );
         assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
     }
 

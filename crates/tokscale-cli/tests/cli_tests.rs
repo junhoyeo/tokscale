@@ -2923,7 +2923,9 @@ fn test_models_with_client_filter_gjc() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().expect("entries must be an array");
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
 
     assert!(
         !entries.is_empty(),
@@ -2940,9 +2942,12 @@ fn test_models_with_client_filter_gjc() {
     }
 
     // The fixture model claude-sonnet-4 must appear.
-    let has_sonnet = entries
-        .iter()
-        .any(|e| e["model"].as_str().unwrap_or("").contains("claude-sonnet-4"));
+    let has_sonnet = entries.iter().any(|e| {
+        e["model"]
+            .as_str()
+            .unwrap_or("")
+            .contains("claude-sonnet-4")
+    });
     assert!(
         has_sonnet,
         "expected claude-sonnet-4 in gjc entries; got: {entries:?}"
@@ -2968,7 +2973,9 @@ fn test_client_filter_gjc_empty_is_clean() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().expect("entries must be an array");
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
     assert!(
         entries.is_empty(),
         "expected zero entries for empty gjc fixture, got: {entries:?}"
@@ -2995,7 +3002,9 @@ fn test_client_filter_gjc_isolation() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().expect("entries must be an array");
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
 
     // No gjc entry should leak through when filtering for claude.
     for entry in entries {

@@ -87,7 +87,8 @@ async fn test_gjc_cost_precedence_end_to_end() {
 
     {
         let mut f = std::fs::File::create(&session_file).expect("failed to create session file");
-        f.write_all(jsonl.as_bytes()).expect("failed to write JSONL");
+        f.write_all(jsonl.as_bytes())
+            .expect("failed to write JSONL");
         f.flush().expect("failed to flush");
     }
 
@@ -218,9 +219,10 @@ async fn test_gjc_workspace_key_from_dashed_slug() {
         year: None,
         scanner_settings: ScannerSettings::default(),
     };
-    let messages = parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
-        .await
-        .expect("parse failed");
+    let messages =
+        parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
+            .await
+            .expect("parse failed");
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].workspace_key.as_deref(), Some("/work/pi"));
     assert_eq!(messages[0].workspace_label.as_deref(), Some("pi"));
@@ -279,17 +281,25 @@ async fn test_gjc_recursive_glob_depth1_and_depth2() {
         year: None,
         scanner_settings: ScannerSettings::default(),
     };
-    let messages = parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
-        .await
-        .expect("parse failed");
+    let messages =
+        parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
+            .await
+            .expect("parse failed");
     // Both the depth-1 and the distinct depth-2 message are discovered.
-    assert_eq!(messages.len(), 2, "expected depth1 + depth2 messages: {messages:#?}");
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected depth1 + depth2 messages: {messages:#?}"
+    );
     let mut ids: Vec<String> = messages
         .iter()
         .map(|m| m.dedup_key.clone().unwrap_or_default())
         .collect();
     ids.sort();
-    assert_eq!(ids, vec!["s_depth1:d1_m1".to_string(), "s_depth2:d2_m1".to_string()]);
+    assert_eq!(
+        ids,
+        vec!["s_depth1:d1_m1".to_string(), "s_depth2:d2_m1".to_string()]
+    );
 }
 
 /// G9b: message-level dedup collapses a replayed parent message id across files.
@@ -312,7 +322,8 @@ async fn test_gjc_message_dedup_across_replayed_files() {
     // Same session id "S" and same message id "SHARED" in BOTH files → same
     // dedup_key "S:SHARED" → counted once.
     let shared_msg = r#"{"type":"message","id":"SHARED","timestamp":"2026-01-01T00:01:00.000Z","message":{"role":"assistant","model":"gjc-priceable-model","provider":"anthropic","timestamp":1767225661000,"usage":{"input":10,"output":5,"cost":{"total":0.01}}}}"#;
-    let header = r#"{"type":"session","id":"S","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/work/proj"}"#;
+    let header =
+        r#"{"type":"session","id":"S","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/work/proj"}"#;
     let content = format!("{header}\n{shared_msg}\n");
 
     {
@@ -338,9 +349,10 @@ async fn test_gjc_message_dedup_across_replayed_files() {
         year: None,
         scanner_settings: ScannerSettings::default(),
     };
-    let messages = parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
-        .await
-        .expect("parse failed");
+    let messages =
+        parse_local_unified_messages_with_pricing(options, Some(&make_pricing_service()))
+            .await
+            .expect("parse failed");
     assert_eq!(
         messages.len(),
         1,
