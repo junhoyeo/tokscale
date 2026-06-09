@@ -8,10 +8,26 @@ interface GetSessionFromRequestOptions {
 
 function getAllowedOrigins(): string[] {
   const env = process.env.CSRF_ALLOWED_ORIGINS;
-  if (env) {
-    return env.split(",").map((o) => o.trim()).filter(Boolean);
+  const origins = env
+    ? env.split(",").map((o) => o.trim()).filter(Boolean)
+    : ["https://tokscale.ai", "https://tokscale.dev", "http://localhost:3000"];
+
+  // Self-hosted deployments already set NEXT_PUBLIC_URL for OAuth redirects;
+  // the deployment's own origin is always a legitimate request source, so
+  // include it whether or not CSRF_ALLOWED_ORIGINS is configured.
+  const publicUrl = process.env.NEXT_PUBLIC_URL;
+  if (publicUrl) {
+    try {
+      const origin = new URL(publicUrl).origin;
+      if (!origins.includes(origin)) {
+        origins.push(origin);
+      }
+    } catch {
+      // Malformed NEXT_PUBLIC_URL; ignore and rely on the explicit list.
+    }
   }
-  return ["https://tokscale.ai", "https://tokscale.dev", "http://localhost:3000"];
+
+  return origins;
 }
 
 export async function getSessionFromRequest(
