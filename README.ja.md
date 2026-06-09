@@ -336,6 +336,7 @@ tokscale --client opencode,claude --week --json
 ```bash
 # クイック日付ショートカット
 tokscale --today              # 今日のみ
+tokscale --yesterday          # 昨日のみ
 tokscale --week               # 過去7日間
 tokscale --month              # 今月
 

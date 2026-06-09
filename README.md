@@ -372,6 +372,7 @@ Date filters work across all commands that generate reports (`tokscale`, `toksca
 ```bash
 # Quick date shortcuts
 tokscale --today              # Today only
+tokscale --yesterday          # Yesterday only
 tokscale --week               # Last 7 days
 tokscale --month              # Current calendar month
 

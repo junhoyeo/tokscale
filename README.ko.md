@@ -335,6 +335,7 @@ tokscale --client opencode,claude --week --json
 ```bash
 # 빠른 날짜 단축키
 tokscale --today              # 오늘만
+tokscale --yesterday          # 어제만
 tokscale --week               # 최근 7일
 tokscale --month              # 이번 달
 
