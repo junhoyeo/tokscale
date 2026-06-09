@@ -838,6 +838,8 @@ pub enum ClientFilter {
     Cline,
     Gjc,
     Grok,
+    #[value(name = "antigravity-cli")]
+    AntigravityCli,
     Synthetic,
 }
 
@@ -868,6 +870,7 @@ impl ClientFilter {
             Self::Goose => "goose",
             Self::Codebuff => "codebuff",
             Self::Antigravity => "antigravity",
+            Self::AntigravityCli => "antigravity-cli",
             Self::Zed => "zed",
             Self::Kiro => "kiro",
             Self::Trae => "trae",
@@ -908,6 +911,7 @@ impl ClientFilter {
             Self::Goose => Some(ClientId::Goose),
             Self::Codebuff => Some(ClientId::Codebuff),
             Self::Antigravity => Some(ClientId::Antigravity),
+            Self::AntigravityCli => Some(ClientId::AntigravityCli),
             Self::Zed => Some(ClientId::Zed),
             Self::Kiro => Some(ClientId::Kiro),
             Self::Trae => Some(ClientId::Trae),
@@ -945,6 +949,7 @@ impl ClientFilter {
             ClientId::Goose => Self::Goose,
             ClientId::Codebuff => Self::Codebuff,
             ClientId::Antigravity => Self::Antigravity,
+            ClientId::AntigravityCli => Self::AntigravityCli,
             ClientId::Zed => Self::Zed,
             ClientId::Kiro => Self::Kiro,
             ClientId::Trae => Self::Trae,
@@ -1046,6 +1051,8 @@ pub struct ClientFlags {
     pub goose: bool,
     #[arg(long, hide = true)]
     pub antigravity: bool,
+    #[arg(long = "antigravity-cli", hide = true)]
+    pub antigravity_cli: bool,
     #[arg(long, hide = true)]
     pub zed: bool,
     #[arg(long, hide = true)]
@@ -1132,7 +1139,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 29] = [
+    let legacy: [(bool, ClientFilter); 30] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1154,6 +1161,7 @@ fn build_client_filter_with_defaults(
         (flags.copilot, ClientFilter::Copilot),
         (flags.goose, ClientFilter::Goose),
         (flags.antigravity, ClientFilter::Antigravity),
+        (flags.antigravity_cli, ClientFilter::AntigravityCli),
         (flags.zed, ClientFilter::Zed),
         (flags.kiro, ClientFilter::Kiro),
         (flags.trae, ClientFilter::Trae),
@@ -3531,6 +3539,8 @@ fn capitalize_client(client: &str) -> String {
         "crush" => "Crush".to_string(),
         "openclaw" => "openclaw".to_string(),
         "hermes" => "Hermes Agent".to_string(),
+        "antigravity" => "Antigravity".to_string(),
+        "antigravity-cli" => "Antigravity CLI".to_string(),
         "goose" => "Goose".to_string(),
         "warp" => "Warp".to_string(),
         "grok" => "Grok Build".to_string(),
@@ -3713,6 +3723,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     ClientId::Gemini => "Gemini CLI",
                     ClientId::Cursor => "Cursor IDE",
                     ClientId::Kimi => "Kimi CLI",
+                    ClientId::Antigravity => "Antigravity",
+                    ClientId::AntigravityCli => "Antigravity CLI",
                     _ => client_ui::display_name(client),
                 }
                 .to_string();
@@ -5936,6 +5948,7 @@ mod tests {
             crush: true,
             goose: true,
             antigravity: true,
+            antigravity_cli: true,
             zed: true,
             kiro: true,
             trae: true,
@@ -5974,6 +5987,7 @@ mod tests {
             "crush",
             "goose",
             "antigravity",
+            "antigravity-cli",
             "zed",
             "kiro",
             "trae",
@@ -6785,6 +6799,16 @@ mod tests {
     #[test]
     fn test_capitalize_client_gemini() {
         assert_eq!(capitalize_client("gemini"), "Gemini");
+    }
+
+    #[test]
+    fn test_capitalize_client_antigravity() {
+        assert_eq!(capitalize_client("antigravity"), "Antigravity");
+    }
+
+    #[test]
+    fn test_capitalize_client_antigravity_cli() {
+        assert_eq!(capitalize_client("antigravity-cli"), "Antigravity CLI");
     }
 
     #[test]

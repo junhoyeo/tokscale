@@ -157,6 +157,7 @@ macro_rules! define_clients {
             } ),+
         ];
 
+        #[allow(unreachable_patterns)]
         const _: () = {
             let mut i = 0;
             $(
@@ -438,6 +439,18 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    AntigravityCli = 28 => {
+        id: "antigravity-cli",
+        root: PathRoot::EnvVar {
+            var: "ANTIGRAVITY_CLI_HOME",
+            fallback_relative: ".gemini",
+        },
+        relative: "antigravity-cli/conversations",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -490,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 28);
+        assert_eq!(ClientId::COUNT, 29);
     }
 
     #[test]
@@ -805,6 +818,11 @@ mod tests {
     #[test]
     fn test_antigravity_parse_local_is_true() {
         assert!(ClientId::Antigravity.data().parse_local);
+    }
+
+    #[test]
+    fn test_antigravity_cli_parse_local_is_true() {
+        assert!(ClientId::AntigravityCli.data().parse_local);
     }
 
     #[test]

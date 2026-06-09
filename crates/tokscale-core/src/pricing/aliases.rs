@@ -44,6 +44,9 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-3-flash-c", "gemini-3-flash-preview");
     m.insert("grok-composer-2.5", "composer-2.5");
     m.insert("grok-composer-2.5-fast", "composer-2.5-fast");
+    m.insert("gemini-3.5-flash-high", "google/gemini-3.5-flash");
+    m.insert("gemini-3.5-flash-medium", "google/gemini-3.5-flash");
+    m.insert("gemini-3.5-flash-low", "google/gemini-3.5-flash");
 
     // Synthetic model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
@@ -91,6 +94,18 @@ mod tests {
         );
         assert_eq!(resolve_alias("model_placeholder_m84"), None);
         assert_eq!(resolve_alias("model_placeholder_m16"), None);
+        assert_eq!(
+            resolve_alias("gemini-3.5-flash-high"),
+            Some("google/gemini-3.5-flash")
+        );
+        assert_eq!(
+            resolve_alias("gemini-3.5-flash-medium"),
+            Some("google/gemini-3.5-flash")
+        );
+        assert_eq!(
+            resolve_alias("gemini-3.5-flash-low"),
+            Some("google/gemini-3.5-flash")
+        );
     }
 
     #[test]

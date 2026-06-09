@@ -260,7 +260,14 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
+                "*.json|*.jsonl|*.db" => {
+                    file_name.ends_with(".json")
+                        || file_name.ends_with(".jsonl")
+                        || file_name.ends_with(".db")
+                }
+                "*.jsonl|*.db" => file_name.ends_with(".jsonl") || file_name.ends_with(".db"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "*.db" => file_name.ends_with(".db"),
                 // OpenClaw: also match archived transcripts
                 // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
                 "*.jsonl*" => {
@@ -3566,5 +3573,18 @@ mod tests {
         restore_env("GJC_CONFIG_DIR", prev_config);
         restore_env("PI_CONFIG_DIR", prev_pi);
         restore_env("XDG_DATA_HOME", prev_xdg);
+    }
+
+    #[test]
+    fn test_scan_all_clients_antigravity_cli_db() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let db_dir = home.join(".gemini/antigravity-cli/conversations");
+        fs::create_dir_all(&db_dir).unwrap();
+        File::create(db_dir.join("session-xyz.db")).unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["antigravity-cli".to_string()]);
+        assert_eq!(result.get(ClientId::AntigravityCli).len(), 1);
+        assert!(result.get(ClientId::AntigravityCli)[0].ends_with("session-xyz.db"));
     }
 }

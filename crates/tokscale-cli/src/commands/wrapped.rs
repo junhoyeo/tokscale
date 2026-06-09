@@ -1451,6 +1451,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "crush" => Some("Crush"),
         "goose" => Some("Goose"),
         "antigravity" => Some("Antigravity"),
+        "antigravity-cli" => Some("Antigravity CLI"),
         "zed" => Some("Zed Agent"),
         "warp" => Some("Warp"),
         "cline" => Some("Cline"),
@@ -1491,6 +1492,9 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
         ),
         "Antigravity" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
+        ),
+        "Antigravity CLI" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
         ),
         "Zed Agent" => Some(
@@ -2443,6 +2447,14 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_antigravity_cli() {
+        assert_eq!(
+            client_display_name("antigravity-cli"),
+            Some("Antigravity CLI")
+        );
+    }
+
+    #[test]
     fn test_client_display_name_zed() {
         assert_eq!(client_display_name("zed"), Some("Zed Agent"));
     }
@@ -2606,6 +2618,16 @@ mod tests {
     fn test_client_logo_url_antigravity() {
         assert_eq!(
             client_logo_url("Antigravity"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"
+            )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_antigravity_cli() {
+        assert_eq!(
+            client_logo_url("Antigravity CLI"),
             Some(
                 "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"
             )

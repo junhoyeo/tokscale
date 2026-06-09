@@ -1176,6 +1176,9 @@ fn extract_model_family(model_id: &str) -> String {
         return "claude".into();
     }
 
+    if lower.contains("gemini-3.5") {
+        return "gemini-3.5".into();
+    }
     if lower.contains("gemini-3") {
         return "gemini-3".into();
     }
@@ -2223,6 +2226,26 @@ mod tests {
             ModelPricing {
                 input_cost_per_token: Some(0.00000125),
                 output_cost_per_token: Some(0.000005),
+                cache_read_input_token_cost: None,
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "google/gemini-3.5-flash".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0000015),
+                output_cost_per_token: Some(0.000009),
+                cache_read_input_token_cost: None,
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "vertex_ai/gemini-3.5-flash".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0000015),
+                output_cost_per_token: Some(0.000009),
                 cache_read_input_token_cost: None,
                 cache_creation_input_token_cost: None,
                 ..Default::default()
@@ -4615,6 +4638,15 @@ mod tests {
         let lookup = create_lookup();
         let result = lookup.lookup("antigravity-gemini-3-pro-high").unwrap();
         assert_eq!(result.matched_key, "openrouter/google/gemini-3-pro-preview");
+    }
+
+    #[test]
+    fn test_antigravity_prefix_gemini_3_5_flash() {
+        let lookup = create_lookup();
+        let result = lookup.lookup("antigravity-gemini-3.5-flash-high").unwrap();
+        assert_eq!(result.matched_key, "google/gemini-3.5-flash");
+        assert_eq!(result.pricing.input_cost_per_token.unwrap(), 0.0000015);
+        assert_eq!(result.pricing.output_cost_per_token.unwrap(), 0.000009);
     }
 
     #[test]
