@@ -1,200 +1,77 @@
 import { NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
+import { getBearerToken } from "@/lib/auth/bearerToken";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
-import { db, dailyBreakdown, submissions } from "@/lib/db";
-import type { ClientBreakdownData as DbClientBreakdownData } from "@/lib/db/helpers";
+import { db, dailyBreakdown, submissions, submittedDevices } from "@/lib/db";
+import { deviceDisplayLabel, toIsoString } from "@/lib/devices/shared";
 
-type ClientBreakdownData = Omit<DbClientBreakdownData, "modelId"> & {
-  modelId?: string;
-};
+/**
+ * Stable wire contract consumed by the CLI TUI (crates/tokscale-cli/src/tui/remote.rs).
+ * Bump `schemaVersion` on breaking changes so old CLIs can detect mismatches.
+ */
+const SCHEMA_VERSION = 1;
 
-type LegacySourceBreakdown = Record<string, ClientBreakdownData>;
-type DeviceSourceBreakdown = {
-  devices: Record<string, Record<string, ClientBreakdownData>>;
-};
-
-type DailyRow = {
+interface MeStatsDay {
   date: string;
   tokens: number;
-  cost: string | number;
-  timestampMs: number | null;
-  sourceBreakdown: LegacySourceBreakdown | DeviceSourceBreakdown | null;
-};
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+}
 
-type StatsResponse = {
-  totalCost: number;
+interface MeStatsDevice {
+  id: string;
+  displayName: string;
+  lastSubmittedAt: string | null;
+}
+
+interface MeStatsResponse {
+  schemaVersion: number;
   totalTokens: number;
-  byModel: Array<{ model: string; cost: number; tokens: number }>;
-  byDay: Array<{ date: string; cost: number; tokens: number }>;
-  byClient: Array<{ client: string; cost: number; tokens: number }>;
-  devices: Array<{ id: string; lastSeenAt?: string; cost: number }>;
-};
-
-const EMPTY_STATS: StatsResponse = {
-  totalCost: 0,
-  totalTokens: 0,
-  byModel: [],
-  byDay: [],
-  byClient: [],
-  devices: [],
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object";
+  totalCost: number;
+  deviceCount: number;
+  lastSubmittedAt: string | null;
+  days: MeStatsDay[];
+  devices: MeStatsDevice[];
 }
 
-function hasDevicesBreakdown(
-  value: LegacySourceBreakdown | DeviceSourceBreakdown | null | undefined
-): value is DeviceSourceBreakdown {
-  return isRecord(value) && isRecord(value.devices);
-}
-
-function addClientAggregates(
-  clientTotals: Map<string, { cost: number; tokens: number }>,
-  modelTotals: Map<string, { cost: number; tokens: number }>,
-  clientName: string,
-  clientData: ClientBreakdownData
-) {
-  const tokens = clientData.tokens || 0;
-  const cost = clientData.cost || 0;
-  const existingClient = clientTotals.get(clientName);
-
-  if (existingClient) {
-    existingClient.tokens += tokens;
-    existingClient.cost += cost;
-  } else {
-    clientTotals.set(clientName, { tokens, cost });
-  }
-
-  if (clientData.models && Object.keys(clientData.models).length > 0) {
-    for (const [model, modelData] of Object.entries(clientData.models)) {
-      const existingModel = modelTotals.get(model);
-      if (existingModel) {
-        existingModel.tokens += modelData.tokens || 0;
-        existingModel.cost += modelData.cost || 0;
-      } else {
-        modelTotals.set(model, {
-          tokens: modelData.tokens || 0,
-          cost: modelData.cost || 0,
-        });
-      }
-    }
-    return;
-  }
-
-  const legacyModelId = (clientData as { modelId?: string }).modelId;
-  if (!legacyModelId) return;
-
-  const existingModel = modelTotals.get(legacyModelId);
-  if (existingModel) {
-    existingModel.tokens += tokens;
-    existingModel.cost += cost;
-  } else {
-    modelTotals.set(legacyModelId, { tokens, cost });
-  }
-}
-
-function buildStats(rows: DailyRow[]): StatsResponse {
-  if (rows.length === 0) return EMPTY_STATS;
-
-  let totalCost = 0;
-  let totalTokens = 0;
-  const byDay: StatsResponse["byDay"] = [];
-  const byClient = new Map<string, { cost: number; tokens: number }>();
-  const byModel = new Map<string, { cost: number; tokens: number }>();
-  const devices = new Map<string, { cost: number; lastSeenTimestampMs: number | null }>();
-
-  for (const row of rows) {
-    const dayCost = Number(row.cost) || 0;
-    const dayTokens = row.tokens || 0;
-
-    totalCost += dayCost;
-    totalTokens += dayTokens;
-    byDay.push({
-      date: row.date,
-      cost: dayCost,
-      tokens: dayTokens,
-    });
-
-    if (!row.sourceBreakdown) continue;
-
-    if (hasDevicesBreakdown(row.sourceBreakdown)) {
-      for (const [deviceId, clientBreakdown] of Object.entries(row.sourceBreakdown.devices)) {
-        let deviceDayCost = 0;
-
-        for (const [clientName, clientData] of Object.entries(clientBreakdown)) {
-          addClientAggregates(byClient, byModel, clientName, clientData);
-          deviceDayCost += clientData.cost || 0;
-        }
-
-        const existingDevice = devices.get(deviceId);
-        const lastSeenTimestampMs = row.timestampMs ?? null;
-        if (existingDevice) {
-          existingDevice.cost += deviceDayCost;
-          if (
-            lastSeenTimestampMs != null &&
-            (existingDevice.lastSeenTimestampMs == null ||
-              lastSeenTimestampMs > existingDevice.lastSeenTimestampMs)
-          ) {
-            existingDevice.lastSeenTimestampMs = lastSeenTimestampMs;
-          }
-        } else {
-          devices.set(deviceId, {
-            cost: deviceDayCost,
-            lastSeenTimestampMs,
-          });
-        }
-      }
-
-      continue;
-    }
-
-    for (const [clientName, clientData] of Object.entries(row.sourceBreakdown)) {
-      addClientAggregates(byClient, byModel, clientName, clientData);
-    }
-  }
-
+function emptyStats(): MeStatsResponse {
   return {
-    totalCost,
-    totalTokens,
-    byModel: Array.from(byModel.entries())
-      .map(([model, totals]) => ({
-        model,
-        cost: totals.cost,
-        tokens: totals.tokens,
-      }))
-      .sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model)),
-    byDay,
-    byClient: Array.from(byClient.entries())
-      .map(([client, totals]) => ({
-        client,
-        cost: totals.cost,
-        tokens: totals.tokens,
-      }))
-      .sort((a, b) => b.tokens - a.tokens || a.client.localeCompare(b.client)),
-    devices: Array.from(devices.entries())
-      .map(([id, device]) => ({
-        id,
-        cost: device.cost,
-        ...(device.lastSeenTimestampMs != null
-          ? { lastSeenAt: new Date(device.lastSeenTimestampMs).toISOString() }
-          : {}),
-      }))
-      .sort((a, b) => b.cost - a.cost || a.id.localeCompare(b.id)),
+    schemaVersion: SCHEMA_VERSION,
+    totalTokens: 0,
+    totalCost: 0,
+    deviceCount: 0,
+    lastSubmittedAt: null,
+    days: [],
+    devices: [],
   };
 }
 
+/**
+ * GET /api/me/stats
+ *
+ * Returns the authenticated user's submitted usage aggregated ACROSS all of
+ * their devices: per-day totals summed over `daily_breakdown` rows (which are
+ * scoped per `submitted_device_id`), overall totals, and the device list with
+ * last-submit timestamps.
+ *
+ * Auth: identical to POST /api/submit — `Authorization: Bearer <api_token>`
+ * validated via authenticatePersonalToken. Cookie sessions are intentionally
+ * not accepted; this endpoint exists for the CLI.
+ *
+ * Read-only: performs no writes (touchLastUsedAt is disabled for the same
+ * reason as submit's auth path).
+ */
 export async function GET(request: Request) {
   try {
-    const authHeader = request.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
+    const token = getBearerToken(request.headers.get("Authorization"));
+    if (!token) {
       return NextResponse.json(
         { error: "Missing or invalid Authorization header" },
         { status: 401 }
       );
     }
 
-    const token = authHeader.slice(7);
     const authResult = await authenticatePersonalToken(token, {
       touchLastUsedAt: false,
     });
@@ -204,7 +81,10 @@ export async function GET(request: Request) {
     }
 
     if (authResult.status === "expired") {
-      return NextResponse.json({ error: "API token has expired" }, { status: 401 });
+      return NextResponse.json(
+        { error: "API token has expired" },
+        { status: 401 }
+      );
     }
 
     const [submission] = await db
@@ -214,22 +94,76 @@ export async function GET(request: Request) {
       .limit(1);
 
     if (!submission) {
-      return NextResponse.json(EMPTY_STATS);
+      return NextResponse.json(emptyStats());
     }
 
-    const rows = await db
+    const dayRows = await db
       .select({
         date: dailyBreakdown.date,
-        tokens: dailyBreakdown.tokens,
-        cost: dailyBreakdown.cost,
-        timestampMs: dailyBreakdown.timestampMs,
-        sourceBreakdown: dailyBreakdown.sourceBreakdown,
+        tokens: sql<string>`COALESCE(SUM(${dailyBreakdown.tokens}), 0)`,
+        inputTokens: sql<string>`COALESCE(SUM(${dailyBreakdown.inputTokens}), 0)`,
+        outputTokens: sql<string>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)`,
+        cost: sql<string>`COALESCE(SUM(${dailyBreakdown.cost}), 0)`,
       })
       .from(dailyBreakdown)
       .where(eq(dailyBreakdown.submissionId, submission.id))
-      .orderBy(dailyBreakdown.date);
+      .groupBy(dailyBreakdown.date)
+      .orderBy(asc(dailyBreakdown.date));
 
-    return NextResponse.json(buildStats(rows as DailyRow[]));
+    const deviceRows = await db
+      .select({
+        id: submittedDevices.id,
+        deviceKey: submittedDevices.deviceKey,
+        displayName: submittedDevices.displayName,
+        lastSubmittedAt: submittedDevices.lastSubmittedAt,
+      })
+      .from(submittedDevices)
+      .where(eq(submittedDevices.userId, authResult.userId))
+      .orderBy(
+        sql`${submittedDevices.lastSubmittedAt} DESC NULLS LAST`,
+        desc(submittedDevices.id)
+      );
+
+    const days: MeStatsDay[] = dayRows.map((row) => ({
+      date: row.date,
+      tokens: Number(row.tokens) || 0,
+      inputTokens: Number(row.inputTokens) || 0,
+      outputTokens: Number(row.outputTokens) || 0,
+      cost: Number(row.cost) || 0,
+    }));
+
+    let totalTokens = 0;
+    let totalCost = 0;
+    for (const day of days) {
+      totalTokens += day.tokens;
+      totalCost += day.cost;
+    }
+
+    const devices: MeStatsDevice[] = deviceRows.map((row) => ({
+      id: row.id,
+      displayName: deviceDisplayLabel(row.deviceKey, row.displayName),
+      lastSubmittedAt: toIsoString(row.lastSubmittedAt),
+    }));
+
+    const lastSubmittedAt = devices.reduce<string | null>(
+      (latest, device) =>
+        device.lastSubmittedAt && (!latest || device.lastSubmittedAt > latest)
+          ? device.lastSubmittedAt
+          : latest,
+      null
+    );
+
+    const response: MeStatsResponse = {
+      schemaVersion: SCHEMA_VERSION,
+      totalTokens,
+      totalCost,
+      deviceCount: devices.length,
+      lastSubmittedAt,
+      days,
+      devices,
+    };
+
+    return NextResponse.json(response);
   } catch (error) {
     console.error("Me stats error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
