@@ -8,8 +8,42 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("bigpickle", "glm-4.7");
     m.insert("k2p5", "kimi-k2-thinking");
     m.insert("k2-p5", "kimi-k2-thinking");
+    m.insert("k2p6", "kimi-k2.6");
+    m.insert("k2-p6", "kimi-k2.6");
+    m.insert("kimi-k2p6", "kimi-k2.6");
     m.insert("kimi-k2.5-thinking", "kimi-k2-thinking");
     m.insert("kimi-for-coding", "kimi-k2.5");
+
+    m.insert("model_placeholder_m26", "claude-opus-4-6");
+    m.insert("model_placeholder_m35", "claude-sonnet-4-6");
+    m.insert("model_placeholder_m36", "gemini-3.1-pro");
+    m.insert("model_placeholder_m37", "gemini-3.1-pro");
+    m.insert("model_placeholder_m47", "gemini-3-flash-preview");
+    m.insert("model_openai_gpt_oss_120b_medium", "gpt-oss-120b-medium");
+    m.insert("claude-opus-4-6-thinking", "claude-opus-4-6");
+    m.insert("claude-sonnet-4-6-thinking", "claude-sonnet-4-6");
+    m.insert("claude-opus-4.6-thinking", "claude-opus-4-6");
+    m.insert("claude-sonnet-4.6-thinking", "claude-sonnet-4-6");
+    m.insert("claude-opus-4-6", "claude-opus-4-6");
+    m.insert("claude-sonnet-4-6", "claude-sonnet-4-6");
+    m.insert("claude-haiku-4-6", "claude-haiku-4-6");
+    m.insert("claude-opus-4.6", "claude-opus-4-6");
+    m.insert("claude-sonnet-4.6", "claude-sonnet-4-6");
+    m.insert("claude-haiku-4.6", "claude-haiku-4-6");
+    m.insert("anthropic/claude-4-5-opus", "claude-opus-4-5");
+    m.insert("anthropic/claude-4-5-sonnet", "claude-sonnet-4-5");
+    m.insert("anthropic/claude-4-5-haiku", "claude-haiku-4-5");
+    m.insert("anthropic/claude-4-6-opus", "claude-opus-4-6");
+    m.insert("anthropic/claude-4-6-sonnet", "claude-sonnet-4-6");
+    m.insert("anthropic/claude-4-6-haiku", "claude-haiku-4-6");
+    m.insert("gemini-3.1-pro-high", "gemini-3.1-pro");
+    m.insert("gemini-3.1-pro-low", "gemini-3.1-pro");
+    m.insert("gemini-3-pro-high", "gemini-3-pro");
+    m.insert("gemini-3-pro-low", "gemini-3-pro");
+    m.insert("gemini-3-flash", "gemini-3-flash-preview");
+    m.insert("gemini-3-flash-c", "gemini-3-flash-preview");
+    m.insert("grok-composer-2.5", "composer-2.5");
+    m.insert("grok-composer-2.5-fast", "composer-2.5-fast");
 
     // Synthetic model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
@@ -19,4 +53,63 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 
 pub fn resolve_alias(model_id: &str) -> Option<&'static str> {
     MODEL_ALIASES.get(model_id.to_lowercase().as_str()).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_alias;
+
+    #[test]
+    fn resolves_antigravity_placeholders() {
+        assert_eq!(
+            resolve_alias("MODEL_PLACEHOLDER_M26"),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            resolve_alias("model_placeholder_m37"),
+            Some("gemini-3.1-pro")
+        );
+        assert_eq!(
+            resolve_alias("MODEL_OPENAI_GPT_OSS_120B_MEDIUM"),
+            Some("gpt-oss-120b-medium")
+        );
+        assert_eq!(
+            resolve_alias("gemini-3-flash-c"),
+            Some("gemini-3-flash-preview")
+        );
+        assert_eq!(
+            resolve_alias("claude-opus-4.6-thinking"),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            resolve_alias("anthropic/claude-4-5-haiku"),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(
+            resolve_alias("anthropic/claude-4-6-sonnet"),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(resolve_alias("model_placeholder_m84"), None);
+        assert_eq!(resolve_alias("model_placeholder_m16"), None);
+    }
+
+    #[test]
+    fn resolves_kimi_k2p6_aliases_without_regressing_k2p5() {
+        assert_eq!(resolve_alias("k2p6"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("k2-p6"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("kimi-k2p6"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("KIMI-K2P6"), Some("kimi-k2.6"));
+
+        assert_eq!(resolve_alias("k2p5"), Some("kimi-k2-thinking"));
+        assert_eq!(resolve_alias("k2-p5"), Some("kimi-k2-thinking"));
+    }
+
+    #[test]
+    fn resolves_grok_composer_aliases_to_cursor_composer_prices() {
+        assert_eq!(resolve_alias("grok-composer-2.5"), Some("composer-2.5"));
+        assert_eq!(
+            resolve_alias("GROK-COMPOSER-2.5-FAST"),
+            Some("composer-2.5-fast")
+        );
+    }
 }

@@ -1,7 +1,18 @@
 import { NextResponse } from "next/server";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
 import { eq, desc, sql, and, gte } from "drizzle-orm";
+import {
+  AmbiguousUsernameError,
+  USERNAME_LOOKUP_LIMIT,
+  getSingleUsernameMatch,
+  usernameEqualsIgnoreCase,
+} from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+
+const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
+function normalizeClientId(id: string): string {
+  return LEGACY_CLIENT_ALIASES[id] ?? id;
+}
 
 export const revalidate = 60; // ISR: revalidate every 60 seconds
 
@@ -14,7 +25,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
     const { username } = await params;
 
     // Find user
-    const [user] = await db
+    const matchingUsers = await db
       .select({
         id: users.id,
         username: users.username,
@@ -23,11 +34,16 @@ export async function GET(_request: Request, { params }: RouteParams) {
         createdAt: users.createdAt,
       })
       .from(users)
-      .where(eq(users.username, username))
-      .limit(1);
+      .where(usernameEqualsIgnoreCase(username))
+      .limit(USERNAME_LOOKUP_LIMIT);
+    const user = getSingleUsernameMatch(matchingUsers, username);
 
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+
+    if (username !== user.username) {
+      return NextResponse.redirect(new URL(`/api/users/${user.username}`, _request.url), 308);
     }
 
     const oneYearAgo = new Date();
@@ -46,6 +62,8 @@ export async function GET(_request: Request, { params }: RouteParams) {
           submissionCount: sql<number>`COALESCE(MAX(${submissions.submitCount}), 0)`,
           earliestDate: sql<string>`MIN(${submissions.dateStart})`,
           latestDate: sql<string>`MAX(${submissions.dateEnd})`,
+          totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`,
+          sessionCount: sql<number>`COALESCE(SUM(${submissions.sessionCount}), 0)`,
         })
         .from(submissions)
         .where(eq(submissions.userId, user.id)),
@@ -57,6 +75,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
           updatedAt: submissions.updatedAt,
           cliVersion: submissions.cliVersion,
           schemaVersion: submissions.schemaVersion,
+          mcpServers: submissions.mcpServers,
         })
         .from(submissions)
         .where(eq(submissions.userId, user.id))
@@ -89,7 +108,6 @@ export async function GET(_request: Request, { params }: RouteParams) {
           inputTokens: dailyBreakdown.inputTokens,
           outputTokens: dailyBreakdown.outputTokens,
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
-          modelBreakdown: dailyBreakdown.modelBreakdown,
         })
         .from(dailyBreakdown)
         .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
@@ -158,7 +176,8 @@ export async function GET(_request: Request, { params }: RouteParams) {
         existing.inputTokens += Number(day.inputTokens);
         existing.outputTokens += Number(day.outputTokens);
         if (day.sourceBreakdown) {
-          for (const [client, data] of Object.entries(day.sourceBreakdown)) {
+          for (const [rawClient, data] of Object.entries(day.sourceBreakdown)) {
+            const client = normalizeClientId(rawClient);
             const breakdown = data as ClientBreakdown;
             if (existing.clients[client]) {
               existing.clients[client].tokens += breakdown.tokens || 0;
@@ -235,21 +254,60 @@ export async function GET(_request: Request, { params }: RouteParams) {
         const clients: Record<string, ClientBreakdown> = {};
         const models: Record<string, { tokens: number; cost: number }> = {};
         if (day.sourceBreakdown) {
-          for (const [client, data] of Object.entries(day.sourceBreakdown)) {
+          for (const [rawClient, data] of Object.entries(day.sourceBreakdown)) {
+            const client = normalizeClientId(rawClient);
             const breakdown = data as ClientBreakdown;
-            // Normalize old DB data that may be missing reasoning and other fields
-            clients[client] = {
-              tokens: breakdown.tokens || 0,
-              cost: breakdown.cost || 0,
-              input: breakdown.input || 0,
-              output: breakdown.output || 0,
-              cacheRead: breakdown.cacheRead || 0,
-              cacheWrite: breakdown.cacheWrite || 0,
-              reasoning: breakdown.reasoning || 0,
-              messages: breakdown.messages || 0,
-              models: breakdown.models,
-              modelId: breakdown.modelId,
-            };
+            if (clients[client]) {
+              // Merge when normalization creates duplicate keys (e.g. kilocode + kilo → kilo)
+              clients[client].tokens += breakdown.tokens || 0;
+              clients[client].cost += breakdown.cost || 0;
+              clients[client].input += breakdown.input || 0;
+              clients[client].output += breakdown.output || 0;
+              clients[client].cacheRead += breakdown.cacheRead || 0;
+              clients[client].cacheWrite += breakdown.cacheWrite || 0;
+              clients[client].reasoning += breakdown.reasoning || 0;
+              clients[client].messages += breakdown.messages || 0;
+              if (breakdown.models) {
+                clients[client].models = clients[client].models || {};
+                for (const [modelId, modelData] of Object.entries(breakdown.models)) {
+                  const existingModel = clients[client].models![modelId];
+                  if (existingModel) {
+                    existingModel.tokens += modelData.tokens || 0;
+                    existingModel.cost += modelData.cost || 0;
+                    existingModel.input += modelData.input || 0;
+                    existingModel.output += modelData.output || 0;
+                    existingModel.cacheRead += modelData.cacheRead || 0;
+                    existingModel.cacheWrite += modelData.cacheWrite || 0;
+                    existingModel.reasoning += modelData.reasoning || 0;
+                    existingModel.messages += modelData.messages || 0;
+                  } else {
+                    clients[client].models![modelId] = {
+                      tokens: modelData.tokens || 0,
+                      cost: modelData.cost || 0,
+                      input: modelData.input || 0,
+                      output: modelData.output || 0,
+                      cacheRead: modelData.cacheRead || 0,
+                      cacheWrite: modelData.cacheWrite || 0,
+                      reasoning: modelData.reasoning || 0,
+                      messages: modelData.messages || 0,
+                    };
+                  }
+                }
+              }
+            } else {
+              clients[client] = {
+                tokens: breakdown.tokens || 0,
+                cost: breakdown.cost || 0,
+                input: breakdown.input || 0,
+                output: breakdown.output || 0,
+                cacheRead: breakdown.cacheRead || 0,
+                cacheWrite: breakdown.cacheWrite || 0,
+                reasoning: breakdown.reasoning || 0,
+                messages: breakdown.messages || 0,
+                models: breakdown.models,
+                modelId: breakdown.modelId,
+              };
+            }
             if (breakdown.models) {
               for (const [modelId, modelData] of Object.entries(breakdown.models)) {
                 const existingModel = models[modelId];
@@ -261,7 +319,13 @@ export async function GET(_request: Request, { params }: RouteParams) {
                 }
               }
             } else if (breakdown.modelId) {
-              models[breakdown.modelId] = { tokens: breakdown.tokens || 0, cost: breakdown.cost || 0 };
+              const existingModel = models[breakdown.modelId];
+              if (existingModel) {
+                existingModel.tokens += breakdown.tokens || 0;
+                existingModel.cost += breakdown.cost || 0;
+              } else {
+                models[breakdown.modelId] = { tokens: breakdown.tokens || 0, cost: breakdown.cost || 0 };
+              }
             }
           }
         }
@@ -381,6 +445,8 @@ export async function GET(_request: Request, { params }: RouteParams) {
         reasoningTokens: Number(stats?.reasoningTokens) || 0,
         submissionCount: Number(stats?.submissionCount) || 0,
         activeDays,
+        totalActiveTimeMs: Number(stats?.totalActiveTimeMs) || 0,
+        sessionCount: Number(stats?.sessionCount) || 0,
       },
       dateRange: {
         start: stats?.earliestDate || null,
@@ -394,10 +460,18 @@ export async function GET(_request: Request, { params }: RouteParams) {
       }),
       clients: latestSubmission?.sourcesUsed || [],
       models: latestSubmission?.modelsUsed || [],
+      mcpServers: latestSubmission?.mcpServers || [],
       modelUsage,
       contributions: graphContributions,
     });
   } catch (error) {
+    if (error instanceof AmbiguousUsernameError) {
+      return NextResponse.json(
+        { error: "Username is ambiguous" },
+        { status: 409 }
+      );
+    }
+
     console.error("Profile error:", error);
     return NextResponse.json(
       { error: "Failed to fetch profile" },

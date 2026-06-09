@@ -32,7 +32,12 @@ export function WorldwideSection({
   topUsersByCost = [],
   topUsersByTokens = [],
 }: WorldwideSectionProps) {
-  const worldwideSection = useSquircleClip<HTMLDivElement>(32, 0.6, true, 1);
+  const {
+    setElementRef: setWorldwideSectionClipRef,
+    clipPath: worldwideClipPath,
+    svgDef: worldwideSvgDef,
+    borderDef: worldwideBorderDef,
+  } = useSquircleClip<HTMLDivElement>(32, 0.6, true, 1);
   const [activeTab, setActiveTab] = useState<"tokens" | "cost">("cost");
   const users = activeTab === "cost" ? topUsersByCost : topUsersByTokens;
   // Measure blue header bottom for border gradient transition
@@ -43,9 +48,9 @@ export function WorldwideSection({
   const sectionRef = useCallback(
     (node: HTMLDivElement | null) => {
       sectionElRef.current = node;
-      worldwideSection.ref(node);
+      setWorldwideSectionClipRef(node);
     },
-    [worldwideSection.ref],
+    [setWorldwideSectionClipRef],
   );
 
   useEffect(() => {
@@ -67,7 +72,7 @@ export function WorldwideSection({
   return (
     <>
       {/* SVG clip-path def for globe section */}
-      {worldwideSection.svgDef && (
+      {worldwideSvgDef && (
         <svg
           width="0"
           height="0"
@@ -76,10 +81,10 @@ export function WorldwideSection({
           role="presentation"
         >
           <defs>
-            <clipPath id={worldwideSection.svgDef.id}>
+            <clipPath id={worldwideSvgDef.id}>
               <path
-                d={worldwideSection.svgDef.path}
-                transform={`translate(0, -${worldwideSection.svgDef.cornerRadius})`}
+                d={worldwideSvgDef.path}
+                transform={`translate(0, -${worldwideSvgDef.cornerRadius})`}
               />
             </clipPath>
           </defs>
@@ -90,10 +95,10 @@ export function WorldwideSection({
       <GlobeSectionWrapper
         ref={sectionRef}
         style={{
-          clipPath: worldwideSection.clipPath || undefined,
+          clipPath: worldwideClipPath || undefined,
         }}
       >
-        <SquircleBorder def={worldwideSection.borderDef} color="#0073FF" gradient={gradientTransitionY > 0 ? { colors: ["#0073FF", "#10233E"], transitionY: gradientTransitionY } : undefined} />
+        <SquircleBorder def={worldwideBorderDef} color="#0073FF" gradient={gradientTransitionY > 0 ? { colors: ["#0073FF", "#10233E"], transitionY: gradientTransitionY } : undefined} />
         <GlobeImageWrapper>
           <GlobeBackground />
           <GlobeFadeTop />

@@ -4,7 +4,7 @@
 //! - tasks/<taskId>/ui_messages.json
 //! - tasks/<taskId>/api_conversation_history.json
 
-use super::utils::{extract_i64, parse_timestamp_str};
+use super::utils::{extract_i64, parse_timestamp_str, read_file_or_none};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -25,9 +25,8 @@ pub fn parse_roocode_file(path: &Path) -> Vec<UnifiedMessage> {
 }
 
 pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessage> {
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    let Some(data) = read_file_or_none(path) else {
+        return Vec::new();
     };
 
     let mut bytes = data;
@@ -220,12 +219,12 @@ fn extract_f64(value: Option<&Value>) -> Option<f64> {
     })
 }
 
-fn provider_from_api_protocol(api_protocol: Option<&str>) -> &'static str {
-    match api_protocol {
-        Some("anthropic") => "anthropic",
-        Some("openai") => "openai",
-        _ => "unknown",
-    }
+fn provider_from_api_protocol(api_protocol: Option<&str>) -> String {
+    api_protocol
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -313,6 +312,29 @@ after"#;
         assert_eq!(messages[0].provider_id, "openai");
         assert_eq!(messages[0].model_id, "unknown");
         assert_eq!(messages[0].agent, None);
+    }
+
+    #[test]
+    fn test_parse_roocode_preserves_nested_reseller_api_protocol() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:00Z",
+    "text": "{\"cost\":0.12,\"tokensIn\":100,\"tokensOut\":50,\"cacheReads\":20,\"cacheWrites\":5,\"apiProtocol\":\"bedrock/anthropic\"}"
+  }
+]"#;
+        let history = r#"before
+<environment_details>
+<model>claude-sonnet-4</model>
+</environment_details>
+after"#;
+        let path = setup_task(&dir, "task-nested-provider", ui_messages, Some(history));
+
+        let messages = parse_roocode_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "bedrock/anthropic");
     }
 
     #[test]

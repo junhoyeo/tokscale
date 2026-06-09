@@ -3,12 +3,14 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const mockState = vi.hoisted(() => {
   const selectResults: Array<Array<Record<string, unknown>>> = [];
   const deleteResults: Array<Array<Record<string, unknown>>> = [];
+  const forUpdateCalls: string[] = [];
 
   const tables = {
     deviceCodes: {
       id: "deviceCodes.id",
       deviceCode: "deviceCodes.deviceCode",
       expiresAt: "deviceCodes.expiresAt",
+      userId: "deviceCodes.userId",
     },
     users: {
       id: "users.id",
@@ -28,6 +30,10 @@ const mockState = vi.hoisted(() => {
       const builder = {
         from: vi.fn(() => builder),
         where: vi.fn(() => builder),
+        for: vi.fn((mode: string) => {
+          forUpdateCalls.push(mode);
+          return builder;
+        }),
         limit: vi.fn(async () => nextResult(selectResults)),
       };
 
@@ -40,6 +46,12 @@ const mockState = vi.hoisted(() => {
 
       return builder;
     }),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(tx)),
+  };
+
+  const tx = {
+    select: db.select,
+    delete: db.delete,
   };
 
   return {
@@ -48,11 +60,14 @@ const mockState = vi.hoisted(() => {
     eq,
     and,
     gt,
+    forUpdateCalls,
     reset() {
       selectResults.length = 0;
       deleteResults.length = 0;
+      forUpdateCalls.length = 0;
       db.select.mockClear();
       db.delete.mockClear();
+      db.transaction.mockClear();
       eq.mockClear();
       and.mockClear();
       gt.mockClear();
@@ -66,7 +81,7 @@ const mockState = vi.hoisted(() => {
   };
 });
 
-const issuePersonalToken = vi.fn();
+const issuePersonalTokenInTransaction = vi.fn();
 
 vi.mock("@/lib/db", () => ({
   db: mockState.db,
@@ -81,7 +96,7 @@ vi.mock("drizzle-orm", () => ({
 }));
 
 vi.mock("@/lib/auth/personalTokens", () => ({
-  issuePersonalToken,
+  issuePersonalTokenInTransaction,
 }));
 
 type ModuleExports = typeof import("../../src/app/api/auth/device/poll/route");
@@ -95,11 +110,11 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockState.reset();
-  issuePersonalToken.mockReset();
+  issuePersonalTokenInTransaction.mockReset();
 });
 
 describe("POST /api/auth/device/poll", () => {
-  it("issues the token through the shared personal token service", async () => {
+  it("locks the device code row and issues the token inside the transaction", async () => {
     mockState.pushSelectResult([
       {
         id: "device-1",
@@ -116,7 +131,7 @@ describe("POST /api/auth/device/poll", () => {
       },
     ]);
     mockState.pushDeleteResult();
-    issuePersonalToken.mockResolvedValue({
+    issuePersonalTokenInTransaction.mockResolvedValue({
       id: "token-1",
       userId: "user-1",
       name: "CLI on macbook",
@@ -135,7 +150,10 @@ describe("POST /api/auth/device/poll", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(issuePersonalToken).toHaveBeenCalledWith({
+    expect(mockState.db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockState.forUpdateCalls).toEqual(["update"]);
+    expect(issuePersonalTokenInTransaction).toHaveBeenCalledTimes(1);
+    expect(issuePersonalTokenInTransaction).toHaveBeenNthCalledWith(1, expect.anything(), {
       userId: "user-1",
       name: "CLI on macbook",
       ensureUniqueName: true,
@@ -178,6 +196,8 @@ describe("POST /api/auth/device/poll", () => {
 
     expect(response.status).toBe(200);
     expect(body).toEqual({ status: "expired" });
+    expect(mockState.forUpdateCalls).toEqual(["update"]);
+    expect(issuePersonalTokenInTransaction).not.toHaveBeenCalled();
   });
 
   it("returns pending status when user has not yet authorized", async () => {
@@ -200,6 +220,8 @@ describe("POST /api/auth/device/poll", () => {
 
     expect(response.status).toBe(200);
     expect(body).toEqual({ status: "pending" });
+    expect(mockState.forUpdateCalls).toEqual(["update"]);
+    expect(issuePersonalTokenInTransaction).not.toHaveBeenCalled();
   });
 
   it("returns 500 when authorized user is not found in users table", async () => {

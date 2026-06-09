@@ -2,7 +2,7 @@
 //!
 //! Parses session-usage.json files from ~/.mux/sessions/<workspaceId>/session-usage.json
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -45,9 +45,8 @@ pub struct MuxLastRequest {
 /// Parse a mux session-usage.json file.
 /// Returns one UnifiedMessage per model entry in byModel.
 pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return vec![],
+    let Some(data) = read_file_or_none(path) else {
+        return vec![];
     };
 
     let usage: MuxSessionUsage = match serde_json::from_slice(&data) {

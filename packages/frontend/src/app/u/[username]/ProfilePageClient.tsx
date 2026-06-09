@@ -37,6 +37,8 @@ interface ProfileData {
     cacheWriteTokens: number;
     submissionCount: number;
     activeDays: number;
+    totalActiveTimeMs: number;
+    sessionCount: number;
   };
   dateRange: {
     start: string | null;
@@ -45,6 +47,7 @@ interface ProfileData {
   updatedAt: string | null;
   clients: string[];
   models: string[];
+  mcpServers?: string[];
   modelUsage?: ModelUsage[];
   contributions: DailyContribution[];
 }
@@ -134,6 +137,8 @@ export default function ProfilePageClient({ initialData, username }: ProfilePage
     cacheWriteTokens: data.stats.cacheWriteTokens,
     activeDays: data.stats.activeDays,
     submissionCount: data.stats.submissionCount,
+    totalActiveTimeMs: data.stats.totalActiveTimeMs,
+    sessionCount: data.stats.sessionCount,
   }), [data]);
 
 const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
@@ -167,20 +172,47 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
           <ProfileTabBar activeTab={activeTab} onTabChange={setActiveTab} />
 
           {activeTab === "activity" && (
-            graphData ? (
-              <ActivitySection>
-                <ProfileActivity data={graphData} />
-                <ProfileStats
-                  stats={stats}
-                  favoriteModel={
-                    data.modelUsage?.reduce((max, current) => current.cost > max.cost ? current : max, data.modelUsage[0])?.model
-                  }
-                />
-              </ActivitySection>
-            ) : <ProfileEmptyActivity />
+            <div
+              role="tabpanel"
+              id="tabpanel-activity"
+              aria-labelledby="tab-activity"
+            >
+              {graphData ? (
+                <ActivitySection>
+                  <ProfileActivity
+                    data={graphData}
+                    totalActiveTimeMs={data.stats.totalActiveTimeMs}
+                    sessionCount={data.stats.sessionCount}
+                    mcpServers={data.mcpServers}
+                  />
+                  <ProfileStats
+                    stats={stats}
+                    favoriteModel={
+                      data.modelUsage?.reduce((max, current) => current.cost > max.cost ? current : max, data.modelUsage[0])?.model
+                    }
+                  />
+                </ActivitySection>
+              ) : <ProfileEmptyActivity />}
+            </div>
           )}
-          {activeTab === "breakdown" && <TokenBreakdown stats={stats} />}
-          {activeTab === "models" && <ProfileModels models={data.models} modelUsage={data.modelUsage} />}
+          {activeTab === "breakdown" && (
+            <div
+              role="tabpanel"
+              id="tabpanel-breakdown"
+              aria-labelledby="tab-breakdown"
+            >
+              <TokenBreakdown stats={stats} />
+            </div>
+          )}
+          {activeTab === "models" && (
+            <div
+              role="tabpanel"
+              id="tabpanel-models"
+              aria-labelledby="tab-models"
+            >
+              <ProfileModels models={data.models} modelUsage={data.modelUsage} />
+            </div>
+          )}
         </ContentWrapper>
       </MainContent>
 

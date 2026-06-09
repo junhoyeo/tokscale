@@ -5,7 +5,7 @@
 use crate::sessions::UnifiedMessage;
 use crate::{
     ClientContribution, DailyContribution, DailyTotals, DataSummary, GraphMeta, GraphResult,
-    TokenBreakdown, YearSummary,
+    SessionContribution, TokenBreakdown, YearSummary,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -57,11 +57,57 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
     contributions
 }
 
+/// Aggregate messages into per-session contributions, keyed on `session_id`.
+///
+/// Each returned [`SessionContribution`] sums all token buckets and cost for a
+/// single session and exposes the same client/model breakdown shape as
+/// [`aggregate_by_date`].  Sessions are sorted by `last_seen` descending so the
+/// most recently active sessions appear first.
+pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+
+    let session_map: HashMap<String, SessionAccumulator> = messages
+        .into_par_iter()
+        .fold(
+            HashMap::new,
+            |mut acc: HashMap<String, SessionAccumulator>, msg| {
+                let entry = acc.entry(msg.session_id.clone()).or_default();
+                entry.add_message(&msg);
+                acc
+            },
+        )
+        .reduce(HashMap::new, |mut a, b| {
+            for (id, acc) in b {
+                a.entry(id).or_default().merge(acc);
+            }
+            a
+        });
+
+    let mut contributions: Vec<SessionContribution> = session_map
+        .into_iter()
+        .map(|(session_id, acc)| acc.into_contribution(session_id))
+        .collect();
+
+    // Most recently active first; stable sort by session_id when ties.
+    contributions.sort_by(|a, b| {
+        b.last_seen
+            .cmp(&a.last_seen)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+
+    contributions
+}
+
 /// Calculate summary statistics
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
     let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
     let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum();
-    let active_days = contributions.iter().filter(|c| c.totals.tokens > 0).count() as i32;
+    let active_days = contributions
+        .iter()
+        .filter(|c| c.totals.tokens > 0 || c.totals.cost > 0.0 || c.totals.messages > 0)
+        .count() as i32;
     let max_cost = contributions
         .iter()
         .map(|c| c.totals.cost)
@@ -88,8 +134,16 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
             0.0
         },
         max_cost_in_single_day: max_cost,
-        clients: clients_set.into_iter().collect(),
-        models: models_set.into_iter().collect(),
+        clients: {
+            let mut v: Vec<_> = clients_set.into_iter().collect();
+            v.sort();
+            v
+        },
+        models: {
+            let mut v: Vec<_> = models_set.into_iter().collect();
+            v.sort();
+            v
+        },
     }
 }
 
@@ -160,6 +214,7 @@ pub fn generate_graph_result(
         summary,
         years,
         contributions,
+        time_metrics: None,
     }
 }
 
@@ -195,7 +250,10 @@ impl DayAccumulator {
 
         self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
         self.totals.cost += msg.cost;
-        self.totals.messages = self.totals.messages.saturating_add(1);
+        self.totals.messages = self
+            .totals
+            .messages
+            .saturating_add(msg.message_count.max(0));
 
         self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
         self.token_breakdown.output = self
@@ -257,7 +315,9 @@ impl DayAccumulator {
             .reasoning
             .saturating_add(msg.tokens.reasoning);
         client_entry.cost += msg.cost;
-        client_entry.messages = client_entry.messages.saturating_add(1);
+        client_entry.messages = client_entry
+            .messages
+            .saturating_add(msg.message_count.max(0));
 
         // Normalize provider order for deterministic output
         let mut providers: Vec<&str> = client_entry.provider_id.split(", ").collect();
@@ -378,6 +438,257 @@ impl DayAccumulator {
             intensity: 0,
             token_breakdown,
             clients,
+            active_time_ms: None,
+        }
+    }
+}
+
+struct SessionAccumulator {
+    totals: DailyTotals,
+    token_breakdown: TokenBreakdown,
+    clients: HashMap<String, ClientContribution>,
+    /// Tracks the most-active (client, provider, model) for the session, used
+    /// as the canonical top-level fields on `SessionContribution`.
+    top_client: String,
+    top_provider: String,
+    top_model: String,
+    top_cost: f64,
+    first_seen: i64,
+    last_seen: i64,
+}
+
+impl Default for SessionAccumulator {
+    fn default() -> Self {
+        Self {
+            totals: DailyTotals::default(),
+            token_breakdown: TokenBreakdown::default(),
+            clients: HashMap::with_capacity(2),
+            top_client: String::new(),
+            top_provider: String::new(),
+            top_model: String::new(),
+            top_cost: f64::NEG_INFINITY,
+            first_seen: i64::MAX,
+            last_seen: i64::MIN,
+        }
+    }
+}
+
+impl SessionAccumulator {
+    fn add_message(&mut self, msg: &UnifiedMessage) {
+        let total_tokens = msg
+            .tokens
+            .input
+            .saturating_add(msg.tokens.output)
+            .saturating_add(msg.tokens.cache_read)
+            .saturating_add(msg.tokens.cache_write)
+            .saturating_add(msg.tokens.reasoning);
+
+        self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
+        self.totals.cost += msg.cost;
+        self.totals.messages = self
+            .totals
+            .messages
+            .saturating_add(msg.message_count.max(0));
+
+        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
+        self.token_breakdown.output = self
+            .token_breakdown
+            .output
+            .saturating_add(msg.tokens.output);
+        self.token_breakdown.cache_read = self
+            .token_breakdown
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        self.token_breakdown.cache_write = self
+            .token_breakdown
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
+        self.token_breakdown.reasoning = self
+            .token_breakdown
+            .reasoning
+            .saturating_add(msg.tokens.reasoning);
+
+        // Track tightest (client, provider, model) by cost contribution.
+        let normalized_model = crate::normalize_model_for_grouping(&msg.model_id);
+        let key = format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model);
+        let client_entry = self
+            .clients
+            .entry(key)
+            .or_insert_with(|| ClientContribution {
+                client: msg.client.clone(),
+                model_id: normalized_model.clone(),
+                provider_id: msg.provider_id.clone(),
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                messages: 0,
+            });
+        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
+        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
+        client_entry.tokens.cache_read = client_entry
+            .tokens
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        client_entry.tokens.cache_write = client_entry
+            .tokens
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
+        client_entry.tokens.reasoning = client_entry
+            .tokens
+            .reasoning
+            .saturating_add(msg.tokens.reasoning);
+        client_entry.cost += msg.cost;
+        client_entry.messages = client_entry
+            .messages
+            .saturating_add(msg.message_count.max(0));
+
+        if client_entry.cost > self.top_cost {
+            self.top_cost = client_entry.cost;
+            self.top_client = client_entry.client.clone();
+            self.top_provider = client_entry.provider_id.clone();
+            self.top_model = client_entry.model_id.clone();
+        }
+
+        // Timestamps in UnifiedMessage are stored in milliseconds in most
+        // parsers; normalize to seconds for the contribution wire format.
+        let secs = if msg.timestamp.abs() > 1_000_000_000_000 {
+            msg.timestamp / 1000
+        } else {
+            msg.timestamp
+        };
+        if secs < self.first_seen {
+            self.first_seen = secs;
+        }
+        if secs > self.last_seen {
+            self.last_seen = secs;
+        }
+    }
+
+    fn merge(&mut self, other: SessionAccumulator) {
+        self.totals.tokens = self.totals.tokens.saturating_add(other.totals.tokens);
+        self.totals.cost += other.totals.cost;
+        self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
+
+        self.token_breakdown.input = self
+            .token_breakdown
+            .input
+            .saturating_add(other.token_breakdown.input);
+        self.token_breakdown.output = self
+            .token_breakdown
+            .output
+            .saturating_add(other.token_breakdown.output);
+        self.token_breakdown.cache_read = self
+            .token_breakdown
+            .cache_read
+            .saturating_add(other.token_breakdown.cache_read);
+        self.token_breakdown.cache_write = self
+            .token_breakdown
+            .cache_write
+            .saturating_add(other.token_breakdown.cache_write);
+        self.token_breakdown.reasoning = self
+            .token_breakdown
+            .reasoning
+            .saturating_add(other.token_breakdown.reasoning);
+
+        for (key, contrib) in other.clients {
+            let entry = self
+                .clients
+                .entry(key)
+                .or_insert_with(|| ClientContribution {
+                    client: contrib.client.clone(),
+                    model_id: contrib.model_id.clone(),
+                    provider_id: contrib.provider_id.clone(),
+                    tokens: TokenBreakdown::default(),
+                    cost: 0.0,
+                    messages: 0,
+                });
+            entry.tokens.input = entry.tokens.input.saturating_add(contrib.tokens.input);
+            entry.tokens.output = entry.tokens.output.saturating_add(contrib.tokens.output);
+            entry.tokens.cache_read = entry
+                .tokens
+                .cache_read
+                .saturating_add(contrib.tokens.cache_read);
+            entry.tokens.cache_write = entry
+                .tokens
+                .cache_write
+                .saturating_add(contrib.tokens.cache_write);
+            entry.tokens.reasoning = entry
+                .tokens
+                .reasoning
+                .saturating_add(contrib.tokens.reasoning);
+            entry.cost += contrib.cost;
+            entry.messages = entry.messages.saturating_add(contrib.messages);
+
+            if entry.cost > self.top_cost {
+                self.top_cost = entry.cost;
+                self.top_client = entry.client.clone();
+                self.top_provider = entry.provider_id.clone();
+                self.top_model = entry.model_id.clone();
+            }
+        }
+
+        if other.first_seen < self.first_seen {
+            self.first_seen = other.first_seen;
+        }
+        if other.last_seen > self.last_seen {
+            self.last_seen = other.last_seen;
+        }
+    }
+
+    fn into_contribution(self, session_id: String) -> SessionContribution {
+        let token_breakdown = TokenBreakdown {
+            input: self.token_breakdown.input.max(0),
+            output: self.token_breakdown.output.max(0),
+            cache_read: self.token_breakdown.cache_read.max(0),
+            cache_write: self.token_breakdown.cache_write.max(0),
+            reasoning: self.token_breakdown.reasoning.max(0),
+        };
+
+        let mut clients: Vec<ClientContribution> = self
+            .clients
+            .into_values()
+            .map(|mut c| {
+                c.tokens.input = c.tokens.input.max(0);
+                c.tokens.output = c.tokens.output.max(0);
+                c.tokens.cache_read = c.tokens.cache_read.max(0);
+                c.tokens.cache_write = c.tokens.cache_write.max(0);
+                c.tokens.reasoning = c.tokens.reasoning.max(0);
+                c.cost = c.cost.max(0.0);
+                c
+            })
+            .collect();
+        clients.sort_by(|a, b| {
+            b.cost
+                .partial_cmp(&a.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.client.cmp(&b.client))
+                .then_with(|| a.model_id.cmp(&b.model_id))
+        });
+
+        let first_seen = if self.first_seen == i64::MAX {
+            0
+        } else {
+            self.first_seen
+        };
+        let last_seen = if self.last_seen == i64::MIN {
+            0
+        } else {
+            self.last_seen
+        };
+
+        SessionContribution {
+            session_id,
+            client: self.top_client,
+            provider: self.top_provider,
+            model: self.top_model,
+            totals: DailyTotals {
+                tokens: self.totals.tokens.max(0),
+                cost: self.totals.cost.max(0.0),
+                messages: self.totals.messages.max(0),
+            },
+            token_breakdown,
+            clients,
+            first_seen,
+            last_seen,
         }
     }
 }
@@ -440,6 +751,8 @@ mod tests {
             model_id: model.to_string(),
             provider_id: "test-provider".to_string(),
             session_id: "test-session".to_string(),
+            workspace_key: None,
+            workspace_label: None,
             timestamp,
             date: date.to_string(),
             tokens: TokenBreakdown {
@@ -450,8 +763,11 @@ mod tests {
                 reasoning: 0,
             },
             cost,
+            duration_ms: None,
+            message_count: 1,
             agent: None,
             dedup_key: None,
+            is_turn_start: false,
         }
     }
 
@@ -603,6 +919,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-02".to_string(),
@@ -614,6 +931,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
         ];
 
@@ -621,6 +939,53 @@ mod tests {
         assert_eq!(summary.total_days, 2);
         assert_eq!(summary.active_days, 1);
         assert!((summary.average_per_day - 0.05).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_calculate_summary_counts_cost_only_days_as_active() {
+        let contributions = vec![
+            DailyContribution {
+                date: "2024-01-01".to_string(),
+                totals: DailyTotals {
+                    tokens: 1000,
+                    cost: 0.05,
+                    messages: 1,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+            DailyContribution {
+                date: "2024-01-02".to_string(),
+                totals: DailyTotals {
+                    tokens: 0,
+                    cost: 1.25,
+                    messages: 0,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+            DailyContribution {
+                date: "2024-01-03".to_string(),
+                totals: DailyTotals {
+                    tokens: 0,
+                    cost: 0.0,
+                    messages: 0,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+        ];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_days, 3);
+        assert_eq!(summary.active_days, 2);
+        assert!((summary.average_per_day - 0.65).abs() < 0.0001);
     }
 
     #[test]
@@ -701,6 +1066,7 @@ mod tests {
             intensity: 0,
             token_breakdown: TokenBreakdown::default(),
             clients: Vec::new(),
+            active_time_ms: None,
         }];
 
         let years = calculate_years(&contributions);
@@ -758,6 +1124,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-02".to_string(),
@@ -769,6 +1136,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
         ];
 
@@ -790,6 +1158,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-02".to_string(),
@@ -801,6 +1170,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-03".to_string(),
@@ -812,6 +1182,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-04".to_string(),
@@ -823,6 +1194,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-05".to_string(),
@@ -834,6 +1206,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
         ];
 
@@ -859,6 +1232,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-02".to_string(),
@@ -870,6 +1244,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-03".to_string(),
@@ -881,6 +1256,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
             DailyContribution {
                 date: "2024-01-04".to_string(),
@@ -892,6 +1268,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                active_time_ms: None,
             },
         ];
 
@@ -950,5 +1327,279 @@ mod tests {
             assert_eq!(contribution.totals.tokens, 10000);
             assert!((contribution.totals.cost - 0.5).abs() < 0.0001);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn session_message(
+        session_id: &str,
+        client: &str,
+        provider: &str,
+        model: &str,
+        date: &str,
+        timestamp_ms: i64,
+        tokens: TokenBreakdown,
+        cost: f64,
+    ) -> UnifiedMessage {
+        UnifiedMessage {
+            client: client.to_string(),
+            model_id: model.to_string(),
+            provider_id: provider.to_string(),
+            session_id: session_id.to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            timestamp: timestamp_ms,
+            date: date.to_string(),
+            tokens,
+            cost,
+            message_count: 1,
+            agent: None,
+            dedup_key: None,
+            is_turn_start: false,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn test_aggregate_by_session_empty() {
+        assert!(aggregate_by_session(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn test_aggregate_by_session_groups_three_sessions() {
+        let t = TokenBreakdown {
+            input: 100,
+            output: 50,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        // 10 rows across 3 sessions.
+        let messages = vec![
+            session_message(
+                "s-a",
+                "codex",
+                "openai",
+                "gpt-5",
+                "2026-05-10",
+                1_700_000_001_000,
+                t.clone(),
+                0.01,
+            ),
+            session_message(
+                "s-a",
+                "codex",
+                "openai",
+                "gpt-5",
+                "2026-05-10",
+                1_700_000_002_000,
+                t.clone(),
+                0.01,
+            ),
+            session_message(
+                "s-a",
+                "codex",
+                "openai",
+                "gpt-5",
+                "2026-05-10",
+                1_700_000_003_000,
+                t.clone(),
+                0.01,
+            ),
+            session_message(
+                "s-a",
+                "codex",
+                "openai",
+                "gpt-5",
+                "2026-05-10",
+                1_700_000_004_000,
+                t.clone(),
+                0.01,
+            ),
+            session_message(
+                "s-b",
+                "amp",
+                "anthropic",
+                "claude-haiku-4-5",
+                "2026-05-10",
+                1_700_000_005_000,
+                t.clone(),
+                0.02,
+            ),
+            session_message(
+                "s-b",
+                "amp",
+                "anthropic",
+                "claude-haiku-4-5",
+                "2026-05-10",
+                1_700_000_006_000,
+                t.clone(),
+                0.02,
+            ),
+            session_message(
+                "s-b",
+                "amp",
+                "anthropic",
+                "claude-haiku-4-5",
+                "2026-05-10",
+                1_700_000_007_000,
+                t.clone(),
+                0.02,
+            ),
+            session_message(
+                "s-c",
+                "claude",
+                "anthropic",
+                "claude-sonnet-4-5",
+                "2026-05-11",
+                1_700_000_100_000,
+                t.clone(),
+                0.05,
+            ),
+            session_message(
+                "s-c",
+                "claude",
+                "anthropic",
+                "claude-sonnet-4-5",
+                "2026-05-11",
+                1_700_000_101_000,
+                t.clone(),
+                0.05,
+            ),
+            session_message(
+                "s-c",
+                "claude",
+                "anthropic",
+                "claude-sonnet-4-5",
+                "2026-05-11",
+                1_700_000_102_000,
+                t.clone(),
+                0.05,
+            ),
+        ];
+
+        let result = aggregate_by_session(messages);
+        assert_eq!(result.len(), 3, "expected 3 sessions");
+
+        // Most-recent-first ordering: s-c last_seen=1_700_000_102 wins.
+        assert_eq!(result[0].session_id, "s-c");
+        assert_eq!(result[1].session_id, "s-b");
+        assert_eq!(result[2].session_id, "s-a");
+
+        let s_a = result.iter().find(|s| s.session_id == "s-a").unwrap();
+        assert_eq!(s_a.totals.messages, 4);
+        assert_eq!(s_a.totals.tokens, 4 * 150); // (100 input + 50 output) * 4
+        assert!((s_a.totals.cost - 0.04).abs() < 1e-9);
+        assert_eq!(s_a.token_breakdown.input, 400);
+        assert_eq!(s_a.token_breakdown.output, 200);
+        assert_eq!(s_a.client, "codex");
+        assert_eq!(s_a.provider, "openai");
+        assert_eq!(s_a.model, "gpt-5");
+        // Timestamps converted to seconds.
+        assert_eq!(s_a.first_seen, 1_700_000_001);
+        assert_eq!(s_a.last_seen, 1_700_000_004);
+
+        let s_b = result.iter().find(|s| s.session_id == "s-b").unwrap();
+        assert_eq!(s_b.totals.messages, 3);
+        assert!((s_b.totals.cost - 0.06).abs() < 1e-9);
+
+        let s_c = result.iter().find(|s| s.session_id == "s-c").unwrap();
+        assert_eq!(s_c.totals.messages, 3);
+        assert!((s_c.totals.cost - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_aggregate_by_session_picks_top_client_by_cost() {
+        // Same session_id but two different clients — top-level fields should
+        // reflect the client with the larger cost share.
+        let small = TokenBreakdown {
+            input: 10,
+            output: 10,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        let big = TokenBreakdown {
+            input: 1000,
+            output: 500,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        let messages = vec![
+            session_message(
+                "shared",
+                "amp",
+                "anthropic",
+                "claude-haiku-4-5",
+                "2026-05-10",
+                1_700_000_001_000,
+                small,
+                0.001,
+            ),
+            session_message(
+                "shared",
+                "codex",
+                "openai",
+                "gpt-5",
+                "2026-05-10",
+                1_700_000_002_000,
+                big,
+                0.50,
+            ),
+        ];
+
+        let result = aggregate_by_session(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].client, "codex");
+        assert_eq!(result[0].provider, "openai");
+        assert_eq!(result[0].model, "gpt-5");
+        // Per-client breakdown should preserve both clients.
+        assert_eq!(result[0].clients.len(), 2);
+        assert_eq!(result[0].clients[0].client, "codex");
+        assert!((result[0].totals.cost - 0.501).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_session_contribution_serde_round_trip() {
+        let contrib = SessionContribution {
+            session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".to_string(),
+            client: "codex".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5".to_string(),
+            totals: DailyTotals {
+                tokens: 25298,
+                cost: 0.0123,
+                messages: 12,
+            },
+            token_breakdown: TokenBreakdown {
+                input: 25_251,
+                output: 47,
+                cache_read: 1_920,
+                cache_write: 0,
+                reasoning: 40,
+            },
+            clients: vec![ClientContribution {
+                client: "codex".to_string(),
+                model_id: "gpt-5".to_string(),
+                provider_id: "openai".to_string(),
+                tokens: TokenBreakdown {
+                    input: 25_251,
+                    output: 47,
+                    cache_read: 1_920,
+                    cache_write: 0,
+                    reasoning: 40,
+                },
+                cost: 0.0123,
+                messages: 12,
+            }],
+            first_seen: 1_715_551_577,
+            last_seen: 1_715_551_612,
+        };
+
+        let json = serde_json::to_string(&contrib).expect("serialize");
+        let parsed: SessionContribution = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, contrib);
+        // Spot-check key field is present in JSON.
+        assert!(json.contains("\"session_id\":\"019e1e27"));
     }
 }

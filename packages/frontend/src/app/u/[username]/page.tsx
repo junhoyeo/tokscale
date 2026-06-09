@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { notFound } from 'next/navigation';
+import { notFound, permanentRedirect } from 'next/navigation';
 import ProfilePageClient from './ProfilePageClient';
 
 export const revalidate = 60;
@@ -56,6 +56,10 @@ export default async function ProfilePage({ params }: { params: Promise<{ userna
   
   if (!data) {
     notFound();
+  }
+
+  if (data.user?.username && data.user.username !== username) {
+    permanentRedirect(`/u/${data.user.username}`);
   }
   
   return <ProfilePageClient initialData={data} username={username} />;

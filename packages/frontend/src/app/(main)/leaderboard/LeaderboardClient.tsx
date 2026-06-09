@@ -2,23 +2,18 @@
 
 import { useState, useEffect, useRef, useMemo, memo, useCallback } from "react";
 import { useRouter } from "nextjs-toploader/app";
+import { useSearchParams, usePathname } from "next/navigation";
 import styled from "styled-components";
-import { CopyIcon, CheckIcon } from "@/components/ui/Icons";
+import { CopyIcon, CheckIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
 import { TabBar } from "@/components/TabBar";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
-import { formatCurrency, formatNumber } from "@/lib/utils";
+import { formatCurrency, formatNumber, formatDuration } from "@/lib/utils";
 import { useSettings } from "@/lib/useSettings";
-import { Switch } from "@/components/Switch";
+import { isValidSortBy, type LeaderboardSortBy } from "@/lib/leaderboard/constants";
+import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 
 const Section = styled.div`
   margin-bottom: 40px;
-`;
-
-const Title = styled.h1`
-  font-size: 30px;
-  font-weight: bold;
-  margin-bottom: 8px;
-  color: var(--color-fg-default);
 `;
 
 const Description = styled.p`
@@ -625,20 +620,177 @@ const ErrorBanner = styled.div`
   gap: 8px;
 `;
 
-const SortToggleContainer = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-bottom: 16px;
-`;
-
 const SortLabel = styled.span`
   font-size: 12px;
   color: var(--color-fg-muted);
   font-weight: 500;
 `;
 
+const SearchSortRow = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+
+  @media (max-width: 560px) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+`;
+
+const SearchInputWrapper = styled.div`
+  position: relative;
+  flex: 1;
+  max-width: 320px;
+
+  @media (max-width: 560px) {
+    max-width: none;
+  }
+`;
+
+const SearchInputIcon = styled.span`
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-fg-muted);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+`;
+
+const SearchInput = styled.input`
+  width: 100%;
+  padding: 8px 36px 8px 36px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  background-color: var(--color-bg-subtle);
+  color: var(--color-fg-default);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s ease;
+
+  &::placeholder {
+    color: var(--color-fg-muted);
+  }
+
+  &:focus {
+    border-color: #0073FF;
+    box-shadow: 0 0 0 3px rgba(0, 115, 255, 0.15);
+  }
+`;
+
+const ClearSearchButton = styled.button`
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.15s ease;
+
+  &:hover {
+    color: var(--color-fg-default);
+  }
+`;
+
+const SortToggleInner = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+`;
+
+const DateRangeRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+`;
+
+const DateInput = styled.input`
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  background-color: var(--color-bg-subtle);
+  color: var(--color-fg-default);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s ease;
+  min-width: 140px;
+
+  &:focus {
+    border-color: #0073FF;
+    box-shadow: 0 0 0 3px rgba(0, 115, 255, 0.15);
+  }
+
+  &::-webkit-calendar-picker-indicator {
+    filter: invert(0.7);
+    cursor: pointer;
+  }
+`;
+
+const DateSeparator = styled.span`
+  font-size: 14px;
+  color: var(--color-fg-muted);
+`;
+
+const DateApplyButton = styled.button`
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid #0073FF;
+  background-color: #0073FF;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 150ms;
+
+  &:hover {
+    opacity: 0.85;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+`;
+
+const SortOptions = styled.div`
+  display: inline-flex;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  overflow: hidden;
+`;
+
+const SortOption = styled.button<{ $active: boolean }>`
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: ${({ $active }) => ($active ? 600 : 400)};
+  color: ${({ $active }) => ($active ? '#fff' : 'var(--color-fg-muted)')};
+  background-color: ${({ $active }) => ($active ? '#0073FF' : 'transparent')};
+  border: none;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover:not([disabled]) {
+    color: ${({ $active }) => ($active ? '#fff' : 'var(--color-fg-default)')};
+    background-color: ${({ $active }) => ($active ? '#0073FF' : 'var(--color-bg-subtle)')};
+  }
+
+  & + & {
+    border-left: 1px solid var(--color-border-default);
+  }
+`;
 
 const HoverTooltip = styled.span`
   position: relative;
@@ -722,7 +874,7 @@ const PaginationPages = styled.div`
   }
 `;
 
-export type Period = "all" | "month" | "week";
+export type Period = "all" | "month" | "last-month" | "week" | "custom";
 
 export interface LeaderboardUser {
   rank: number;
@@ -732,6 +884,7 @@ export interface LeaderboardUser {
   avatarUrl: string | null;
   totalTokens: number;
   totalCost: number;
+  totalActiveTimeMs: number | null;
   submissionCount: number | null;
   lastSubmission: string;
 }
@@ -749,17 +902,18 @@ export interface LeaderboardData {
   stats: {
     totalTokens: number;
     totalCost: number;
+    totalActiveTimeMs: number | null;
     totalSubmissions: number | null;
     uniqueUsers: number;
   };
   period: Period;
-  sortBy?: 'tokens' | 'cost';
+  sortBy?: 'tokens' | 'cost' | 'time';
 }
 
 interface LeaderboardClientProps {
   initialData: LeaderboardData;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
-  initialSortBy: 'tokens' | 'cost';
+  initialSortBy: 'tokens' | 'cost' | 'time';
   initialUserRank: LeaderboardUser | null;
 }
 
@@ -779,6 +933,7 @@ interface LeaderboardRowProps {
   isCurrentUser: boolean;
   isLastRow: boolean;
   showSubmissionCount: boolean;
+  showTime: boolean;
   onRowClick: (username: string) => void;
 }
 
@@ -787,6 +942,7 @@ const LeaderboardRow = memo(function LeaderboardRow({
   isCurrentUser,
   isLastRow,
   showSubmissionCount,
+  showTime,
   onRowClick,
 }: LeaderboardRowProps) {
   const formattedTokens = useMemo(() => user.totalTokens.toLocaleString('en-US'), [user.totalTokens]);
@@ -838,6 +994,11 @@ const LeaderboardRow = memo(function LeaderboardRow({
           </CostValue>
         </CombinedValueContainer>
       </TableCell>
+      {showTime && (
+        <TableCell className="text-right hidden-mobile w-24">
+          <StatSpan>{formatDuration(user.totalActiveTimeMs)}</StatSpan>
+        </TableCell>
+      )}
       {showSubmissionCount && (
         <TableCell className="text-right hidden-mobile w-24">
           <SubmitCount>{user.submissionCount ?? "—"}</SubmitCount>
@@ -847,32 +1008,121 @@ const LeaderboardRow = memo(function LeaderboardRow({
   );
 });
 
+const VALID_PERIODS: Period[] = ["all", "month", "last-month", "week", "custom"];
+
+function parsePeriodParam(value: string | null): Period | null {
+  if (!value) return null;
+  return VALID_PERIODS.includes(value as Period) ? (value as Period) : null;
+}
+
 export default function LeaderboardClient({ initialData, currentUser, initialSortBy, initialUserRank }: LeaderboardClientProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+
+  const urlPeriod = parsePeriodParam(searchParams.get("period"));
+  const urlPage = searchParams.get("page") ? Math.max(1, Number(searchParams.get("page")) || 1) : null;
+  const sortByParam = searchParams.get("sortBy");
+  const urlSortBy = isValidSortBy(sortByParam) ? sortByParam : null;
+  const urlFrom = searchParams.get("from") || "";
+  const urlTo = searchParams.get("to") || "";
+  const urlSearch = searchParams.get("search")?.trim() || "";
+  const initialCustomDateRange = parseCustomDateRange(urlPeriod === "custom" ? urlFrom : null, urlPeriod === "custom" ? urlTo : null);
+
   const [data, setData] = useState<LeaderboardData>(initialData);
-  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  // Server/client divergence note: when ?period=custom&from=BAD&to=BAD is
+  // requested, the server falls back to period="all" (see page.tsx) while the
+  // client keeps period="custom" from the URL. This is intentionally safe
+  // because the client will not fire a fetch until the user applies a valid
+  // date range (isCustomWithoutDates guard), so no mismatched data is shown.
   const [period, setPeriod] = useState<Period>(initialData.period);
-  const [page, setPage] = useState(initialData.pagination.page);
+  const [page, setPage] = useState(urlPage || initialData.pagination.page);
   const [currentUserRank, setCurrentUserRank] = useState<LeaderboardUser | null>(initialUserRank);
   const [currentUserRankError, setCurrentUserRankError] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(urlSearch);
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch);
+  const [retryToken, setRetryToken] = useState(0);
+  const [customFrom, setCustomFrom] = useState(initialCustomDateRange?.from || "");
+  const [customTo, setCustomTo] = useState(initialCustomDateRange?.to || "");
+  const [appliedFrom, setAppliedFrom] = useState(initialCustomDateRange?.from || "");
+  const [appliedTo, setAppliedTo] = useState(initialCustomDateRange?.to || "");
+  const [resolvedRequest, setResolvedRequest] = useState({
+    period: initialData.period,
+    page: initialData.pagination.page,
+    sortBy: initialSortBy,
+    search: urlSearch,
+    retryToken: 0,
+    customFrom: initialCustomDateRange?.from || "",
+    customTo: initialCustomDateRange?.to || "",
+  });
 
   const { leaderboardSortBy, setLeaderboardSort, mounted } = useSettings();
-  
-  const effectiveSortBy = mounted ? leaderboardSortBy : initialSortBy;
 
-  const isFirstMount = useRef(true);
-  const prevPeriodRef = useRef<Period>(initialData.period);
-  const prevPageRef = useRef(initialData.pagination.page);
-  const prevSortByRef = useRef(initialSortBy);
+  // Precedence for the active sort column:
+  //   1. URL `?sortBy=` on first paint wins (preserves shareable links), but
+  //   2. the moment the user clicks a SortOption, their choice takes over and
+  //      stays sticky from the persisted setting (`leaderboardSortBy`).
+  // `urlSortOverride` is cleared on user clicks; do not remove that state reset
+  // when refactoring or the URL param will silently override every click.
+  const [urlSortOverride, setUrlSortOverride] = useState<LeaderboardSortBy | null>(urlSortBy);
+  const effectiveSortBy = urlSortOverride
+    ? urlSortOverride
+    : (mounted ? leaderboardSortBy : initialSortBy);
+  const requestedPage = data.pagination.totalPages > 0
+    ? Math.min(page, data.pagination.totalPages)
+    : page;
+  const isCustomWithoutDates = period === "custom" && (!appliedFrom || !appliedTo);
+  const isLoading = !isCustomWithoutDates && (
+    period !== resolvedRequest.period
+    || requestedPage !== resolvedRequest.page
+    || effectiveSortBy !== resolvedRequest.sortBy
+    || debouncedSearch !== resolvedRequest.search
+    || retryToken !== resolvedRequest.retryToken
+    || (period === "custom" && (appliedFrom !== resolvedRequest.customFrom || appliedTo !== resolvedRequest.customTo))
+  );
 
   const isFirstRankFetch = useRef(true);
+  const isFirstUrlSync = useRef(true);
+
+  useEffect(() => {
+    if (isFirstUrlSync.current) {
+      isFirstUrlSync.current = false;
+      return;
+    }
+    const params = new URLSearchParams();
+    // Preserve ?view= when it's present (e.g. view=users navigated explicitly)
+    const currentView = searchParams.get("view");
+    if (currentView) params.set("view", currentView);
+    if (period !== "all") params.set("period", period);
+    if (requestedPage > 1) params.set("page", String(requestedPage));
+    if (effectiveSortBy !== "tokens") params.set("sortBy", effectiveSortBy);
+    if (period === "custom" && appliedFrom) params.set("from", appliedFrom);
+    if (period === "custom" && appliedTo) params.set("to", appliedTo);
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    const qs = params.toString();
+    const url = qs ? `${pathname}?${qs}` : pathname;
+    window.history.replaceState(null, "", url);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period, requestedPage, effectiveSortBy, appliedFrom, appliedTo, pathname, debouncedSearch]);
+
+  // Debounce search input so URL/search sync updates after typing stops.
+  const isSearchMounted = useRef(false);
+  useEffect(() => {
+    if (!isSearchMounted.current) {
+      isSearchMounted.current = true;
+      return;
+    }
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   useEffect(() => {
     if (!currentUser) {
-      setCurrentUserRank(null);
-      setCurrentUserRankError(false);
       return;
     }
 
@@ -882,9 +1132,9 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
     }
 
     const abortController = new AbortController();
-    setCurrentUserRankError(false);
 
-    fetch(`/api/leaderboard/user/${currentUser.username}?period=${period}&sortBy=${effectiveSortBy}`, {
+    const customParams = period === "custom" ? `&from=${appliedFrom}&to=${appliedTo}` : "";
+    fetch(`/api/leaderboard/user/${currentUser.username}?period=${period}&sortBy=${effectiveSortBy}${customParams}`, {
       signal: abortController.signal,
     })
       .then((res) => {
@@ -903,12 +1153,23 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       });
 
     return () => abortController.abort();
-  }, [currentUser, period, effectiveSortBy]);
+  }, [currentUser, period, effectiveSortBy, appliedFrom, appliedTo]);
 
-  const fetchData = (targetPeriod: Period, targetPage: number, targetSortBy: 'tokens' | 'cost', signal?: AbortSignal) => {
-    setIsLoading(true);
-    setError(null);
-    fetch(`/api/leaderboard?period=${targetPeriod}&page=${targetPage}&limit=50&sortBy=${targetSortBy}`, { signal })
+  const fetchData = useCallback((
+    targetPeriod: Period,
+    targetPage: number,
+    targetSortBy: LeaderboardSortBy,
+    targetSearch: string,
+    targetRetryToken: number,
+    signal?: AbortSignal,
+    targetCustomFrom?: string,
+    targetCustomTo?: string,
+  ) => {
+    const searchParam = targetSearch ? `&search=${encodeURIComponent(targetSearch)}` : "";
+    const customParams = targetPeriod === "custom" && targetCustomFrom && targetCustomTo
+      ? `&from=${targetCustomFrom}&to=${targetCustomTo}`
+      : "";
+    fetch(`/api/leaderboard?period=${targetPeriod}&page=${targetPage}&limit=50&sortBy=${targetSortBy}${searchParam}${customParams}`, { signal })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -918,48 +1179,50 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           throw new Error("Invalid response format");
         }
         setData(result);
-        setIsLoading(false);
+        setError(null);
+        setResolvedRequest({
+          period: targetPeriod,
+          page: result.pagination.page,
+          sortBy: targetSortBy,
+          search: targetSearch,
+          retryToken: targetRetryToken,
+          customFrom: targetCustomFrom || "",
+          customTo: targetCustomTo || "",
+        });
       })
       .catch((err) => {
         if (err.name !== "AbortError") {
           setError(err.message || "Failed to load");
-          setIsLoading(false);
+          setResolvedRequest({
+            period: targetPeriod,
+            page: targetPage,
+            sortBy: targetSortBy,
+            search: targetSearch,
+            retryToken: targetRetryToken,
+            customFrom: targetCustomFrom || "",
+            customTo: targetCustomTo || "",
+          });
         }
       });
-  };
+  }, []);
 
   useEffect(() => {
-    if (isFirstMount.current) {
-      isFirstMount.current = false;
-      prevSortByRef.current = effectiveSortBy;
+    if (!isLoading) {
       return;
     }
 
-    const periodChanged = period !== prevPeriodRef.current;
-    const pageChanged = page !== prevPageRef.current;
-    const sortByChanged = effectiveSortBy !== prevSortByRef.current;
-
-    if (!periodChanged && !pageChanged && !sortByChanged) {
+    if (period === "custom" && (!appliedFrom || !appliedTo)) {
       return;
     }
-
-    prevPeriodRef.current = period;
-    prevPageRef.current = page;
-    prevSortByRef.current = effectiveSortBy;
 
     const abortController = new AbortController();
-    fetchData(period, page, effectiveSortBy, abortController.signal);
+    fetchData(period, requestedPage, effectiveSortBy, debouncedSearch, retryToken, abortController.signal, appliedFrom, appliedTo);
     return () => abortController.abort();
-  }, [period, page, effectiveSortBy]);
-
-  useEffect(() => {
-    if (data.pagination.totalPages > 0 && page > data.pagination.totalPages) {
-      setPage(data.pagination.totalPages);
-    }
-  }, [data.pagination.totalPages, page]);
+  }, [appliedFrom, appliedTo, debouncedSearch, effectiveSortBy, fetchData, isLoading, period, requestedPage, retryToken]);
 
   const sortedUsers = data.users || [];
   const showSubmissionCount = period === "all";
+  const showTime = true;
 
   const handleCopyCommand = (command: string) => {
     navigator.clipboard.writeText(command);
@@ -974,7 +1237,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   return (
     <>
       <Section>
-        <Title>Leaderboard</Title>
         <Description>See who&apos;s using the most tokens</Description>
 
         <StatsGrid>
@@ -1056,26 +1318,107 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         <TabBar
           tabs={[
             { id: "all" as Period, label: "All Time" },
+            { id: "last-month" as Period, label: "Last Month" },
             { id: "month" as Period, label: "This Month" },
             { id: "week" as Period, label: "This Week" },
+            { id: "custom" as Period, label: "Custom" },
           ]}
           activeTab={period}
           onTabChange={(tab) => {
             setPeriod(tab);
             setPage(1);
+            if (tab !== "custom") {
+              setAppliedFrom("");
+              setAppliedTo("");
+              setCustomFrom("");
+              setCustomTo("");
+            }
           }}
         />
       </TabSection>
 
-      <SortToggleContainer>
-        <SortLabel>Sort by:</SortLabel>
-        <Switch
-          checked={effectiveSortBy === 'cost'}
-          onChange={(checked) => setLeaderboardSort(checked ? 'cost' : 'tokens')}
-          leftLabel="Tokens"
-          rightLabel="Cost"
-        />
-      </SortToggleContainer>
+      {period === "custom" && (
+        <DateRangeRow>
+          <DateInput
+            type="date"
+            value={customFrom}
+            onChange={(e) => setCustomFrom(e.target.value)}
+            max={customTo || undefined}
+          />
+          <DateSeparator>~</DateSeparator>
+          <DateInput
+            type="date"
+            value={customTo}
+            onChange={(e) => setCustomTo(e.target.value)}
+            min={customFrom || undefined}
+          />
+          <DateApplyButton
+            disabled={!parseCustomDateRange(customFrom, customTo)}
+            onClick={() => {
+              const parsed = parseCustomDateRange(customFrom, customTo);
+              if (!parsed) {
+                return;
+              }
+              setAppliedFrom(parsed.from);
+              setAppliedTo(parsed.to);
+              setPage(1);
+            }}
+          >
+            Apply
+          </DateApplyButton>
+        </DateRangeRow>
+      )}
+
+      <SearchSortRow>
+        <SearchInputWrapper>
+          <SearchInputIcon>
+            <SearchIcon size={16} />
+          </SearchInputIcon>
+          <SearchInput
+            type="text"
+            placeholder="Search users..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchQuery && (
+            <ClearSearchButton onClick={() => setSearchQuery("")} aria-label="Clear search">
+              <XIcon size={16} />
+            </ClearSearchButton>
+          )}
+        </SearchInputWrapper>
+        <SortToggleInner>
+          <SortLabel>Sort by:</SortLabel>
+          <SortOptions>
+            <SortOption
+              $active={effectiveSortBy === 'tokens'}
+              onClick={() => {
+                setUrlSortOverride(null);
+                setLeaderboardSort('tokens');
+              }}
+            >
+              Tokens
+            </SortOption>
+            <SortOption
+              $active={effectiveSortBy === 'cost'}
+              onClick={() => {
+                setUrlSortOverride(null);
+                setLeaderboardSort('cost');
+              }}
+            >
+              Cost
+            </SortOption>
+            <SortOption
+              $active={effectiveSortBy === 'time'}
+              onClick={() => {
+                setUrlSortOverride(null);
+                setLeaderboardSort('time');
+              }}
+            >
+              Time
+            </SortOption>
+          </SortOptions>
+        </SortToggleInner>
+      </SearchSortRow>
 
       {isLoading ? (
         <LeaderboardSkeleton />
@@ -1084,7 +1427,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           <EmptyState>
             <EmptyMessage>Failed to load leaderboard</EmptyMessage>
             <EmptyHint>{error}</EmptyHint>
-            <RetryButton onClick={() => fetchData(period, page, effectiveSortBy)}>
+            <RetryButton onClick={() => setRetryToken((prev) => prev + 1)}>
               Retry
             </RetryButton>
           </EmptyState>
@@ -1093,10 +1436,19 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         <TableContainer>
           {data.users.length === 0 ? (
             <EmptyState>
-              <EmptyMessage>No submissions yet. Be the first!</EmptyMessage>
-              <EmptyHint>
-                Run <CodeSnippet>tokscale login && tokscale submit</CodeSnippet>
-              </EmptyHint>
+              {debouncedSearch ? (
+                <>
+                  <EmptyMessage>No users found for &ldquo;{debouncedSearch}&rdquo;</EmptyMessage>
+                  <EmptyHint>Try a different search term</EmptyHint>
+                </>
+              ) : (
+                <>
+                  <EmptyMessage>No submissions yet. Be the first!</EmptyMessage>
+                  <EmptyHint>
+                    Run <CodeSnippet>tokscale login && tokscale submit</CodeSnippet>
+                  </EmptyHint>
+                </>
+              )}
             </EmptyState>
           ) : (
             <>
@@ -1108,6 +1460,9 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                       <TableHeaderCell>User</TableHeaderCell>
                       <TableHeaderCell className="text-right hidden-cost-mobile">Cost</TableHeaderCell>
                       <TableHeaderCell className="text-right">Tokens</TableHeaderCell>
+                      {showTime && (
+                        <TableHeaderCell className="text-right hidden-mobile w-24">Time</TableHeaderCell>
+                      )}
                       {showSubmissionCount && (
                         <TableHeaderCell className="text-right hidden-mobile w-24">Submits</TableHeaderCell>
                       )}
@@ -1121,6 +1476,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                         isCurrentUser={!!(currentUser && user.username === currentUser.username)}
                         isLastRow={index === sortedUsers.length - 1}
                         showSubmissionCount={showSubmissionCount}
+                        showTime={showTime}
                         onRowClick={handleRowClick}
                       />
                     ))}
@@ -1191,6 +1547,21 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         <CTATitle>Join the Leaderboard</CTATitle>
         <CTADescription>Install Tokscale CLI and submit your usage data:</CTADescription>
         <CodeBlock>
+          {mounted && typeof window !== "undefined" && window.location.hostname !== "tokscale.ai" && (
+            <CodeLine>
+              <CommandPrompt>$</CommandPrompt>
+              <CommandPrefix>export</CommandPrefix>
+              <CommandName>TOKSCALE_API_URL</CommandName>
+              <CommandArg>={`${window.location.origin}`}</CommandArg>
+              <CopyIconButton
+                onClick={() => handleCopyCommand(`export TOKSCALE_API_URL=${window.location.origin}`)}
+                className={copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? "copied" : ""}
+                aria-label="Copy command"
+              >
+                {copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
+              </CopyIconButton>
+            </CodeLine>
+          )}
           <CodeLine>
             <CommandPrompt>$</CommandPrompt>
             <CommandPrefix>bunx</CommandPrefix>

@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import Image from "next/image";
 import styled, { css } from "styled-components";
 import { toast } from "react-toastify";
 import { GraphContainer } from "@/components/GraphContainer";
 import type { TokenContributionData } from "@/lib/types";
-import { formatNumber, formatCurrency } from "@/lib/utils";
+import { formatNumber, formatCurrency, formatDuration } from "@/lib/utils";
 import { legacy } from "@/lib/responsive";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
 
@@ -26,6 +26,8 @@ export interface ProfileStatsData {
   cacheWriteTokens: number;
   activeDays: number;
   submissionCount?: number;
+  totalActiveTimeMs?: number;
+  sessionCount?: number;
 }
 
 export interface ProfileHeaderProps {
@@ -133,12 +135,15 @@ const UserDetails = styled.div`
 `;
 
 const RankBadge = styled.div`
-  width: 2rem;
+  min-width: 2rem;
   height: 2rem;
+  padding: 0 0.375rem;
   border-radius: 0.5rem;
   display: flex;
   align-items: center;
   justify-content: center;
+  white-space: nowrap;
+  align-self: flex-start;
 `;
 
 const RankText = styled.span`
@@ -308,6 +313,11 @@ const actionButtonStyles = css`
   transition: opacity 150ms ease-in-out;
   cursor: pointer;
 
+  background-color: var(--color-btn-bg);
+  border-color: var(--color-border-default);
+
+  color: var(--color-fg-default);
+
   &:hover {
     opacity: 0.8;
   }
@@ -320,6 +330,16 @@ const actionButtonStyles = css`
 
 const ActionButton = styled.button`
   ${actionButtonStyles}
+`;
+
+const PrimaryActionButton = styled(ActionButton)`
+  background: linear-gradient(135deg, #169AFF 0%, #0A84FF 100%);
+  border-color: color-mix(in srgb, #9FD4FB 45%, var(--color-border-default));
+  color: #F8FBFF;
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--color-bg-default), 0 0 0 4px #169AFF;
+  }
 `;
 
 const ActionLink = styled.a`
@@ -438,38 +458,25 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
           <LastUpdatedText
             style={{ color: "var(--color-fg-muted)" }}
           >
-            Last Updated: {new Date(lastUpdated).toLocaleString()}
+            Last Updated: {new Date(lastUpdated).toLocaleString("en-US", { timeZone: "UTC" })}
           </LastUpdatedText>
         )}
 
         <ActionButtons>
-          <ActionButton
+          <PrimaryActionButton
             onClick={() => setIsEmbedDialogOpen(true)}
             aria-label={`Open GitHub README embed options for ${user.displayName || user.username}`}
-            style={{
-              background: "linear-gradient(135deg, rgba(22, 154, 255, 0.14) 0%, rgba(133, 202, 255, 0.08) 100%)",
-              borderColor: "rgba(133, 202, 255, 0.22)",
-            }}
           >
             <EmbedIcon />
-            <ActionText
-              style={{ color: "var(--color-fg-default)" }}
-            >
-              Embed
-            </ActionText>
-          </ActionButton>
+            <ActionText>Embed</ActionText>
+          </PrimaryActionButton>
 
           <ActionButton
             onClick={handleShareClick}
             aria-label={`Share ${user.displayName || user.username}'s profile`}
-            style={{ backgroundColor: "var(--color-btn-bg)", borderColor: "var(--color-border-default)" }}
           >
             <Image src="/icons/icon-share.svg" alt="" width={20} height={20} aria-hidden="true" />
-            <ActionText
-              style={{ color: "var(--color-fg-default)" }}
-            >
-              Share
-            </ActionText>
+            <ActionText>Share</ActionText>
           </ActionButton>
 
           <ActionLink
@@ -477,14 +484,9 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
             target="_blank"
             rel="noopener noreferrer"
             aria-label={`View ${user.username}'s GitHub profile (opens in new tab)`}
-            style={{ backgroundColor: "var(--color-btn-bg)", borderColor: "var(--color-border-default)" }}
           >
             <Image src="/icons/icon-github.svg" alt="" width={20} height={20} aria-hidden="true" />
-            <ActionText
-              style={{ color: "var(--color-fg-default)" }}
-            >
-              GitHub
-            </ActionText>
+            <ActionText>GitHub</ActionText>
           </ActionLink>
         </ActionButtons>
       </FooterRow>
@@ -499,40 +501,39 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
   );
 }
 
-function EmbedIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      width="20"
-      height="20"
-      viewBox="0 0 24 24"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <path
-        d="M8 8L4 12L8 16"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M16 8L20 12L16 16"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M13.5 5L10.5 19"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
+const EmbedIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+  <svg
+    aria-hidden="true"
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    {...props}
+  >
+    <path
+      d="M8 8L4 12L8 16"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M16 8L20 12L16 16"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M13.5 5L10.5 19"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
 
 export type ProfileTab = "activity" | "breakdown" | "models";
 
@@ -653,6 +654,7 @@ export function ProfileTabBar({ activeTab, onTabChange }: ProfileTabBarProps) {
         return (
           <TabButton
             key={tab.id}
+            id={`tab-${tab.id}`}
             role="tab"
             aria-selected={isActive}
             aria-controls={`tabpanel-${tab.id}`}
@@ -860,6 +862,12 @@ export function ProfileStats({ stats, favoriteModel }: ProfileStatsProps) {
   const statItems = [
     { label: "Submits", value: (stats.submissionCount ?? 0).toString(), color: "var(--color-primary)" },
     { label: "Favorite Model", value: favoriteModel ?? "N/A", color: "var(--color-primary)" },
+    ...(stats.totalActiveTimeMs && stats.totalActiveTimeMs > 0
+      ? [{ label: "Active Time", value: formatDuration(stats.totalActiveTimeMs), color: "var(--color-primary)" }]
+      : []),
+    ...(stats.sessionCount && stats.sessionCount > 0
+      ? [{ label: "Sessions", value: stats.sessionCount.toString(), color: "var(--color-primary)" }]
+      : []),
   ];
 
   return (
@@ -1145,6 +1153,9 @@ export function ProfileModels({ models, modelUsage }: ProfileModelsProps) {
 
 export interface ProfileActivityProps {
   data: TokenContributionData;
+  totalActiveTimeMs?: number | null;
+  sessionCount?: number | null;
+  mcpServers?: string[];
 }
 
 const ActivityContainer = styled.div`
@@ -1170,11 +1181,11 @@ const ActivityInner = styled.div`
   }
 `;
 
-export function ProfileActivity({ data }: ProfileActivityProps) {
+export function ProfileActivity({ data, totalActiveTimeMs, sessionCount, mcpServers }: ProfileActivityProps) {
   return (
     <ActivityContainer>
       <ActivityInner>
-        <GraphContainer data={data} />
+        <GraphContainer data={data} totalActiveTimeMs={totalActiveTimeMs} sessionCount={sessionCount} mcpServers={mcpServers} />
       </ActivityInner>
     </ActivityContainer>
   );

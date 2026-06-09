@@ -2,6 +2,7 @@
 pub enum PathRoot {
     Home,
     XdgData,
+    Config,
     EnvVar {
         var: &'static str,
         fallback_relative: &'static str,
@@ -9,18 +10,67 @@ pub enum PathRoot {
 }
 
 impl PathRoot {
-    pub fn resolve(&self, home_dir: &str) -> String {
+    pub fn resolve_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
         match self {
             PathRoot::Home => home_dir.to_string(),
-            PathRoot::XdgData => std::env::var("XDG_DATA_HOME")
-                .unwrap_or_else(|_| format!("{}/.local/share", home_dir)),
+            PathRoot::XdgData => {
+                if use_env_roots {
+                    std::env::var("XDG_DATA_HOME")
+                        .unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+                } else {
+                    format!("{}/.local/share", home_dir)
+                }
+            }
+            PathRoot::Config => {
+                if use_env_roots {
+                    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
+                        if !custom.is_empty() {
+                            return custom.to_string_lossy().into_owned();
+                        }
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+                        return format!("{xdg_config_home}/tokscale");
+                    }
+                }
+
+                // Match paths::get_config_dir() platform branches so the
+                // scanner reads from the same root the writer (e.g.
+                // get_antigravity_cache_dir) targets. Hardcoding
+                // `{home}/.config/tokscale` everywhere would diverge from
+                // dirs::config_dir() on Windows (where it resolves to
+                // %APPDATA%\tokscale), causing synced data to land in
+                // %APPDATA% while the scanner looks in %USERPROFILE%.
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(dir) = dirs::config_dir() {
+                        return dir.join("tokscale").to_string_lossy().into_owned();
+                    }
+                }
+
+                format!("{home_dir}/.config/tokscale")
+            }
             PathRoot::EnvVar {
                 var,
                 fallback_relative,
             } => {
-                std::env::var(var).unwrap_or_else(|_| format!("{}/{}", home_dir, fallback_relative))
+                if use_env_roots {
+                    let val = std::env::var(var).unwrap_or_default();
+                    if val.trim().is_empty() {
+                        format!("{}/{}", home_dir, fallback_relative)
+                    } else {
+                        val
+                    }
+                } else {
+                    format!("{}/{}", home_dir, fallback_relative)
+                }
             }
         }
+    }
+
+    pub fn resolve(&self, home_dir: &str) -> String {
+        self.resolve_with_env_strategy(home_dir, true)
     }
 }
 
@@ -32,16 +82,25 @@ pub struct ClientDef {
     pub pattern: &'static str,
     pub headless: bool,
     pub parse_local: bool,
+    pub submit_default: bool,
 }
 
 impl ClientDef {
+    pub fn resolve_path_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
+        format!(
+            "{}/{}",
+            self.root.resolve_with_env_strategy(home_dir, use_env_roots),
+            self.relative_path
+        )
+    }
+
     pub fn resolve_path(&self, home_dir: &str) -> String {
-        format!("{}/{}", self.root.resolve(home_dir), self.relative_path)
+        self.resolve_path_with_env_strategy(home_dir, true)
     }
 }
 
 macro_rules! define_clients {
-    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr } ),+ $(,)? ) => {
+    ( $( $variant:ident = $index:expr => { id: $id:expr, root: $root:expr, relative: $rel:expr, pattern: $pat:expr, headless: $hl:expr, parse_local: $pl:expr, submit_default: $sd:expr } ),+ $(,)? ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[repr(usize)]
         pub enum ClientId {
@@ -72,6 +131,10 @@ macro_rules! define_clients {
                 self.data().parse_local
             }
 
+            pub fn submit_default(&self) -> bool {
+                self.data().submit_default
+            }
+
             pub fn iter() -> impl Iterator<Item = ClientId> {
                 Self::ALL.iter().copied()
             }
@@ -90,6 +153,7 @@ macro_rules! define_clients {
                 pattern: $pat,
                 headless: $hl,
                 parse_local: $pl,
+                submit_default: $sd,
             } ),+
         ];
 
@@ -111,7 +175,8 @@ define_clients!(
         relative: "opencode/storage/message",
         pattern: "*.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Claude = 1 => {
         id: "claude",
@@ -119,7 +184,8 @@ define_clients!(
         relative: ".claude/projects",
         pattern: "*.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Codex = 2 => {
         id: "codex",
@@ -130,7 +196,8 @@ define_clients!(
         relative: "sessions",
         pattern: "*.jsonl",
         headless: true,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Cursor = 3 => {
         id: "cursor",
@@ -138,15 +205,20 @@ define_clients!(
         relative: ".config/tokscale/cursor-cache",
         pattern: "usage*.csv",
         headless: false,
-        parse_local: false
+        parse_local: false,
+        submit_default: true
     },
     Gemini = 4 => {
         id: "gemini",
-        root: PathRoot::Home,
-        relative: ".gemini/tmp",
-        pattern: "*.json",
+        root: PathRoot::EnvVar {
+            var: "GEMINI_CLI_HOME",
+            fallback_relative: ".gemini",
+        },
+        relative: "tmp",
+        pattern: "*.json|*.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Amp = 5 => {
         id: "amp",
@@ -154,7 +226,8 @@ define_clients!(
         relative: "amp/threads",
         pattern: "T-*.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Droid = 6 => {
         id: "droid",
@@ -162,15 +235,17 @@ define_clients!(
         relative: ".factory/sessions",
         pattern: "*.settings.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     OpenClaw = 7 => {
         id: "openclaw",
         root: PathRoot::Home,
         relative: ".openclaw/agents",
-        pattern: "*.jsonl",
+        pattern: "*.jsonl*",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Pi = 8 => {
         id: "pi",
@@ -178,7 +253,8 @@ define_clients!(
         relative: ".pi/agent/sessions",
         pattern: "*.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Kimi = 9 => {
         id: "kimi",
@@ -186,7 +262,8 @@ define_clients!(
         relative: ".kimi/sessions",
         pattern: "wire.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Qwen = 10 => {
         id: "qwen",
@@ -194,7 +271,8 @@ define_clients!(
         relative: ".qwen/projects",
         pattern: "*.jsonl",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     RooCode = 11 => {
         id: "roocode",
@@ -202,7 +280,8 @@ define_clients!(
         relative: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
         pattern: "ui_messages.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     KiloCode = 12 => {
         id: "kilocode",
@@ -210,7 +289,8 @@ define_clients!(
         relative: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
         pattern: "ui_messages.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
     },
     Mux = 13 => {
         id: "mux",
@@ -218,7 +298,146 @@ define_clients!(
         relative: ".mux/sessions",
         pattern: "session-usage.json",
         headless: false,
-        parse_local: true
+        parse_local: true,
+        submit_default: true
+    },
+    Kilo = 14 => {
+        id: "kilo",
+        root: PathRoot::XdgData,
+        relative: "kilo/kilo.db",
+        pattern: "kilo.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Crush = 15 => {
+        id: "crush",
+        root: PathRoot::XdgData,
+        relative: "crush/projects.json",
+        pattern: "projects.json",
+        headless: false,
+        parse_local: true,
+        submit_default: false
+    },
+    Hermes = 16 => {
+        id: "hermes",
+        root: PathRoot::EnvVar {
+            var: "HERMES_HOME",
+            fallback_relative: ".hermes",
+        },
+        relative: "state.db",
+        pattern: "state.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Copilot = 17 => {
+        id: "copilot",
+        root: PathRoot::Home,
+        relative: ".copilot/otel",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Goose = 18 => {
+        id: "goose",
+        root: PathRoot::XdgData,
+        relative: "goose/sessions/sessions.db",
+        pattern: "sessions.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Codebuff = 19 => {
+        id: "codebuff",
+        root: PathRoot::EnvVar {
+            var: "CODEBUFF_DATA_DIR",
+            fallback_relative: ".config/manicode",
+        },
+        relative: "projects",
+        pattern: "chat-messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Antigravity = 20 => {
+        id: "antigravity",
+        root: PathRoot::Config,
+        relative: "antigravity-cache/sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Zed = 21 => {
+        id: "zed",
+        root: PathRoot::XdgData,
+        relative: "zed/threads/threads.db",
+        pattern: "threads.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Kiro = 22 => {
+        id: "kiro",
+        root: PathRoot::Home,
+        relative: ".kiro/sessions/cli",
+        pattern: "*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Trae = 23 => {
+        id: "trae",
+        root: PathRoot::Config,
+        relative: "trae-cache/sessions",
+        pattern: "*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: false
+    },
+    Warp = 24 => {
+        id: "warp",
+        root: PathRoot::Config,
+        relative: "warp-cache",
+        pattern: "usage*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: false
+    },
+    Cline = 25 => {
+        id: "cline",
+        root: PathRoot::Home,
+        relative: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
+        pattern: "ui_messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Gjc = 26 => {
+        id: "gjc",
+        root: PathRoot::EnvVar {
+            var: "GJC_CODING_AGENT_DIR",
+            fallback_relative: ".gjc/agent",
+        },
+        relative: "sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Grok = 27 => {
+        id: "grok",
+        root: PathRoot::EnvVar {
+            var: "GROK_HOME",
+            fallback_relative: ".grok",
+        },
+        relative: "sessions",
+        pattern: "updates.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -271,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 14);
+        assert_eq!(ClientId::COUNT, 28);
     }
 
     #[test]
@@ -285,6 +504,24 @@ mod tests {
             let id = client.as_str();
             assert_eq!(ClientId::from_str(id), Some(client));
         }
+    }
+
+    #[test]
+    fn test_warp_client_registered_as_aggregate_cache_source() {
+        let client = ClientId::from_str("warp").expect("warp client should be registered");
+        assert_eq!(client.data().relative_path, "warp-cache");
+        assert_eq!(client.data().pattern, "usage*.json");
+        assert!(client.data().parse_local);
+        assert!(!client.data().submit_default);
+    }
+
+    #[test]
+    fn test_grok_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("grok").expect("grok client should be registered");
+        assert_eq!(client.data().relative_path, "sessions");
+        assert_eq!(client.data().pattern, "updates.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
     }
 
     #[test]
@@ -315,6 +552,98 @@ mod tests {
         assert_eq!(resolved, "/tmp/home/.local/share");
 
         restore_env("XDG_DATA_HOME", previous);
+    }
+
+    #[test]
+    fn test_path_root_xdg_data_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-home") };
+
+        let resolved = PathRoot::XdgData.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.local/share");
+
+        restore_env("XDG_DATA_HOME", previous);
+    }
+
+    #[test]
+    fn test_path_root_config_uses_override_when_set() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/custom-config-root");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_path_root_config_uses_xdg_config_home_when_override_unset() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/xdg-config-home/tokscale");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_path_root_config_uses_dirs_config_dir_on_windows() {
+        // Windows must resolve PathRoot::Config to the same root that
+        // paths::get_config_dir() and get_antigravity_cache_dir() use,
+        // i.e. dirs::config_dir() (= %APPDATA%\tokscale). Hardcoding
+        // {home}/.config/tokscale would diverge from the writer side
+        // and silently hide synced Antigravity data from reports.
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        unsafe {
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let resolved = PathRoot::Config.resolve("C:\\fake-home");
+        let expected = dirs::config_dir()
+            .expect("Windows always exposes dirs::config_dir")
+            .join("tokscale")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            resolved, expected,
+            "PathRoot::Config on Windows must match dirs::config_dir().join('tokscale') so the scanner agrees with the writer"
+        );
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+    }
+
+    #[test]
+    fn test_path_root_config_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        }
+
+        let resolved = PathRoot::Config.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.config/tokscale");
+
+        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env("XDG_CONFIG_HOME", previous_xdg);
     }
 
     #[test]
@@ -352,6 +681,23 @@ mod tests {
     }
 
     #[test]
+    fn test_path_root_env_var_ignores_env_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "TOKSCALE_TEST_PATH_ROOT";
+        let previous = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "/tmp/custom-root") };
+
+        let root = PathRoot::EnvVar {
+            var,
+            fallback_relative: ".fallback",
+        };
+        let resolved = root.resolve_with_env_strategy("/tmp/home", false);
+        assert_eq!(resolved, "/tmp/home/.fallback");
+
+        restore_env(var, previous);
+    }
+
+    #[test]
     fn test_client_def_resolve_path_combines_root_and_relative() {
         let client = ClientDef {
             id: "test",
@@ -360,6 +706,7 @@ mod tests {
             pattern: "*.jsonl",
             headless: false,
             parse_local: true,
+            submit_default: true,
         };
 
         assert_eq!(client.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
@@ -394,7 +741,105 @@ mod tests {
     }
 
     #[test]
+    fn test_gjc_data_dir_path() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "GJC_CODING_AGENT_DIR";
+        let previous = std::env::var(var).ok();
+        // Env unset (cleared): resolves under home/.gjc/agent/sessions.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            ClientId::Gjc.data().resolve_path("/tmp/home"),
+            "/tmp/home/.gjc/agent/sessions"
+        );
+        assert_eq!(ClientId::Gjc.data().pattern, "*.jsonl");
+        assert!(ClientId::Gjc.data().parse_local);
+        assert!(ClientId::Gjc.data().submit_default);
+        assert_eq!(ClientId::from_str("gjc"), Some(ClientId::Gjc));
+
+        // Env set but env roots disabled: falls back to home, ignoring env.
+        unsafe { std::env::set_var(var, "/tmp/custom-gjc") };
+        assert_eq!(
+            ClientId::Gjc
+                .data()
+                .resolve_path_with_env_strategy("/tmp/home", false),
+            "/tmp/home/.gjc/agent/sessions"
+        );
+
+        restore_env(var, previous);
+    }
+
+    #[test]
     fn test_cursor_parse_local_is_false() {
         assert!(!ClientId::Cursor.data().parse_local);
+    }
+
+    #[test]
+    fn test_crush_submit_default_is_false() {
+        assert!(!ClientId::Crush.submit_default());
+    }
+
+    #[test]
+    fn test_hermes_root_uses_hermes_home_env_var() {
+        assert_eq!(
+            ClientId::Hermes.data().root,
+            PathRoot::EnvVar {
+                var: "HERMES_HOME",
+                fallback_relative: ".hermes",
+            }
+        );
+        assert_eq!(ClientId::Hermes.data().relative_path, "state.db");
+    }
+
+    #[test]
+    fn test_codebuff_root_uses_codebuff_data_dir_env_var() {
+        assert_eq!(
+            ClientId::Codebuff.data().root,
+            PathRoot::EnvVar {
+                var: "CODEBUFF_DATA_DIR",
+                fallback_relative: ".config/manicode",
+            }
+        );
+        assert_eq!(ClientId::Codebuff.data().pattern, "chat-messages.json");
+    }
+
+    #[test]
+    fn test_antigravity_parse_local_is_true() {
+        assert!(ClientId::Antigravity.data().parse_local);
+    }
+
+    #[test]
+    fn test_antigravity_submit_default_is_true() {
+        assert!(ClientId::Antigravity.submit_default());
+    }
+
+    #[test]
+    fn test_zed_data_dir_path() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+
+        assert_eq!(
+            ClientId::Zed.data().resolve_path("/tmp/home"),
+            "/tmp/home/.local/share/zed/threads/threads.db"
+        );
+
+        restore_env("XDG_DATA_HOME", previous);
+    }
+
+    #[test]
+    fn test_zed_submit_default_is_true() {
+        assert!(ClientId::Zed.submit_default());
+    }
+
+    #[test]
+    fn test_kiro_data_dir_path() {
+        assert_eq!(
+            ClientId::Kiro.data().resolve_path("/tmp/home"),
+            "/tmp/home/.kiro/sessions/cli"
+        );
+        assert_eq!(ClientId::Kiro.data().pattern, "*.json");
+        assert!(ClientId::Kiro.parse_local());
+        assert!(ClientId::Kiro.submit_default());
+        assert!(!ClientId::Kiro.supports_headless());
     }
 }

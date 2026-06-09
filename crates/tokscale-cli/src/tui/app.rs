@@ -1,17 +1,26 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
-use super::data::{AgentUsage, DailyUsage, DataLoader, ModelUsage, UsageData};
+use crate::ClientFilter;
+
+use ratatui::style::Color;
+
+use super::data::{
+    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, TokenBreakdown,
+    UsageData,
+};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
+use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
 
 /// Configuration for TUI initialization
 pub struct TuiConfig {
@@ -25,11 +34,14 @@ pub struct TuiConfig {
     pub initial_tab: Option<Tab>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Usage,
     Models,
     Daily,
+    Hourly,
+    Minutely,
     Stats,
     Agents,
 }
@@ -38,8 +50,11 @@ impl Tab {
     pub fn all() -> &'static [Tab] {
         &[
             Tab::Overview,
+            Tab::Usage,
             Tab::Models,
             Tab::Daily,
+            Tab::Hourly,
+            Tab::Minutely,
             Tab::Stats,
             Tab::Agents,
         ]
@@ -48,8 +63,11 @@ impl Tab {
     pub fn as_str(&self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Usage => "Usage",
             Tab::Models => "Models",
             Tab::Daily => "Daily",
+            Tab::Hourly => "Hourly",
+            Tab::Minutely => "Minutely",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
         }
@@ -58,8 +76,11 @@ impl Tab {
     pub fn short_name(&self) -> &'static str {
         match self {
             Tab::Overview => "Ovw",
+            Tab::Usage => "Use",
             Tab::Models => "Mod",
             Tab::Daily => "Day",
+            Tab::Hourly => "Hr",
+            Tab::Minutely => "Min",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
         }
@@ -67,9 +88,12 @@ impl Tab {
 
     pub fn next(self) -> Tab {
         match self {
-            Tab::Overview => Tab::Models,
+            Tab::Overview => Tab::Usage,
+            Tab::Usage => Tab::Models,
             Tab::Models => Tab::Daily,
-            Tab::Daily => Tab::Stats,
+            Tab::Daily => Tab::Hourly,
+            Tab::Hourly => Tab::Minutely,
+            Tab::Minutely => Tab::Stats,
             Tab::Stats => Tab::Agents,
             Tab::Agents => Tab::Overview,
         }
@@ -78,12 +102,22 @@ impl Tab {
     pub fn prev(self) -> Tab {
         match self {
             Tab::Overview => Tab::Agents,
-            Tab::Models => Tab::Overview,
+            Tab::Usage => Tab::Overview,
+            Tab::Models => Tab::Usage,
             Tab::Daily => Tab::Models,
-            Tab::Stats => Tab::Daily,
+            Tab::Hourly => Tab::Daily,
+            Tab::Minutely => Tab::Hourly,
+            Tab::Stats => Tab::Minutely,
             Tab::Agents => Tab::Stats,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChartGranularity {
+    #[default]
+    Daily,
+    Hourly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,16 +127,17 @@ pub enum SortField {
     Date,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HourlyViewMode {
+    #[default]
+    Table,
+    Profile,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDirection {
     Ascending,
     Descending,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DataSource {
-    Local,
-    Remote,
 }
 
 pub struct ClickArea {
@@ -110,11 +145,52 @@ pub struct ClickArea {
     pub action: ClickAction,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DailyDetailRow<'a> {
+    pub source: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub color_key: &'a str,
+    pub tokens: &'a TokenBreakdown,
+    pub cost: f64,
+    pub messages: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum ClickAction {
     Tab(Tab),
     Sort(SortField),
     GraphCell { week: usize, day: usize },
+    UsageRefresh,
+    CodexStartLogin,
+    CodexDismissLogin,
+    CodexUseAccount { account_id: String },
+    CodexRemoveAccount { account_id: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum CodexLoginOutcome {
+    Imported(crate::commands::usage::codex::CodexAccountInfo),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+enum CodexLoginEvent {
+    Output(String),
+    Finished(CodexLoginOutcome),
+}
+
+/// Shared handle to the spawned `codex login` child process. The login worker
+/// polls it via `try_wait`; the TUI takes the child out of the slot to kill it
+/// on dismiss or exit (an emptied slot tells the worker it was cancelled).
+type CodexLoginChildSlot = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>;
+
+struct MinutelySortCache {
+    sort_field: SortField,
+    sort_direction: SortDirection,
+    data_version: u64,
+    data_len: usize,
+    indices: Vec<usize>,
 }
 
 pub struct App {
@@ -123,18 +199,27 @@ pub struct App {
     pub theme: Theme,
     pub settings: Settings,
     pub data: UsageData,
-    pub data_source: DataSource,
     pub data_loader: DataLoader,
 
-    pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
-    pub include_synthetic: Rc<RefCell<bool>>,
+    /// Set of clients currently selected in the source picker. The
+    /// `Synthetic` variant is part of the same set so dialog code can
+    /// uniformly toggle/inspect every option without a separate boolean.
+    /// Code that talks to `tokscale_core` (which still expects a
+    /// `Vec<ClientId>` plus a `bool include_synthetic`) projects this set
+    /// at the boundary via `App::scan_clients` and `App::include_synthetic`.
+    pub enabled_clients: Rc<RefCell<HashSet<ClientFilter>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
+    tab_sort_state: HashMap<Tab, (SortField, SortDirection)>,
+    pub chart_granularity: ChartGranularity,
 
     pub scroll_offset: usize,
     pub selected_index: usize,
     pub max_visible_items: usize,
+    pub selected_daily_detail_date: Option<NaiveDate>,
+    daily_list_selected_index: usize,
+    daily_list_scroll_offset: usize,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
@@ -160,6 +245,23 @@ pub struct App {
     pub dialog_stack: DialogStack,
 
     pub dialog_needs_reload: Rc<RefCell<bool>>,
+
+    pub hourly_view_mode: HourlyViewMode,
+
+    pub model_shade_map: HashMap<String, Color>,
+
+    pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
+    pub pending_codex_remove_account_id: Option<String>,
+    pub codex_login_lines: Vec<String>,
+    pub codex_login_outcome: Option<CodexLoginOutcome>,
+
+    pub usage_fetch_attempted: bool,
+    usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+    codex_login_rx: Option<std::sync::mpsc::Receiver<CodexLoginEvent>>,
+    codex_login_child: Option<CodexLoginChildSlot>,
+
+    data_version: u64,
+    minutely_sort_cache: RefCell<Option<MinutelySortCache>>,
 }
 
 impl App {
@@ -169,24 +271,25 @@ impl App {
             .theme
             .parse()
             .unwrap_or_else(|_| settings.theme_name());
-        let theme = Theme::from_name(theme_name);
+        let theme = Theme::from_name_for_current_terminal(theme_name);
 
-        let mut enabled_clients = HashSet::new();
-        let mut include_synthetic = false;
-
-        if let Some(ref cli_clients) = config.clients {
-            for client_str in cli_clients {
-                if client_str.eq_ignore_ascii_case("synthetic") {
-                    include_synthetic = true;
-                } else if let Some(client) = ClientId::from_str(client_str) {
-                    enabled_clients.insert(client);
-                }
-            }
+        let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
+            // CLI-provided filter list. Each entry is the canonical
+            // lowercase id (`opencode`, `claude`, ..., `synthetic`).
+            // Unknown ids are dropped silently; the CLI parser already
+            // validated against `ClientFilter` so this lookup should be
+            // total in practice.
+            cli_clients
+                .iter()
+                .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+                .collect()
         } else {
-            for client in ClientId::iter() {
-                enabled_clients.insert(client);
-            }
-        }
+            // No filter → use the canonical default set (every real
+            // client, Synthetic opt-in only). MUST stay in sync with
+            // `run_warm_tui_cache()` so a fresh cache warm produces a
+            // fresh hit on the next no-filter launch.
+            ClientFilter::default_set()
+        };
 
         let auto_refresh_interval = if config.refresh > 0 {
             Duration::from_secs(config.refresh)
@@ -203,29 +306,40 @@ impl App {
             config.since,
             config.until,
             config.year,
-        );
+        )
+        .with_minutely_enabled(settings.minutely_tab_enabled);
 
         let data = cached_data.unwrap_or_default();
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
+        let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
+        let current_tab = if Self::tab_visible(&settings, requested_tab) {
+            requested_tab
+        } else {
+            Tab::Overview
+        };
+        let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
 
-        Ok(Self {
+        let mut app = Self {
             should_quit: false,
-            current_tab: config.initial_tab.unwrap_or(Tab::Overview),
+            current_tab,
             theme,
             settings,
             data,
-            data_source: DataSource::Local,
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
-            include_synthetic: Rc::new(RefCell::new(include_synthetic)),
-            group_by: Rc::new(RefCell::new(tokscale_core::GroupBy::Model)),
-            sort_field: SortField::Cost,
-            sort_direction: SortDirection::Descending,
+            group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
+            sort_field,
+            sort_direction,
+            tab_sort_state: HashMap::new(),
+            chart_granularity: ChartGranularity::default(),
             scroll_offset: 0,
             selected_index: 0,
             max_visible_items: 20,
+            selected_daily_detail_date: None,
+            daily_list_selected_index: 0,
+            daily_list_scroll_offset: 0,
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -245,7 +359,30 @@ impl App {
             needs_reload: false,
             dialog_stack,
             dialog_needs_reload,
-        })
+            hourly_view_mode: HourlyViewMode::default(),
+            model_shade_map: HashMap::new(),
+            subscription_usage: {
+                #[cfg(not(test))]
+                {
+                    crate::commands::usage::load_cache().unwrap_or_default()
+                }
+                #[cfg(test)]
+                {
+                    Vec::new()
+                }
+            },
+            pending_codex_remove_account_id: None,
+            codex_login_lines: Vec::new(),
+            codex_login_outcome: None,
+            usage_fetch_attempted: false,
+            usage_rx: None,
+            codex_login_rx: None,
+            codex_login_child: None,
+            data_version: 0,
+            minutely_sort_cache: RefCell::new(None),
+        };
+        app.build_model_shade_map();
+        Ok(app)
     }
 
     pub fn set_background_loading(&mut self, loading: bool) {
@@ -255,8 +392,53 @@ impl App {
 
     pub fn update_data(&mut self, data: UsageData) {
         self.data = data;
+        self.data_version = self.data_version.saturating_add(1);
         self.last_refresh = Instant::now();
+        self.build_model_shade_map();
+        self.minutely_sort_cache.borrow_mut().take();
+
+        // Exit Daily-detail mode if the refresh dropped the day we were
+        // viewing; otherwise `get_sorted_daily_detail_rows()` would return
+        // empty while the user is still nominally in detail mode.
+        if let Some(date) = self.selected_daily_detail_date {
+            if !self.data.daily.iter().any(|day| day.date == date) {
+                self.selected_daily_detail_date = None;
+                self.selected_index = self.daily_list_selected_index;
+                self.scroll_offset = self.daily_list_scroll_offset;
+            }
+        }
+
         self.clamp_selection();
+    }
+
+    pub fn build_model_shade_map(&mut self) {
+        self.model_shade_map = super::colors::build_model_shade_map(&self.data.models);
+    }
+
+    pub fn model_color_for(&self, provider: &str, model: &str) -> Color {
+        let provider = if provider.is_empty() || provider.contains(", ") {
+            get_provider_from_model(model)
+        } else {
+            provider
+        };
+        let lookup_key = super::colors::model_shade_key(provider, model);
+        let color = self
+            .model_shade_map
+            .get(&lookup_key)
+            .copied()
+            .unwrap_or_else(|| get_provider_shade(provider, 0));
+        self.theme.color(color)
+    }
+
+    pub fn model_color(&self, model: &str) -> Color {
+        let provider = get_provider_from_model(model);
+        let lookup_key = super::colors::model_shade_key(provider, model);
+        let color = self
+            .model_shade_map
+            .get(&lookup_key)
+            .copied()
+            .unwrap_or_else(|| get_model_color(model));
+        self.theme.color(color)
     }
 
     pub fn has_visible_data(&self) -> bool {
@@ -293,6 +475,98 @@ impl App {
             *self.dialog_needs_reload.borrow_mut() = false;
             self.needs_reload = true;
         }
+
+        // Poll background usage fetch
+        if let Some(ref rx) = self.usage_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.usage_rx = None;
+                    self.subscription_usage = results;
+                    if !self.subscription_usage.is_empty() {
+                        crate::commands::usage::save_cache(&self.subscription_usage);
+                        self.status_message = Some("Usage data loaded".into());
+                    } else {
+                        crate::commands::usage::clear_cache();
+                        self.status_message = Some("No usage data available".into());
+                    }
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.usage_rx = None;
+                    self.status_message = Some("Usage fetch failed".into());
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        self.poll_codex_login();
+    }
+
+    fn poll_codex_login(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(rx) = &self.codex_login_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut finished = false;
+        for event in events {
+            match event {
+                CodexLoginEvent::Output(line) => {
+                    self.codex_login_lines.push(line);
+                    const MAX_LOGIN_LINES: usize = 12;
+                    if self.codex_login_lines.len() > MAX_LOGIN_LINES {
+                        let drain_count = self.codex_login_lines.len() - MAX_LOGIN_LINES;
+                        self.codex_login_lines.drain(0..drain_count);
+                    }
+                }
+                CodexLoginEvent::Finished(outcome) => {
+                    finished = true;
+                    match &outcome {
+                        CodexLoginOutcome::Imported(info) => {
+                            let display = info.label.as_deref().unwrap_or(&info.id);
+                            self.set_status(&format!("Imported Codex account: {display}"));
+                        }
+                        CodexLoginOutcome::Failed(error) => {
+                            self.set_status(&format!("Codex login failed: {error}"));
+                        }
+                    }
+                    self.codex_login_outcome = Some(outcome);
+                }
+            }
+        }
+
+        if disconnected && !finished && self.codex_login_outcome.is_none() {
+            self.codex_login_outcome = Some(CodexLoginOutcome::Failed(
+                "login worker stopped".to_string(),
+            ));
+            self.set_status("Codex login failed: login worker stopped");
+            finished = true;
+        }
+
+        if finished {
+            self.codex_login_rx = None;
+            self.codex_login_child = None;
+            if matches!(
+                self.codex_login_outcome,
+                Some(CodexLoginOutcome::Imported(_))
+            ) {
+                self.codex_login_lines.clear();
+                self.codex_login_outcome = None;
+                self.refresh_usage();
+            }
+        }
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
@@ -312,19 +586,23 @@ impl App {
                 return true;
             }
             KeyCode::Tab => {
-                self.current_tab = self.current_tab.next();
+                let next = self.next_visible_tab();
+                self.switch_tab(next);
                 self.reset_selection();
             }
             KeyCode::BackTab => {
-                self.current_tab = self.current_tab.prev();
+                let prev = self.prev_visible_tab();
+                self.switch_tab(prev);
                 self.reset_selection();
             }
             KeyCode::Left => {
-                self.current_tab = self.current_tab.prev();
+                let prev = self.prev_visible_tab();
+                self.switch_tab(prev);
                 self.reset_selection();
             }
             KeyCode::Right => {
-                self.current_tab = self.current_tab.next();
+                let next = self.next_visible_tab();
+                self.switch_tab(next);
                 self.reset_selection();
             }
             KeyCode::Up => {
@@ -361,11 +639,7 @@ impl App {
                 self.cycle_theme();
             }
             KeyCode::Char('r') => {
-                if self.background_loading {
-                    self.set_status("Refresh already in progress");
-                } else {
-                    self.needs_reload = true;
-                }
+                self.refresh_usage();
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.toggle_auto_refresh();
@@ -385,25 +659,234 @@ impl App {
             KeyCode::Char('s') => {
                 self.open_client_picker();
             }
+            KeyCode::Char('h') if self.current_tab == Tab::Overview => {
+                self.chart_granularity = match self.chart_granularity {
+                    ChartGranularity::Daily => ChartGranularity::Hourly,
+                    ChartGranularity::Hourly => ChartGranularity::Daily,
+                };
+            }
+            KeyCode::Char('v') if self.current_tab == Tab::Hourly => {
+                self.hourly_view_mode = match self.hourly_view_mode {
+                    HourlyViewMode::Table => HourlyViewMode::Profile,
+                    HourlyViewMode::Profile => HourlyViewMode::Table,
+                };
+                self.reset_selection();
+            }
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
             }
-            KeyCode::Enter => {
-                if self.current_tab == Tab::Stats {
-                    self.handle_graph_selection();
-                }
+            KeyCode::Char('u') if self.current_tab == Tab::Usage => {
+                self.refresh_usage();
             }
-            KeyCode::Esc => {
-                if self.selected_graph_cell.is_some() {
-                    self.selected_graph_cell = None;
-                    self.stats_breakdown_total_lines = 0;
-                    self.selected_index = 0;
-                    self.scroll_offset = 0;
-                }
+            KeyCode::Enter if self.current_tab == Tab::Daily => {
+                self.open_selected_daily_detail();
+            }
+            KeyCode::Enter if self.current_tab == Tab::Stats => {
+                self.handle_graph_selection();
+            }
+            KeyCode::Esc | KeyCode::Backspace
+                if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
+            {
+                self.close_daily_detail();
+            }
+            KeyCode::Esc if self.selected_graph_cell.is_some() => {
+                self.selected_graph_cell = None;
+                self.stats_breakdown_total_lines = 0;
+                self.selected_index = 0;
+                self.scroll_offset = 0;
             }
             _ => {}
         }
         false
+    }
+
+    pub fn fetch_subscription_usage(&mut self) {
+        if self.usage_rx.is_some() {
+            return; // already fetching
+        }
+        self.usage_fetch_attempted = true;
+        self.status_message = Some("Fetching usage data...".into());
+        self.status_message_time = Some(std::time::Instant::now());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.usage_rx = Some(rx);
+        std::thread::spawn(move || {
+            // Tests must not hit real provider endpoints or credentials.
+            #[cfg(test)]
+            let results = Vec::new();
+            #[cfg(not(test))]
+            let results = crate::commands::usage::fetch_all();
+            let _ = tx.send(results);
+        });
+    }
+
+    pub fn refresh_usage(&mut self) {
+        if self.usage_rx.is_some() {
+            self.set_status("Refresh already in progress");
+        } else {
+            if !self.background_loading {
+                self.needs_reload = true;
+            }
+            self.fetch_subscription_usage();
+        }
+    }
+
+    pub fn is_fetching_usage(&self) -> bool {
+        self.usage_rx.is_some()
+    }
+
+    fn handle_click_action(&mut self, action: ClickAction) {
+        match action {
+            ClickAction::Tab(tab) => {
+                self.switch_tab(tab);
+                self.reset_selection();
+            }
+            ClickAction::Sort(field) => {
+                self.set_sort(field);
+            }
+            ClickAction::GraphCell { week, day } => {
+                self.selected_graph_cell = Some((week, day));
+                self.stats_breakdown_total_lines = 0;
+                self.selected_index = 0;
+                self.scroll_offset = 0;
+            }
+            ClickAction::UsageRefresh => {
+                self.refresh_usage();
+            }
+            ClickAction::CodexStartLogin => {
+                self.start_codex_login();
+            }
+            ClickAction::CodexDismissLogin => {
+                self.dismiss_codex_login();
+            }
+            ClickAction::CodexUseAccount { account_id } => {
+                self.use_codex_account(&account_id);
+            }
+            ClickAction::CodexRemoveAccount { account_id } => {
+                self.remove_codex_account(&account_id);
+            }
+        }
+    }
+
+    pub fn is_codex_login_running(&self) -> bool {
+        self.codex_login_rx.is_some()
+    }
+
+    pub fn should_show_codex_login_panel(&self) -> bool {
+        self.is_codex_login_running()
+            || self.codex_login_outcome.is_some()
+            || !self.codex_login_lines.is_empty()
+    }
+
+    fn start_codex_login(&mut self) {
+        if self.codex_login_rx.is_some() {
+            self.set_status("Codex login already in progress");
+            return;
+        }
+
+        self.pending_codex_remove_account_id = None;
+        self.codex_login_lines.clear();
+        self.codex_login_outcome = None;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.codex_login_rx = Some(rx);
+        let child_slot = CodexLoginChildSlot::default();
+        self.codex_login_child = Some(std::sync::Arc::clone(&child_slot));
+        self.set_status("Starting Codex login...");
+        std::thread::spawn(move || run_codex_login_worker(tx, child_slot));
+    }
+
+    fn dismiss_codex_login(&mut self) {
+        if self.codex_login_rx.is_some() {
+            self.kill_codex_login_child();
+            self.codex_login_rx = None;
+            self.codex_login_lines.clear();
+            self.codex_login_outcome = None;
+            self.set_status("Codex login cancelled");
+            return;
+        }
+
+        self.codex_login_lines.clear();
+        self.codex_login_outcome = None;
+        self.set_status("Codex login panel dismissed");
+    }
+
+    /// Kills any in-flight `codex login` child process. Called on dismiss and
+    /// on TUI exit so a dangling login can't keep holding the OAuth port.
+    pub fn kill_codex_login_child(&mut self) {
+        let Some(slot) = self.codex_login_child.take() else {
+            return;
+        };
+        let child = slot.lock().ok().and_then(|mut child| child.take());
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn use_codex_account(&mut self, account_id: &str) {
+        self.pending_codex_remove_account_id = None;
+
+        match crate::commands::usage::codex::switch_active_account(account_id) {
+            Ok(info) => {
+                self.mark_active_codex_account(&info.id);
+                self.persist_subscription_usage_cache();
+                let display = info.label.as_deref().unwrap_or(&info.id);
+                self.set_status(&format!("Active Codex account: {display}"));
+            }
+            Err(e) => {
+                self.set_status(&format!("Codex account switch failed: {e}"));
+            }
+        }
+    }
+
+    fn remove_codex_account(&mut self, account_id: &str) {
+        if self.pending_codex_remove_account_id.as_deref() != Some(account_id) {
+            self.pending_codex_remove_account_id = Some(account_id.to_string());
+            self.set_status("Click Confirm to remove this Codex account");
+            return;
+        }
+
+        self.pending_codex_remove_account_id = None;
+        match crate::commands::usage::codex::remove_account(account_id) {
+            Ok(info) => {
+                self.subscription_usage.retain(|usage| {
+                    usage.account.as_ref().map(|account| account.id.as_str())
+                        != Some(info.id.as_str())
+                });
+                if let Some(active) = crate::commands::usage::codex::list_accounts()
+                    .into_iter()
+                    .find(|account| account.is_active)
+                {
+                    self.mark_active_codex_account(&active.id);
+                }
+                self.persist_subscription_usage_cache();
+                let display = info.label.as_deref().unwrap_or(&info.id);
+                self.set_status(&format!(
+                    "Stopped tracking Codex account: {display} (codex CLI login unchanged)"
+                ));
+            }
+            Err(e) => {
+                self.set_status(&format!("Codex account removal failed: {e}"));
+            }
+        }
+    }
+
+    fn persist_subscription_usage_cache(&self) {
+        if self.subscription_usage.is_empty() {
+            crate::commands::usage::clear_cache();
+        } else {
+            crate::commands::usage::save_cache(&self.subscription_usage);
+        }
+    }
+
+    fn mark_active_codex_account(&mut self, active_account_id: &str) {
+        for usage in &mut self.subscription_usage {
+            if usage.provider == "Codex" {
+                if let Some(account) = &mut usage.account {
+                    account.is_active = account.id == active_account_id;
+                }
+            }
+        }
     }
 
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
@@ -417,29 +900,19 @@ impl App {
                 let x = event.column;
                 let y = event.row;
 
-                for area in &self.click_areas {
-                    if x >= area.rect.x
-                        && x < area.rect.x + area.rect.width
-                        && y >= area.rect.y
-                        && y < area.rect.y + area.rect.height
-                    {
-                        match &area.action {
-                            ClickAction::Tab(tab) => {
-                                self.current_tab = *tab;
-                                self.reset_selection();
-                            }
-                            ClickAction::Sort(field) => {
-                                self.set_sort(*field);
-                            }
-                            ClickAction::GraphCell { week, day } => {
-                                self.selected_graph_cell = Some((*week, *day));
-                                self.stats_breakdown_total_lines = 0;
-                                self.selected_index = 0;
-                                self.scroll_offset = 0;
-                            }
-                        }
-                        break;
-                    }
+                let action = self
+                    .click_areas
+                    .iter()
+                    .find(|area| {
+                        x >= area.rect.x
+                            && x < area.rect.x + area.rect.width
+                            && y >= area.rect.y
+                            && y < area.rect.y + area.rect.height
+                    })
+                    .map(|area| area.action.clone());
+
+                if let Some(action) = action {
+                    self.handle_click_action(action);
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -452,11 +925,19 @@ impl App {
         }
     }
 
+    /// Cache the latest terminal dimensions. `max_visible_items` is
+    /// intentionally not updated here: each tab's renderer owns its own
+    /// visible-item capacity and pushes the rendered count via
+    /// [`Self::set_max_visible_items`] (which clamps selection and scroll
+    /// state). Between resize and the next render, scroll math runs
+    /// against the previous tab's capacity for one frame and self-corrects.
     pub fn handle_resize(&mut self, width: u16, height: u16) {
         self.terminal_width = width;
         self.terminal_height = height;
-        // Ensure at least 1 visible item to prevent division/slice issues
-        self.max_visible_items = (height.saturating_sub(10) as usize).max(1);
+    }
+
+    pub(crate) fn set_max_visible_items(&mut self, max_visible_items: usize) {
+        self.max_visible_items = max_visible_items.max(1);
         self.clamp_selection();
     }
 
@@ -489,8 +970,71 @@ impl App {
     fn reset_selection(&mut self) {
         self.scroll_offset = 0;
         self.selected_index = 0;
+        self.selected_daily_detail_date = None;
+        self.daily_list_selected_index = 0;
+        self.daily_list_scroll_offset = 0;
         self.selected_graph_cell = None;
         self.stats_breakdown_total_lines = 0;
+    }
+
+    fn switch_tab(&mut self, target: Tab) {
+        self.persist_current_sort();
+
+        self.current_tab = target;
+        if target != Tab::Usage {
+            self.pending_codex_remove_account_id = None;
+        }
+        if target != Tab::Daily {
+            self.selected_daily_detail_date = None;
+        }
+
+        let (field, dir) = self
+            .tab_sort_state
+            .get(&target)
+            .copied()
+            .unwrap_or_else(|| Self::default_sort_for_tab(target));
+        self.sort_field = field;
+        self.sort_direction = dir;
+    }
+
+    fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
+        if matches!(tab, Tab::Hourly | Tab::Minutely) {
+            (SortField::Date, SortDirection::Descending)
+        } else {
+            (SortField::Cost, SortDirection::Descending)
+        }
+    }
+
+    pub(crate) fn tab_visible(settings: &Settings, tab: Tab) -> bool {
+        match tab {
+            Tab::Minutely => settings.minutely_tab_enabled,
+            _ => true,
+        }
+    }
+
+    pub(crate) fn is_tab_visible(&self, tab: Tab) -> bool {
+        Self::tab_visible(&self.settings, tab)
+    }
+
+    fn next_visible_tab(&self) -> Tab {
+        let mut candidate = self.current_tab.next();
+        while !self.is_tab_visible(candidate) && candidate != self.current_tab {
+            candidate = candidate.next();
+        }
+        candidate
+    }
+
+    fn prev_visible_tab(&self) -> Tab {
+        let mut candidate = self.current_tab.prev();
+        while !self.is_tab_visible(candidate) && candidate != self.current_tab {
+            candidate = candidate.prev();
+        }
+        candidate
+    }
+
+    fn persist_current_sort(&mut self) {
+        self.tab_sort_state
+            .insert(self.current_tab, (self.sort_field, self.sort_direction));
     }
 
     fn move_selection_up(&mut self) {
@@ -604,7 +1148,12 @@ impl App {
         match self.current_tab {
             Tab::Overview | Tab::Models => self.data.models.len(),
             Tab::Agents => self.data.agents.len(),
+            Tab::Daily if self.is_daily_detail_active() => {
+                self.get_sorted_daily_detail_rows().len()
+            }
             Tab::Daily => self.data.daily.len(),
+            Tab::Hourly => self.data.hourly.len(),
+            Tab::Minutely => self.data.minutely.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
                     self.stats_breakdown_total_lines
@@ -612,6 +1161,11 @@ impl App {
                     0
                 }
             }
+            Tab::Usage => self
+                .subscription_usage
+                .iter()
+                .map(|u| u.metrics.len())
+                .sum(),
         }
     }
 
@@ -625,7 +1179,13 @@ impl App {
             self.sort_field = field;
             self.sort_direction = SortDirection::Descending;
         }
-        self.reset_selection();
+        self.persist_current_sort();
+        if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.reset_selection();
+        }
         self.set_status(&format!(
             "Sorted by {:?} {:?}",
             self.sort_field, self.sort_direction
@@ -636,6 +1196,7 @@ impl App {
         if self.current_tab != Tab::Daily {
             return;
         }
+        self.selected_daily_detail_date = None;
 
         let today = chrono::Local::now().date_naive();
         let (today_index, total_len) = {
@@ -667,7 +1228,7 @@ impl App {
 
     fn cycle_theme(&mut self) {
         let new_theme = self.theme.name.next();
-        self.theme = Theme::from_name(new_theme);
+        self.theme = Theme::from_name_for_current_terminal(new_theme);
         self.dialog_stack.set_theme(self.theme.clone());
         self.settings.set_theme(new_theme);
         if let Err(e) = self.settings.save() {
@@ -684,10 +1245,36 @@ impl App {
     fn open_client_picker(&mut self) {
         let dialog = ClientPickerDialog::new(
             self.enabled_clients.clone(),
-            self.include_synthetic.clone(),
             self.dialog_needs_reload.clone(),
         );
         self.dialog_stack.show(Box::new(dialog));
+    }
+
+    /// Project the unified `HashSet<ClientFilter>` into the
+    /// `Vec<ClientId>` shape that `tokscale_core` scanners still consume.
+    /// `ClientFilter::Synthetic` does not have a `ClientId` and is
+    /// excluded from this projection — use [`Self::include_synthetic`]
+    /// for that signal.
+    pub fn scan_clients(&self) -> Vec<ClientId> {
+        let mut out: Vec<ClientId> = self
+            .enabled_clients
+            .borrow()
+            .iter()
+            .filter_map(|f| f.to_client_id())
+            .collect();
+        // Stable order for downstream cache key + log output. Sort by the
+        // declaration index in ClientId::ALL so the projection mirrors
+        // the canonical ordering used elsewhere.
+        out.sort_by_key(|c| *c as usize);
+        out
+    }
+
+    /// Whether the user has Synthetic enabled. Boundary helper for code
+    /// paths that still take a separate `bool include_synthetic` argument.
+    pub fn include_synthetic(&self) -> bool {
+        self.enabled_clients
+            .borrow()
+            .contains(&ClientFilter::Synthetic)
     }
 
     fn open_group_by_picker(&mut self) {
@@ -695,6 +1282,57 @@ impl App {
         let dialog =
             GroupByPickerDialog::new(self.group_by.clone(), self.dialog_needs_reload.clone());
         self.dialog_stack.show(Box::new(dialog));
+    }
+
+    fn open_selected_daily_detail(&mut self) {
+        if self.is_daily_detail_active() {
+            return;
+        }
+
+        let selected_date = {
+            let daily = self.get_sorted_daily();
+            daily.get(self.selected_index).map(|day| day.date)
+        };
+
+        if let Some(date) = selected_date {
+            self.daily_list_selected_index = self.selected_index;
+            self.daily_list_scroll_offset = self.scroll_offset;
+            self.selected_daily_detail_date = Some(date);
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.set_status(&format!("Viewing daily details for {}", date));
+            self.clamp_selection();
+        }
+    }
+
+    fn close_daily_detail(&mut self) {
+        let Some(detail_date) = self.selected_daily_detail_date else {
+            return;
+        };
+
+        self.selected_daily_detail_date = None;
+
+        // Re-anchor by date so a sort change inside detail mode still
+        // restores the same day rather than the stale list index.
+        let restored_index = self
+            .get_sorted_daily()
+            .iter()
+            .position(|day| day.date == detail_date)
+            .unwrap_or(self.daily_list_selected_index);
+
+        self.selected_index = restored_index;
+
+        let max_visible = self.max_visible_items.max(1);
+        let viewport_still_holds = restored_index >= self.daily_list_scroll_offset
+            && restored_index < self.daily_list_scroll_offset + max_visible;
+        self.scroll_offset = if viewport_still_holds {
+            self.daily_list_scroll_offset
+        } else {
+            restored_index.saturating_sub(max_visible / 2)
+        };
+
+        self.set_status("Returned to daily usage");
+        self.clamp_selection();
     }
 
     fn toggle_auto_refresh(&mut self) {
@@ -754,11 +1392,42 @@ impl App {
                 .get_sorted_agents()
                 .get(self.selected_index)
                 .map(|a| format!("{}: {} tokens, ${:.4}", a.agent, a.tokens.total(), a.cost)),
+            Tab::Daily if self.is_daily_detail_active() => self
+                .get_sorted_daily_detail_rows()
+                .get(self.selected_index)
+                .map(|row| {
+                    format!(
+                        "{} / {}: {} tokens, ${:.4}",
+                        row.source,
+                        row.model,
+                        row.tokens.total(),
+                        row.cost
+                    )
+                }),
             Tab::Daily => self
                 .get_sorted_daily()
                 .get(self.selected_index)
                 .map(|d| format!("{}: {} tokens, ${:.4}", d.date, d.tokens.total(), d.cost)),
-            Tab::Stats => None,
+            Tab::Hourly => self.get_sorted_hourly().get(self.selected_index).map(|h| {
+                format!(
+                    "{}: {} tokens, ${:.4}",
+                    h.datetime.format("%Y-%m-%d %H:%M"),
+                    h.tokens.total(),
+                    h.cost
+                )
+            }),
+            Tab::Minutely => self
+                .get_sorted_minutely()
+                .get(self.selected_index)
+                .map(|m| {
+                    format!(
+                        "{}: {} tokens, ${:.4}",
+                        m.datetime.format("%Y-%m-%d %H:%M"),
+                        m.tokens.total(),
+                        m.cost
+                    )
+                }),
+            Tab::Stats | Tab::Usage => None,
         };
 
         if let Some(text) = text {
@@ -770,57 +1439,12 @@ impl App {
     }
 
     fn export_to_json(&mut self) {
-        let export_data = serde_json::json!({
-            "models": self.data.models.iter().map(|m| serde_json::json!({
-                "model": m.model,
-                "provider": m.provider,
-                "client": m.client,
-                "tokens": {
-                    "input": m.tokens.input,
-                    "output": m.tokens.output,
-                    "cacheRead": m.tokens.cache_read,
-                    "cacheWrite": m.tokens.cache_write,
-                    "total": m.tokens.total()
-                },
-                "cost": m.cost,
-                "sessionCount": m.session_count
-            })).collect::<Vec<_>>(),
-            "agents": self.data.agents.iter().map(|a| serde_json::json!({
-                "agent": a.agent,
-                "clients": a.clients,
-                "tokens": {
-                    "input": a.tokens.input,
-                    "output": a.tokens.output,
-                    "cacheRead": a.tokens.cache_read,
-                    "cacheWrite": a.tokens.cache_write,
-                    "total": a.tokens.total()
-                },
-                "cost": a.cost,
-                "messageCount": a.message_count
-            })).collect::<Vec<_>>(),
-            "daily": self.data.daily.iter().map(|d| serde_json::json!({
-                "date": d.date.to_string(),
-                "tokens": {
-                    "input": d.tokens.input,
-                    "output": d.tokens.output,
-                    "cacheRead": d.tokens.cache_read,
-                    "cacheWrite": d.tokens.cache_write,
-                    "total": d.tokens.total()
-                },
-                "cost": d.cost
-            })).collect::<Vec<_>>(),
-            "totals": {
-                "tokens": self.data.total_tokens,
-                "cost": self.data.total_cost
-            }
-        });
-
         let filename = format!(
             "tokscale-export-{}.json",
             chrono::Utc::now().format("%Y%m%d-%H%M%S")
         );
 
-        match serde_json::to_string_pretty(&export_data) {
+        match super::export::build_export_json(&self.data) {
             Ok(json) => match std::fs::write(&filename, json) {
                 Ok(_) => self.set_status(&format!("Exported to {}", filename)),
                 Err(e) => self.set_status(&format!("Export failed: {}", e)),
@@ -846,6 +1470,8 @@ impl App {
         let tie_breaker = |a: &&ModelUsage, b: &&ModelUsage| {
             a.model
                 .cmp(&b.model)
+                .then_with(|| a.workspace_label.cmp(&b.workspace_label))
+                .then_with(|| a.workspace_key.cmp(&b.workspace_key))
                 .then_with(|| a.provider.cmp(&b.provider))
                 .then_with(|| a.client.cmp(&b.client))
         };
@@ -936,14 +1562,193 @@ impl App {
                     .then_with(|| a.date.cmp(&b.date))
             }),
             (SortField::Date, SortDirection::Descending) => {
-                daily.sort_by(|a, b| b.date.cmp(&a.date))
+                daily.sort_by_key(|b| std::cmp::Reverse(b.date))
             }
-            (SortField::Date, SortDirection::Ascending) => {
-                daily.sort_by(|a, b| a.date.cmp(&b.date))
-            }
+            (SortField::Date, SortDirection::Ascending) => daily.sort_by_key(|a| a.date),
         }
 
         daily
+    }
+
+    pub fn is_daily_detail_active(&self) -> bool {
+        self.selected_daily_detail_date.is_some()
+    }
+
+    pub fn daily_detail_date(&self) -> Option<NaiveDate> {
+        self.selected_daily_detail_date
+    }
+
+    pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow<'_>> {
+        let Some(date) = self.selected_daily_detail_date else {
+            return Vec::new();
+        };
+        let Some(day) = self.data.daily.iter().find(|day| day.date == date) else {
+            return Vec::new();
+        };
+
+        let mut rows: Vec<DailyDetailRow<'_>> = day
+            .source_breakdown
+            .iter()
+            .flat_map(|(source, source_info)| {
+                source_info
+                    .models
+                    .values()
+                    .map(move |model_info| DailyDetailRow {
+                        source,
+                        provider: &model_info.provider,
+                        model: &model_info.display_name,
+                        color_key: &model_info.color_key,
+                        tokens: &model_info.tokens,
+                        cost: model_info.cost,
+                        messages: model_info.messages,
+                    })
+            })
+            .collect();
+
+        let tie_breaker = |a: &DailyDetailRow<'_>, b: &DailyDetailRow<'_>| {
+            a.source
+                .cmp(b.source)
+                .then_with(|| a.model.cmp(b.model))
+                .then_with(|| a.provider.cmp(b.provider))
+        };
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => {
+                rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Cost, SortDirection::Ascending) => {
+                rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Date, _) => rows.sort_by(tie_breaker),
+        }
+
+        rows
+    }
+
+    pub fn get_sorted_hourly(&self) -> Vec<&HourlyUsage> {
+        let mut hourly: Vec<&HourlyUsage> = self.data.hourly.iter().collect();
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => hourly.sort_by(|a, b| {
+                b.cost
+                    .total_cmp(&a.cost)
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => hourly.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => hourly.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => hourly.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| a.datetime.cmp(&b.datetime))
+            }),
+            (SortField::Date, SortDirection::Descending) => {
+                hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime))
+            }
+            (SortField::Date, SortDirection::Ascending) => hourly.sort_by_key(|a| a.datetime),
+        }
+
+        hourly
+    }
+
+    pub fn get_sorted_minutely(&self) -> Vec<&MinutelyUsage> {
+        let sort_field = self.sort_field;
+        let sort_direction = self.sort_direction;
+        let data_version = self.data_version;
+        let data_len = self.data.minutely.len();
+
+        let cached_indices = {
+            let cache = self.minutely_sort_cache.borrow();
+            cache
+                .as_ref()
+                .filter(|cache| {
+                    cache.sort_field == sort_field
+                        && cache.sort_direction == sort_direction
+                        && cache.data_version == data_version
+                        && cache.data_len == data_len
+                })
+                .map(|cache| cache.indices.clone())
+        };
+
+        let indices = if let Some(indices) = cached_indices {
+            indices
+        } else {
+            let mut indices: Vec<usize> = (0..data_len).collect();
+
+            match (sort_field, sort_direction) {
+                (SortField::Cost, SortDirection::Descending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    b.cost
+                        .total_cmp(&a.cost)
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Cost, SortDirection::Ascending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    a.cost
+                        .total_cmp(&b.cost)
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Tokens, SortDirection::Descending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    b.tokens
+                        .total()
+                        .cmp(&a.tokens.total())
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Tokens, SortDirection::Ascending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    a.tokens
+                        .total()
+                        .cmp(&b.tokens.total())
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Date, SortDirection::Descending) => indices
+                    .sort_by_key(|index| std::cmp::Reverse(self.data.minutely[*index].datetime)),
+                (SortField::Date, SortDirection::Ascending) => {
+                    indices.sort_by_key(|index| self.data.minutely[*index].datetime)
+                }
+            }
+
+            *self.minutely_sort_cache.borrow_mut() = Some(MinutelySortCache {
+                sort_field,
+                sort_direction,
+                data_version,
+                data_len,
+                indices: indices.clone(),
+            });
+
+            indices
+        };
+
+        indices
+            .into_iter()
+            .map(|index| &self.data.minutely[index])
+            .collect()
     }
 
     pub fn is_narrow(&self) -> bool {
@@ -955,27 +1760,242 @@ impl App {
     }
 }
 
+fn run_codex_login_worker(
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    child_slot: CodexLoginChildSlot,
+) {
+    let result = run_codex_login_worker_inner(tx.clone(), child_slot);
+    let outcome = match result {
+        Ok(info) => CodexLoginOutcome::Imported(info),
+        Err(e) => CodexLoginOutcome::Failed(e.to_string()),
+    };
+    let _ = tx.send(CodexLoginEvent::Finished(outcome));
+}
+
+fn run_codex_login_worker_inner(
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    child_slot: CodexLoginChildSlot,
+) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
+    let codex_home =
+        std::env::temp_dir().join(format!("tokscale-codex-login-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&codex_home)
+        .map_err(|e| anyhow::anyhow!("failed to create temporary Codex home: {e}"))?;
+
+    let result = run_codex_login_in_home(&codex_home, tx, child_slot);
+    let _ = std::fs::remove_dir_all(&codex_home);
+    result
+}
+
+fn run_codex_login_in_home(
+    codex_home: &std::path::Path,
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    child_slot: CodexLoginChildSlot,
+) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
+    let _ = tx.send(CodexLoginEvent::Output(
+        "Starting Codex browser login".to_string(),
+    ));
+
+    let mut child = std::process::Command::new("codex")
+        .arg("login")
+        .env("CODEX_HOME", codex_home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to start codex login: {e}"))?;
+
+    let output_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(spawn_codex_login_output_reader(
+            stdout,
+            tx.clone(),
+            std::sync::Arc::clone(&output_lines),
+        ));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(spawn_codex_login_output_reader(
+            stderr,
+            tx.clone(),
+            std::sync::Arc::clone(&output_lines),
+        ));
+    }
+
+    if let Ok(mut slot) = child_slot.lock() {
+        *slot = Some(child);
+    } else {
+        anyhow::bail!("codex login state lock poisoned");
+    }
+
+    let status = wait_for_codex_login_child(&child_slot);
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let Some(status) = status? else {
+        // The TUI emptied the slot: the login was dismissed or the app exited.
+        anyhow::bail!("Codex login cancelled");
+    };
+
+    if !status.success() {
+        let output_lines = output_lines
+            .lock()
+            .map(|lines| lines.clone())
+            .unwrap_or_default();
+        anyhow::bail!("{}", codex_login_failure_message(&status, &output_lines));
+    }
+
+    let auth_path = codex_home.join("auth.json");
+    let import = crate::commands::usage::codex::import_login_auth_file(&auth_path)?;
+    if let Some(warning) = import.warning {
+        let _ = tx.send(CodexLoginEvent::Output(warning));
+    }
+    Ok(import.info)
+}
+
+/// Polls the login child until it exits. Returns `Ok(None)` when the TUI took
+/// the child out of the slot to kill it (dismiss or app exit).
+fn wait_for_codex_login_child(
+    child_slot: &CodexLoginChildSlot,
+) -> Result<Option<std::process::ExitStatus>> {
+    loop {
+        {
+            let mut slot = child_slot
+                .lock()
+                .map_err(|_| anyhow::anyhow!("codex login state lock poisoned"))?;
+            let Some(child) = slot.as_mut() else {
+                return Ok(None);
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    *slot = None;
+                    return Ok(Some(status));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    *slot = None;
+                    return Err(anyhow::anyhow!("failed to wait for codex login: {e}"));
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
+fn spawn_codex_login_output_reader<R>(
+    reader: R,
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    output_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> std::thread::JoinHandle<()>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(reader);
+        for line in std::io::BufRead::lines(reader).map_while(std::result::Result::ok) {
+            let line = sanitize_codex_login_line(&line);
+            if !line.trim().is_empty() {
+                if let Ok(mut output_lines) = output_lines.lock() {
+                    output_lines.push(line.clone());
+                }
+                let _ = tx.send(CodexLoginEvent::Output(line));
+            }
+        }
+    })
+}
+
+fn codex_login_failure_message(
+    status: &std::process::ExitStatus,
+    output_lines: &[String],
+) -> String {
+    codex_login_failure_message_from_output(&status.to_string(), output_lines)
+}
+
+fn codex_login_failure_message_from_output(status: &str, output_lines: &[String]) -> String {
+    let output = output_lines.join("\n").to_lowercase();
+
+    if output.contains("429") || output.contains("too many requests") {
+        return "OpenAI login is rate-limited (429 Too Many Requests). Wait before trying Add Codex again.".to_string();
+    }
+
+    if output.contains("expired") {
+        return "Codex device code expired. Start Add Codex again to get a new code.".to_string();
+    }
+
+    if output.contains("device auth failed") {
+        return "Codex device login failed. Try Add Codex again later.".to_string();
+    }
+
+    format!("codex login exited with {status}")
+}
+
+fn sanitize_codex_login_line(line: &str) -> String {
+    let mut sanitized = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    for ch in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' && chars.peek() == Some(&'\\') {
+                            let _ = chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(_) | None => {}
+            }
+            continue;
+        }
+
+        if !ch.is_control() || ch == '\t' {
+            sanitized.push(ch);
+        }
+    }
+
+    sanitized
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::ui::widgets::get_provider_shade;
     use super::*;
-    use crate::tui::data::{ModelUsage, TokenBreakdown};
+    use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
+    use chrono::{NaiveDate, NaiveDateTime};
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 5);
+        assert_eq!(tabs.len(), 8);
         assert_eq!(tabs[0], Tab::Overview);
-        assert_eq!(tabs[1], Tab::Models);
-        assert_eq!(tabs[2], Tab::Daily);
-        assert_eq!(tabs[3], Tab::Stats);
-        assert_eq!(tabs[4], Tab::Agents);
+        assert_eq!(tabs[1], Tab::Usage);
+        assert_eq!(tabs[2], Tab::Models);
+        assert_eq!(tabs[3], Tab::Daily);
+        assert_eq!(tabs[4], Tab::Hourly);
+        assert_eq!(tabs[5], Tab::Minutely);
+        assert_eq!(tabs[6], Tab::Stats);
+        assert_eq!(tabs[7], Tab::Agents);
     }
 
     #[test]
     fn test_tab_next() {
-        assert_eq!(Tab::Overview.next(), Tab::Models);
+        assert_eq!(Tab::Overview.next(), Tab::Usage);
+        assert_eq!(Tab::Usage.next(), Tab::Models);
         assert_eq!(Tab::Models.next(), Tab::Daily);
-        assert_eq!(Tab::Daily.next(), Tab::Stats);
+        assert_eq!(Tab::Daily.next(), Tab::Hourly);
+        assert_eq!(Tab::Hourly.next(), Tab::Minutely);
+        assert_eq!(Tab::Minutely.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
         assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
@@ -983,9 +2003,12 @@ mod tests {
     #[test]
     fn test_tab_prev() {
         assert_eq!(Tab::Overview.prev(), Tab::Agents);
-        assert_eq!(Tab::Models.prev(), Tab::Overview);
+        assert_eq!(Tab::Usage.prev(), Tab::Overview);
+        assert_eq!(Tab::Models.prev(), Tab::Usage);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
-        assert_eq!(Tab::Stats.prev(), Tab::Daily);
+        assert_eq!(Tab::Hourly.prev(), Tab::Daily);
+        assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
+        assert_eq!(Tab::Stats.prev(), Tab::Minutely);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
@@ -995,6 +2018,8 @@ mod tests {
         assert_eq!(Tab::Models.as_str(), "Models");
         assert_eq!(Tab::Agents.as_str(), "Agents");
         assert_eq!(Tab::Daily.as_str(), "Daily");
+        assert_eq!(Tab::Hourly.as_str(), "Hourly");
+        assert_eq!(Tab::Minutely.as_str(), "Minutely");
         assert_eq!(Tab::Stats.as_str(), "Stats");
     }
 
@@ -1004,6 +2029,8 @@ mod tests {
         assert_eq!(Tab::Models.short_name(), "Mod");
         assert_eq!(Tab::Agents.short_name(), "Agt");
         assert_eq!(Tab::Daily.short_name(), "Day");
+        assert_eq!(Tab::Hourly.short_name(), "Hr");
+        assert_eq!(Tab::Minutely.short_name(), "Min");
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
 
@@ -1054,7 +2081,10 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
             ModelUsage {
                 model: "model2".to_string(),
@@ -1062,7 +2092,10 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
         ];
 
@@ -1097,7 +2130,10 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
             ModelUsage {
                 model: "model2".to_string(),
@@ -1105,7 +2141,10 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             },
         ];
 
@@ -1139,7 +2178,10 @@ mod tests {
             client: "opencode".to_string(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
+            performance: Default::default(),
             session_count: 1,
+            workspace_key: None,
+            workspace_label: None,
         }];
 
         // Set selection beyond bounds
@@ -1203,7 +2245,7 @@ mod tests {
         };
         let app = App::new_with_cached_data(config, None).unwrap();
 
-        assert_eq!(app.should_quit, false);
+        assert!(!app.should_quit);
     }
 
     // ── Helper ──────────────────────────────────────────────────────
@@ -1222,6 +2264,27 @@ mod tests {
         App::new_with_cached_data(config, None).unwrap()
     }
 
+    #[test]
+    fn test_app_no_filter_default_matches_default_set() {
+        // Regression for an Oracle-flagged HIGH bug: the no-filter TUI
+        // default and the `submit` warm-cache filter set drifted apart,
+        // making every TUI launch after submit a stale-cache reuse
+        // instead of a fresh hit. Both paths now go through
+        // `ClientFilter::default_set()`; assert it stays that way.
+        let app = make_app();
+        let actual = app.enabled_clients.borrow().clone();
+        let expected = ClientFilter::default_set();
+        assert_eq!(
+            actual, expected,
+            "no-filter App default drifted from ClientFilter::default_set() — \
+             warm cache and TUI launch will mismatch"
+        );
+        assert!(
+            !actual.contains(&ClientFilter::Synthetic),
+            "no-filter default must not include Synthetic (opt-in only)"
+        );
+    }
+
     fn make_app_with_models(n: usize) -> App {
         let mut app = make_app();
         app.data.models = (0..n)
@@ -1231,10 +2294,180 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
             })
             .collect();
         app
+    }
+
+    fn daily_usage(date: &str, cost: f64, models: Vec<(&str, &str, f64)>) -> DailyUsage {
+        let mut model_breakdown = BTreeMap::new();
+        let mut total_tokens = TokenBreakdown::default();
+        let mut total_cost = 0.0;
+
+        for (model, provider, model_cost) in models {
+            let tokens = TokenBreakdown {
+                input: (model_cost * 100.0) as u64,
+                output: 10,
+                cache_read: 5,
+                cache_write: 0,
+                reasoning: 0,
+            };
+            total_tokens.input = total_tokens.input.saturating_add(tokens.input);
+            total_tokens.output = total_tokens.output.saturating_add(tokens.output);
+            total_tokens.cache_read = total_tokens.cache_read.saturating_add(tokens.cache_read);
+            total_cost += model_cost;
+
+            model_breakdown.insert(
+                model.to_string(),
+                DailyModelInfo {
+                    provider: provider.to_string(),
+                    display_name: model.to_string(),
+                    color_key: model.to_string(),
+                    tokens,
+                    cost: model_cost,
+                    messages: 1,
+                },
+            );
+        }
+
+        let mut source_breakdown = BTreeMap::new();
+        source_breakdown.insert(
+            "claude".to_string(),
+            DailySourceInfo {
+                tokens: total_tokens.clone(),
+                cost: total_cost,
+                models: model_breakdown,
+            },
+        );
+
+        DailyUsage {
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            tokens: total_tokens,
+            cost: if cost > 0.0 { cost } else { total_cost },
+            source_breakdown,
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    fn minutely_usage(datetime: &str, input_tokens: u64, cost: f64) -> MinutelyUsage {
+        MinutelyUsage {
+            datetime: NaiveDateTime::parse_from_str(datetime, "%Y-%m-%d %H:%M:%S").unwrap(),
+            tokens: TokenBreakdown {
+                input: input_tokens,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    #[test]
+    fn test_get_sorted_minutely_reuses_cached_order_for_same_sort() {
+        let mut app = make_app();
+        app.data.minutely = vec![
+            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
+            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
+        ];
+
+        let first = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ]
+        );
+
+        app.data.minutely.swap(0, 1);
+
+        let second = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ],
+            "unchanged data should reuse the cached sorted index order"
+        );
+    }
+
+    #[test]
+    fn test_get_sorted_minutely_invalidates_cache_when_sort_changes() {
+        let mut app = make_app();
+        app.data.minutely = vec![
+            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
+            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
+        ];
+        let _ = app.get_sorted_minutely();
+
+        app.data.minutely.swap(0, 1);
+        app.set_sort(SortField::Date);
+
+        let sorted = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ],
+            "changing sort key should rebuild the minutely sorted cache"
+        );
+    }
+
+    #[test]
+    fn test_get_sorted_minutely_invalidates_cache_when_data_updates() {
+        let mut app = make_app();
+        app.data.minutely = vec![
+            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
+            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
+        ];
+        let _ = app.get_sorted_minutely();
+
+        let refreshed = UsageData {
+            minutely: vec![
+                minutely_usage("2026-05-20 10:02:00", 30, 2.0),
+                minutely_usage("2026-05-20 10:03:00", 40, 12.0),
+            ],
+            ..Default::default()
+        };
+        app.update_data(refreshed);
+
+        let sorted = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:03:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:02:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ],
+            "update_data should clear stale minutely sorted cache entries"
+        );
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1271,10 +2504,16 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Overview);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Daily);
+
+        app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Hourly);
 
         app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Stats);
@@ -1298,10 +2537,56 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Hourly);
+
+        app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Daily);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Overview);
+    }
+
+    #[test]
+    fn test_handle_key_tab_switch_with_minutely_enabled_includes_minutely() {
+        let mut app = make_app();
+        app.settings.minutely_tab_enabled = true;
+        assert_eq!(app.current_tab, Tab::Overview);
+
+        for expected in [
+            Tab::Usage,
+            Tab::Models,
+            Tab::Daily,
+            Tab::Hourly,
+            Tab::Minutely,
+            Tab::Stats,
+            Tab::Agents,
+            Tab::Overview,
+        ] {
+            app.handle_key_event(key(KeyCode::Tab));
+            assert_eq!(app.current_tab, expected);
+        }
+    }
+
+    #[test]
+    fn test_initial_minutely_tab_clamps_to_overview_when_flag_off() {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Minutely),
+        };
+        let app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
@@ -1384,10 +2669,13 @@ mod tests {
     fn test_handle_key_left_right_switch() {
         let mut app = make_app();
         app.handle_key_event(key(KeyCode::Right));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::Right));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Left));
-        assert_eq!(app.current_tab, Tab::Overview);
+        assert_eq!(app.current_tab, Tab::Usage);
     }
 
     #[test]
@@ -1401,6 +2689,171 @@ mod tests {
         assert_eq!(app.selected_index, 0);
         assert_eq!(app.scroll_offset, 0);
         assert_eq!(app.selected_graph_cell, None);
+    }
+
+    #[test]
+    fn test_enter_on_daily_opens_selected_day_detail_rows() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 0;
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(app.get_current_list_len(), 2);
+    }
+
+    #[test]
+    fn test_esc_from_daily_detail_restores_daily_selection() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.max_visible_items = 2;
+        app.selected_index = 1;
+        app.scroll_offset = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Down));
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert_eq!(app.current_tab, Tab::Daily);
+        assert_eq!(app.selected_index, 1);
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.get_current_list_len(), 3);
+    }
+
+    #[test]
+    fn test_close_daily_detail_reanchors_selection_by_date_after_sort_change() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 1;
+        let target_date = app.get_sorted_daily()[app.selected_index].date;
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+        assert_eq!(app.daily_detail_date(), Some(target_date));
+
+        app.handle_key_event(key(KeyCode::Char('c')));
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.is_daily_detail_active());
+        let restored_index = app.selected_index;
+        let restored_date = app.get_sorted_daily()[restored_index].date;
+        assert_eq!(
+            restored_date, target_date,
+            "Closing detail after sort change should re-anchor on the original date"
+        );
+    }
+
+    #[test]
+    fn test_update_data_exits_daily_detail_when_date_disappears() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+        ];
+
+        app.selected_index = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+
+        let refreshed = UsageData {
+            daily: vec![
+                daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+                daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+            ],
+            ..Default::default()
+        };
+        app.update_data(refreshed);
+
+        assert!(
+            !app.is_daily_detail_active(),
+            "update_data should drop detail mode when the selected date is gone"
+        );
+        assert_eq!(app.daily_detail_date(), None);
+        assert!(app.get_sorted_daily_detail_rows().is_empty());
+    }
+
+    #[test]
+    fn test_update_data_keeps_daily_detail_when_date_still_present() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage(
+                "2026-05-17",
+                7.0,
+                vec![("target-a", "openai", 5.0), ("target-b", "anthropic", 2.0)],
+            ),
+        ];
+
+        app.selected_index = 1;
+        let target_date = app.get_sorted_daily()[app.selected_index].date;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+
+        let refreshed = UsageData {
+            daily: vec![
+                daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+                daily_usage(
+                    "2026-05-17",
+                    9.0,
+                    vec![("target-a", "openai", 7.0), ("target-b", "anthropic", 2.0)],
+                ),
+            ],
+            ..Default::default()
+        };
+        app.update_data(refreshed);
+
+        assert!(app.is_daily_detail_active());
+        assert_eq!(app.daily_detail_date(), Some(target_date));
     }
 
     // ── handle_key_event: sort ──────────────────────────────────────
@@ -1439,6 +2892,75 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Ascending);
 
         app.handle_key_event(key(KeyCode::Char('t')));
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_switch_tab_restores_hourly_date_default() {
+        let mut app = make_app();
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.switch_tab(Tab::Hourly);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+
+        app.switch_tab(Tab::Models);
+        assert_eq!(app.sort_field, SortField::Cost);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_initial_hourly_tab_uses_hourly_sort_default() {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Hourly),
+        };
+
+        let app = App::new_with_cached_data(config, None).unwrap();
+
+        assert_eq!(app.current_tab, Tab::Hourly);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_switch_tab_preserves_user_sort() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Models);
+
+        app.set_sort(SortField::Tokens);
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+
+        app.switch_tab(Tab::Daily);
+        assert_eq!(app.sort_field, SortField::Cost);
+
+        app.switch_tab(Tab::Models);
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_switch_tab_preserves_daily_sort_after_hourly_roundtrip() {
+        let mut app = make_app();
+
+        app.switch_tab(Tab::Daily);
+        app.set_sort(SortField::Date);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+
+        app.switch_tab(Tab::Hourly);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+
+        app.switch_tab(Tab::Daily);
+        assert_eq!(app.sort_field, SortField::Date);
         assert_eq!(app.sort_direction, SortDirection::Descending);
     }
 
@@ -1539,6 +3061,22 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
     }
 
+    #[test]
+    fn test_overview_scroll_keeps_rendered_capacity_after_resize() {
+        let mut app = make_app_with_models(33);
+        app.current_tab = Tab::Overview;
+        app.set_max_visible_items(9);
+
+        for _ in 0..32 {
+            app.move_selection_down();
+            app.handle_resize(120, 40);
+            app.set_max_visible_items(9);
+        }
+
+        assert_eq!(app.selected_index, 32);
+        assert_eq!(app.scroll_offset, 24);
+    }
+
     // ── handle_key_event: theme ─────────────────────────────────────
 
     #[test]
@@ -1589,9 +3127,10 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('r')));
 
         assert!(!app.needs_reload);
+        assert!(app.is_fetching_usage());
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Refresh already in progress")
+            Some("Fetching usage data...")
         );
     }
 
@@ -1696,6 +3235,56 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_mouse_click_usage_refresh_uses_refresh_path() {
+        let mut app = make_app();
+        app.background_loading = true;
+        app.add_click_area(Rect::new(0, 0, 10, 2), ClickAction::UsageRefresh);
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(event);
+
+        assert!(!app.needs_reload);
+        assert!(app.is_fetching_usage());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Fetching usage data...")
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_codex_remove_requires_confirmation() {
+        let mut app = make_app();
+        app.add_click_area(
+            Rect::new(0, 0, 10, 2),
+            ClickAction::CodexRemoveAccount {
+                account_id: "acct_work".to_string(),
+            },
+        );
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(event);
+
+        assert_eq!(
+            app.pending_codex_remove_account_id.as_deref(),
+            Some("acct_work")
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Click Confirm to remove this Codex account")
+        );
+    }
+
+    #[test]
     fn test_handle_mouse_click_outside_areas() {
         let mut app = make_app();
         app.add_click_area(Rect::new(0, 0, 5, 5), ClickAction::Tab(Tab::Stats));
@@ -1751,7 +3340,7 @@ mod tests {
         app.handle_resize(120, 40);
         assert_eq!(app.terminal_width, 120);
         assert_eq!(app.terminal_height, 40);
-        assert_eq!(app.max_visible_items, 30);
+        assert_eq!(app.max_visible_items, 20);
     }
 
     #[test]
@@ -1760,18 +3349,34 @@ mod tests {
         app.handle_resize(40, 12);
         assert_eq!(app.terminal_width, 40);
         assert_eq!(app.terminal_height, 12);
-        assert_eq!(app.max_visible_items, 2);
+        assert_eq!(app.max_visible_items, 20);
     }
 
     #[test]
-    fn test_handle_resize_clamps_selection() {
+    fn test_handle_resize_preserves_rendered_capacity() {
         let mut app = make_app_with_models(5);
         app.selected_index = 4;
-        app.scroll_offset = 3;
-        app.max_visible_items = 20;
+        app.scroll_offset = 2;
+        app.max_visible_items = 3;
 
         app.handle_resize(80, 24);
-        assert!(app.selected_index <= 4);
+
+        assert_eq!(app.max_visible_items, 3);
+        assert_eq!(app.selected_index, 4);
+        assert_eq!(app.scroll_offset, 2);
+    }
+
+    #[test]
+    fn test_set_max_visible_items_clamps_scroll_offset() {
+        let mut app = make_app_with_models(10);
+        app.selected_index = 9;
+        app.scroll_offset = 9;
+
+        app.set_max_visible_items(3);
+
+        assert_eq!(app.max_visible_items, 3);
+        assert_eq!(app.selected_index, 9);
+        assert_eq!(app.scroll_offset, 7);
     }
 
     // ── on_tick ─────────────────────────────────────────────────────
@@ -1821,6 +3426,174 @@ mod tests {
         assert_eq!(app.status_message.as_ref().unwrap(), "fresh message");
     }
 
+    #[test]
+    fn test_on_tick_collects_codex_login_events() {
+        let mut app = make_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.codex_login_rx = Some(rx);
+        tx.send(CodexLoginEvent::Output(
+            "Open https://example.com/device".to_string(),
+        ))
+        .unwrap();
+        tx.send(CodexLoginEvent::Finished(CodexLoginOutcome::Failed(
+            "expired".to_string(),
+        )))
+        .unwrap();
+        drop(tx);
+
+        app.on_tick();
+
+        assert!(app.codex_login_rx.is_none());
+        assert_eq!(
+            app.codex_login_lines.last().map(String::as_str),
+            Some("Open https://example.com/device")
+        );
+        assert!(matches!(
+            app.codex_login_outcome,
+            Some(CodexLoginOutcome::Failed(ref error)) if error == "expired"
+        ));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex login failed: expired")
+        );
+    }
+
+    #[test]
+    fn test_on_tick_clears_codex_login_panel_after_import() {
+        let mut app = make_app();
+        app.background_loading = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.codex_login_rx = Some(rx);
+        tx.send(CodexLoginEvent::Output(
+            "Starting Codex browser login".to_string(),
+        ))
+        .unwrap();
+        tx.send(CodexLoginEvent::Finished(CodexLoginOutcome::Imported(
+            crate::commands::usage::codex::CodexAccountInfo {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                account_id: Some("acct_work".to_string()),
+                created_at: "2026-06-09T00:00:00Z".to_string(),
+                is_active: true,
+            },
+        )))
+        .unwrap();
+        drop(tx);
+
+        app.on_tick();
+
+        assert!(app.codex_login_rx.is_none());
+        assert!(app.codex_login_lines.is_empty());
+        assert!(app.codex_login_outcome.is_none());
+        assert!(!app.should_show_codex_login_panel());
+    }
+
+    #[test]
+    fn test_wait_for_codex_login_child_returns_none_when_cancelled() {
+        let slot = CodexLoginChildSlot::default();
+        let status = wait_for_codex_login_child(&slot).unwrap();
+        assert!(status.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wait_for_codex_login_child_reports_exit_status() {
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let slot = CodexLoginChildSlot::default();
+        *slot.lock().unwrap() = Some(child);
+
+        let status = wait_for_codex_login_child(&slot).unwrap();
+
+        assert!(status.unwrap().success());
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dismiss_codex_login_while_running_kills_child() {
+        let mut app = make_app();
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.codex_login_rx = Some(rx);
+        app.codex_login_lines.push("waiting".to_string());
+        let slot = CodexLoginChildSlot::default();
+        *slot.lock().unwrap() = Some(child);
+        app.codex_login_child = Some(std::sync::Arc::clone(&slot));
+
+        app.dismiss_codex_login();
+
+        assert!(app.codex_login_rx.is_none());
+        assert!(app.codex_login_child.is_none());
+        assert!(app.codex_login_lines.is_empty());
+        assert!(app.codex_login_outcome.is_none());
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "child must be taken and killed on dismiss"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Codex login cancelled"));
+    }
+
+    #[test]
+    fn test_dismiss_codex_login_when_idle_clears_panel() {
+        let mut app = make_app();
+        app.codex_login_lines.push("stale".to_string());
+        app.codex_login_outcome = Some(CodexLoginOutcome::Failed("expired".to_string()));
+
+        app.dismiss_codex_login();
+
+        assert!(app.codex_login_lines.is_empty());
+        assert!(app.codex_login_outcome.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex login panel dismissed")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_codex_login_line_strips_ansi_sequences() {
+        assert_eq!(
+            sanitize_codex_login_line("\u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m"),
+            "https://auth.openai.com/codex/device"
+        );
+        assert_eq!(
+            sanitize_codex_login_line("\u{1b}[90mCAGW-LNUYX\u{1b}[0m"),
+            "CAGW-LNUYX"
+        );
+    }
+
+    #[test]
+    fn test_codex_login_failure_message_identifies_rate_limit() {
+        let message = codex_login_failure_message_from_output(
+            "exit status: 1",
+            &[
+                "Device codes are a common phishing target. Never share this code.".to_string(),
+                "Error logging in with device code: device auth failed with status 429 Too Many Requests"
+                    .to_string(),
+            ],
+        );
+
+        assert_eq!(
+            message,
+            "OpenAI login is rate-limited (429 Too Many Requests). Wait before trying Add Codex again."
+        );
+    }
+
+    #[test]
+    fn test_codex_login_failure_message_identifies_expired_code() {
+        let message = codex_login_failure_message_from_output(
+            "exit status: 1",
+            &["Error logging in with device code: expired".to_string()],
+        );
+
+        assert_eq!(
+            message,
+            "Codex device code expired. Start Add Codex again to get a new code."
+        );
+    }
+
     // ── click area management ───────────────────────────────────────
 
     #[test]
@@ -1854,5 +3627,302 @@ mod tests {
 
         app.terminal_width = 60;
         assert!(!app.is_very_narrow());
+    }
+
+    // ── HourlyViewMode tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_hourly_view_mode_default() {
+        let mode = HourlyViewMode::default();
+        assert_eq!(mode, HourlyViewMode::Table);
+    }
+
+    #[test]
+    fn test_hourly_view_mode_toggle() {
+        let mut app = make_app();
+        assert_eq!(app.hourly_view_mode, HourlyViewMode::Table);
+
+        // Toggle to Profile when on Hourly tab
+        app.current_tab = Tab::Hourly;
+        app.handle_key_event(key(KeyCode::Char('v')));
+        assert_eq!(app.hourly_view_mode, HourlyViewMode::Profile);
+
+        // Toggle back to Table
+        app.handle_key_event(key(KeyCode::Char('v')));
+        assert_eq!(app.hourly_view_mode, HourlyViewMode::Table);
+    }
+
+    #[test]
+    fn test_hourly_view_mode_no_toggle_on_other_tabs() {
+        let mut app = make_app();
+        assert_eq!(app.hourly_view_mode, HourlyViewMode::Table);
+
+        // 'v' should not toggle when not on Hourly tab
+        app.current_tab = Tab::Overview;
+        app.handle_key_event(key(KeyCode::Char('v')));
+        assert_eq!(app.hourly_view_mode, HourlyViewMode::Table);
+
+        app.current_tab = Tab::Daily;
+        app.handle_key_event(key(KeyCode::Char('v')));
+        assert_eq!(app.hourly_view_mode, HourlyViewMode::Table);
+    }
+
+    // ── build_model_shade_map ───────────────────────────────────────
+
+    fn model_usage(name: &str, cost: f64, workspace: Option<&str>) -> ModelUsage {
+        ModelUsage {
+            model: name.to_string(),
+            provider: "anthropic".to_string(),
+            client: "claude".to_string(),
+            workspace_key: workspace.map(String::from),
+            workspace_label: workspace.map(String::from),
+            tokens: TokenBreakdown::default(),
+            cost,
+            performance: Default::default(),
+            session_count: 1,
+        }
+    }
+
+    fn shade_key(provider: &str, model: &str) -> String {
+        super::super::colors::model_shade_key(provider, model)
+    }
+
+    #[test]
+    fn test_shade_map_assigns_rank_0_to_highest_cost() {
+        let mut app = make_app();
+        app.data.models = vec![
+            model_usage("claude-haiku-4-5", 10.0, None),
+            model_usage("claude-opus-4-5", 100.0, None),
+            model_usage("claude-sonnet-4-5", 50.0, None),
+        ];
+        app.build_model_shade_map();
+
+        let opus = app
+            .model_shade_map
+            .get(&shade_key("anthropic", "claude-opus-4-5"))
+            .copied()
+            .unwrap();
+        let sonnet = app
+            .model_shade_map
+            .get(&shade_key("anthropic", "claude-sonnet-4-5"))
+            .copied()
+            .unwrap();
+        let haiku = app
+            .model_shade_map
+            .get(&shade_key("anthropic", "claude-haiku-4-5"))
+            .copied()
+            .unwrap();
+
+        // Rank 0 is the base Anthropic coral; ranks below lighten toward white.
+        assert_eq!(opus, get_provider_shade("anthropic", 0));
+        assert_eq!(sonnet, get_provider_shade("anthropic", 1));
+        assert_eq!(haiku, get_provider_shade("anthropic", 2));
+    }
+
+    #[test]
+    fn test_shade_map_dedupes_same_model_across_workspaces() {
+        // Same model appearing N times in different workspaces (as happens
+        // under GroupBy::WorkspaceModel) must not inflate the rank count.
+        let mut app = make_app();
+        app.data.models = vec![
+            model_usage("claude-sonnet-4-5", 20.0, Some("ws-a")),
+            model_usage("claude-sonnet-4-5", 20.0, Some("ws-b")),
+            model_usage("claude-sonnet-4-5", 20.0, Some("ws-c")),
+            model_usage("claude-haiku-4-5", 5.0, None),
+        ];
+        app.build_model_shade_map();
+
+        // Only two distinct model names should be in the map; sonnet takes
+        // rank 0 (aggregate cost 60 > haiku cost 5).
+        assert_eq!(app.model_shade_map.len(), 2);
+        assert_eq!(
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-sonnet-4-5"))
+                .copied(),
+            Some(get_provider_shade("anthropic", 0))
+        );
+        assert_eq!(
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-haiku-4-5"))
+                .copied(),
+            Some(get_provider_shade("anthropic", 1))
+        );
+    }
+
+    #[test]
+    fn test_shade_map_is_deterministic_on_cost_ties() {
+        // All-zero costs (fresh data) must produce a stable shade assignment
+        // across refreshes so the chart doesn't flicker.
+        let ranks = |app: &App| {
+            let a = app
+                .model_shade_map
+                .get(&shade_key("anthropic", "claude-alpha"))
+                .copied();
+            let b = app
+                .model_shade_map
+                .get(&shade_key("anthropic", "claude-beta"))
+                .copied();
+            let c = app
+                .model_shade_map
+                .get(&shade_key("anthropic", "claude-gamma"))
+                .copied();
+            (a, b, c)
+        };
+
+        let mut app1 = make_app();
+        app1.data.models = vec![
+            model_usage("claude-gamma", 0.0, None),
+            model_usage("claude-alpha", 0.0, None),
+            model_usage("claude-beta", 0.0, None),
+        ];
+        app1.build_model_shade_map();
+
+        let mut app2 = make_app();
+        app2.data.models = vec![
+            model_usage("claude-beta", 0.0, None),
+            model_usage("claude-gamma", 0.0, None),
+            model_usage("claude-alpha", 0.0, None),
+        ];
+        app2.build_model_shade_map();
+
+        assert_eq!(ranks(&app1), ranks(&app2));
+        // alpha sorts first by name so it gets rank 0 on ties.
+        assert_eq!(
+            app1.model_shade_map
+                .get(&shade_key("anthropic", "claude-alpha"))
+                .copied(),
+            Some(get_provider_shade("anthropic", 0))
+        );
+    }
+
+    #[test]
+    fn test_shade_map_handles_nan_cost() {
+        // NaN costs must not propagate into total_cmp ordering surprises or
+        // crash the builder.
+        let mut app = make_app();
+        app.data.models = vec![
+            model_usage("claude-nan", f64::NAN, None),
+            model_usage("claude-normal", 1.0, None),
+        ];
+        app.build_model_shade_map();
+
+        assert_eq!(app.model_shade_map.len(), 2);
+        // Normal model outranks NaN (which is coerced to 0).
+        assert_eq!(
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-normal"))
+                .copied(),
+            Some(get_provider_shade("anthropic", 0))
+        );
+    }
+
+    #[test]
+    fn test_shade_map_separates_providers() {
+        let mut app = make_app();
+        app.data.models = vec![
+            ModelUsage {
+                model: "claude-opus-4-5".to_string(),
+                provider: "anthropic".to_string(),
+                client: "claude".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 10.0,
+                performance: Default::default(),
+                session_count: 1,
+            },
+            ModelUsage {
+                model: "gpt-5".to_string(),
+                provider: "openai".to_string(),
+                client: "codex".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 1.0,
+                performance: Default::default(),
+                session_count: 1,
+            },
+        ];
+        app.build_model_shade_map();
+
+        // Each provider ranks independently — both get rank-0 shades.
+        assert_eq!(
+            app.model_shade_map
+                .get(&shade_key("anthropic", "claude-opus-4-5"))
+                .copied(),
+            Some(get_provider_shade("anthropic", 0))
+        );
+        assert_eq!(
+            app.model_shade_map
+                .get(&shade_key("openai", "gpt-5"))
+                .copied(),
+            Some(get_provider_shade("openai", 0))
+        );
+    }
+
+    #[test]
+    fn test_shade_map_rebuilds_on_update_data() {
+        let mut app = make_app();
+        app.data.models = vec![model_usage("claude-opus-4-5", 10.0, None)];
+        app.build_model_shade_map();
+        assert!(app
+            .model_shade_map
+            .contains_key(&shade_key("anthropic", "claude-opus-4-5")));
+
+        let fresh = UsageData {
+            models: vec![model_usage("claude-sonnet-4-5", 5.0, None)],
+            ..UsageData::default()
+        };
+        app.update_data(fresh);
+
+        assert!(!app
+            .model_shade_map
+            .contains_key(&shade_key("anthropic", "claude-opus-4-5")));
+        assert!(app
+            .model_shade_map
+            .contains_key(&shade_key("anthropic", "claude-sonnet-4-5")));
+    }
+
+    #[test]
+    fn test_same_model_name_keeps_distinct_provider_colors() {
+        let mut app = make_app();
+        app.data.models = vec![
+            ModelUsage {
+                model: "sonnet-shared".to_string(),
+                provider: "anthropic".to_string(),
+                client: "claude".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 10.0,
+                performance: Default::default(),
+                session_count: 1,
+            },
+            ModelUsage {
+                model: "sonnet-shared".to_string(),
+                provider: "openai".to_string(),
+                client: "codex".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 5.0,
+                performance: Default::default(),
+                session_count: 1,
+            },
+        ];
+        app.build_model_shade_map();
+
+        assert_eq!(
+            app.model_color_for("anthropic", "sonnet-shared"),
+            app.theme.color(get_provider_shade("anthropic", 0))
+        );
+        assert_eq!(
+            app.model_color_for("openai", "sonnet-shared"),
+            app.theme.color(get_provider_shade("openai", 0))
+        );
+        assert_ne!(
+            app.model_color_for("anthropic", "sonnet-shared"),
+            app.model_color_for("openai", "sonnet-shared")
+        );
     }
 }

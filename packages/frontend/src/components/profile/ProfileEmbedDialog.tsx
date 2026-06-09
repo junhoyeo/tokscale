@@ -4,9 +4,18 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import styled from "styled-components";
 import { toast } from "react-toastify";
+import { EMBED_TEMPLATES, type EmbedTemplate } from "@/lib/embed/embedShared";
+import { getPaletteNames, getPalette, type ColorPaletteName } from "@/lib/themes";
 
 type EmbedTheme = "dark" | "light";
 type EmbedSortBy = "tokens" | "cost";
+type EmbedView = "2d" | "3d";
+type EmbedNumberFormat = "compact" | "full";
+type EmbedRankFormat = "plain" | "percent" | "total";
+
+function titleCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
 
 interface ProfileEmbedDialogProps {
   open: boolean;
@@ -26,6 +35,16 @@ export function ProfileEmbedDialog({
   const [theme, setTheme] = useState<EmbedTheme>("dark");
   const [sortBy, setSortBy] = useState<EmbedSortBy>("tokens");
   const [compact, setCompact] = useState(false);
+  const [view, setView] = useState<EmbedView>("2d");
+  const [template, setTemplate] = useState<EmbedTemplate>("classic");
+  const [color, setColor] = useState<ColorPaletteName | null>(null);
+  const [tokensFormat, setTokensFormat] = useState<EmbedNumberFormat>("compact");
+  const [costFormat, setCostFormat] = useState<EmbedNumberFormat>("compact");
+  const [rankFormat, setRankFormat] = useState<EmbedRankFormat>("plain");
+  const [graph, setGraph] = useState(false);
+
+  // Templates whose contribution graph is toggleable via `?graph=1`.
+  const graphCapable = template !== "graph" && template !== "vitals";
 
   useEffect(() => {
     if (!open) return;
@@ -48,16 +67,22 @@ export function ProfileEmbedDialog({
 
   const {
     embedUrl,
-    previewUrl,
     markdownSnippet,
     htmlSnippet,
     profileUrl,
   } = useMemo(() => {
     const params = new URLSearchParams();
 
+    if (view === "3d") params.set("view", "3d");
     if (theme !== "dark") params.set("theme", theme);
     if (sortBy !== "tokens") params.set("sort", sortBy);
-    if (compact) params.set("compact", "1");
+    if (template !== "classic") params.set("template", template);
+    if (color) params.set("color", color);
+    if (template === "classic" && compact) params.set("compact", "1");
+    if (graph && graphCapable) params.set("graph", "1");
+    if (rankFormat !== "plain") params.set("rank", rankFormat);
+    params.set("tokens", tokensFormat);
+    params.set("cost", costFormat);
 
     const query = params.toString();
     const baseEmbedUrl = `${TOKSCALE_URL}/api/embed/${username}/svg`;
@@ -66,12 +91,11 @@ export function ProfileEmbedDialog({
 
     return {
       embedUrl: resolvedEmbedUrl,
-      previewUrl: `${resolvedEmbedUrl}${query ? "&" : "?"}preview=1`,
       markdownSnippet: `[![Tokscale Stats](${resolvedEmbedUrl})](${resolvedProfileUrl})`,
       htmlSnippet: `<a href="${resolvedProfileUrl}"><img alt="Tokscale Stats for @${username}" src="${resolvedEmbedUrl}" /></a>`,
       profileUrl: resolvedProfileUrl,
     };
-  }, [compact, sortBy, theme, username]);
+  }, [color, compact, costFormat, graph, graphCapable, rankFormat, sortBy, template, theme, tokensFormat, username, view]);
 
   const copyToClipboard = async (value: string, label: string) => {
     try {
@@ -117,7 +141,7 @@ export function ProfileEmbedDialog({
               <PreviewLabel>Live preview</PreviewLabel>
               <PreviewFrame>
                 <PreviewImage
-                  src={previewUrl}
+                  src={embedUrl}
                   alt={`Tokscale README embed preview for ${displayName || username}`}
                 />
               </PreviewFrame>
@@ -131,6 +155,42 @@ export function ProfileEmbedDialog({
           </PreviewPanel>
 
           <ControlsPanel>
+            <OptionGroup>
+              <OptionLabel>Template</OptionLabel>
+              <SegmentedControl>
+                {EMBED_TEMPLATES.map((tpl) => (
+                  <SegmentButton
+                    key={tpl}
+                    type="button"
+                    $active={template === tpl}
+                    onClick={() => setTemplate(tpl)}
+                  >
+                    {titleCase(tpl)}
+                  </SegmentButton>
+                ))}
+              </SegmentedControl>
+            </OptionGroup>
+
+            <OptionGroup>
+              <OptionLabel>View</OptionLabel>
+              <SegmentedControl>
+                <SegmentButton
+                  type="button"
+                  $active={view === "2d"}
+                  onClick={() => setView("2d")}
+                >
+                  2D
+                </SegmentButton>
+                <SegmentButton
+                  type="button"
+                  $active={view === "3d"}
+                  onClick={() => setView("3d")}
+                >
+                  3D
+                </SegmentButton>
+              </SegmentedControl>
+            </OptionGroup>
+
             <OptionGroup>
               <OptionLabel>Theme</OptionLabel>
               <SegmentedControl>
@@ -149,6 +209,31 @@ export function ProfileEmbedDialog({
                   Light
                 </SegmentButton>
               </SegmentedControl>
+            </OptionGroup>
+
+            <OptionGroup>
+              <OptionLabel>Accent color</OptionLabel>
+              <SwatchRow>
+                <Swatch
+                  type="button"
+                  $active={color === null}
+                  $color="var(--color-border-default)"
+                  aria-label="Default accent color"
+                  title="Default"
+                  onClick={() => setColor(null)}
+                />
+                {getPaletteNames().map((name) => (
+                  <Swatch
+                    key={name}
+                    type="button"
+                    $active={color === name}
+                    $color={getPalette(name).grade3}
+                    aria-label={`${name} accent color`}
+                    title={titleCase(name)}
+                    onClick={() => setColor(name)}
+                  />
+                ))}
+              </SwatchRow>
             </OptionGroup>
 
             <OptionGroup>
@@ -172,21 +257,101 @@ export function ProfileEmbedDialog({
             </OptionGroup>
 
             <OptionGroup>
-              <OptionLabel>Layout</OptionLabel>
+              <OptionLabel>Rank format</OptionLabel>
+              <SegmentedControl>
+                {(["plain", "percent", "total"] as const).map((mode) => (
+                  <SegmentButton
+                    key={mode}
+                    type="button"
+                    $active={rankFormat === mode}
+                    onClick={() => setRankFormat(mode)}
+                  >
+                    {titleCase(mode)}
+                  </SegmentButton>
+                ))}
+              </SegmentedControl>
+            </OptionGroup>
+
+            {template === "classic" && (
+              <OptionGroup>
+                <OptionLabel>Layout</OptionLabel>
+                <SegmentedControl>
+                  <SegmentButton
+                    type="button"
+                    $active={!compact}
+                    onClick={() => setCompact(false)}
+                  >
+                    Full
+                  </SegmentButton>
+                  <SegmentButton
+                    type="button"
+                    $active={compact}
+                    onClick={() => setCompact(true)}
+                  >
+                    Compact
+                  </SegmentButton>
+                </SegmentedControl>
+              </OptionGroup>
+            )}
+
+            {graphCapable && (
+              <OptionGroup>
+                <OptionLabel>Contribution graph</OptionLabel>
+                <SegmentedControl>
+                  <SegmentButton
+                    type="button"
+                    $active={!graph}
+                    onClick={() => setGraph(false)}
+                  >
+                    Off
+                  </SegmentButton>
+                  <SegmentButton
+                    type="button"
+                    $active={graph}
+                    onClick={() => setGraph(true)}
+                  >
+                    On
+                  </SegmentButton>
+                </SegmentedControl>
+              </OptionGroup>
+            )}
+
+            <OptionGroup>
+              <OptionLabel>Token number format</OptionLabel>
               <SegmentedControl>
                 <SegmentButton
                   type="button"
-                  $active={!compact}
-                  onClick={() => setCompact(false)}
+                  $active={tokensFormat === "compact"}
+                  onClick={() => setTokensFormat("compact")}
                 >
-                  Full
+                  Compact
                 </SegmentButton>
                 <SegmentButton
                   type="button"
-                  $active={compact}
-                  onClick={() => setCompact(true)}
+                  $active={tokensFormat === "full"}
+                  onClick={() => setTokensFormat("full")}
+                >
+                  Full
+                </SegmentButton>
+              </SegmentedControl>
+            </OptionGroup>
+
+            <OptionGroup>
+              <OptionLabel>Cost number format</OptionLabel>
+              <SegmentedControl>
+                <SegmentButton
+                  type="button"
+                  $active={costFormat === "compact"}
+                  onClick={() => setCostFormat("compact")}
                 >
                   Compact
+                </SegmentButton>
+                <SegmentButton
+                  type="button"
+                  $active={costFormat === "full"}
+                  onClick={() => setCostFormat("full")}
+                >
+                  Full
                 </SegmentButton>
               </SegmentedControl>
             </OptionGroup>
@@ -483,6 +648,27 @@ const SegmentButton = styled.button<{ $active: boolean }>`
     transform: translateY(-1px);
     color: var(--color-fg-default);
     border-color: rgba(133, 202, 255, 0.24);
+  }
+`;
+
+const SwatchRow = styled.div`
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+`;
+
+const Swatch = styled.button<{ $active: boolean; $color: string }>`
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: ${({ $color }) => $color};
+  border: 2px solid ${({ $active }) => ($active ? "var(--color-fg-default)" : "transparent")};
+  box-shadow: inset 0 0 0 1px var(--color-border-default);
+  cursor: pointer;
+  transition: transform 150ms ease;
+
+  &:hover {
+    transform: translateY(-1px);
   }
 `;
 

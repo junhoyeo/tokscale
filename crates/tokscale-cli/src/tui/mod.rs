@@ -1,16 +1,19 @@
 mod app;
 mod cache;
 pub mod client_ui;
+mod colors;
 pub mod config;
 pub mod data;
-pub mod remote;
 mod event;
+mod export;
 pub mod settings;
 mod themes;
 mod ui;
 
-pub use app::{App, DataSource, Tab, TuiConfig};
-pub use cache::{load_cache, save_cached_data, CacheResult};
+pub use app::{App, Tab, TuiConfig};
+pub use cache::{
+    load_cache, save_cached_data, CacheReportScope, CacheResult, TUI_DEFAULT_GROUP_BY,
+};
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
 
@@ -29,79 +32,42 @@ use std::sync::Arc;
 use std::panic;
 
 use anyhow::Result;
-use chrono::NaiveDate;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    },
 };
 use ratatui::prelude::*;
 use tokscale_core::ClientId;
 
-use crate::auth;
+use crate::ClientFilter;
 
-use self::data::{DailyUsage, ModelUsage, TokenBreakdown};
+fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
+    let cached_data = match load_result {
+        CacheResult::Fresh(data) | CacheResult::Stale(data) => Some(data),
+        CacheResult::Miss => None,
+    };
 
-fn remote_stats_to_usage_data(remote: &remote::RemoteStats) -> UsageData {
-    let fallback_client = remote
-        .by_client
-        .iter()
-        .max_by_key(|stat| stat.tokens)
-        .map(|stat| stat.client.clone())
-        .unwrap_or_else(|| "remote".to_string());
+    (cached_data, true)
+}
 
-    let models = remote
-        .by_model
-        .iter()
-        .map(|stat| ModelUsage {
-            model: stat.model.clone(),
-            provider: "remote".to_string(),
-            client: fallback_client.clone(),
-            tokens: TokenBreakdown {
-                input: stat.tokens,
-                output: 0,
-                cache_read: 0,
-                cache_write: 0,
-                reasoning: 0,
-            },
-            cost: stat.cost,
-            session_count: 0,
-        })
-        .collect();
+fn background_data_loader(
+    since: Option<String>,
+    until: Option<String>,
+    year: Option<String>,
+    minutely_enabled: bool,
+) -> DataLoader {
+    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
+}
 
-    let daily = remote
-        .by_day
-        .iter()
-        .filter_map(|stat| {
-            NaiveDate::parse_from_str(&stat.date, "%Y-%m-%d")
-                .ok()
-                .map(|date| DailyUsage {
-                    date,
-                    tokens: TokenBreakdown {
-                        input: stat.tokens,
-                        output: 0,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    cost: stat.cost,
-                    models: std::collections::BTreeMap::new(),
-                })
-        })
-        .collect();
-
-    UsageData {
-        models,
-        agents: Vec::new(),
-        daily,
-        graph: None,
-        total_tokens: remote.total_tokens,
-        total_cost: remote.total_cost,
-        loading: false,
-        error: None,
-        current_streak: 0,
-        longest_streak: 0,
-    }
+fn background_cache_scope(
+    since: &Option<String>,
+    until: &Option<String>,
+    year: &Option<String>,
+) -> CacheReportScope {
+    CacheReportScope::new(since.clone(), until.clone(), year.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -132,40 +98,32 @@ pub fn run(
         initial_tab,
     };
 
-    let mut enabled_clients = HashSet::new();
-    let mut include_synthetic = false;
-    if let Some(ref cli_clients) = clients {
-        for client_str in cli_clients {
-            if client_str.eq_ignore_ascii_case("synthetic") {
-                include_synthetic = true;
-            } else if let Some(client) = ClientId::from_str(client_str) {
-                enabled_clients.insert(client);
-            }
-        }
+    // Build the unified filter set used by the cache key, the App
+    // constructor, and the background loader. We mirror the same
+    // resolution rules App::new_with_cached_data uses so the cache
+    // lookup and the in-app state always agree. Drift between them
+    // makes every launch a stale-cache hit instead of a fresh one.
+    let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = clients {
+        cli_clients
+            .iter()
+            .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+            .collect()
     } else {
-        for client in ClientId::iter() {
-            enabled_clients.insert(client);
-        }
-    }
+        ClientFilter::default_set()
+    };
 
-    // Single file read: load cache and check freshness in one pass
-    let (cached_data, cache_is_stale) = match load_cache(&enabled_clients, include_synthetic) {
-        CacheResult::Fresh(data) => (Some(data), false),
-        CacheResult::Stale(data) => (Some(data), true),
-        CacheResult::Miss => (None, true),
-    };
-    // Load credentials first so we can scope the remote cache by account and API server.
-    let creds = auth::load_credentials();
-    let api_url = auth::get_api_base_url();
-    let remote_cached = creds.as_ref().and_then(|c| {
-        remote::load_cached_remote_stats(Some(c.username.as_str()), Some(&api_url))
-    });
-    let (effective_data, data_source) = if let Some(ref remote_stats) = remote_cached {
-        (Some(remote_stats_to_usage_data(remote_stats)), DataSource::Remote)
-    } else {
-        (cached_data, DataSource::Local)
-    };
-    let has_cached_data = effective_data.is_some();
+    // Single file read: load cache and check freshness in one pass.
+    // The key MUST be `cache::TUI_DEFAULT_GROUP_BY` — any code path that
+    // writes the TUI cache (notably `run_warm_tui_cache` in main.rs) keys
+    // on the same constant. Hard-coding a different value here would
+    // silently invalidate the cache on every launch after `submit`.
+    let initial_group_by = TUI_DEFAULT_GROUP_BY;
+    let initial_report_scope = background_cache_scope(&since, &until, &year);
+    let (cached_data, needs_background_load) = decide_initial_data(load_cache(
+        &enabled_clients,
+        &initial_group_by,
+        &initial_report_scope,
+    ));
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -176,8 +134,11 @@ pub fn run(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
+    let _ = execute!(stdout, SetTitle("Tokscale"));
+
     if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
         let _ = disable_raw_mode();
+        let _ = execute!(stdout, SetTitle(""));
         return Err(e.into());
     }
 
@@ -191,59 +152,47 @@ pub fn run(
         }
     };
 
-    let mut app = match App::new_with_cached_data(config, effective_data) {
+    let mut app = match App::new_with_cached_data(config, cached_data) {
         Ok(a) => a,
         Err(e) => {
             restore_terminal(&mut terminal);
             return Err(e);
         }
     };
-    app.data_source = data_source;
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
-    let (remote_tx, remote_rx) = mpsc::channel::<UsageData>();
-    let needs_background_load = !has_cached_data || (cache_is_stale && data_source == DataSource::Local);
 
     if needs_background_load {
         app.set_background_loading(true);
 
         let tx = bg_tx.clone();
-        let bg_clients: Vec<ClientId> = enabled_clients.iter().copied().collect();
+        // Project the filter set into the (clients, include_synthetic)
+        // pair the loader still consumes. Keeping the projection here
+        // (instead of inside DataLoader) avoids touching tokscale-core's
+        // public API in this PR.
+        let bg_clients: Vec<ClientId> = enabled_clients
+            .iter()
+            .filter_map(|f| f.to_client_id())
+            .collect();
+        let bg_include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
         let bg_since = since.clone();
         let bg_until = until.clone();
         let bg_year = year.clone();
         let bg_enabled_clients = enabled_clients.clone();
-        let bg_include_synthetic = include_synthetic;
         let bg_group_by = app.group_by.borrow().clone();
+        let bg_report_scope = background_cache_scope(&since, &until, &year);
+        let bg_minutely_enabled = app.settings.minutely_tab_enabled;
 
         thread::spawn(move || {
-            let loader = DataLoader::with_filters(None, bg_since, bg_until, bg_year);
+            let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
             let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
 
             if let Ok(ref data) = result {
-                save_cached_data(data, &bg_enabled_clients, bg_include_synthetic);
+                save_cached_data(data, &bg_enabled_clients, &bg_group_by, &bg_report_scope);
             }
 
             let _ = tx.send(result);
         });
-    }
-
-    if remote_cached.is_none() {
-        if let Some(c) = creds {
-            let token = c.token;
-            let username = c.username;
-            let api_url = auth::get_api_base_url();
-            let tx = remote_tx;
-            thread::spawn(move || {
-                let Ok(runtime) = tokio::runtime::Runtime::new() else {
-                    return;
-                };
-                if let Ok(stats) = runtime.block_on(remote::fetch_remote_stats(&token, &username, &api_url)) {
-                    let usage_data = remote_stats_to_usage_data(&stats);
-                    let _ = tx.send(usage_data);
-                }
-            });
-        }
     }
 
     #[cfg(unix)]
@@ -261,10 +210,13 @@ pub fn run(
         &mut events,
         bg_tx,
         bg_rx,
-        remote_rx,
         #[cfg(unix)]
         &sigcont_flag,
     );
+
+    // Don't orphan a `codex login` child (it would keep holding the OAuth
+    // port after the TUI exits).
+    app.kill_codex_login_child();
 
     restore_terminal(&mut terminal);
 
@@ -272,7 +224,12 @@ pub fn run(
 }
 
 fn restore_terminal_best_effort() {
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        SetTitle("")
+    );
     let _ = disable_raw_mode();
 }
 
@@ -281,7 +238,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        SetTitle("")
     );
     let _ = terminal.show_cursor();
 }
@@ -292,7 +250,6 @@ fn run_loop_with_background(
     events: &mut EventHandler,
     bg_tx: mpsc::Sender<Result<UsageData>>,
     bg_rx: mpsc::Receiver<Result<UsageData>>,
-    remote_rx: mpsc::Receiver<UsageData>,
     #[cfg(unix)] sigcont_flag: &Arc<AtomicBool>,
 ) -> Result<()> {
     loop {
@@ -314,15 +271,8 @@ fn run_loop_with_background(
                 app.set_background_loading(false);
                 match result {
                     Ok(data) => {
-                        // Don't overwrite remote data with local reload results
-                        if app.data_source == DataSource::Remote {
-                            // Remote data is authoritative; skip local update
-                            app.set_status("Remote data unchanged");
-                        } else {
-                            app.update_data(data);
-                            app.data_source = DataSource::Local;
-                            app.set_status("Data loaded");
-                        }
+                        app.update_data(data);
+                        app.set_status("Data loaded");
                     }
                     Err(e) => {
                         app.set_error(Some(e.to_string()));
@@ -340,31 +290,27 @@ fn run_loop_with_background(
             Err(TryRecvError::Empty) => {}
         }
 
-        // Check if background remote fetch has delivered new aggregated data.
-        if let Ok(remote_data) = remote_rx.try_recv() {
-            app.update_data(remote_data);
-            app.data_source = DataSource::Remote;
-            app.set_status("Synced");
-        }
-
         if app.needs_reload && !app.background_loading {
             app.needs_reload = false;
             app.set_background_loading(true);
 
             let tx = bg_tx.clone();
-            let clients: Vec<ClientId> = app.enabled_clients.borrow().iter().copied().collect();
+            // Boundary projection: see [`run`] above for the shape rationale.
+            let clients = app.scan_clients();
+            let include_synthetic = app.include_synthetic();
             let since = app.data_loader.since.clone();
             let until = app.data_loader.until.clone();
             let year = app.data_loader.year.clone();
             let enabled_clients = app.enabled_clients.borrow().clone();
-            let include_synthetic = *app.include_synthetic.borrow();
             let group_by = app.group_by.borrow().clone();
+            let report_scope = background_cache_scope(&since, &until, &year);
+            let minutely_enabled = app.settings.minutely_tab_enabled;
 
             thread::spawn(move || {
-                let loader = DataLoader::with_filters(None, since, until, year);
+                let loader = background_data_loader(since, until, year, minutely_enabled);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
-                    save_cached_data(data, &enabled_clients, include_synthetic);
+                    save_cached_data(data, &enabled_clients, &group_by, &report_scope);
                 }
                 let _ = tx.send(result);
             });
@@ -412,6 +358,11 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Qwen,
         ClientId::RooCode,
         ClientId::KiloCode,
+        ClientId::Kilo,
+        ClientId::Mux,
+        ClientId::Crush,
+        ClientId::Hermes,
+        ClientId::Codebuff,
     ];
 
     let data = loader.load(&all_clients, &tokscale_core::GroupBy::default(), false)?;
@@ -434,4 +385,53 @@ pub fn test_data_loading() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launches_with_24h_old_cache_renders_immediately() {
+        let (cached_data, needs_background_load) =
+            decide_initial_data(CacheResult::Stale(UsageData::default()));
+
+        assert!(cached_data.is_some());
+        assert!(needs_background_load);
+    }
+
+    #[test]
+    fn miss_renders_empty_until_background_completes() {
+        let (cached_data, needs_background_load) = decide_initial_data(CacheResult::Miss);
+
+        assert!(cached_data.is_none());
+        assert!(needs_background_load);
+    }
+
+    #[test]
+    fn background_loader_preserves_minutely_toggle() {
+        let enabled = background_data_loader(None, None, None, true);
+        assert!(enabled.minutely_enabled);
+
+        let disabled = background_data_loader(None, None, None, false);
+        assert!(!disabled.minutely_enabled);
+    }
+
+    #[test]
+    fn background_cache_scope_uses_date_filters() {
+        let scope = background_cache_scope(
+            &Some("2026-05-01".to_string()),
+            &Some("2026-05-07".to_string()),
+            &Some("2026".to_string()),
+        );
+
+        assert_eq!(
+            scope,
+            crate::tui::cache::CacheReportScope::new(
+                Some("2026-05-01".to_string()),
+                Some("2026-05-07".to_string()),
+                Some("2026".to_string()),
+            )
+        );
+    }
 }

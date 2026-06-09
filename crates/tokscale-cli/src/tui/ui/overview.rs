@@ -1,14 +1,15 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
-use super::widgets::{format_tokens, get_model_color};
-use crate::tui::app::App;
+use super::widgets::{format_tokens, viewport_scrollbar_state};
+use crate::tui::app::{App, ChartGranularity};
+use tokscale_core::GroupBy;
 
 struct ModelRowData {
     model: String,
+    provider: String,
+    workspace_label: Option<String>,
     tokens_input: u64,
     tokens_output: u64,
     tokens_cache_read: u64,
@@ -16,7 +17,38 @@ struct ModelRowData {
     cost: f64,
 }
 
+fn overview_model_label(group_by: &GroupBy, model: &str, workspace_label: Option<&str>) -> String {
+    if *group_by == GroupBy::WorkspaceModel {
+        format!(
+            "{} / {}",
+            workspace_label.unwrap_or("Unknown workspace"),
+            model
+        )
+    } else {
+        model.to_string()
+    }
+}
+
+fn overview_color_key<'a>(group_by: &GroupBy, model: &'a str) -> &'a str {
+    if *group_by == GroupBy::WorkspaceModel {
+        model
+            .rsplit_once(" / ")
+            .map(|(_, base_model)| base_model)
+            .unwrap_or(model)
+    } else {
+        model
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Pre-fill entire overview area with theme background so that chart and
+    // legend cells (which only set fg via direct buffer writes) don't fall
+    // through to the terminal's default background color.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(app.theme.background)),
+        area,
+    );
+
     let safe_height = area.height.max(12) as usize;
     let chart_height = (safe_height as f64 * 0.35).floor().max(5.0) as u16;
     let legend_height = 1u16;
@@ -32,7 +64,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let list_area_height = chunks[2].height.saturating_sub(2);
     let items_per_page = ((list_area_height / 2) as usize).max(1);
-    app.max_visible_items = items_per_page;
+    app.set_max_visible_items(items_per_page);
 
     render_chart(frame, app, chunks[0]);
     render_legend(frame, app, chunks[1]);
@@ -40,36 +72,71 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
-    let daily = &app.data.daily;
-    let mut sorted_daily: Vec<_> = daily.iter().collect();
-    sorted_daily.sort_by(|a, b| a.date.cmp(&b.date));
+    let group_by = app.group_by.borrow().clone();
 
-    let data: Vec<StackedBarData> = sorted_daily
-        .iter()
-        .rev()
-        .take(60)
-        .rev()
-        .map(|d| {
-            let date = d.date.format("%m/%d").to_string();
-            let total = d.tokens.total();
+    let data: Vec<StackedBarData> = match app.chart_granularity {
+        ChartGranularity::Daily => app
+            .data
+            .daily
+            .iter()
+            .take(60)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|d| {
+                let mut models_by_key = std::collections::BTreeMap::<String, ModelSegment>::new();
+                for source_info in d.source_breakdown.values() {
+                    for (key, info) in &source_info.models {
+                        let entry =
+                            models_by_key
+                                .entry(key.clone())
+                                .or_insert_with(|| ModelSegment {
+                                    model_id: info.display_name.clone(),
+                                    tokens: 0,
+                                    color: app.model_color_for(
+                                        &info.provider,
+                                        overview_color_key(&group_by, &info.color_key),
+                                    ),
+                                });
+                        entry.tokens = entry.tokens.saturating_add(info.tokens.total());
+                    }
+                }
+                let models: Vec<ModelSegment> = models_by_key.into_values().collect();
 
-            let models: Vec<ModelSegment> = d
-                .models
-                .iter()
-                .map(|(model_name, info)| ModelSegment {
-                    model_id: model_name.clone(),
-                    tokens: info.tokens.total(),
-                    color: get_model_color(model_name),
-                })
-                .collect();
+                StackedBarData {
+                    date: d.date.format("%m/%d").to_string(),
+                    models,
+                    total: d.tokens.total(),
+                }
+            })
+            .collect(),
+        ChartGranularity::Hourly => app
+            .data
+            .hourly
+            .iter()
+            .take(60)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|h| {
+                let models: Vec<ModelSegment> = h
+                    .models
+                    .values()
+                    .map(|info| ModelSegment {
+                        model_id: info.display_name.clone(),
+                        tokens: info.tokens.total(),
+                        color: app.model_color_for(&info.provider, &info.color_key),
+                    })
+                    .collect();
 
-            StackedBarData {
-                date,
-                models,
-                total,
-            }
-        })
-        .collect();
+                StackedBarData {
+                    date: h.datetime.format("%d %H:%M").to_string(),
+                    models,
+                    total: h.tokens.total(),
+                }
+            })
+            .collect(),
+    };
 
     render_stacked_bar_chart(frame, app, area, &data);
 }
@@ -78,12 +145,18 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
     let legend_limit = if app.is_narrow() { 3 } else { 5 };
     let max_name_width = if app.is_narrow() { 12 } else { 18 };
     let muted_color = app.theme.muted;
+    let group_by = app.group_by.borrow().clone();
 
     let top_models: Vec<(String, Color)> = app
         .get_sorted_models()
         .iter()
         .take(legend_limit)
-        .map(|m| (m.model.clone(), get_model_color(&m.model)))
+        .map(|m| {
+            (
+                overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
+                app.model_color_for(&m.provider, &m.model),
+            )
+        })
         .collect();
 
     if top_models.is_empty() {
@@ -117,18 +190,23 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
     let theme_muted = app.theme.muted;
     let theme_foreground = app.theme.foreground;
     let theme_selection = app.theme.selection;
+    let secondary_text_style = app.theme.secondary_text_style();
+    let subtle_text_style = app.theme.subtle_text_style();
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let is_narrow = app.is_narrow();
     let is_very_narrow = app.is_very_narrow();
     let sort_field = app.sort_field;
     let total_cost = app.data.total_cost;
+    let group_by = app.group_by.borrow().clone();
 
     let models_data: Vec<ModelRowData> = app
         .get_sorted_models()
         .iter()
         .map(|m| ModelRowData {
             model: m.model.clone(),
+            provider: m.provider.clone(),
+            workspace_label: m.workspace_label.clone(),
             tokens_input: m.tokens.input,
             tokens_output: m.tokens.output,
             tokens_cache_read: m.tokens.cache_read,
@@ -209,8 +287,10 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             Style::default()
         };
 
-        let model_color = get_model_color(&model.model);
-        let name = truncate_string(&model.model, max_name_width);
+        let model_color = app.model_color_for(&model.provider, &model.model);
+        let display_name =
+            overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
+        let name = truncate_string(&display_name, max_name_width);
         let percentage = if model.cost.is_finite() && total.is_finite() && total > 0.0 {
             (model.cost / total) * 100.0
         } else {
@@ -252,47 +332,29 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         let line2_spans = if is_narrow {
             vec![
                 Span::raw("  "),
-                Span::styled(
-                    format_tokens(model.tokens_input),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
-                ),
-                Span::styled("/", Style::default().fg(Color::Rgb(102, 102, 102))),
-                Span::styled(
-                    format_tokens(model.tokens_output),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
-                ),
-                Span::styled("/", Style::default().fg(Color::Rgb(102, 102, 102))),
-                Span::styled(
-                    format_tokens(model.tokens_cache_read),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
-                ),
-                Span::styled("/", Style::default().fg(Color::Rgb(102, 102, 102))),
+                Span::styled(format_tokens(model.tokens_input), secondary_text_style),
+                Span::styled("/", subtle_text_style),
+                Span::styled(format_tokens(model.tokens_output), secondary_text_style),
+                Span::styled("/", subtle_text_style),
+                Span::styled(format_tokens(model.tokens_cache_read), secondary_text_style),
+                Span::styled("/", subtle_text_style),
                 Span::styled(
                     format_tokens(model.tokens_cache_write),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
+                    secondary_text_style,
                 ),
             ]
         } else {
             vec![
-                Span::styled("  In: ", Style::default().fg(Color::Rgb(102, 102, 102))),
-                Span::styled(
-                    format_tokens(model.tokens_input),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
-                ),
-                Span::styled(" · Out: ", Style::default().fg(Color::Rgb(102, 102, 102))),
-                Span::styled(
-                    format_tokens(model.tokens_output),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
-                ),
-                Span::styled(" · CR: ", Style::default().fg(Color::Rgb(102, 102, 102))),
-                Span::styled(
-                    format_tokens(model.tokens_cache_read),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
-                ),
-                Span::styled(" · CW: ", Style::default().fg(Color::Rgb(102, 102, 102))),
+                Span::styled("  In: ", subtle_text_style),
+                Span::styled(format_tokens(model.tokens_input), secondary_text_style),
+                Span::styled(" · Out: ", subtle_text_style),
+                Span::styled(format_tokens(model.tokens_output), secondary_text_style),
+                Span::styled(" · CR: ", subtle_text_style),
+                Span::styled(format_tokens(model.tokens_cache_read), secondary_text_style),
+                Span::styled(" · CW: ", subtle_text_style),
                 Span::styled(
                     format_tokens(model.tokens_cache_write),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
+                    secondary_text_style,
                 ),
             ]
         };
@@ -311,7 +373,8 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             .track_symbol(Some("│"))
             .thumb_symbol("█");
 
-        let mut scrollbar_state = ScrollbarState::new(models_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(models_len, scroll_offset, items_per_page);
 
         frame.render_stateful_widget(
             scrollbar,

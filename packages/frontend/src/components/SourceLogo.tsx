@@ -1,8 +1,8 @@
 "use client";
 
 import styled from "styled-components";
-
-/* eslint-disable @next/next/no-img-element */
+import { SOURCE_LOGOS } from "@/lib/constants";
+import type { ClientType } from "@/lib/types";
 
 interface SourceLogoProps {
   sourceId: string;
@@ -22,46 +22,10 @@ const StyledImg = styled.img<{ $height: number }>`
 `;
 
 export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogoProps) {
-  const normalizedId = sourceId.toLowerCase();
-
-  const getLogoSrc = (id: string) => {
-    switch (id) {
-      case "opencode":
-        return "/assets/logos/opencode.png";
-      case "claude":
-        return "/assets/logos/claude.jpg";
-      case "codex":
-        return "/assets/logos/openai.jpg";
-      case "gemini":
-        return "/assets/logos/gemini.png";
-      case "cursor":
-        return "/assets/logos/cursor.jpg";
-      case "amp":
-        return "/assets/logos/amp.png";
-      case "droid":
-        return "/assets/logos/droid.png";
-      case "openclaw":
-        return "/assets/logos/openclaw.jpg";
-      case "pi":
-        return "/assets/logos/pi.png";
-      case "kimi":
-        return "/assets/logos/kimi.png";
-      case "qwen":
-        return "/assets/logos/qwen.png";
-      case "roocode":
-        return "/assets/logos/roocode.png";
-      case "kilocode":
-        return "/assets/logos/kilocode.png";
-      case "mux":
-        return "/assets/logos/mux.png";
-      case "synthetic":
-        return "/assets/logos/synthetic.png";
-      default:
-        return null;
-    }
-  };
-
-  const src = getLogoSrc(normalizedId);
+  const normalizedId = sourceId.toLowerCase() as ClientType;
+  const src = Object.prototype.hasOwnProperty.call(SOURCE_LOGOS, normalizedId)
+    ? SOURCE_LOGOS[normalizedId]
+    : null;
 
   if (!src) {
     return <span className={className}>{sourceId}</span>;

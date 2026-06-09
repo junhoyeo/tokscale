@@ -1,4 +1,4 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db, apiTokens, users } from "@/lib/db";
 import { generateApiToken, hashToken } from "@/lib/auth/utils";
 
@@ -28,7 +28,6 @@ export interface AuthenticatedPersonalToken {
   username: string;
   displayName: string | null;
   avatarUrl: string | null;
-  isAdmin: boolean;
   expiresAt: Date | null;
 }
 
@@ -43,6 +42,8 @@ export interface AuthenticatePersonalTokenOptions {
 
 const TOKEN_NAME_LOCK_NAMESPACE = "personal_token_names";
 
+type PersonalTokenDb = Pick<typeof db, "execute" | "insert" | "select">;
+
 function getUniqueTokenName(baseName: string, existingNames: Iterable<string>): string {
   const names = new Set(existingNames);
   let finalName = baseName;
@@ -56,6 +57,79 @@ function getUniqueTokenName(baseName: string, existingNames: Iterable<string>): 
   return finalName;
 }
 
+async function insertPersonalToken(
+  client: PersonalTokenDb,
+  {
+    userId,
+    name,
+    expiresAt,
+  }: {
+    userId: string;
+    name: string;
+    expiresAt: Date | null;
+  }
+): Promise<IssuedPersonalToken> {
+  const token = generateApiToken();
+  const tokenHashed = hashToken(token);
+  const [createdToken] = await client
+    .insert(apiTokens)
+    .values({
+      userId,
+      token: tokenHashed,
+      name,
+      expiresAt,
+    })
+    .returning({
+      id: apiTokens.id,
+      userId: apiTokens.userId,
+      name: apiTokens.name,
+      createdAt: apiTokens.createdAt,
+      lastUsedAt: apiTokens.lastUsedAt,
+      expiresAt: apiTokens.expiresAt,
+    });
+
+  return {
+    ...createdToken,
+    token,
+  };
+}
+
+export async function issuePersonalTokenInTransaction(
+  tx: PersonalTokenDb,
+  {
+    userId,
+    name,
+    expiresAt = null,
+    ensureUniqueName = false,
+  }: IssuePersonalTokenInput
+): Promise<IssuedPersonalToken> {
+  if (!ensureUniqueName) {
+    return insertPersonalToken(tx, { userId, name, expiresAt });
+  }
+
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtext(${TOKEN_NAME_LOCK_NAMESPACE}),
+      hashtext(${userId})
+    )
+  `);
+
+  const existingTokens = await tx
+    .select({
+      name: apiTokens.name,
+    })
+    .from(apiTokens)
+    .where(eq(apiTokens.userId, userId))
+    .orderBy(desc(apiTokens.createdAt));
+
+  const finalName = getUniqueTokenName(
+    name,
+    existingTokens.map((token) => token.name)
+  );
+
+  return insertPersonalToken(tx, { userId, name: finalName, expiresAt });
+}
+
 export async function issuePersonalToken({
   userId,
   name,
@@ -63,74 +137,21 @@ export async function issuePersonalToken({
   ensureUniqueName = false,
 }: IssuePersonalTokenInput): Promise<IssuedPersonalToken> {
   if (!ensureUniqueName) {
-    const token = generateApiToken();
-    const tokenHashed = hashToken(token);
-    const [createdToken] = await db
-      .insert(apiTokens)
-      .values({
-        userId,
-        token: tokenHashed,
-        name,
-        expiresAt,
-      })
-      .returning({
-        id: apiTokens.id,
-        userId: apiTokens.userId,
-        name: apiTokens.name,
-        createdAt: apiTokens.createdAt,
-        lastUsedAt: apiTokens.lastUsedAt,
-        expiresAt: apiTokens.expiresAt,
-      });
-
-    return {
-      ...createdToken,
-      token,
-    };
+    return issuePersonalTokenInTransaction(db, {
+      userId,
+      name,
+      expiresAt,
+      ensureUniqueName,
+    });
   }
 
   return db.transaction(async (tx) => {
-    await tx.execute(sql`
-      SELECT pg_advisory_xact_lock(
-        hashtext(${TOKEN_NAME_LOCK_NAMESPACE}),
-        hashtext(${userId})
-      )
-    `);
-
-    const existingTokens = await tx
-      .select({
-        name: apiTokens.name,
-      })
-      .from(apiTokens)
-      .where(eq(apiTokens.userId, userId))
-      .orderBy(desc(apiTokens.createdAt));
-
-    const finalName = getUniqueTokenName(
+    return issuePersonalTokenInTransaction(tx, {
+      userId,
       name,
-      existingTokens.map((token) => token.name)
-    );
-    const token = generateApiToken();
-    const tokenHashed = hashToken(token);
-    const [createdToken] = await tx
-      .insert(apiTokens)
-      .values({
-        userId,
-        token: tokenHashed,
-        name: finalName,
-        expiresAt,
-      })
-      .returning({
-        id: apiTokens.id,
-        userId: apiTokens.userId,
-        name: apiTokens.name,
-        createdAt: apiTokens.createdAt,
-        lastUsedAt: apiTokens.lastUsedAt,
-        expiresAt: apiTokens.expiresAt,
-      });
-
-    return {
-      ...createdToken,
-      token,
-    };
+      expiresAt,
+      ensureUniqueName,
+    });
   });
 }
 
@@ -171,20 +192,22 @@ export async function authenticatePersonalToken(
 
   const tokenHashed = hashToken(token);
 
+  // All rows are SHA-256 hashed at rest. Migration
+  // 0006_rehash_plaintext_personal_tokens.sql rehashed any pre-#512
+  // plaintext rows in place; the prior transitional OR-clause that also
+  // matched the raw token value has been removed.
   const result = await db
     .select({
       tokenId: apiTokens.id,
-      tokenValue: apiTokens.token,
       userId: apiTokens.userId,
       username: users.username,
       displayName: users.displayName,
       avatarUrl: users.avatarUrl,
-      isAdmin: users.isAdmin,
       expiresAt: apiTokens.expiresAt,
     })
     .from(apiTokens)
     .innerJoin(users, eq(apiTokens.userId, users.id))
-    .where(or(eq(apiTokens.token, tokenHashed), eq(apiTokens.token, token)))
+    .where(eq(apiTokens.token, tokenHashed))
     .limit(1);
 
   if (result.length === 0) {
@@ -192,23 +215,15 @@ export async function authenticatePersonalToken(
   }
 
   const record = result[0];
-  const isLegacyPlaintext = record.tokenValue === token;
 
   if (record.expiresAt && record.expiresAt <= new Date()) {
     return { status: "expired" };
   }
 
-  const updates: Record<string, unknown> = {};
   if (options.touchLastUsedAt !== false) {
-    updates.lastUsedAt = new Date();
-  }
-  if (isLegacyPlaintext) {
-    updates.token = tokenHashed;
-  }
-  if (Object.keys(updates).length > 0) {
     await db
       .update(apiTokens)
-      .set(updates)
+      .set({ lastUsedAt: new Date() })
       .where(eq(apiTokens.id, record.tokenId));
   }
 
@@ -219,7 +234,6 @@ export async function authenticatePersonalToken(
     username: record.username,
     displayName: record.displayName,
     avatarUrl: record.avatarUrl,
-    isAdmin: record.isAdmin,
     expiresAt: record.expiresAt,
   };
 }

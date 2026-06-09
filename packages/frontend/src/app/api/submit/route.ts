@@ -1,24 +1,28 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
-import { db, apiTokens, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { db, apiTokens, submissions, submittedDevices, dailyBreakdown } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
-  mergeClientBreakdowns,
-  recalculateClientAggregate,
+  mergeClientBreakdownsWithRegressionGuard,
   recalculateDayTotals,
-  buildModelBreakdown,
   clientContributionToBreakdownData,
+  deriveClientBreakdownProvenance,
   mergeTimestampMs,
   type ClientBreakdownData,
 } from "@/lib/db/helpers";
+import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
+import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
+import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 
-type DailySourceBreakdown = NonNullable<typeof dailyBreakdown.$inferInsert.sourceBreakdown>;
+const LEGACY_SUBMIT_DEVICE_KEY = LEGACY_DEVICE_KEY;
+const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
 
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -48,6 +52,37 @@ function normalizeSubmissionData(data: unknown): void {
   }
 }
 
+// Submission schema versions:
+//   0 = legacy CLI: no per-day timestamps, no device metadata.
+//   1 = timestamp-aware CLI (>=v2.1): per-day `timestampMs` set, still no device.
+//   2 = device-aware CLI (>=v2.1.x post-#517): caller sends a `device` object,
+//       so daily_breakdown rows are keyed by submittedDeviceId.
+// The submissions row keeps the GREATEST() of stored vs. incoming so a single
+// device-aware submit cannot regress an account back to v1 hash semantics.
+function getSubmitDevice(data: SubmissionData): { key: string; name: string | null; schemaVersion: number } {
+  if (data.device) {
+    return {
+      key: data.device.id,
+      name: data.device.name ?? null,
+      schemaVersion: 2,
+    };
+  }
+
+  return {
+    key: LEGACY_SUBMIT_DEVICE_KEY,
+    name: LEGACY_SUBMIT_DEVICE_NAME,
+    schemaVersion: data.contributions.some((c) => c.timestampMs != null) ? 1 : 0,
+  };
+}
+
+function isUniqueConstraintViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const maybeError = error as { code?: unknown; cause?: unknown };
+  if (maybeError.code === "23505") return true;
+  const cause = maybeError.cause;
+  return Boolean(cause && typeof cause === "object" && (cause as { code?: unknown }).code === "23505");
+}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -64,20 +99,17 @@ function normalizeSubmissionData(data: unknown): void {
  */
 export async function POST(request: Request) {
   try {
-    const deviceId = request.headers.get("X-Device-Id") || "__legacy__";
-
     // ========================================
     // STEP 1: Authentication
     // ========================================
-    const authHeader = request.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
+    const token = getBearerToken(request.headers.get("Authorization"));
+    if (!token) {
       return NextResponse.json(
         { error: "Missing or invalid Authorization header" },
         { status: 401 }
       );
     }
 
-    const token = authHeader.slice(7);
     const authResult = await authenticatePersonalToken(token, {
       touchLastUsedAt: false,
     });
@@ -104,6 +136,14 @@ export async function POST(request: Request) {
 
     normalizeSubmissionData(rawData);
 
+    const mcpServers: string[] | null =
+      rawData != null && typeof rawData === "object" &&
+      Array.isArray((rawData as Record<string, unknown>).mcpServers)
+        ? ((rawData as Record<string, unknown>).mcpServers as unknown[]).filter(
+            (s): s is string => typeof s === "string" && s.length > 0
+          )
+        : null;
+
     const validation = validateSubmission(rawData);
 
     if (!validation.valid || !validation.data) {
@@ -114,6 +154,7 @@ export async function POST(request: Request) {
     }
 
     const data = validation.data;
+    const warnings = [...validation.warnings];
 
     if (data.contributions.length === 0) {
       return NextResponse.json(
@@ -127,6 +168,9 @@ export async function POST(request: Request) {
       for (const client_contrib of contribution.clients) {
         submittedClients.add(client_contrib.client);
       }
+    }
+    if (submittedClients.has("kilo")) {
+      submittedClients.add("kilocode" as SubmissionData["summary"]["clients"][number]);
     }
     const hashData: SubmissionData = {
       ...data,
@@ -161,43 +205,159 @@ export async function POST(request: Request) {
       if (existingSubmission) {
         submissionId = existingSubmission.id;
       } else {
-        isNewSubmission = true;
-        const [newSubmission] = await tx
-          .insert(submissions)
-          .values({
-            userId: tokenRecord.userId,
-            totalTokens: 0,
-            totalCost: "0",
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheCreationTokens: 0,
-            cacheReadTokens: 0,
-            dateStart: data.meta.dateRange.start,
-            dateEnd: data.meta.dateRange.end,
-            sourcesUsed: [],
-            modelsUsed: [],
-            status: "verified",
-            cliVersion: data.meta.version,
-            submissionHash: generateSubmissionHash(hashData),
-          })
-          .returning({ id: submissions.id });
+        try {
+          const [newSubmission] = await tx.transaction(async (sp) =>
+            sp
+              .insert(submissions)
+              .values({
+                userId: tokenRecord.userId,
+                totalTokens: 0,
+                totalCost: "0",
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheCreationTokens: 0,
+                cacheReadTokens: 0,
+                dateStart: data.meta.dateRange.start,
+                dateEnd: data.meta.dateRange.end,
+                sourcesUsed: [],
+                modelsUsed: [],
+                cliVersion: data.meta.version,
+                submissionHash: generateSubmissionHash(hashData),
+              })
+              .returning({ id: submissions.id })
+          );
 
-        submissionId = newSubmission.id;
+          submissionId = newSubmission.id;
+          isNewSubmission = true;
+        } catch (creationErr) {
+          if (!isUniqueConstraintViolation(creationErr)) {
+            throw creationErr;
+          }
+
+          const [racedSubmission] = await tx
+            .select({ id: submissions.id })
+            .from(submissions)
+            .where(eq(submissions.userId, tokenRecord.userId))
+            .for('update')
+            .limit(1);
+
+          if (!racedSubmission) {
+            throw creationErr;
+          }
+
+          submissionId = racedSubmission.id;
+        }
       }
+
+      const submitDevice = getSubmitDevice(data);
+      const submittedAt = new Date();
+      const [submittedDevice] = await tx
+        .insert(submittedDevices)
+        .values({
+          userId: tokenRecord.userId,
+          deviceKey: submitDevice.key,
+          displayName: submitDevice.name,
+          lastSubmittedAt: submittedAt,
+          updatedAt: submittedAt,
+        })
+        .onConflictDoUpdate({
+          target: [submittedDevices.userId, submittedDevices.deviceKey],
+          set: {
+            displayName: sql`COALESCE(EXCLUDED.display_name, ${submittedDevices.displayName})`,
+            lastSubmittedAt: submittedAt,
+            updatedAt: submittedAt,
+          },
+        })
+        .returning({ id: submittedDevices.id });
 
       // ------------------------------------------
       // STEP 3b: Fetch existing daily breakdown for merge
       // ------------------------------------------
-      const existingDays = await tx
-        .select({
-          id: dailyBreakdown.id,
-          date: dailyBreakdown.date,
-          timestampMs: dailyBreakdown.timestampMs,
-          sourceBreakdown: dailyBreakdown.sourceBreakdown,
-        })
-        .from(dailyBreakdown)
-        .where(eq(dailyBreakdown.submissionId, submissionId))
-        .for('update');
+      const fetchExistingDeviceDays = () =>
+        tx
+          .select({
+            id: dailyBreakdown.id,
+            date: dailyBreakdown.date,
+            timestampMs: dailyBreakdown.timestampMs,
+            activeTimeMs: dailyBreakdown.activeTimeMs,
+            sourceBreakdown: dailyBreakdown.sourceBreakdown,
+          })
+          .from(dailyBreakdown)
+          .where(
+            and(
+              eq(dailyBreakdown.submissionId, submissionId),
+              eq(dailyBreakdown.submittedDeviceId, submittedDevice.id)
+            )
+          )
+          .for('update');
+
+      let existingDays = await fetchExistingDeviceDays();
+
+      if (
+        existingDays.length === 0 &&
+        !isNewSubmission &&
+        submitDevice.key !== LEGACY_SUBMIT_DEVICE_KEY
+      ) {
+        // The first device-aware submit after the migration should continue
+        // the user's legacy bucket instead of counting the same history twice.
+        // Once any modern device rows exist, attribution is ambiguous, so the
+        // legacy bucket stays separate.
+        //
+        // Race note: two concurrent submits from the same user can both reach
+        // this branch before either has committed. The second UPDATE will try
+        // to re-stamp submitted_device_id on rows the first already claimed,
+        // which can violate the (submission_id, submitted_device_id, date)
+        // unique constraint. The ON CONFLICT DO NOTHING below makes the UPDATE
+        // skip conflicting rows rather than throw, and the outer try/catch falls
+        // through to the normal insert path if a unique violation still escapes
+        // (e.g. via a concurrent INSERT racing the UPDATE window).
+        try {
+          // Wrap the UPDATE in a savepoint so a unique-constraint violation
+          // from a concurrent submit does not poison the enclosing
+          // transaction. Drizzle's nested transaction maps to a Postgres
+          // SAVEPOINT; throwing inside the inner block rolls back to the
+          // savepoint and leaves the outer tx in a usable state.
+          await tx.transaction(async (sp) => {
+            await sp.execute(sql`
+              UPDATE daily_breakdown AS db
+              SET submitted_device_id = ${submittedDevice.id}
+              WHERE db.submission_id = ${submissionId}
+                AND db.submitted_device_id IN (
+                  SELECT sd.id
+                  FROM submitted_devices AS sd
+                  WHERE sd.user_id = ${tokenRecord.userId}
+                    AND sd.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM daily_breakdown AS modern
+                  WHERE modern.submission_id = db.submission_id
+                    AND modern.submitted_device_id NOT IN (
+                      SELECT sd2.id
+                      FROM submitted_devices AS sd2
+                      WHERE sd2.user_id = ${tokenRecord.userId}
+                        AND sd2.device_key = ${LEGACY_SUBMIT_DEVICE_KEY}
+                    )
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM daily_breakdown AS dup
+                  WHERE dup.submission_id = db.submission_id
+                    AND dup.submitted_device_id = ${submittedDevice.id}
+                    AND dup.date = db.date
+                )
+            `);
+          });
+        } catch (adoptionErr) {
+          // Unique constraint hit from a concurrent submit racing this UPDATE.
+          // Savepoint rolled back; outer tx is still usable.
+          // fetchExistingDeviceDays() below will pick up rows already claimed
+          // by the other request, and subsequent logic will merge rather than
+          // re-adopt.
+          console.warn("Legacy adoption conflict (concurrent submit), falling through:", adoptionErr);
+        }
+        existingDays = await fetchExistingDeviceDays();
+      }
 
       const existingDaysMap = new Map(
         existingDays.map((d) => [d.date, d])
@@ -208,14 +368,15 @@ export async function POST(request: Request) {
       // ------------------------------------------
       const toInsert: Array<{
         submissionId: string;
+        submittedDeviceId: string;
         date: string;
         tokens: number;
         cost: string;
         inputTokens: number;
         outputTokens: number;
         timestampMs: number | null;
-        sourceBreakdown: DailySourceBreakdown;
-        modelBreakdown: Record<string, number>;
+        activeTimeMs: number | null;
+        sourceBreakdown: Record<string, ClientBreakdownData>;
       }> = [];
 
       const toUpdate: Array<{
@@ -225,8 +386,8 @@ export async function POST(request: Request) {
         inputTokens: number;
         outputTokens: number;
         timestampMs: number | null;
-        sourceBreakdown: DailySourceBreakdown;
-        modelBreakdown: Record<string, number>;
+        activeTimeMs: number | null;
+        sourceBreakdown: Record<string, ClientBreakdownData>;
       }> = [];
 
       for (const incomingDay of data.contributions) {
@@ -256,10 +417,15 @@ export async function POST(request: Request) {
             } else {
               existing.models[client_contrib.modelId] = modelData;
             }
+            existing.provenance = deriveClientBreakdownProvenance(existing);
           } else {
-            incomingClientBreakdown[client_contrib.client] = {
+            const clientBreakdown = {
               ...modelData,
               models: { [client_contrib.modelId]: modelData },
+            };
+            incomingClientBreakdown[client_contrib.client] = {
+              ...clientBreakdown,
+              provenance: deriveClientBreakdownProvenance(clientBreakdown),
             };
           }
         }
@@ -267,15 +433,20 @@ export async function POST(request: Request) {
         const existingDay = existingDaysMap.get(incomingDay.date);
 
         if (existingDay) {
-           const existingClientBreakdown = (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>;
-          const mergedClientBreakdown: DailySourceBreakdown = mergeClientBreakdowns(
+          const existingClientBreakdown = (existingDay.sourceBreakdown || {}) as Record<
+            string,
+            ClientBreakdownData
+          >;
+          const mergeResult = mergeClientBreakdownsWithRegressionGuard(
             existingClientBreakdown,
             incomingClientBreakdown,
-            submittedClients,
-            deviceId
-          ) as unknown as DailySourceBreakdown;
+            submittedClients
+          );
+          warnings.push(
+            ...mergeResult.warnings.map((warning) => `Day ${incomingDay.date}: ${warning}`)
+          );
+          const mergedClientBreakdown = mergeResult.merged;
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);
 
           toUpdate.push({
             id: existingDay.id,
@@ -284,40 +455,37 @@ export async function POST(request: Request) {
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestampMs ?? null),
+            activeTimeMs: incomingDay.activeTimeMs ?? existingDay.activeTimeMs ?? null,
             sourceBreakdown: mergedClientBreakdown,
-            modelBreakdown,
           });
         } else {
-          const sourceBreakdown = recalculateClientAggregate({
-            [deviceId]: incomingClientBreakdown,
-          }) as DailySourceBreakdown;
-          const dayTotals = recalculateDayTotals(sourceBreakdown);
-          const modelBreakdown = buildModelBreakdown(sourceBreakdown);
+          const dayTotals = recalculateDayTotals(incomingClientBreakdown);
 
           toInsert.push({
             submissionId,
+            submittedDeviceId: submittedDevice.id,
             date: incomingDay.date,
             tokens: dayTotals.tokens,
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
             outputTokens: dayTotals.outputTokens,
             timestampMs: incomingDay.timestampMs ?? null,
-            sourceBreakdown,
-            modelBreakdown,
+            activeTimeMs: incomingDay.activeTimeMs ?? null,
+            sourceBreakdown: incomingClientBreakdown,
           });
         }
       }
 
       // Batch INSERT new days
       if (toInsert.length > 0) {
-        await tx.insert(dailyBreakdown).values(toInsert as Array<typeof dailyBreakdown.$inferInsert>);
+        await tx.insert(dailyBreakdown).values(toInsert);
       }
 
       // Batch UPDATE existing days via raw SQL VALUES list
       if (toUpdate.length > 0) {
         const valuesClauses = toUpdate.map(
           (row) =>
-            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb, ${JSON.stringify(row.modelBreakdown)}::jsonb)`
+            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
         );
 
         const valuesList = sql.join(valuesClauses, sql`, `);
@@ -329,10 +497,10 @@ export async function POST(request: Request) {
             input_tokens = batch.input_tokens,
             output_tokens = batch.output_tokens,
             timestamp_ms = batch.timestamp_ms,
-            source_breakdown = batch.source_breakdown,
-            model_breakdown = batch.model_breakdown
+            active_time_ms = batch.active_time_ms,
+            source_breakdown = batch.source_breakdown
           FROM (VALUES ${valuesList})
-            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, source_breakdown, model_breakdown)
+            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown)
           WHERE d.id = batch.id
         `);
       }
@@ -348,7 +516,8 @@ export async function POST(request: Request) {
           outputTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)::bigint`,
           dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
           dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
-          activeDays: sql<number>`COUNT(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN 1 END)::int`,
+          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
+          totalActiveTimeMs: sql<number>`COALESCE(SUM(${dailyBreakdown.activeTimeMs}), 0)::bigint`,
           rowCount: sql<number>`COUNT(*)::int`,
         })
         .from(dailyBreakdown)
@@ -369,9 +538,8 @@ export async function POST(request: Request) {
 
       for (const day of allDays) {
         if (day.sourceBreakdown) {
-          for (const [clientName, clientData] of Object.entries(day.sourceBreakdown)) {
-            if (clientName === "devices") continue;
-            if (!clientData || typeof clientData !== "object") continue;
+          for (const [rawClientName, clientData] of Object.entries(day.sourceBreakdown)) {
+            const clientName = rawClientName === "kilocode" ? "kilo" : rawClientName;
             allClients.add(clientName);
             const cd = clientData as ClientBreakdownData;
             if (cd.models) {
@@ -408,7 +576,15 @@ export async function POST(request: Request) {
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
-          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${data.contributions.some((c) => c.timestampMs != null) ? 1 : 0})`,
+          schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
+          totalActiveTimeMs: aggregates.totalActiveTimeMs,
+          // Session-shape metrics cannot be safely recomputed from daily active-time buckets.
+          ...(data.timeMetrics ? {
+            longestContinuousMs: data.timeMetrics.longestContinuousMs,
+            maxConcurrentSessions: data.timeMetrics.maxConcurrentSessions,
+            sessionCount: data.timeMetrics.sessionCount,
+          } : {}),
+          mcpServers: mcpServers && mcpServers.length > 0 ? mcpServers : null,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
@@ -429,13 +605,26 @@ export async function POST(request: Request) {
       };
     });
 
+    const usernameCacheKey = normalizeUsernameCacheKey(tokenRecord.username);
     try {
       revalidateTag("leaderboard", "max");
-      revalidateTag(`user:${tokenRecord.username}`, "max");
+      revalidateTag(`user:${usernameCacheKey}`, "max");
       revalidateTag("user-rank", "max");
-      revalidateTag(`user-rank:${tokenRecord.username}`, "max");
+      revalidateTag(`user-rank:${usernameCacheKey}`, "max");
     } catch (e) {
-      console.error("Cache invalidation failed:", e);
+      console.error("Public cache invalidation failed:", e);
+    }
+
+    try {
+      await revalidateUserGroupLeaderboards(tokenRecord.userId);
+    } catch (e) {
+      console.error("Group leaderboard cache invalidation failed:", e);
+    }
+
+    try {
+      revalidateUsernamePaths(tokenRecord.username);
+    } catch (e) {
+      console.error("Username path revalidation failed:", e);
     }
 
     return NextResponse.json({
@@ -444,7 +633,7 @@ export async function POST(request: Request) {
       username: tokenRecord.username,
       metrics: result.metrics,
       mode: result.isNewSubmission ? "create" : "merge",
-      warnings: validation.warnings.length > 0 ? validation.warnings : undefined,
+      warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (error) {
     console.error("Submit error:", error);

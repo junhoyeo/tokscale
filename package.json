@@ -13,7 +13,8 @@
     "build:core": "cargo build --release -p tokscale-cli",
     "cli": "./scripts/cli.sh",
     "dev:frontend": "bun run --cwd packages/frontend dev",
-    "dev:benchmarks": "bun run --cwd packages/benchmarks run"
+    "dev:benchmarks": "bun run --cwd packages/benchmarks run",
+    "test:launchers": "bash scripts/test-package-launchers.sh"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",

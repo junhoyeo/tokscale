@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -143,22 +143,30 @@ searchPaths.push(
   join(cliDir, "bin", binaryName),
 );
 
-let binary = searchPaths.find((p) => existsSync(p));
-
-if (!binary) {
+function tryRealpath(p: string): string {
   try {
-    const whichCmd = process.platform === "win32" ? "where" : "which";
-    const found = execSync(`${whichCmd} ${binaryName}`, {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-      .trim()
-      .split("\n")[0];
-    if (found && existsSync(found)) {
-      binary = found;
-    }
-  } catch {}
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
 }
+
+// Paths that would re-enter this wrapper if executed - using any of these as
+// the "real" binary causes infinite recursion (a fork bomb). We compare by
+// realpath so symlinks (e.g. npm/bun bin shims) are dereferenced.
+const selfPaths = new Set<string>([
+  tryRealpath(fileURLToPath(import.meta.url)),
+  tryRealpath(join(cliDir, "bin.js")),
+]);
+if (process.argv[1]) {
+  selfPaths.add(tryRealpath(process.argv[1]));
+}
+
+function isSelfReference(p: string): boolean {
+  return selfPaths.has(tryRealpath(p));
+}
+
+let binary = searchPaths.find((p) => existsSync(p) && !isSelfReference(p));
 
 if (!binary) {
   console.error("Error: tokscale binary not found");

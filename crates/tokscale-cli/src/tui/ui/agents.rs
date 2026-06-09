@@ -1,11 +1,13 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
-use tokscale_core::ClientId;
 
-use super::widgets::{format_cost, format_tokens, get_client_display_name};
+use super::widgets::{
+    format_cost, format_tokens, get_client_display_name, viewport_scrollbar_state,
+};
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::ClientFilter;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -23,7 +25,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
-    app.max_visible_items = visible_height;
+    app.set_max_visible_items(visible_height);
 
     let is_narrow = app.is_narrow();
     let is_very_narrow = app.is_very_narrow();
@@ -34,6 +36,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
+    let striped_row_style = app.theme.striped_row_style();
 
     let agents = app.get_sorted_agents();
     if agents.is_empty() {
@@ -136,7 +139,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
             } else if is_striped {
-                Style::default().bg(Color::Rgb(20, 24, 30))
+                striped_row_style
             } else {
                 Style::default()
             };
@@ -175,7 +178,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(agents_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(agents_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -193,7 +197,7 @@ fn get_empty_message(app: &App) -> String {
     let only_codex = !enabled_clients.is_empty()
         && enabled_clients
             .iter()
-            .all(|client| *client == ClientId::Codex);
+            .all(|client| *client == ClientFilter::Codex);
 
     if only_codex {
         "No agent breakdown is available for the current sources.\nThe selected source usually does not record agent metadata for regular sessions.\nPress 's' to try a different source."
@@ -232,9 +236,9 @@ mod tests {
     use super::get_empty_message;
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
-    use tokscale_core::ClientId;
+    use crate::ClientFilter;
 
-    fn make_app(clients: Vec<ClientId>) -> App {
+    fn make_app(clients: Vec<ClientFilter>) -> App {
         let app = App::new_with_cached_data(
             TuiConfig {
                 theme: "tokscale".to_string(),
@@ -256,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_get_empty_message_for_codex_only() {
-        let app = make_app(vec![ClientId::Codex]);
+        let app = make_app(vec![ClientFilter::Codex]);
         let message = get_empty_message(&app);
 
         assert!(message.contains("selected source usually does not record"));
@@ -265,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_get_empty_message_for_mixed_sources() {
-        let app = make_app(vec![ClientId::OpenCode, ClientId::RooCode]);
+        let app = make_app(vec![ClientFilter::Opencode, ClientFilter::Roocode]);
         let message = get_empty_message(&app);
 
         assert!(message.contains("Only some sources record agent metadata"));
