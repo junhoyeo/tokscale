@@ -75,6 +75,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
           updatedAt: submissions.updatedAt,
           cliVersion: submissions.cliVersion,
           schemaVersion: submissions.schemaVersion,
+          mcpServers: submissions.mcpServers,
         })
         .from(submissions)
         .where(eq(submissions.userId, user.id))
@@ -459,6 +460,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       }),
       clients: latestSubmission?.sourcesUsed || [],
       models: latestSubmission?.modelsUsed || [],
+      mcpServers: latestSubmission?.mcpServers || [],
       modelUsage,
       contributions: graphContributions,
     });

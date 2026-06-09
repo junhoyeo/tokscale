@@ -458,7 +458,7 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
           <LastUpdatedText
             style={{ color: "var(--color-fg-muted)" }}
           >
-            Last Updated: {new Date(lastUpdated).toLocaleString()}
+            Last Updated: {new Date(lastUpdated).toLocaleString("en-US", { timeZone: "UTC" })}
           </LastUpdatedText>
         )}
 
@@ -1155,6 +1155,7 @@ export interface ProfileActivityProps {
   data: TokenContributionData;
   totalActiveTimeMs?: number | null;
   sessionCount?: number | null;
+  mcpServers?: string[];
 }
 
 const ActivityContainer = styled.div`
@@ -1180,11 +1181,11 @@ const ActivityInner = styled.div`
   }
 `;
 
-export function ProfileActivity({ data, totalActiveTimeMs, sessionCount }: ProfileActivityProps) {
+export function ProfileActivity({ data, totalActiveTimeMs, sessionCount, mcpServers }: ProfileActivityProps) {
   return (
     <ActivityContainer>
       <ActivityInner>
-        <GraphContainer data={data} totalActiveTimeMs={totalActiveTimeMs} sessionCount={sessionCount} />
+        <GraphContainer data={data} totalActiveTimeMs={totalActiveTimeMs} sessionCount={sessionCount} mcpServers={mcpServers} />
       </ActivityInner>
     </ActivityContainer>
   );

@@ -65,6 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Check release workflow safety
+        run: python3 scripts/check-release-workflow-safety.py
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

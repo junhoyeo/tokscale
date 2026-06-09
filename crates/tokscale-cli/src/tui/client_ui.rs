@@ -107,8 +107,16 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         hotkey: 'v',
     },
     ClientUi {
-        display_name: "Grok Build",
+        display_name: "Cline",
+        hotkey: 'n',
+    },
+    ClientUi {
+        display_name: "Gajae-Code",
         hotkey: 'g',
+    },
+    ClientUi {
+        display_name: "Grok Build",
+        hotkey: 'u',
     },
 ];
 

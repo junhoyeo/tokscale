@@ -161,6 +161,31 @@ pub enum ClickAction {
     Tab(Tab),
     Sort(SortField),
     GraphCell { week: usize, day: usize },
+    UsageRefresh,
+    CodexStartLogin,
+    CodexDismissLogin,
+    CodexUseAccount { account_id: String },
+    CodexRemoveAccount { account_id: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum CodexLoginOutcome {
+    Imported(crate::commands::usage::codex::CodexAccountInfo),
+    Failed(String),
+}
+
+#[cfg(test)]
+type UsageFetcher = fn() -> Vec<crate::commands::usage::UsageOutput>;
+
+#[cfg(test)]
+fn test_usage_fetcher() -> Vec<crate::commands::usage::UsageOutput> {
+    Vec::new()
+}
+
+#[derive(Debug, Clone)]
+enum CodexLoginEvent {
+    Output(String),
+    Finished(CodexLoginOutcome),
 }
 
 struct MinutelySortCache {
@@ -229,9 +254,15 @@ pub struct App {
     pub model_shade_map: HashMap<String, Color>,
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
+    pub pending_codex_remove_account_id: Option<String>,
+    pub codex_login_lines: Vec<String>,
+    pub codex_login_outcome: Option<CodexLoginOutcome>,
 
     pub usage_fetch_attempted: bool,
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+    #[cfg(test)]
+    usage_fetcher: UsageFetcher,
+    codex_login_rx: Option<std::sync::mpsc::Receiver<CodexLoginEvent>>,
 
     data_version: u64,
     minutely_sort_cache: RefCell<Option<MinutelySortCache>>,
@@ -344,8 +375,14 @@ impl App {
                     Vec::new()
                 }
             },
+            pending_codex_remove_account_id: None,
+            codex_login_lines: Vec::new(),
+            codex_login_outcome: None,
             usage_fetch_attempted: false,
             usage_rx: None,
+            #[cfg(test)]
+            usage_fetcher: test_usage_fetcher,
+            codex_login_rx: None,
             data_version: 0,
             minutely_sort_cache: RefCell::new(None),
         };
@@ -467,6 +504,73 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
+
+        self.poll_codex_login();
+    }
+
+    fn poll_codex_login(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(rx) = &self.codex_login_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut finished = false;
+        for event in events {
+            match event {
+                CodexLoginEvent::Output(line) => {
+                    self.codex_login_lines.push(line);
+                    const MAX_LOGIN_LINES: usize = 12;
+                    if self.codex_login_lines.len() > MAX_LOGIN_LINES {
+                        let drain_count = self.codex_login_lines.len() - MAX_LOGIN_LINES;
+                        self.codex_login_lines.drain(0..drain_count);
+                    }
+                }
+                CodexLoginEvent::Finished(outcome) => {
+                    finished = true;
+                    match &outcome {
+                        CodexLoginOutcome::Imported(info) => {
+                            let display = info.label.as_deref().unwrap_or(&info.id);
+                            self.set_status(&format!("Imported Codex account: {display}"));
+                        }
+                        CodexLoginOutcome::Failed(error) => {
+                            self.set_status(&format!("Codex login failed: {error}"));
+                        }
+                    }
+                    self.codex_login_outcome = Some(outcome);
+                }
+            }
+        }
+
+        if disconnected && !finished && self.codex_login_outcome.is_none() {
+            self.codex_login_outcome = Some(CodexLoginOutcome::Failed(
+                "login worker stopped".to_string(),
+            ));
+            self.set_status("Codex login failed: login worker stopped");
+            finished = true;
+        }
+
+        if finished {
+            self.codex_login_rx = None;
+            if matches!(
+                self.codex_login_outcome,
+                Some(CodexLoginOutcome::Imported(_))
+            ) {
+                self.codex_login_lines.clear();
+                self.codex_login_outcome = None;
+                self.refresh_usage();
+            }
+        }
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
@@ -539,12 +643,7 @@ impl App {
                 self.cycle_theme();
             }
             KeyCode::Char('r') => {
-                if self.background_loading {
-                    self.set_status("Refresh already in progress");
-                } else {
-                    self.needs_reload = true;
-                    self.fetch_subscription_usage();
-                }
+                self.refresh_usage();
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.toggle_auto_refresh();
@@ -614,14 +713,161 @@ impl App {
         self.status_message_time = Some(std::time::Instant::now());
         let (tx, rx) = std::sync::mpsc::channel();
         self.usage_rx = Some(rx);
+        #[cfg(test)]
+        let usage_fetcher = self.usage_fetcher;
         std::thread::spawn(move || {
+            #[cfg(test)]
+            let results = usage_fetcher();
+            #[cfg(not(test))]
             let results = crate::commands::usage::fetch_all();
             let _ = tx.send(results);
         });
     }
 
+    pub fn refresh_usage(&mut self) {
+        if self.usage_rx.is_some() {
+            self.set_status("Refresh already in progress");
+        } else {
+            if !self.background_loading {
+                self.needs_reload = true;
+            }
+            self.fetch_subscription_usage();
+        }
+    }
+
     pub fn is_fetching_usage(&self) -> bool {
         self.usage_rx.is_some()
+    }
+
+    fn handle_click_action(&mut self, action: ClickAction) {
+        match action {
+            ClickAction::Tab(tab) => {
+                self.switch_tab(tab);
+                self.reset_selection();
+            }
+            ClickAction::Sort(field) => {
+                self.set_sort(field);
+            }
+            ClickAction::GraphCell { week, day } => {
+                self.selected_graph_cell = Some((week, day));
+                self.stats_breakdown_total_lines = 0;
+                self.selected_index = 0;
+                self.scroll_offset = 0;
+            }
+            ClickAction::UsageRefresh => {
+                self.refresh_usage();
+            }
+            ClickAction::CodexStartLogin => {
+                self.start_codex_login();
+            }
+            ClickAction::CodexDismissLogin => {
+                self.dismiss_codex_login();
+            }
+            ClickAction::CodexUseAccount { account_id } => {
+                self.use_codex_account(&account_id);
+            }
+            ClickAction::CodexRemoveAccount { account_id } => {
+                self.remove_codex_account(&account_id);
+            }
+        }
+    }
+
+    pub fn is_codex_login_running(&self) -> bool {
+        self.codex_login_rx.is_some()
+    }
+
+    pub fn should_show_codex_login_panel(&self) -> bool {
+        self.is_codex_login_running()
+            || self.codex_login_outcome.is_some()
+            || !self.codex_login_lines.is_empty()
+    }
+
+    fn start_codex_login(&mut self) {
+        if self.codex_login_rx.is_some() {
+            self.set_status("Codex login already in progress");
+            return;
+        }
+
+        self.pending_codex_remove_account_id = None;
+        self.codex_login_lines.clear();
+        self.codex_login_outcome = None;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.codex_login_rx = Some(rx);
+        self.set_status("Starting Codex login...");
+        std::thread::spawn(move || run_codex_login_worker(tx));
+    }
+
+    fn dismiss_codex_login(&mut self) {
+        if self.codex_login_rx.is_none() {
+            self.codex_login_lines.clear();
+            self.codex_login_outcome = None;
+            self.set_status("Codex login panel dismissed");
+        }
+    }
+
+    fn use_codex_account(&mut self, account_id: &str) {
+        self.pending_codex_remove_account_id = None;
+
+        match crate::commands::usage::codex::switch_active_account(account_id) {
+            Ok(info) => {
+                self.mark_active_codex_account(&info.id);
+                self.persist_subscription_usage_cache();
+                let display = info.label.as_deref().unwrap_or(&info.id);
+                self.set_status(&format!("Active Codex account: {display}"));
+            }
+            Err(e) => {
+                self.set_status(&format!("Codex account switch failed: {e}"));
+            }
+        }
+    }
+
+    fn remove_codex_account(&mut self, account_id: &str) {
+        if self.pending_codex_remove_account_id.as_deref() != Some(account_id) {
+            self.pending_codex_remove_account_id = Some(account_id.to_string());
+            self.set_status("Click Confirm to remove this Codex account");
+            return;
+        }
+
+        self.pending_codex_remove_account_id = None;
+        match crate::commands::usage::codex::remove_account(account_id) {
+            Ok(info) => {
+                self.subscription_usage.retain(|usage| {
+                    usage.account.as_ref().map(|account| account.id.as_str())
+                        != Some(info.id.as_str())
+                });
+                if let Some(active) = crate::commands::usage::codex::list_accounts()
+                    .into_iter()
+                    .find(|account| account.is_active)
+                {
+                    self.mark_active_codex_account(&active.id);
+                }
+                self.persist_subscription_usage_cache();
+                let display = info.label.as_deref().unwrap_or(&info.id);
+                self.set_status(&format!("Removed Codex account: {display}"));
+            }
+            Err(e) => {
+                self.set_status(&format!("Codex account removal failed: {e}"));
+            }
+        }
+    }
+
+    fn persist_subscription_usage_cache(&self) {
+        if self.subscription_usage.is_empty() {
+            crate::commands::usage::clear_cache();
+        } else {
+            crate::commands::usage::save_cache(&self.subscription_usage);
+        }
+    }
+
+    fn mark_active_codex_account(&mut self, active_account_id: &str) {
+        for usage in &mut self.subscription_usage {
+            if usage.provider == "Codex" {
+                if let Some(account) = &mut usage.account {
+                    account.is_active = account.id == active_account_id;
+                }
+            }
+        }
     }
 
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
@@ -635,29 +881,19 @@ impl App {
                 let x = event.column;
                 let y = event.row;
 
-                for area in &self.click_areas {
-                    if x >= area.rect.x
-                        && x < area.rect.x + area.rect.width
-                        && y >= area.rect.y
-                        && y < area.rect.y + area.rect.height
-                    {
-                        match &area.action {
-                            ClickAction::Tab(tab) => {
-                                self.switch_tab(*tab);
-                                self.reset_selection();
-                            }
-                            ClickAction::Sort(field) => {
-                                self.set_sort(*field);
-                            }
-                            ClickAction::GraphCell { week, day } => {
-                                self.selected_graph_cell = Some((*week, *day));
-                                self.stats_breakdown_total_lines = 0;
-                                self.selected_index = 0;
-                                self.scroll_offset = 0;
-                            }
-                        }
-                        break;
-                    }
+                let action = self
+                    .click_areas
+                    .iter()
+                    .find(|area| {
+                        x >= area.rect.x
+                            && x < area.rect.x + area.rect.width
+                            && y >= area.rect.y
+                            && y < area.rect.y + area.rect.height
+                    })
+                    .map(|area| area.action.clone());
+
+                if let Some(action) = action {
+                    self.handle_click_action(action);
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -726,6 +962,9 @@ impl App {
         self.persist_current_sort();
 
         self.current_tab = target;
+        if target != Tab::Usage {
+            self.pending_codex_remove_account_id = None;
+        }
         if target != Tab::Daily {
             self.selected_daily_detail_date = None;
         }
@@ -1500,6 +1739,167 @@ impl App {
     pub fn is_very_narrow(&self) -> bool {
         self.terminal_width < 60
     }
+}
+
+fn run_codex_login_worker(tx: std::sync::mpsc::Sender<CodexLoginEvent>) {
+    let result = run_codex_login_worker_inner(tx.clone());
+    let outcome = match result {
+        Ok(info) => CodexLoginOutcome::Imported(info),
+        Err(e) => CodexLoginOutcome::Failed(e.to_string()),
+    };
+    let _ = tx.send(CodexLoginEvent::Finished(outcome));
+}
+
+fn run_codex_login_worker_inner(
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
+    let codex_home =
+        std::env::temp_dir().join(format!("tokscale-codex-login-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&codex_home)
+        .map_err(|e| anyhow::anyhow!("failed to create temporary Codex home: {e}"))?;
+
+    let result = run_codex_login_in_home(&codex_home, tx);
+    let _ = std::fs::remove_dir_all(&codex_home);
+    result
+}
+
+fn run_codex_login_in_home(
+    codex_home: &std::path::Path,
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
+    let _ = tx.send(CodexLoginEvent::Output(
+        "Starting Codex browser login".to_string(),
+    ));
+
+    let mut child = std::process::Command::new("codex")
+        .arg("login")
+        .env("CODEX_HOME", codex_home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to start codex login: {e}"))?;
+
+    let output_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(spawn_codex_login_output_reader(
+            stdout,
+            tx.clone(),
+            std::sync::Arc::clone(&output_lines),
+        ));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(spawn_codex_login_output_reader(
+            stderr,
+            tx.clone(),
+            std::sync::Arc::clone(&output_lines),
+        ));
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("failed to wait for codex login: {e}"))?;
+    for reader in readers {
+        let _ = reader.join();
+    }
+
+    if !status.success() {
+        let output_lines = output_lines
+            .lock()
+            .map(|lines| lines.clone())
+            .unwrap_or_default();
+        anyhow::bail!("{}", codex_login_failure_message(&status, &output_lines));
+    }
+
+    let auth_path = codex_home.join("auth.json");
+    let _ = crate::commands::usage::codex::save_current_account_as_active(None);
+    crate::commands::usage::codex::import_auth_file_without_activating(&auth_path, None)
+}
+
+fn spawn_codex_login_output_reader<R>(
+    reader: R,
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    output_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> std::thread::JoinHandle<()>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(reader);
+        for line in std::io::BufRead::lines(reader).map_while(std::result::Result::ok) {
+            let line = sanitize_codex_login_line(&line);
+            if !line.trim().is_empty() {
+                if let Ok(mut output_lines) = output_lines.lock() {
+                    output_lines.push(line.clone());
+                }
+                let _ = tx.send(CodexLoginEvent::Output(line));
+            }
+        }
+    })
+}
+
+fn codex_login_failure_message(
+    status: &std::process::ExitStatus,
+    output_lines: &[String],
+) -> String {
+    codex_login_failure_message_from_output(&status.to_string(), output_lines)
+}
+
+fn codex_login_failure_message_from_output(status: &str, output_lines: &[String]) -> String {
+    let output = output_lines.join("\n").to_lowercase();
+
+    if output.contains("429") || output.contains("too many requests") {
+        return "OpenAI login is rate-limited (429 Too Many Requests). Wait before trying Add Codex again.".to_string();
+    }
+
+    if output.contains("expired") {
+        return "Codex device code expired. Start Add Codex again to get a new code.".to_string();
+    }
+
+    if output.contains("device auth failed") {
+        return "Codex device login failed. Try Add Codex again later.".to_string();
+    }
+
+    format!("codex login exited with {status}")
+}
+
+fn sanitize_codex_login_line(line: &str) -> String {
+    let mut sanitized = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    for ch in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' && chars.peek() == Some(&'\\') {
+                            let _ = chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(_) | None => {}
+            }
+            continue;
+        }
+
+        if !ch.is_control() || ch == '\t' {
+            sanitized.push(ch);
+        }
+    }
+
+    sanitized
 }
 
 #[cfg(test)]
@@ -2663,9 +3063,10 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('r')));
 
         assert!(!app.needs_reload);
+        assert!(app.is_fetching_usage());
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Refresh already in progress")
+            Some("Fetching usage data...")
         );
     }
 
@@ -2767,6 +3168,56 @@ mod tests {
         };
         app.handle_mouse_event(event);
         assert_eq!(app.selected_graph_cell, Some((2, 3)));
+    }
+
+    #[test]
+    fn test_handle_mouse_click_usage_refresh_uses_refresh_path() {
+        let mut app = make_app();
+        app.background_loading = true;
+        app.add_click_area(Rect::new(0, 0, 10, 2), ClickAction::UsageRefresh);
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(event);
+
+        assert!(!app.needs_reload);
+        assert!(app.is_fetching_usage());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Fetching usage data...")
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_codex_remove_requires_confirmation() {
+        let mut app = make_app();
+        app.add_click_area(
+            Rect::new(0, 0, 10, 2),
+            ClickAction::CodexRemoveAccount {
+                account_id: "acct_work".to_string(),
+            },
+        );
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(event);
+
+        assert_eq!(
+            app.pending_codex_remove_account_id.as_deref(),
+            Some("acct_work")
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Click Confirm to remove this Codex account")
+        );
     }
 
     #[test]
@@ -2909,6 +3360,110 @@ mod tests {
         app.on_tick();
         assert!(app.status_message.is_some());
         assert_eq!(app.status_message.as_ref().unwrap(), "fresh message");
+    }
+
+    #[test]
+    fn test_on_tick_collects_codex_login_events() {
+        let mut app = make_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.codex_login_rx = Some(rx);
+        tx.send(CodexLoginEvent::Output(
+            "Open https://example.com/device".to_string(),
+        ))
+        .unwrap();
+        tx.send(CodexLoginEvent::Finished(CodexLoginOutcome::Failed(
+            "expired".to_string(),
+        )))
+        .unwrap();
+        drop(tx);
+
+        app.on_tick();
+
+        assert!(app.codex_login_rx.is_none());
+        assert_eq!(
+            app.codex_login_lines.last().map(String::as_str),
+            Some("Open https://example.com/device")
+        );
+        assert!(matches!(
+            app.codex_login_outcome,
+            Some(CodexLoginOutcome::Failed(ref error)) if error == "expired"
+        ));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex login failed: expired")
+        );
+    }
+
+    #[test]
+    fn test_on_tick_clears_codex_login_panel_after_import() {
+        let mut app = make_app();
+        app.background_loading = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.codex_login_rx = Some(rx);
+        tx.send(CodexLoginEvent::Output(
+            "Starting Codex browser login".to_string(),
+        ))
+        .unwrap();
+        tx.send(CodexLoginEvent::Finished(CodexLoginOutcome::Imported(
+            crate::commands::usage::codex::CodexAccountInfo {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                account_id: Some("acct_work".to_string()),
+                created_at: "2026-06-09T00:00:00Z".to_string(),
+                is_active: true,
+            },
+        )))
+        .unwrap();
+        drop(tx);
+
+        app.on_tick();
+
+        assert!(app.codex_login_rx.is_none());
+        assert!(app.codex_login_lines.is_empty());
+        assert!(app.codex_login_outcome.is_none());
+        assert!(!app.should_show_codex_login_panel());
+    }
+
+    #[test]
+    fn test_sanitize_codex_login_line_strips_ansi_sequences() {
+        assert_eq!(
+            sanitize_codex_login_line("\u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m"),
+            "https://auth.openai.com/codex/device"
+        );
+        assert_eq!(
+            sanitize_codex_login_line("\u{1b}[90mCAGW-LNUYX\u{1b}[0m"),
+            "CAGW-LNUYX"
+        );
+    }
+
+    #[test]
+    fn test_codex_login_failure_message_identifies_rate_limit() {
+        let message = codex_login_failure_message_from_output(
+            "exit status: 1",
+            &[
+                "Device codes are a common phishing target. Never share this code.".to_string(),
+                "Error logging in with device code: device auth failed with status 429 Too Many Requests"
+                    .to_string(),
+            ],
+        );
+
+        assert_eq!(
+            message,
+            "OpenAI login is rate-limited (429 Too Many Requests). Wait before trying Add Codex again."
+        );
+    }
+
+    #[test]
+    fn test_codex_login_failure_message_identifies_expired_code() {
+        let message = codex_login_failure_message_from_output(
+            "exit status: 1",
+            &["Error logging in with device code: expired".to_string()],
+        );
+
+        assert_eq!(
+            message,
+            "Codex device code expired. Start Add Codex again to get a new code."
+        );
     }
 
     // ── click area management ───────────────────────────────────────

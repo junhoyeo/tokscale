@@ -34,7 +34,7 @@ This applies to all GitHub-content authoring through the CLI — PR bodies, issu
 
 ## Git Identity & Merge Discipline
 
-- Before making any commit, verify the local git identity is exactly `Junho Yeo <i@junho.io>`. If it is not, set `git config user.name "Junho Yeo"` and `git config user.email "i@junho.io"` before committing.
+- Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
 - Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
 - When merging pull requests through `gh`, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
 - Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
@@ -110,6 +110,8 @@ Migrations 0010 and 0011 have round-number hand-edited timestamps (`"when": 1780
 
 
 If two branches generate migrations with the same index, resolve the conflict by re-running `drizzle-kit generate` on the branch that was merged later — do not manually renumber files or edit `_journal.json`.
+
+**Never edit the SQL of a migration file after it has been applied to any database.** drizzle stores the SHA256 of the migration content in `drizzle.__drizzle_migrations` on first apply. If the local file content changes (even just a comment), the local hash diverges from the stored hash and drizzle-kit migrate will treat the migration as missing and attempt to re-apply it — which fails on idempotent-unsafe DDL. If you need to document a migration after the fact (lock-window risk, rollback notes, anything), put the commentary in a sidecar `0NNN_*.md` next to the .sql, in `schema.ts`, or in this file — never as comments inside the applied .sql.
 
 ## Agent Command Execution
 

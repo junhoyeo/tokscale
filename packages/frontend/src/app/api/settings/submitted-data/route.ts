@@ -1,8 +1,8 @@
 import { revalidatePath, revalidateTag } from "next/cache";
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { getSession } from "@/lib/auth/session";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { db, submissions, submittedDevices } from "@/lib/db";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { getBearerToken } from "../../../../lib/auth/bearerToken";
@@ -18,7 +18,7 @@ async function resolveUser(request: Request): Promise<{ id: string; username: st
     return null;
   }
 
-  const session = await getSession();
+  const session = await getSessionFromRequest(request);
   if (session) {
     return { id: session.id, username: session.username };
   }

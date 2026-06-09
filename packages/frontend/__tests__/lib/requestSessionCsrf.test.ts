@@ -109,6 +109,25 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(result).toEqual(validUser);
   });
 
+  it("allows cookie session from the production custom domain when bearer auth is disabled", async () => {
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const result = await getSessionFromRequest(
+      new Request("https://tokscale.ai/api/groups", {
+        method: "POST",
+        headers: {
+          Cookie: "tt_session=session-token",
+          Origin: "https://tokscale.ai",
+        },
+      }),
+      { allowAuthorizationHeader: false }
+    );
+
+    expect(result).toEqual(validUser);
+    expect(mockState.getSession).toHaveBeenCalledTimes(1);
+    expect(mockState.getSessionFromHeader).not.toHaveBeenCalled();
+  });
+
   it("rejects cookie session on mutating method with no Origin header (non-browser clients must use Bearer)", async () => {
     mockState.getSession.mockResolvedValue(validUser);
 

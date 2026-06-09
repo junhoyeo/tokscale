@@ -263,7 +263,7 @@ fn numeric_value(value: &Value) -> Option<f64> {
         .and_then(numeric_value)
 }
 
-fn number_at<'a>(value: &'a Value, path: &[&str]) -> Option<f64> {
+fn number_at(value: &Value, path: &[&str]) -> Option<f64> {
     let mut current = value;
     for segment in path {
         current = current.get(*segment)?;
@@ -624,6 +624,7 @@ fn fetch_network_usage(credentials: &Credentials) -> Result<UsageOutput> {
 
     Ok(UsageOutput {
         provider: "Grok Build".into(),
+        account: None,
         plan,
         email: credentials.email.clone(),
         metrics,
@@ -637,6 +638,7 @@ fn usage_output(
 ) -> UsageOutput {
     UsageOutput {
         provider: "Grok Build".into(),
+        account: None,
         plan,
         email,
         metrics,

@@ -52,8 +52,10 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   zed: "Zed Agent",
   trae: "Trae",
   warp: "Warp",
-  grok: "Grok Build",
+  cline: "Cline",
   synthetic: "Synthetic",
+  gjc: "Gajae Code",
+  grok: "Grok Build",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -77,15 +79,17 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   kilocode: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   kilo: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   mux: `${GITHUB_CDN_BASE}/client-mux.png`,
-  kiro: "/assets/logos/kiro.ico",
+  kiro: "https://github.com/kirodotdev.png",
   crush: `${GITHUB_CDN_BASE}/client-crush.png`,
   goose: `${GITHUB_CDN_BASE}/client-goose.png`,
   antigravity: `${GITHUB_CDN_BASE}/client-antigravity.png`,
   zed: `${GITHUB_CDN_BASE}/client-zed.webp`,
   trae: `${GITHUB_CDN_BASE}/client-trae.png`,
-  warp: `${GITHUB_CDN_BASE}/client-warp.png`,
-  grok: "/assets/logos/grok.jpg",
+  warp: "https://github.com/warpdotdev.png",
+  cline: "https://github.com/cline.png",
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
+  gjc: "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
+  grok: "https://github.com/xai-org.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -114,8 +118,10 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   zed: "#084CCF",
   trae: "#00BFA5",
   warp: "#01A4A4",
-  grok: "#1D9BF0",
+  cline: "#5B8DEF",
   synthetic: "#4ADE80",
+  gjc: "#FF6B6B",
+  grok: "#171717",
 };
 
 export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {

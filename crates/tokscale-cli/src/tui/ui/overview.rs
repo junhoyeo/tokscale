@@ -1,10 +1,8 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
-use super::widgets::format_tokens;
+use super::widgets::{format_tokens, scrollbar_state};
 use crate::tui::app::{App, ChartGranularity};
 use tokscale_core::GroupBy;
 
@@ -375,7 +373,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             .track_symbol(Some("│"))
             .thumb_symbol("█");
 
-        let mut scrollbar_state = ScrollbarState::new(models_len).position(scroll_offset);
+        let mut scrollbar_state = scrollbar_state(models_len, scroll_offset, items_per_page);
 
         frame.render_stateful_widget(
             scrollbar,

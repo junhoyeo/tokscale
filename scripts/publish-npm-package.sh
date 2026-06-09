@@ -93,6 +93,42 @@ package_name="$(read_manifest_field name)"
 package_version="$(read_manifest_field version)"
 package_spec="${package_name}@${package_version}"
 
+semver_prerelease() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+version = sys.argv[1]
+match = re.fullmatch(r"\d+\.\d+\.\d+(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?", version)
+if not match:
+    raise SystemExit(f"Unsupported semver value: {version}")
+print(match.group(1) or "")
+PY
+}
+
+derive_dist_tag() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+prerelease = sys.argv[1]
+if not prerelease:
+    print("latest")
+    raise SystemExit(0)
+
+identifier = prerelease.split(".", 1)[0].lower()
+if not re.fullmatch(r"[a-z][a-z0-9_-]*", identifier):
+    identifier = "next"
+print(identifier)
+PY
+}
+
+package_prerelease="$(semver_prerelease "${package_version}")"
+npm_dist_tag="${NPM_DIST_TAG:-$(derive_dist_tag "${package_prerelease}")}"
+if [[ -n "${package_prerelease}" && "${npm_dist_tag}" == "latest" ]]; then
+  fail "Refusing to publish prerelease ${package_spec} with npm dist-tag latest"
+fi
+
 package_exists=false
 if npm_view_version_status published_version "${package_spec}"; then
   package_exists=true
@@ -111,8 +147,8 @@ if [[ "${package_exists}" == "true" ]]; then
   fail "${package_spec} already exists on npm; set RELEASE_RECOVERY=true to skip already-published packages"
 fi
 
-echo "Publishing ${package_spec}"
+echo "Publishing ${package_spec} with npm dist-tag ${npm_dist_tag}"
 (
   cd "${PACKAGE_DIR}"
-  "${NPM_CMD}" publish --access public
+  "${NPM_CMD}" publish --access public --tag "${npm_dist_tag}"
 )

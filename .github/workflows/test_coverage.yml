@@ -11,7 +11,7 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/check-version-coherence.sh'
+      - 'scripts/*.sh'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
@@ -23,7 +23,7 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/check-version-coherence.sh'
+      - 'scripts/*.sh'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
 
@@ -45,6 +45,12 @@ jobs:
           components: clippy, rustfmt
       - name: Verify version coherence
         run: bash scripts/check-version-coherence.sh
+      - name: Run release helper tests
+        run: |
+          bash scripts/test-calculate-release-version.sh
+          bash scripts/test-check-version-coherence.sh
+          bash scripts/test-npm-release-state.sh
+          bash scripts/test-prepare-release-provenance.sh
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:

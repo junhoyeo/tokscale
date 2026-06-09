@@ -4,6 +4,7 @@ mod aggregator;
 mod cc_mirror;
 pub mod clients;
 pub mod fs_atomic;
+pub mod mcp;
 mod message_cache;
 mod parser;
 pub mod paths;
@@ -1125,13 +1126,49 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // gjc (gajae-code) JSONL sessions. Binding note N1: this cached cluster
+    // MUST obtain messages via the non-repricing parser and apply the A1
+    // Hermes guard explicitly (reprice only when the embedded usage.cost.total
+    // was absent, i.e. cost <= 0.0). Routing through load_or_parse_source /
+    // apply_pricing_to_messages / cached_messages would reprice unconditionally
+    // and overwrite gjc's authoritative embedded cost, silently downgrading to
+    // A2 on the dominant cached path. Message-level dedup via
+    // should_keep_deduped_message collapses depth-1/depth-2 replays.
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::gjc::parse_gjc_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    if msg.cost <= 0.0 {
+                        apply_pricing_if_available(&mut msg, pricing);
+                    }
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(
+        gjc_messages
+            .into_iter()
+            .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
+    );
+
     let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kimi::parse_kimi_file(path)
-            })
+            if sessions::kimi::is_kimi_code_path(path) {
+                load_or_parse_source(path, &source_cache, pricing, |path| {
+                    sessions::kimi::parse_kimi_code_file(path)
+                })
+            } else {
+                load_or_parse_source(path, &source_cache, pricing, |path| {
+                    sessions::kimi::parse_kimi_file(path)
+                })
+            }
         })
         .collect();
     for outcome in kimi_outcomes {
@@ -1184,6 +1221,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in kilocode_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    let cline_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Cline)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::cline::parse_cline_file(path)
+            })
+        })
+        .collect();
+    for outcome in cline_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -2257,13 +2310,38 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
 
+    // gjc (gajae-code) JSONL sessions. This non-cached path produces
+    // ParsedMessage (no cost field) and has no pricing service in scope, so
+    // the A1 cost guard is a no-op here — cost correctness is enforced on the
+    // cached pricing path (see the gjc_outcomes block). What matters here is
+    // message-level dedup (codebuff-style key via should_keep_deduped_message)
+    // to collapse depth-1/depth-2 replays, mirroring the codex cluster.
+    let gjc_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| sessions::gjc::parse_gjc_file(path))
+        .collect();
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_msgs: Vec<ParsedMessage> = gjc_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut gjc_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let gjc_count = gjc_msgs.len() as i32;
+    counts.set(ClientId::Gjc, gjc_count);
+    messages.extend(gjc_msgs);
+
     // Parse Kimi wire.jsonl files in parallel
     let kimi_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
         .flat_map(|path| {
-            sessions::kimi::parse_kimi_file(path)
-                .into_iter()
+            let msgs = if sessions::kimi::is_kimi_code_path(path) {
+                sessions::kimi::parse_kimi_code_file(path)
+            } else {
+                sessions::kimi::parse_kimi_file(path)
+            };
+            msgs.into_iter()
                 .map(|msg| unified_to_parsed(&msg))
                 .collect::<Vec<_>>()
         })
@@ -2314,6 +2392,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let kilocode_count = summed_parsed_message_count(&kilocode_msgs);
     counts.set(ClientId::KiloCode, kilocode_count);
     messages.extend(kilocode_msgs);
+
+    let cline_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Cline)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::cline::parse_cline_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let cline_count = summed_parsed_message_count(&cline_msgs);
+    counts.set(ClientId::Cline, cline_count);
+    messages.extend(cline_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Mux)
@@ -2620,10 +2712,11 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        generate_graph_with_loaded_pricing, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
+        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -4163,6 +4256,68 @@ mod tests {
         .unwrap();
     }
 
+    fn write_codex_parent_replay_fixture(source_home: &std::path::Path) {
+        let codex_dir = source_home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("parent.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-05-24T20:00:00Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:01Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"output_tokens":13,"total_tokens":143},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        for (filename, child_id, child_turn_id, timestamp) in [
+            (
+                "child-a.jsonl",
+                "019e5c03-1e99-7000-8000-000000000001",
+                "019e5c03-6425-7000-8000-000000000001",
+                "2026-05-24T21:00:00Z",
+            ),
+            (
+                "child-b.jsonl",
+                "019e5c04-1e99-7000-8000-000000000001",
+                "019e5c04-6425-7000-8000-000000000001",
+                "2026-05-24T22:00:00Z",
+            ),
+        ] {
+            std::fs::write(
+                codex_dir.join(filename),
+                format!(
+                    concat!(
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"{child_id}","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}}}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"last_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":130,"output_tokens":13,"total_tokens":143}},"last_token_usage":{{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"task_started","turn_id":"{child_turn_id}"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"{child_turn_id}","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":140,"output_tokens":14,"total_tokens":154}},"last_token_usage":{{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}}}}}}"#,
+                        "\n",
+                    ),
+                    timestamp = timestamp,
+                    child_id = child_id,
+                    child_turn_id = child_turn_id,
+                ),
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_parse_all_messages_with_pricing_codex_deduplicates_forked_history() {
@@ -4210,12 +4365,49 @@ mod tests {
         }
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_parent_replay_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            // Parent contributes its two turns. The two forks each replay the
+            // parent history (skipped) and then emit one own turn that lands on
+            // the identical cumulative total (140/14). Sibling forks sharing a
+            // cumulative total is the signature of a replayed row, so the
+            // fork-parent-scoped dedup key collapses them into one. Real fork
+            // fan-out replays the same upstream totals into 10-100+ siblings;
+            // two distinct turns reaching a byte-identical cumulative vector by
+            // chance does not happen in practice because the cumulative encodes
+            // each fork's divergent context size.
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 140);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 14);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
         // Single session with two turns whose `last_token_usage` deltas are
         // byte-identical but emitted at different timestamps. The fork-dedup
-        // key includes timestamp, so both turns must survive — collapsing
-        // them would erase legitimate usage when a user happens to send two
-        // turns producing the same per-turn delta.
+        // key includes the cumulative total, so both turns must survive even
+        // when a user happens to send two turns producing the same per-turn
+        // delta.
         let codex_dir = source_home.join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(
@@ -5954,6 +6146,54 @@ mod tests {
         );
         assert_eq!(parsed_with_settings.messages[0].input, 42);
         assert_eq!(parsed_with_settings.messages[0].output, 7);
+    }
+
+    #[test]
+    fn test_submit_default_graph_includes_antigravity_cache_rows() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = temp_dir
+            .path()
+            .join(".config/tokscale/antigravity-cache/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("ag-submit.jsonl"),
+            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+"#,
+        )
+        .unwrap();
+
+        let mut clients: Vec<String> = ClientId::iter()
+            .filter(|client| client.submit_default())
+            .map(|client| client.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let graph = rt
+            .block_on(generate_graph_with_loaded_pricing(
+                ReportOptions {
+                    home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    use_env_roots: false,
+                    clients: Some(clients),
+                    since: None,
+                    until: None,
+                    year: None,
+                    group_by: GroupBy::default(),
+                    scanner_settings: scanner::ScannerSettings::default(),
+                },
+                None,
+            ))
+            .unwrap();
+
+        assert_eq!(graph.summary.clients, vec!["antigravity"]);
+        assert_eq!(graph.summary.models, vec!["model_placeholder_m84"]);
+        assert_eq!(graph.summary.total_tokens, 19);
+        assert_eq!(graph.contributions.len(), 1);
+        assert_eq!(graph.contributions[0].clients[0].client, "antigravity");
+        assert_eq!(
+            graph.contributions[0].clients[0].model_id,
+            "model_placeholder_m84"
+        );
     }
 
     #[test]

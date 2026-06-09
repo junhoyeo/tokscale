@@ -64,9 +64,10 @@ interface GraphContainerProps {
   data: TokenContributionData;
   totalActiveTimeMs?: number | null;
   sessionCount?: number | null;
+  mcpServers?: string[];
 }
 
-export function GraphContainer({ data, totalActiveTimeMs, sessionCount }: GraphContainerProps) {
+export function GraphContainer({ data, totalActiveTimeMs, sessionCount, mcpServers }: GraphContainerProps) {
   const { paletteName, setPalette } = useSettings();
 
   const [view, setView] = useState<ViewMode>("2d");
@@ -181,7 +182,7 @@ export function GraphContainer({ data, totalActiveTimeMs, sessionCount }: GraphC
       </GraphCard>
 
       {selectedDay && <BreakdownPanel day={selectedDay} onClose={() => setSelectedDay(null)} palette={palette} />}
-      {view === "2d" && <StatsPanel data={filteredByClient} palette={palette} totalActiveTimeMs={clientFilter.length === 0 ? totalActiveTimeMs : null} sessionCount={clientFilter.length === 0 ? sessionCount : null} />}
+      {view === "2d" && <StatsPanel data={filteredByClient} palette={palette} totalActiveTimeMs={clientFilter.length === 0 ? totalActiveTimeMs : null} sessionCount={clientFilter.length === 0 ? sessionCount : null} mcpServers={mcpServers} />}
       <Tooltip day={hoveredDay} position={tooltipPosition} visible={hoveredDay !== null} palette={palette} />
     </Container>
   );

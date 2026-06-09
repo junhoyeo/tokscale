@@ -1,6 +1,6 @@
 mod amp;
 mod claude;
-mod codex;
+pub mod codex;
 mod copilot;
 mod grok;
 pub mod helpers;
@@ -25,9 +25,90 @@ pub struct UsageMetric {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UsageOutput {
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<UsageAccount>,
     pub plan: Option<String>,
     pub email: Option<String>,
     pub metrics: Vec<UsageMetric>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UsageAccount {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub is_active: bool,
+}
+
+impl UsageAccount {
+    pub fn label_name(&self) -> Option<&str> {
+        self.label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+    }
+
+    pub fn short_id(&self) -> String {
+        let id = self.id.trim();
+        if id.is_empty() {
+            return "unknown".to_string();
+        }
+
+        let char_count = id.chars().count();
+        if char_count <= 12 {
+            return id.to_string();
+        }
+
+        let head: String = id.chars().take(6).collect();
+        let tail: String = id
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("{head}...{tail}")
+    }
+
+    pub fn display_name(&self) -> String {
+        self.label_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Account {}", self.short_id()))
+    }
+}
+
+impl UsageOutput {
+    pub fn account_display_name(&self) -> Option<String> {
+        let account = self.account.as_ref()?;
+
+        if let Some(label) = account.label_name() {
+            return Some(label.to_string());
+        }
+
+        if let Some(email) = self
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(email.to_string());
+        }
+
+        Some(account.display_name())
+    }
+
+    pub fn display_name(&self) -> String {
+        match &self.account {
+            Some(_) => format!(
+                "{} ({})",
+                self.provider,
+                self.account_display_name().unwrap_or_default()
+            ),
+            None => self.provider.clone(),
+        }
+    }
 }
 
 // ── Cache ──
@@ -79,19 +160,51 @@ pub fn load_cache() -> Option<Vec<UsageOutput>> {
 
 // ── Public API ──
 
-type UsageProvider = (&'static str, fn() -> bool, fn() -> Result<UsageOutput>);
+type UsageProvider = (&'static str, fn() -> bool, fn() -> Result<Vec<UsageOutput>>);
+
+fn fetch_amp() -> Result<Vec<UsageOutput>> {
+    amp::fetch().map(|output| vec![output])
+}
+
+fn fetch_claude() -> Result<Vec<UsageOutput>> {
+    claude::fetch().map(|output| vec![output])
+}
+
+fn fetch_copilot() -> Result<Vec<UsageOutput>> {
+    copilot::fetch().map(|output| vec![output])
+}
+
+fn fetch_grok() -> Result<Vec<UsageOutput>> {
+    grok::fetch().map(|output| vec![output])
+}
+
+fn fetch_kimi() -> Result<Vec<UsageOutput>> {
+    kimi::fetch().map(|output| vec![output])
+}
+
+fn fetch_minimax() -> Result<Vec<UsageOutput>> {
+    minimax::fetch().map(|output| vec![output])
+}
+
+fn fetch_warp() -> Result<Vec<UsageOutput>> {
+    warp::fetch().map(|output| vec![output])
+}
+
+fn fetch_zai() -> Result<Vec<UsageOutput>> {
+    zai::fetch().map(|output| vec![output])
+}
 
 pub fn fetch_all() -> Vec<UsageOutput> {
     let providers: Vec<UsageProvider> = vec![
-        ("Claude", claude::has_credentials, claude::fetch),
-        ("Codex", codex::has_credentials, codex::fetch),
-        ("Z.ai", zai::has_credentials, zai::fetch),
-        ("Amp", amp::has_credentials, amp::fetch),
-        ("Copilot", copilot::has_credentials, copilot::fetch),
-        ("Grok Build", grok::has_credentials, grok::fetch),
-        ("Kimi", kimi::has_credentials, kimi::fetch),
-        ("MiniMax", minimax::has_credentials, minimax::fetch),
-        ("Warp/Oz", warp::has_credentials, warp::fetch),
+        ("Claude", claude::has_credentials, fetch_claude),
+        ("Codex", codex::has_credentials, codex::fetch_all),
+        ("Z.ai", zai::has_credentials, fetch_zai),
+        ("Amp", amp::has_credentials, fetch_amp),
+        ("Copilot", copilot::has_credentials, fetch_copilot),
+        ("Grok Build", grok::has_credentials, fetch_grok),
+        ("Kimi", kimi::has_credentials, fetch_kimi),
+        ("MiniMax", minimax::has_credentials, fetch_minimax),
+        ("Warp/Oz", warp::has_credentials, fetch_warp),
     ];
 
     let active: Vec<_> = providers.into_iter().filter(|(_, has, _)| has()).collect();
@@ -107,6 +220,7 @@ pub fn fetch_all() -> Vec<UsageOutput> {
             .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|h| h.join().ok().flatten())
+            .flatten()
             .collect()
     })
 }
@@ -127,7 +241,11 @@ fn truncate(s: &str, max_len: usize) -> String {
 fn render_light(output: &UsageOutput) {
     println!("╭{}╮", "─".repeat(CARD_WIDTH));
     // Provider header
-    println!("│ {:<width$}│", output.provider, width = CARD_WIDTH - 1);
+    println!(
+        "│ {:<width$}│",
+        output.display_name(),
+        width = CARD_WIDTH - 1
+    );
     for m in &output.metrics {
         let rem = m
             .remaining_label
@@ -169,4 +287,76 @@ pub fn run(json: bool, _light: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_output_display_name_includes_account_label() {
+        let output = UsageOutput {
+            provider: "Codex".to_string(),
+            account: Some(UsageAccount {
+                id: "acct_123".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
+            plan: None,
+            email: None,
+            metrics: Vec::new(),
+        };
+
+        assert_eq!(output.display_name(), "Codex (work)");
+    }
+
+    #[test]
+    fn usage_output_display_name_prefers_email_over_account_id() {
+        let output = UsageOutput {
+            provider: "Codex".to_string(),
+            account: Some(UsageAccount {
+                id: "acct_123".to_string(),
+                label: Some("  ".to_string()),
+                is_active: false,
+            }),
+            plan: None,
+            email: Some("user@example.com".to_string()),
+            metrics: Vec::new(),
+        };
+
+        assert_eq!(output.display_name(), "Codex (user@example.com)");
+    }
+
+    #[test]
+    fn usage_output_display_name_masks_long_account_id() {
+        let output = UsageOutput {
+            provider: "Codex".to_string(),
+            account: Some(UsageAccount {
+                id: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+                label: None,
+                is_active: false,
+            }),
+            plan: None,
+            email: None,
+            metrics: Vec::new(),
+        };
+
+        assert_eq!(output.display_name(), "Codex (Account 123e45...4000)");
+    }
+
+    #[test]
+    fn usage_output_deserializes_legacy_json_without_account() -> Result<()> {
+        let output: UsageOutput = serde_json::from_str(
+            r#"{
+                "provider": "Codex",
+                "plan": null,
+                "email": null,
+                "metrics": []
+            }"#,
+        )?;
+
+        assert!(output.account.is_none());
+        assert_eq!(output.display_name(), "Codex");
+        Ok(())
+    }
 }

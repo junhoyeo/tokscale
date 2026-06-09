@@ -219,6 +219,7 @@ pub fn fetch() -> Result<UsageOutput> {
 
         Ok(UsageOutput {
             provider: "Claude".into(),
+            account: None,
             plan,
             email: None,
             metrics,

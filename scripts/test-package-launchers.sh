@@ -18,6 +18,21 @@ BUN_BIN="${BUN_BIN:-$(command -v bun)}"
 NODE_BIN="${NODE_BIN:-$(command -v node)}"
 LDD_BIN="${LDD_BIN:-$(command -v ldd || true)}"
 WHICH_BIN="${WHICH_BIN:-$(command -v which || true)}"
+TOKSCALE_SMOKE_BUILD_PROFILE="${TOKSCALE_SMOKE_BUILD_PROFILE:-debug}"
+case "${TOKSCALE_SMOKE_BUILD_PROFILE}" in
+  debug)
+    CARGO_BUILD_ARGS=(-p tokscale-cli)
+    CARGO_BINARY_DIR="target/debug"
+    ;;
+  release)
+    CARGO_BUILD_ARGS=(--release -p tokscale-cli)
+    CARGO_BINARY_DIR="target/release"
+    ;;
+  *)
+    echo "Unsupported TOKSCALE_SMOKE_BUILD_PROFILE: ${TOKSCALE_SMOKE_BUILD_PROFILE}" >&2
+    exit 1
+    ;;
+esac
 
 PLATFORM_PACKAGE="$(node --input-type=module <<'NODE'
 import { execSync } from "node:child_process";
@@ -72,9 +87,9 @@ if [[ -z "${PLATFORM_PACKAGE}" ]]; then
   exit 1
 fi
 
-echo "Building CLI wrapper and native binary..."
+echo "Building CLI wrapper and native binary (${TOKSCALE_SMOKE_BUILD_PROFILE})..."
 bun run --cwd packages/cli build >/dev/null
-cargo build --release -p tokscale-cli >/dev/null
+cargo build "${CARGO_BUILD_ARGS[@]}" >/dev/null
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/tokscale-launcher-smoke.XXXXXX")"
 cleanup() {
@@ -103,7 +118,7 @@ mkdir -p \
   "${BUN_ONLY_DIR}" \
   "${NODE_ONLY_DIR}" \
   "${STALE_PATH_DIR}"
-cp target/release/tokscale "${PLATFORM_STAGE}/bin/tokscale"
+cp "${CARGO_BINARY_DIR}/tokscale" "${PLATFORM_STAGE}/bin/tokscale"
 
 chmod +x "${CLI_STAGE}/bin.js" "${WRAPPER_STAGE}/bin.js" "${PLATFORM_STAGE}/bin/tokscale"
 
@@ -149,13 +164,10 @@ fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
 WRAPPER_TGZ="$(cd "${WRAPPER_STAGE}" && NPM_CONFIG_CACHE="${NPM_CACHE}" npm pack --silent)"
 
-echo "Installing local tarballs with Bun..."
+echo "Installing local wrapper tarball with Bun..."
 (
   cd "${INSTALL_DIR}"
-  env PATH="${BUN_ONLY_PATH}" bun add \
-    "${CLI_STAGE}/${CLI_TGZ}" \
-    "${WRAPPER_STAGE}/${WRAPPER_TGZ}" \
-    "${PLATFORM_STAGE}/${PLATFORM_TGZ}" >/dev/null
+  env PATH="${BUN_ONLY_PATH}" bun add "${WRAPPER_STAGE}/${WRAPPER_TGZ}" >/dev/null
 )
 
 INSTALLED_BIN="${INSTALL_DIR}/node_modules/.bin/tokscale"
@@ -163,9 +175,41 @@ if [[ ! -e "${INSTALLED_BIN}" ]]; then
   echo "Installed tokscale launcher not found at ${INSTALLED_BIN}" >&2
   exit 1
 fi
+WRAPPER_PACKAGE_DIR="${INSTALL_DIR}/node_modules/tokscale"
+CLI_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@tokscale/cli"
+PLATFORM_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@tokscale/${PLATFORM_PACKAGE}"
+WRAPPER_BIN="${WRAPPER_PACKAGE_DIR}/bin.js"
+for expected in \
+  "${WRAPPER_BIN}" \
+  "${CLI_PACKAGE_DIR}/bin.js" \
+  "${PLATFORM_PACKAGE_DIR}/bin/tokscale"; do
+  if [[ ! -e "${expected}" ]]; then
+    echo "Expected installed package path missing: ${expected}" >&2
+    exit 1
+  fi
+done
+grep -q 'await import("@tokscale/cli")' "${WRAPPER_PACKAGE_DIR}/bin.js" || {
+  echo "Installed tokscale wrapper does not import @tokscale/cli" >&2
+  exit 1
+}
+if [[ -L "${INSTALLED_BIN}" ]]; then
+  INSTALLED_BIN_TARGET="$(readlink "${INSTALLED_BIN}")"
+  echo "Installed tokscale bin points at ${INSTALLED_BIN_TARGET}"
+fi
 
-echo "Checking source-tree wrapper with Node-only PATH..."
-env PATH="${NODE_ONLY_PATH}" "${ROOT_DIR}/packages/tokscale/bin.js" --version >/dev/null
+if [[ "${TOKSCALE_SMOKE_BUILD_PROFILE}" == "release" ]]; then
+  echo "Checking source-tree wrapper with Node-only PATH..."
+  env PATH="${NODE_ONLY_PATH}" "${ROOT_DIR}/packages/tokscale/bin.js" --version >/dev/null
+else
+  echo "Skipping source-tree wrapper check for debug smoke profile..."
+fi
+
+echo "Checking installed wrapper package with Node-only PATH..."
+INSTALLED_WRAPPER_VERSION_NODE="$(env PATH="${NODE_ONLY_PATH}" "${WRAPPER_BIN}" --version)"
+[[ "${INSTALLED_WRAPPER_VERSION_NODE}" == tokscale* ]] || {
+  echo "Unexpected installed wrapper output: ${INSTALLED_WRAPPER_VERSION_NODE}" >&2
+  exit 1
+}
 
 echo "Checking installed launcher via Bun runtime..."
 INSTALLED_VERSION_BUN="$(env PATH="${BUN_ONLY_PATH}" bun "${INSTALLED_BIN}" --version)"
@@ -190,7 +234,7 @@ rm -f "${INSTALL_DIR}/node_modules/packages/${PLATFORM_PACKAGE}/bin/tokscale"
 rm -f "${INSTALL_DIR}/node_modules/target/release/tokscale"
 rm -f "${INSTALL_DIR}/node_modules/@tokscale/cli/bin/tokscale"
 set +e
-STALE_OUTPUT="$(env PATH="${STALE_PATH_DIR}:${NODE_ONLY_PATH}" "${INSTALLED_BIN}" --version 2>&1)"
+STALE_OUTPUT="$(env PATH="${STALE_PATH_DIR}:${NODE_ONLY_PATH}" "${WRAPPER_BIN}" --version 2>&1)"
 STALE_CODE=$?
 set -e
 if [[ ${STALE_CODE} -eq 0 ]]; then
