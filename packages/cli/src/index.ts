@@ -56,28 +56,44 @@ function detectLibcKind(): LibcKind {
     return "musl";
   }
 
-  // musl distros (Alpine, Void-musl, ...) ship the loader as /lib/ld-musl-<arch>.so.1.
-  try {
-    if (readdirSync("/lib").some((entry) => entry.startsWith("ld-musl-"))) {
-      return "musl";
-    }
-  } catch {
-    // /lib unreadable or missing; fall through to ldd probing.
-  }
-
   try {
     const output = execSync("ldd --version", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).toLowerCase();
-    return output.includes("musl") ? "musl" : "gnu";
+    if (output.includes("musl")) return "musl";
+    if (output.includes("glibc") || output.includes("gnu")) return "gnu";
   } catch (error) {
     // musl's ldd rejects --version: it prints "musl libc" to stderr and
     // exits non-zero, so the answer is in the error, not the output.
     const { stdout, stderr } = (error ?? {}) as { stdout?: unknown; stderr?: unknown };
     const combined = `${stdout ?? ""}\n${stderr ?? ""}`.toLowerCase();
-    return combined.includes("musl") ? "musl" : "gnu";
+    if (combined.includes("musl")) return "musl";
+    if (combined.includes("glibc") || combined.includes("gnu")) return "gnu";
   }
+
+  // ldd missing or inconclusive: look for dynamic loaders. The glibc loader
+  // wins when both exist - a musl loader can coexist on glibc hosts (e.g.
+  // Debian with the musl package installed), but not the reverse.
+  if (loaderPresent("ld-linux-")) return "gnu";
+  if (loaderPresent("ld-musl-")) return "musl";
+
+  return "gnu";
+}
+
+// Glibc ships ld-linux-*.so.* in /lib64 (or /lib on some arches); musl
+// distros (Alpine, Void-musl, ...) ship /lib/ld-musl-<arch>.so.1.
+function loaderPresent(prefix: string): boolean {
+  for (const dir of ["/lib", "/lib64"]) {
+    try {
+      if (readdirSync(dir).some((entry) => entry.startsWith(prefix))) {
+        return true;
+      }
+    } catch {
+      // Directory unreadable or missing; try the next one.
+    }
+  }
+  return false;
 }
 
 function resolveTargetPackageName(): string | null {

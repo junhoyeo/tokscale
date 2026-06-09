@@ -65,22 +65,35 @@ function detectLibcKind() {
   }
 
   try {
-    if (readdirSync("/lib").some((entry) => entry.startsWith("ld-musl-"))) {
-      return "musl";
-    }
-  } catch {}
-
-  try {
     const output = execSync("ldd --version", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).toLowerCase();
-    return output.includes("musl") ? "musl" : "gnu";
+    if (output.includes("musl")) return "musl";
+    if (output.includes("glibc") || output.includes("gnu")) return "gnu";
   } catch (error) {
     // musl's ldd prints "musl libc" to stderr and exits non-zero on --version.
     const combined = `${error?.stdout ?? ""}\n${error?.stderr ?? ""}`.toLowerCase();
-    return combined.includes("musl") ? "musl" : "gnu";
+    if (combined.includes("musl")) return "musl";
+    if (combined.includes("glibc") || combined.includes("gnu")) return "gnu";
   }
+
+  // ldd missing or inconclusive: look for dynamic loaders. The glibc loader
+  // wins when both exist (e.g. Debian with the musl package installed).
+  const loaderPresent = (prefix) => {
+    for (const dir of ["/lib", "/lib64"]) {
+      try {
+        if (readdirSync(dir).some((entry) => entry.startsWith(prefix))) {
+          return true;
+        }
+      } catch {}
+    }
+    return false;
+  };
+  if (loaderPresent("ld-linux-")) return "gnu";
+  if (loaderPresent("ld-musl-")) return "musl";
+
+  return "gnu";
 }
 
 const arch = process.arch;
