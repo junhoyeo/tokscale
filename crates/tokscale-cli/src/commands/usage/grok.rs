@@ -583,17 +583,15 @@ fn fetch_network_usage(credentials: &Credentials) -> Result<UsageOutput> {
             .timeout(Duration::from_secs(12))
             .build()?;
 
-        if metrics.is_empty() {
-            match fetch_billing_grpc(&client, &credentials.token).await {
-                Ok(body) => {
-                    if let Some(metric) = parse_grpc_billing_metric(&body) {
-                        metrics.push(metric);
-                    } else {
-                        errors.push("Grok billing response was not recognized".to_string());
-                    }
+        match fetch_billing_grpc(&client, &credentials.token).await {
+            Ok(body) => {
+                if let Some(metric) = parse_grpc_billing_metric(&body) {
+                    metrics.push(metric);
+                } else {
+                    errors.push("Grok billing response was not recognized".to_string());
                 }
-                Err(error) => errors.push(format!("Grok billing request failed: {error}")),
             }
+            Err(error) => errors.push(format!("Grok billing request failed: {error}")),
         }
 
         if metrics.is_empty() {
@@ -662,7 +660,14 @@ pub fn fetch() -> Result<UsageOutput> {
         }
     }
 
-    if let Some(billing) = fetch_agent_billing(Duration::from_secs(4)) {
+    // The `grok agent --no-leader stdio` billing fallback runs without
+    // credential context, so its metrics cannot be attributed to a specific
+    // account. Skip it when auth.json holds multiple credentials to avoid
+    // merging metrics with a plan/email that belongs to a different account.
+    if credentials.len() > 1 {
+        errors
+            .push("Grok agent billing fallback skipped: multiple credentials present".to_string());
+    } else if let Some(billing) = fetch_agent_billing(Duration::from_secs(4)) {
         let mut metrics = Vec::new();
         if let Some(metric) = parse_billing_json_metric(&billing) {
             metrics.push(metric);
