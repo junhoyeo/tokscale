@@ -1173,6 +1173,8 @@ cd packages/core && bun run bench
 | Windows | x86_64 | ✅ Supported |
 | Windows | aarch64 | ✅ Supported |
 
+On Linux, the launcher detects glibc vs musl automatically (via `process.report`, the musl dynamic loader at `/lib/ld-musl-*.so.1`, and `ldd`). If detection ever picks the wrong flavor — e.g. in minimal containers — set `TOKSCALE_LIBC=musl` (or `TOKSCALE_LIBC=gnu`) to force it.
+
 ### Windows Support
 
 Tokscale fully supports Windows. The TUI and CLI work the same as on macOS/Linux.

@@ -36,11 +36,17 @@ esac
 
 PLATFORM_PACKAGE="$(node --input-type=module <<'NODE'
 import { execSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 
+// Keep in sync with detectLibcKind() in packages/cli/src/index.ts.
 function detectLibcKind() {
   if (process.platform !== "linux") {
     return null;
   }
+
+  const override = process.env.TOKSCALE_LIBC?.trim().toLowerCase();
+  if (override === "musl") return "musl";
+  if (override === "gnu" || override === "glibc") return "gnu";
 
   const report = process.report?.getReport?.();
   if (report?.header?.glibcVersionRuntime) {
@@ -54,14 +60,26 @@ function detectLibcKind() {
     return "musl";
   }
 
+  if (report?.header?.release?.sourceUrl?.toLowerCase().includes("musl")) {
+    return "musl";
+  }
+
+  try {
+    if (readdirSync("/lib").some((entry) => entry.startsWith("ld-musl-"))) {
+      return "musl";
+    }
+  } catch {}
+
   try {
     const output = execSync("ldd --version", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).toLowerCase();
     return output.includes("musl") ? "musl" : "gnu";
-  } catch {
-    throw new Error("Unable to determine Linux libc kind for launcher smoke tests");
+  } catch (error) {
+    // musl's ldd prints "musl libc" to stderr and exits non-zero on --version.
+    const combined = `${error?.stdout ?? ""}\n${error?.stderr ?? ""}`.toLowerCase();
+    return combined.includes("musl") ? "musl" : "gnu";
   }
 }
 

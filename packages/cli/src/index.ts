@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync, execSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,9 +25,16 @@ const workspaceRoot = resolve(scopeDir, "..");
 type LibcKind = "gnu" | "musl";
 
 function detectLibcKind(): LibcKind {
+  const override = process.env.TOKSCALE_LIBC?.trim().toLowerCase();
+  if (override === "musl") return "musl";
+  if (override === "gnu" || override === "glibc") return "gnu";
+
   const report = process.report?.getReport?.() as
     | {
-        header?: { glibcVersionRuntime?: string };
+        header?: {
+          glibcVersionRuntime?: string;
+          release?: { sourceUrl?: string };
+        };
         sharedObjects?: string[];
       }
     | undefined;
@@ -43,14 +50,33 @@ function detectLibcKind(): LibcKind {
     return "musl";
   }
 
+  // Bun reports neither glibcVersionRuntime nor sharedObjects, but its
+  // release.sourceUrl names the build flavor (e.g. bun-linux-x64-musl-baseline.zip).
+  if (report?.header?.release?.sourceUrl?.toLowerCase().includes("musl")) {
+    return "musl";
+  }
+
+  // musl distros (Alpine, Void-musl, ...) ship the loader as /lib/ld-musl-<arch>.so.1.
+  try {
+    if (readdirSync("/lib").some((entry) => entry.startsWith("ld-musl-"))) {
+      return "musl";
+    }
+  } catch {
+    // /lib unreadable or missing; fall through to ldd probing.
+  }
+
   try {
     const output = execSync("ldd --version", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).toLowerCase();
     return output.includes("musl") ? "musl" : "gnu";
-  } catch {
-    return "gnu";
+  } catch (error) {
+    // musl's ldd rejects --version: it prints "musl libc" to stderr and
+    // exits non-zero, so the answer is in the error, not the output.
+    const { stdout, stderr } = (error ?? {}) as { stdout?: unknown; stderr?: unknown };
+    const combined = `${stdout ?? ""}\n${stderr ?? ""}`.toLowerCase();
+    return combined.includes("musl") ? "musl" : "gnu";
   }
 }
 
