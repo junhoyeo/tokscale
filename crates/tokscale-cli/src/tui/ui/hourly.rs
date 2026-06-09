@@ -1,11 +1,13 @@
 use chrono::{Local, NaiveDate, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::hourly_profile;
-use super::widgets::{format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens};
+use super::widgets::{
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, scrollbar_state,
+};
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -336,7 +338,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(hourly_len).position(scroll_offset);
+        let mut scrollbar_state =
+            scrollbar_state(hourly_len, scroll_offset, data_rows_shown.max(1));
 
         frame.render_stateful_widget(
             scrollbar,

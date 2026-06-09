@@ -1,4 +1,5 @@
 use ratatui::prelude::*;
+use ratatui::widgets::ScrollbarState;
 use tokscale_core::ClientId;
 
 use crate::tui::client_ui;
@@ -79,6 +80,27 @@ pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
         format!("{:.1}s", value / 1000.0)
     } else {
         format!("{:.0}ms", value)
+    }
+}
+
+pub fn scrollbar_state(
+    content_len: usize,
+    scroll_offset: usize,
+    viewport_len: usize,
+) -> ScrollbarState {
+    let viewport_len = viewport_len.max(1);
+    ScrollbarState::new(content_len)
+        .position(scrollbar_position(scroll_offset, content_len, viewport_len))
+        .viewport_content_length(viewport_len)
+}
+
+fn scrollbar_position(scroll_offset: usize, content_len: usize, viewport_len: usize) -> usize {
+    let max_scroll = content_len.saturating_sub(viewport_len);
+    if max_scroll == 0 {
+        0
+    } else {
+        ((scroll_offset.min(max_scroll) as u128) * (content_len.saturating_sub(1) as u128)
+            / (max_scroll as u128)) as usize
     }
 }
 
@@ -318,6 +340,42 @@ fn capitalize_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollbar_state_maps_bottom_offset_to_last_position() {
+        assert_eq!(scrollbar_position(15, 20, 5), 19);
+    }
+
+    #[test]
+    fn scrollbar_state_keeps_top_at_zero() {
+        assert_eq!(scrollbar_position(0, 20, 5), 0);
+    }
+
+    #[test]
+    fn scrollbar_state_clamps_overscroll_to_bottom() {
+        assert_eq!(scrollbar_position(999, 20, 5), 19);
+    }
+
+    #[test]
+    fn scrollbar_state_single_page_stays_at_zero() {
+        assert_eq!(scrollbar_position(0, 5, 10), 0);
+    }
+
+    #[test]
+    fn scrollbar_state_uses_wide_math_for_large_lengths() {
+        let content_len = usize::MAX;
+        let viewport_len = 2;
+        let scroll_offset = content_len / 2;
+        let max_scroll = content_len.saturating_sub(viewport_len);
+        let expected = ((scroll_offset.min(max_scroll) as u128)
+            * (content_len.saturating_sub(1) as u128)
+            / (max_scroll as u128)) as usize;
+
+        assert_eq!(
+            scrollbar_position(scroll_offset, content_len, viewport_len),
+            expected
+        );
+    }
 
     #[test]
     fn shade_from_base_rank_0_equals_base() {

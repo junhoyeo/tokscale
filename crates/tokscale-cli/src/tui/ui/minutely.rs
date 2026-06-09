@@ -1,10 +1,10 @@
 use chrono::{Local, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
-use super::widgets::{format_cache_hit_rate, format_cost, format_tokens};
+use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, scrollbar_state};
 use crate::tui::app::{App, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -292,7 +292,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(minutely_len).position(scroll_offset);
+        let mut scrollbar_state = scrollbar_state(minutely_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
