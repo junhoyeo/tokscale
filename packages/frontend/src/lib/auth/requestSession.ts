@@ -18,9 +18,15 @@ function getAllowedOrigins(): string[] {
   const publicUrl = process.env.NEXT_PUBLIC_URL;
   if (publicUrl) {
     try {
-      const origin = new URL(publicUrl).origin;
-      if (!origins.includes(origin)) {
-        origins.push(origin);
+      const url = new URL(publicUrl);
+      // Only http(s) URLs have a real origin. Anything else (mailto:,
+      // file:, ...) yields the opaque origin "null", and allowlisting the
+      // literal string "null" would accept Origin: null requests from
+      // sandboxed iframes - a CSRF hole.
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        if (!origins.includes(url.origin)) {
+          origins.push(url.origin);
+        }
       }
     } catch {
       // Malformed NEXT_PUBLIC_URL; ignore and rely on the explicit list.

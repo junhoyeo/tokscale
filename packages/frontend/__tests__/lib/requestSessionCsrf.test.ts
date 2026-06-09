@@ -250,6 +250,20 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(mockState.getSession).not.toHaveBeenCalled();
   });
 
+  it("does not allowlist the opaque 'null' origin from a non-HTTP NEXT_PUBLIC_URL", async () => {
+    vi.stubEnv("NEXT_PUBLIC_URL", "mailto:admin@example.com");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    // new URL("mailto:...").origin === "null"; sandboxed iframes send
+    // Origin: null, so accepting it would reopen CSRF.
+    const result = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "null" })
+    );
+
+    expect(result).toBeNull();
+    expect(mockState.getSession).not.toHaveBeenCalled();
+  });
+
   it("ignores a malformed NEXT_PUBLIC_URL and keeps the explicit allowlist working", async () => {
     vi.stubEnv("NEXT_PUBLIC_URL", "not-a-valid-url");
     mockState.getSession.mockResolvedValue(validUser);
