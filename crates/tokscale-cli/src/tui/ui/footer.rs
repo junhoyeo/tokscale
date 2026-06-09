@@ -277,8 +277,45 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+/// Data-source indicator label (#699): "local" when only this machine's
+/// data is on screen, or "local+remote (N devices)" when server-side
+/// aggregated stats are available for cross-checking.
+fn data_source_label(app: &App) -> String {
+    match app.remote_stats {
+        Some(ref remote) => {
+            let devices = if remote.device_count == 1 {
+                "1 device".to_string()
+            } else {
+                format!("{} devices", remote.device_count)
+            };
+            format!("local+remote ({})", devices)
+        }
+        None => "local".to_string(),
+    }
+}
+
 fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
+
+    // Always-visible data-source indicator, so it is clear whether the
+    // numbers on screen are local-only or backed by server-side aggregates.
+    spans.push(Span::styled(
+        data_source_label(app),
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if let Some(ref remote) = app.remote_stats {
+        spans.push(Span::styled(
+            format!(
+                " all devices: {} · {}",
+                format_tokens(remote.total_tokens),
+                format_cost(remote.total_cost)
+            ),
+            Style::default().fg(app.theme.muted),
+        ));
+    }
+    spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
 
     if app.data.loading {
         let scanner_spans = get_scanner_spans(app.spinner_frame, &app.theme);
@@ -378,5 +415,32 @@ mod tests {
         app.settings.minutely_tab_enabled = true;
         app.current_tab = Tab::Minutely;
         assert_eq!(current_count_label(&app), " (0 minutes)");
+    }
+
+    #[test]
+    fn test_data_source_label_local_without_remote_stats() {
+        let app = make_app_on(Tab::Models);
+        assert_eq!(data_source_label(&app), "local");
+    }
+
+    #[test]
+    fn test_data_source_label_with_remote_stats() {
+        let mut app = make_app_on(Tab::Models);
+        app.remote_stats = Some(crate::tui::remote::RemoteStats {
+            schema_version: 1,
+            total_tokens: 1250,
+            total_cost: 1.75,
+            device_count: 2,
+            last_submitted_at: None,
+            days: Vec::new(),
+            devices: Vec::new(),
+            fetched_at_secs: 0,
+            cached_for_user: "alice".to_string(),
+            cached_for_api_url: "https://tokscale.ai".to_string(),
+        });
+        assert_eq!(data_source_label(&app), "local+remote (2 devices)");
+
+        app.remote_stats.as_mut().unwrap().device_count = 1;
+        assert_eq!(data_source_label(&app), "local+remote (1 device)");
     }
 }

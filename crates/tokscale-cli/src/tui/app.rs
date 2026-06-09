@@ -260,6 +260,15 @@ pub struct App {
     codex_login_rx: Option<std::sync::mpsc::Receiver<CodexLoginEvent>>,
     codex_login_child: Option<CodexLoginChildSlot>,
 
+    /// Server-side stats aggregated across all of the user's devices
+    /// (`GET /api/me/stats`). `None` means local-only: logged out, offline,
+    /// or the fetch has not completed yet.
+    pub remote_stats: Option<crate::tui::remote::RemoteStats>,
+    remote_stats_rx: Option<std::sync::mpsc::Receiver<crate::tui::remote::RemoteStats>>,
+    /// Throttles background refresh attempts so a failing fetch (offline,
+    /// expired token) is not retried on every tick.
+    remote_stats_last_attempt: Option<std::time::Instant>,
+
     data_version: u64,
     minutely_sort_cache: RefCell<Option<MinutelySortCache>>,
 }
@@ -378,6 +387,9 @@ impl App {
             usage_rx: None,
             codex_login_rx: None,
             codex_login_child: None,
+            remote_stats: None,
+            remote_stats_rx: None,
+            remote_stats_last_attempt: None,
             data_version: 0,
             minutely_sort_cache: RefCell::new(None),
         };
@@ -499,6 +511,9 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
+
+        self.poll_remote_stats();
+        self.maybe_refresh_remote_stats();
 
         self.poll_codex_login();
     }
@@ -732,6 +747,89 @@ impl App {
 
     pub fn is_fetching_usage(&self) -> bool {
         self.usage_rx.is_some()
+    }
+
+    /// Cache-first load of server-side aggregated multi-device stats.
+    /// Called once at TUI startup; the background refresh for a stale or
+    /// missing cache is driven by `on_tick` via `maybe_refresh_remote_stats`.
+    /// Silent on every failure path — the TUI stays local-only.
+    pub fn init_remote_stats(&mut self) {
+        #[cfg(not(test))]
+        {
+            let Some(auth) = crate::auth::resolve_api_token() else {
+                return;
+            };
+            // Env-provided tokens carry no username, so their responses are
+            // never trusted from cache (cache entries are scoped per account).
+            let username = auth.username.unwrap_or_default();
+            let api_url = crate::auth::get_api_base_url();
+            if let Some(stats) = crate::tui::remote::load_cached_remote_stats(&username, &api_url) {
+                self.remote_stats = Some(stats);
+            }
+        }
+    }
+
+    /// Spawn a background `GET /api/me/stats` fetch when the current remote
+    /// stats are missing or older than the cache TTL. Attempts are throttled
+    /// so an offline machine or expired token does not retry on every tick.
+    fn maybe_refresh_remote_stats(&mut self) {
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+        if self.remote_stats_rx.is_some() {
+            return;
+        }
+        let stale = self
+            .remote_stats
+            .as_ref()
+            .is_none_or(crate::tui::remote::RemoteStats::is_stale);
+        if !stale {
+            return;
+        }
+        if self
+            .remote_stats_last_attempt
+            .is_some_and(|at| at.elapsed() < RETRY_INTERVAL)
+        {
+            return;
+        }
+        self.remote_stats_last_attempt = Some(std::time::Instant::now());
+
+        // Tests must not read real credentials or hit the network.
+        #[cfg(not(test))]
+        {
+            let Some(auth) = crate::auth::resolve_api_token() else {
+                return;
+            };
+            let token = auth.token;
+            let username = auth.username.unwrap_or_default();
+            let api_url = crate::auth::get_api_base_url();
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.remote_stats_rx = Some(rx);
+            std::thread::spawn(move || {
+                if let Ok(stats) =
+                    crate::tui::remote::fetch_remote_stats(&token, &username, &api_url)
+                {
+                    let _ = tx.send(stats);
+                }
+            });
+        }
+    }
+
+    /// Poll the background remote stats fetch. Errors are silent: the sender
+    /// is simply dropped without a payload and the TUI stays local-only.
+    fn poll_remote_stats(&mut self) {
+        if let Some(ref rx) = self.remote_stats_rx {
+            match rx.try_recv() {
+                Ok(stats) => {
+                    self.remote_stats_rx = None;
+                    self.remote_stats = Some(stats);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.remote_stats_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
     }
 
     fn handle_click_action(&mut self, action: ClickAction) {
