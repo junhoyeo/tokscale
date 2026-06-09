@@ -102,14 +102,15 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(mockState.getSession).toHaveBeenCalledTimes(1);
   });
 
-  it("allows cookie session when Origin is in the default allowlist (production)", async () => {
+  it("rejects the removed tokscale.dev origin (domain does not exist)", async () => {
     mockState.getSession.mockResolvedValue(validUser);
 
     const result = await getSessionFromRequest(
       makeRequest("POST", { Origin: "https://tokscale.dev" })
     );
 
-    expect(result).toEqual(validUser);
+    expect(result).toBeNull();
+    expect(mockState.getSession).not.toHaveBeenCalled();
   });
 
   it("allows cookie session from the production custom domain when bearer auth is disabled", async () => {

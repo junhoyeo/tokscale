@@ -10,7 +10,7 @@ function getAllowedOrigins(): string[] {
   const env = process.env.CSRF_ALLOWED_ORIGINS;
   const origins = env
     ? env.split(",").map((o) => o.trim()).filter(Boolean)
-    : ["https://tokscale.ai", "https://tokscale.dev", "http://localhost:3000"];
+    : ["https://tokscale.ai", "http://localhost:3000"];
 
   // Self-hosted deployments already set NEXT_PUBLIC_URL for OAuth redirects;
   // the deployment's own origin is always a legitimate request source, so
