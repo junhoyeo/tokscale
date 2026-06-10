@@ -150,7 +150,7 @@ fn anthropic_catalog_resolves_to_correct_family_version_and_price() {
 
     // Retired models absent from all datasets, and bare brand tokens, must
     // resolve unpriced — never to another model's price.
-    for id in ["claude-2.1", "claude-2.0", "claude"] {
+    for id in ["claude-2.1", "claude-2.0", "claude", "anthropic"] {
         if let Some(result) = lookup.lookup(id) {
             failures.push(format!(
                 "{}: must be None, resolved to {} at {:?}",

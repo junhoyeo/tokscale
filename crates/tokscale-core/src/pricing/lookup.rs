@@ -161,6 +161,17 @@ impl PricingLookup {
         for key in &models_dev_keys {
             let lower = key.to_lowercase();
             models_dev_lower.insert(lower.clone(), key.clone());
+            // Only priced entries enter the model-part index: the
+            // deterministic anthropic-first preference must choose among
+            // keys that can actually price usage, otherwise an unpriced
+            // `anthropic/<model>` row would shadow a priced reseller row
+            // and bill the model at zero cost. (The models.dev loader only
+            // emits entries with input+output costs — see
+            // `models_dev::cost_to_pricing` — but this constructor is
+            // public, so the index guards itself too.)
+            if !models_dev.get(key).is_some_and(has_any_usable_pricing) {
+                continue;
+            }
             if let Some(model_part) = lower.split('/').next_back() {
                 if model_part != lower {
                     match models_dev_model_part.entry(model_part.to_string()) {
@@ -439,12 +450,26 @@ impl PricingLookup {
             return Some(result);
         }
 
+        // A provider hint pins the lookup to that provider's catalog: the
+        // provider-scoped models.dev pass must run before the unscoped
+        // separator-normalized fallback below, otherwise a hinted lookup
+        // (e.g. `venice` + `claude-opus-4-6-fast`) would take OpenRouter's
+        // `anthropic/claude-opus-4.6-fast` price instead of the hinted
+        // provider's own `venice/claude-opus-4-6-fast` key.
+        if provider_id.is_some() {
+            if let Some(result) = self.exact_match_models_dev_for_provider(model_id, provider_id) {
+                return Some(result);
+            }
+        }
+
         // Separator-normalized exact passes against the canonical sources
         // (LiteLLM + OpenRouter) run BEFORE the models.dev model-part pass so
         // ids like `claude-opus-4-6-fast` hit the canonical
         // `anthropic/claude-opus-4.6-fast` key instead of a reseller's
         // `venice/claude-opus-4-6-fast` markup. models.dev stays the
-        // long-tail fallback below.
+        // long-tail fallback below. This reorder only preempts models.dev
+        // for UNhinted lookups: the provider-scoped passes above and below
+        // keep provider-hinted resolutions pinned to the hinted provider.
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = choose_best_source_result(
                 self.exact_match_litellm_for_provider(&version_normalized, provider_id),
@@ -452,6 +477,13 @@ impl PricingLookup {
                 provider_id,
             ) {
                 return Some(result);
+            }
+            if provider_id.is_some() {
+                if let Some(result) =
+                    self.exact_match_models_dev_for_provider(&version_normalized, provider_id)
+                {
+                    return Some(result);
+                }
             }
             if let Some(result) = self.exact_match_litellm(&version_normalized) {
                 return Some(result);
@@ -3650,7 +3682,7 @@ mod tests {
         );
         let lookup = PricingLookup::new(HashMap::new(), openrouter, HashMap::new());
 
-        for id in ["claude-2.1", "claude-2.0", "claude"] {
+        for id in ["claude-2.1", "claude-2.0", "claude", "anthropic"] {
             assert!(
                 lookup.lookup(id).is_none(),
                 "id {id} must resolve unpriced, never to another model's price"
@@ -3724,6 +3756,79 @@ mod tests {
         let result = lookup.lookup("claude-opus-4-6-fast").unwrap();
         assert_eq!(result.matched_key, "anthropic/claude-opus-4.6-fast");
         assert_eq!(result.pricing.input_cost_per_token, Some(30e-6));
+    }
+
+    /// Regression (#707 review): a provider hint pins the lookup to that
+    /// provider's catalog. The canonical-source reorder asserted by
+    /// `canonical_fast_price_beats_reseller_markup` only applies to unhinted
+    /// lookups; with `provider_id = Some("venice")` the provider-scoped
+    /// models.dev pass must win over OpenRouter's unscoped `anthropic/...`
+    /// row, so provider-aware callers get the hinted provider's price.
+    #[test]
+    fn provider_hint_keeps_models_dev_provider_key_over_unscoped_canonical() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4.6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(30e-6),
+                output_cost_per_token: Some(150e-6),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "venice/claude-opus-4-6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(36e-6),
+                output_cost_per_token: Some(180e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            openrouter,
+            HashMap::new(),
+            models_dev,
+        );
+
+        let hinted = lookup
+            .lookup_with_provider("claude-opus-4-6-fast", Some("venice"))
+            .unwrap();
+        assert_eq!(hinted.matched_key, "venice/claude-opus-4-6-fast");
+        assert_eq!(hinted.pricing.input_cost_per_token, Some(36e-6));
+
+        // Unhinted lookups keep the canonical resolution.
+        let unhinted = lookup.lookup("claude-opus-4-6-fast").unwrap();
+        assert_eq!(unhinted.matched_key, "anthropic/claude-opus-4.6-fast");
+        assert_eq!(unhinted.pricing.input_cost_per_token, Some(30e-6));
+    }
+
+    /// Regression (#707 review): the anthropic-first preference in the
+    /// models.dev model-part index must only choose among priced keys. An
+    /// unpriced (all-None) `anthropic/<model>` row must not shadow a priced
+    /// reseller row, which would bill the model at zero cost.
+    #[test]
+    fn unpriced_anthropic_models_dev_key_does_not_shadow_priced_reseller() {
+        let mut models_dev = HashMap::new();
+        models_dev.insert("anthropic/model-x".to_string(), ModelPricing::default());
+        models_dev.insert(
+            "reseller/model-x".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(36e-6),
+                output_cost_per_token: Some(180e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup.lookup("model-x").unwrap();
+        assert_eq!(result.matched_key, "reseller/model-x");
+        assert_eq!(result.pricing.input_cost_per_token, Some(36e-6));
     }
 
     /// After the lookup_auto reorder, models.dev must remain the long-tail
