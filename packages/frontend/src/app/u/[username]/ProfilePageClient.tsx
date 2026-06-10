@@ -148,7 +148,7 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
   const showResubmitBanner = EARLY_ADOPTERS.includes(data.user.username) && data.stats.submissionCount === 1;
 
   return (
-    <PageContainer style={{ backgroundColor: "#10121C" }}>
+    <PageContainer style={{ backgroundColor: "var(--color-bg-default)" }}>
       <Navigation />
 
       {showResubmitBanner && (

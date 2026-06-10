@@ -251,7 +251,7 @@ const TokenInfo = styled.div`
 `;
 
 const IconWrapper = styled.div`
-  color: #737373;
+  color: var(--color-fg-muted);
 `;
 
 const DeviceEditRow = styled.div`
