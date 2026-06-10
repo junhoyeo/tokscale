@@ -10,6 +10,9 @@ import { formatNumber, formatCurrency, formatDuration } from "@/lib/utils";
 import { legacy } from "@/lib/responsive";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
 
+export { ProfileDevices } from "./ProfileDevices";
+export type { ProfileDevice } from "./ProfileDevices";
+
 export interface ProfileUser {
   username: string;
   displayName: string | null;
