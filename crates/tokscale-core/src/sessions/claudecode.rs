@@ -9,10 +9,10 @@ use super::utils::{
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
-use crate::{provider_identity, TokenBreakdown};
+use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -48,6 +48,18 @@ pub struct ClaudeEntry {
 struct AgentMetaFile {
     #[serde(rename = "agentType")]
     agent_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CcMirrorVariantMetadata {
+    name: String,
+    provider_id: Option<String>,
+}
+
+impl CcMirrorVariantMetadata {
+    fn client_id(&self) -> String {
+        format!("cc-mirror/{}", sanitize_cc_mirror_segment(&self.name))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -294,15 +306,37 @@ fn extract_agent_id_from_text(text: &str) -> Option<String> {
 
 /// Parse a Claude Code JSONL file
 pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
+    let home_dir = dirs::home_dir();
+    parse_claude_file_with_home(path, home_dir.as_deref())
+}
+
+pub fn parse_claude_file_with_home(path: &Path, home_dir: Option<&Path>) -> Vec<UnifiedMessage> {
     let mut parent_cache = ParentSubagentTypeCache::new();
-    parse_claude_file_with_cache(path, &mut parent_cache)
+    parse_claude_file_with_cache_and_home(path, &mut parent_cache, home_dir)
 }
 
 pub fn parse_claude_file_with_cache(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
 ) -> Vec<UnifiedMessage> {
+    let home_dir = dirs::home_dir();
+    parse_claude_file_with_cache_and_home(path, parent_cache, home_dir.as_deref())
+}
+
+pub fn parse_claude_file_with_cache_and_home(
+    path: &Path,
+    parent_cache: &mut ParentSubagentTypeCache,
+    home_dir: Option<&Path>,
+) -> Vec<UnifiedMessage> {
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
+    let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir);
+    let client_id = cc_mirror_metadata
+        .as_ref()
+        .map(CcMirrorVariantMetadata::client_id)
+        .unwrap_or_else(|| "claude".to_string());
+    let metadata_provider_hint = cc_mirror_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.provider_id.as_deref());
     let mut session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -318,6 +352,8 @@ pub fn parse_claude_file_with_cache(
             fallback_timestamp,
             workspace_key.clone(),
             workspace_label.clone(),
+            &client_id,
+            metadata_provider_hint,
         );
         if !json_messages.is_empty() {
             return json_messages;
@@ -344,6 +380,8 @@ pub fn parse_claude_file_with_cache(
     // so the next assistant message can be marked as a turn start.
     let mut pending_turn_start = false;
     let mut pending_request_start_timestamp_ms: Option<i64> = None;
+    let mut last_model: Option<String> = None;
+    let mut last_provider_hint: Option<String> = None;
     // Sidechain detection state (resolved lazily on first parseable entry)
     let mut sidechain_agent: Option<String> = None;
     let mut sidechain_detected = false;
@@ -381,17 +419,48 @@ pub fn parse_claude_file_with_cache(
                 }
             }
 
-            if entry.entry_type == "user" {
+            if entry.entry_type == "user" || entry.entry_type == "tool_result" {
+                let tool_result_message = extract_claude_tool_result_message(
+                    trimmed,
+                    ClaudeToolResultContext {
+                        entry: &entry,
+                        last_model: last_model.as_deref(),
+                        last_provider_hint: last_provider_hint.as_deref(),
+                        client_id: &client_id,
+                        default_provider_hint: metadata_provider_hint,
+                        session_id: &session_id,
+                        fallback_timestamp,
+                        workspace_key: workspace_key.clone(),
+                        workspace_label: workspace_label.clone(),
+                        sidechain_agent: sidechain_agent.clone(),
+                    },
+                );
+
                 if let Some(timestamp_ms) = parse_claude_entry_timestamp(entry.timestamp.as_deref())
                 {
                     pending_request_start_timestamp_ms = Some(timestamp_ms);
                 }
-                // Distinguish real human input from tool results / system messages.
-                // Tool results have content as a JSON array (e.g. [{"type":"tool_result",...}]).
-                // System messages have XML-tagged content (e.g. <local-command-stdout>).
-                // Only plain text without XML tags counts as a genuine user turn.
-                if is_human_turn(trimmed) {
+
+                if entry.entry_type == "user" && is_human_turn(trimmed) {
                     pending_turn_start = true;
+                }
+
+                if let Some(tool_message) = tool_result_message {
+                    if let Some(ref dedup_key) = tool_message.dedup_key {
+                        if let Some(&existing_idx) = processed_hashes.get(dedup_key) {
+                            merge_claude_tool_result_duplicate(
+                                &mut messages[existing_idx],
+                                tool_message.tokens.input,
+                                tool_message.timestamp,
+                            );
+                            continue;
+                        }
+                        processed_hashes.insert(dedup_key.clone(), messages.len());
+                    }
+                    let provider_confidence =
+                        stored_claude_provider_confidence(&tool_message.provider_id);
+                    messages.push(tool_message);
+                    provider_confidences.push(provider_confidence);
                 }
                 continue;
             }
@@ -403,6 +472,15 @@ pub fn parse_claude_file_with_cache(
                     None => continue,
                 };
 
+                if let Some(model) = message.model.as_deref() {
+                    last_model = Some(model.to_string());
+                    last_provider_hint = message
+                        .provider_id
+                        .as_deref()
+                        .or(entry.provider_id.as_deref())
+                        .map(str::to_string);
+                }
+
                 let usage = match message.usage {
                     Some(u) => u,
                     None => continue,
@@ -413,7 +491,8 @@ pub fn parse_claude_file_with_cache(
                     message
                         .provider_id
                         .as_deref()
-                        .or(entry.provider_id.as_deref()),
+                        .or(entry.provider_id.as_deref())
+                        .or(metadata_provider_hint),
                 );
 
                 // Build dedup key for global deduplication (messageId:requestId composite).
@@ -463,18 +542,20 @@ pub fn parse_claude_file_with_cache(
                     _ => None,
                 };
 
-                let model = match message.model {
+                let raw_model = match message.model {
                     Some(m) => m,
                     None => continue,
                 };
                 let provider_choice = claude_provider_choice(
-                    &model,
+                    &raw_model,
                     message
                         .provider_id
                         .as_deref()
-                        .or(entry.provider_id.as_deref()),
+                        .or(entry.provider_id.as_deref())
+                        .or(metadata_provider_hint),
                 );
                 let provider_confidence = provider_choice.confidence;
+                let model = canonicalize_claude_model(&raw_model);
 
                 let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
                 let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
@@ -487,7 +568,7 @@ pub fn parse_claude_file_with_cache(
                 });
 
                 let mut unified = UnifiedMessage::new_with_dedup(
-                    "claude",
+                    client_id.clone(),
                     model,
                     provider_choice.id,
                     session_id.clone(),
@@ -532,6 +613,8 @@ pub fn parse_claude_file_with_cache(
             &session_id,
             &mut headless_state,
             fallback_timestamp,
+            &client_id,
+            metadata_provider_hint,
         ) {
             let mut message = message;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
@@ -541,9 +624,13 @@ pub fn parse_claude_file_with_cache(
         }
     }
 
-    if let Some(message) =
-        finalize_headless_state(&mut headless_state, &session_id, fallback_timestamp)
-    {
+    if let Some(message) = finalize_headless_state(
+        &mut headless_state,
+        &session_id,
+        fallback_timestamp,
+        &client_id,
+        metadata_provider_hint,
+    ) {
         let mut message = message;
         message.set_workspace(workspace_key, workspace_label);
         let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
@@ -568,7 +655,94 @@ fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
         }
     }
 
+    for window in components.windows(5) {
+        if window[0] == ".cc-mirror" && window[2] == "config" && window[3] == "projects" {
+            let key = normalize_workspace_key(&window[4]);
+            let label = key.as_deref().and_then(workspace_label_from_key);
+            return (key, label);
+        }
+    }
+
+    for window in components.windows(2).rev() {
+        if window[0] == "projects" {
+            let key = normalize_workspace_key(&window[1]);
+            let label = key.as_deref().and_then(workspace_label_from_key);
+            return (key, label);
+        }
+    }
+
     (None, None)
+}
+
+fn sanitize_cc_mirror_segment(raw: &str) -> String {
+    let mut segment: String = raw
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    while segment.contains("--") {
+        segment = segment.replace("--", "-");
+    }
+    let mut segment = segment
+        .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
+        .to_string();
+    if segment.len() > 96 {
+        segment.truncate(96);
+        segment = segment
+            .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
+            .to_string();
+    }
+    if segment.is_empty() {
+        "variant".to_string()
+    } else {
+        segment
+    }
+}
+
+fn cc_mirror_provider_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case("mirror") {
+        return Some("anthropic".to_string());
+    }
+    provider_identity::canonical_provider(trimmed)
+}
+
+fn cc_mirror_variant_metadata_from_path(
+    path: &Path,
+    home_dir: Option<&Path>,
+) -> Option<CcMirrorVariantMetadata> {
+    let variant_dir = crate::cc_mirror::variant_dir_from_session_path(path, home_dir)?;
+    let variant_name = variant_dir.file_name()?.to_string_lossy().to_string();
+    let variant_path = crate::cc_mirror::variant_file_path(&variant_dir);
+    let metadata = crate::cc_mirror::read_variant_file(&variant_path);
+
+    let name = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.name.as_deref())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&variant_name)
+        .to_string();
+    let provider_id = metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata
+                .provider_id
+                .as_deref()
+                .or(metadata.provider.as_deref())
+        })
+        .and_then(cc_mirror_provider_id);
+
+    Some(CcMirrorVariantMetadata { name, provider_id })
 }
 
 fn parse_claude_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
@@ -621,6 +795,275 @@ fn merge_claude_duplicate(
     }
 }
 
+fn merge_claude_tool_result_duplicate(
+    existing: &mut UnifiedMessage,
+    input_tokens: i64,
+    timestamp_ms: i64,
+) {
+    existing.tokens.input = existing.tokens.input.max(input_tokens.max(0));
+    if timestamp_ms >= existing.timestamp {
+        existing.set_timestamp(timestamp_ms);
+    }
+}
+
+struct ClaudeToolResultUsage {
+    input_tokens: i64,
+    dedup_key: Option<String>,
+}
+
+struct ClaudeToolResultContext<'a> {
+    entry: &'a ClaudeEntry,
+    last_model: Option<&'a str>,
+    last_provider_hint: Option<&'a str>,
+    client_id: &'a str,
+    default_provider_hint: Option<&'a str>,
+    session_id: &'a str,
+    fallback_timestamp: i64,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+    sidechain_agent: Option<String>,
+}
+
+fn extract_claude_tool_result_message(
+    line: &str,
+    context: ClaudeToolResultContext<'_>,
+) -> Option<UnifiedMessage> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let usage = extract_claude_tool_result_usage(&value)?;
+
+    let raw_model = extract_claude_model(&value)
+        .or_else(|| {
+            context
+                .entry
+                .message
+                .as_ref()
+                .and_then(|message| message.model.clone())
+        })
+        .or_else(|| context.last_model.map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let provider_hint = extract_claude_provider(&value)
+        .or_else(|| {
+            context
+                .entry
+                .message
+                .as_ref()
+                .and_then(|message| message.provider_id.clone())
+        })
+        .or_else(|| context.entry.provider_id.clone())
+        .or_else(|| context.last_provider_hint.map(str::to_string))
+        .or_else(|| context.default_provider_hint.map(str::to_string));
+
+    let provider_choice = claude_provider_choice(&raw_model, provider_hint.as_deref());
+    let model = canonicalize_claude_model(&raw_model);
+    let timestamp = parse_claude_entry_timestamp(context.entry.timestamp.as_deref())
+        .or_else(|| extract_claude_timestamp(&value))
+        .unwrap_or(context.fallback_timestamp);
+
+    let mut message = UnifiedMessage::new_with_dedup(
+        context.client_id,
+        model,
+        provider_choice.id,
+        context.session_id.to_string(),
+        timestamp,
+        TokenBreakdown {
+            input: usage.input_tokens,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        usage.dedup_key.map(|key| {
+            format!(
+                "{}:tool_result:{}:{key}",
+                context.client_id, context.session_id
+            )
+        }),
+    );
+    message.message_count = 0;
+    message.agent = context.sidechain_agent;
+    message.set_workspace(context.workspace_key, context.workspace_label);
+    Some(message)
+}
+
+fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsage> {
+    let mut total_tokens = 0;
+    let mut first_dedup_id: Option<String> = None;
+    let mut seen_ids = HashSet::new();
+
+    for tool_result in claude_tool_result_values(value) {
+        let tool_result_id = extract_tool_result_id(tool_result);
+        if let Some(id) = tool_result_id.as_ref() {
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
+        }
+        if first_dedup_id.is_none() {
+            first_dedup_id = tool_result_id;
+        }
+        total_tokens += extract_tool_result_input_tokens(tool_result).unwrap_or(0);
+    }
+
+    if total_tokens <= 0 {
+        return None;
+    }
+
+    Some(ClaudeToolResultUsage {
+        input_tokens: total_tokens,
+        dedup_key: first_dedup_id.map(|id| format!("tool_result:{id}")),
+    })
+}
+
+fn claude_tool_result_values(value: &Value) -> Vec<&Value> {
+    let mut results = Vec::new();
+
+    if value
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .is_some_and(|kind| kind == "tool_result")
+    {
+        results.push(value);
+    }
+
+    if let Some(tool_result) = value.get("tool_result") {
+        results.push(tool_result);
+    }
+
+    if let Some(message_tool_result) = value
+        .get("message")
+        .and_then(|message| message.get("tool_result"))
+    {
+        results.push(message_tool_result);
+    }
+
+    if let Some(content) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .or_else(|| value.get("content"))
+    {
+        collect_tool_result_blocks(content, &mut results);
+    }
+
+    results
+}
+
+fn collect_tool_result_blocks<'a>(value: &'a Value, results: &mut Vec<&'a Value>) {
+    if let Some(blocks) = value.as_array() {
+        for block in blocks {
+            if block
+                .get("type")
+                .and_then(|kind| kind.as_str())
+                .is_some_and(|kind| kind == "tool_result")
+            {
+                results.push(block);
+            }
+        }
+    }
+}
+
+fn extract_tool_result_id(tool_result: &Value) -> Option<String> {
+    extract_string(tool_result.get("tool_use_id"))
+        .or_else(|| extract_string(tool_result.get("id")))
+        .or_else(|| extract_string(tool_result.get("tool_result_id")))
+}
+
+fn extract_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
+    explicit_tool_result_input_tokens(tool_result).or_else(|| {
+        let chars = tool_result_output_char_count(tool_result);
+        (chars > 0).then(|| estimate_tokens_from_chars(chars))
+    })
+}
+
+fn explicit_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
+    for candidate in [
+        tool_result.get("input_tokens"),
+        tool_result.get("token_count"),
+        tool_result.get("tokens"),
+        tool_result
+            .get("usage")
+            .and_then(|usage| usage.get("input_tokens")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("input_tokens")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("token_count")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("tokens")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("usage"))
+            .and_then(|usage| usage.get("input_tokens")),
+    ] {
+        if let Some(tokens) = extract_i64(candidate) {
+            return Some(tokens.max(0));
+        }
+    }
+    None
+}
+
+fn tool_result_output_char_count(tool_result: &Value) -> usize {
+    let mut chars = 0;
+
+    if let Some(output) = tool_result
+        .get("tool_output")
+        .and_then(|tool_output| tool_output.get("output"))
+        .and_then(|output| output.as_str())
+    {
+        chars += output.chars().count();
+    }
+
+    match tool_result.get("content") {
+        Some(content) if content.is_string() => {
+            chars += content
+                .as_str()
+                .map(str::chars)
+                .map(Iterator::count)
+                .unwrap_or(0);
+        }
+        Some(content) => {
+            chars += tool_result_content_output_chars(content);
+        }
+        None => {}
+    }
+
+    chars
+}
+
+fn tool_result_content_output_chars(content: &Value) -> usize {
+    content
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .get("tool_output")
+                        .and_then(|tool_output| tool_output.get("output"))
+                        .and_then(|output| output.as_str())
+                        .or_else(|| block.get("text").and_then(|text| text.as_str()))
+                        .map(str::chars)
+                        .map(Iterator::count)
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn estimate_tokens_from_chars(chars: usize) -> i64 {
+    // Claude Code tool outputs may not include token metadata. Match the
+    // existing Kiro fallback of one token per four characters, rounded up.
+    chars.div_ceil(4) as i64
+}
+
+fn canonicalize_claude_model(model: &str) -> String {
+    pricing::aliases::resolve_alias(model)
+        .unwrap_or(model)
+        .to_string()
+}
+
 #[derive(Default)]
 struct ClaudeHeadlessState {
     model: Option<String>,
@@ -638,6 +1081,8 @@ fn parse_claude_headless_json(
     fallback_timestamp: i64,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Vec<UnifiedMessage> {
     let Some(data) = read_file_or_none(path) else {
         return Vec::new();
@@ -650,7 +1095,13 @@ fn parse_claude_headless_json(
     };
 
     let mut messages = Vec::with_capacity(1);
-    if let Some(message) = extract_claude_headless_message(&value, session_id, fallback_timestamp) {
+    if let Some(message) = extract_claude_headless_message(
+        &value,
+        session_id,
+        fallback_timestamp,
+        client_id,
+        default_provider_hint,
+    ) {
         let mut message = message;
         message.set_workspace(workspace_key, workspace_label);
         messages.push(message);
@@ -664,6 +1115,8 @@ fn process_claude_headless_line(
     session_id: &str,
     state: &mut ClaudeHeadlessState,
     fallback_timestamp: i64,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
     let mut bytes = line.as_bytes().to_vec();
     let value: Value = simd_json::from_slice(&mut bytes).ok()?;
@@ -673,7 +1126,13 @@ fn process_claude_headless_line(
 
     match event_type {
         "message_start" => {
-            completed_message = finalize_headless_state(state, session_id, fallback_timestamp);
+            completed_message = finalize_headless_state(
+                state,
+                session_id,
+                fallback_timestamp,
+                client_id,
+                default_provider_hint,
+            );
 
             state.model = extract_claude_model(&value);
             state.provider_id = extract_claude_provider(&value);
@@ -695,12 +1154,22 @@ fn process_claude_headless_line(
             }
         }
         "message_stop" => {
-            completed_message = finalize_headless_state(state, session_id, fallback_timestamp);
+            completed_message = finalize_headless_state(
+                state,
+                session_id,
+                fallback_timestamp,
+                client_id,
+                default_provider_hint,
+            );
         }
         _ => {
-            if let Some(message) =
-                extract_claude_headless_message(&value, session_id, fallback_timestamp)
-            {
+            if let Some(message) = extract_claude_headless_message(
+                &value,
+                session_id,
+                fallback_timestamp,
+                client_id,
+                default_provider_hint,
+            ) {
                 completed_message = Some(message);
             }
         }
@@ -713,16 +1182,23 @@ fn extract_claude_headless_message(
     value: &Value,
     session_id: &str,
     fallback_timestamp: i64,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
     let usage = value
         .get("usage")
         .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))?;
-    let model = extract_claude_model(value)?;
-    let provider_id = claude_provider_id(&model, extract_claude_provider(value).as_deref());
+    let raw_model = extract_claude_model(value)?;
+    let provider_hint = extract_claude_provider(value);
+    let provider_id = claude_provider_id(
+        &raw_model,
+        provider_hint.as_deref().or(default_provider_hint),
+    );
+    let model = canonicalize_claude_model(&raw_model);
     let timestamp = extract_claude_timestamp(value).unwrap_or(fallback_timestamp);
 
     Some(UnifiedMessage::new(
-        "claude",
+        client_id,
         model,
         provider_id,
         session_id.to_string(),
@@ -934,9 +1410,15 @@ fn finalize_headless_state(
     state: &mut ClaudeHeadlessState,
     session_id: &str,
     fallback_timestamp: i64,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
-    let model = state.model.clone()?;
-    let provider_id = claude_provider_id(&model, state.provider_id.as_deref());
+    let raw_model = state.model.clone()?;
+    let provider_id = claude_provider_id(
+        &raw_model,
+        state.provider_id.as_deref().or(default_provider_hint),
+    );
+    let model = canonicalize_claude_model(&raw_model);
     let timestamp = state.timestamp_ms.unwrap_or(fallback_timestamp);
     if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
         *state = ClaudeHeadlessState::default();
@@ -944,7 +1426,7 @@ fn finalize_headless_state(
     }
 
     let message = UnifiedMessage::new(
-        "claude",
+        client_id,
         model,
         provider_id,
         session_id.to_string(),
@@ -1017,6 +1499,30 @@ mod tests {
         (temp_dir, path)
     }
 
+    fn create_cc_mirror_project_file(
+        content: &str,
+        variant: &str,
+        provider: &str,
+        project: &str,
+        filename: &str,
+    ) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let variant_dir = temp_dir.path().join(".cc-mirror").join(variant);
+        let config_dir = variant_dir.join("config");
+        let path = config_dir.join("projects").join(project).join(filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            variant_dir.join("variant.json"),
+            format!(
+                r#"{{"name":"{variant}","provider":"{provider}","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(&path, content).unwrap();
+        (temp_dir, path)
+    }
+
     fn create_transcript_file(content: &str, filename: &str) -> (TempDir, std::path::PathBuf) {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir
@@ -1045,6 +1551,46 @@ mod tests {
         );
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[1].tokens.input, 200);
+    }
+
+    #[test]
+    fn test_parse_cc_mirror_claude_variant_attributes_client_provider_and_workspace() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
+
+        let (_temp_dir, path) = create_cc_mirror_project_file(
+            content,
+            "zai-worker",
+            "zai",
+            "-Users-example-work",
+            "session.jsonl",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "cc-mirror/zai-worker");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].model_id, "claude-3-5-sonnet");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 10);
+        assert_eq!(messages[0].tokens.cache_write, 5);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("-Users-example-work")
+        );
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("-Users-example-work")
+        );
+    }
+
+    #[test]
+    fn test_cc_mirror_variant_client_segment_is_submit_safe() {
+        assert_eq!(sanitize_cc_mirror_segment(" zaicc "), "zaicc");
+        assert_eq!(sanitize_cc_mirror_segment("../Zai CC!"), "zai-cc");
+        assert_eq!(sanitize_cc_mirror_segment("..."), "variant");
+        assert_eq!(sanitize_cc_mirror_segment(&"a".repeat(120)).len(), 96);
     }
 
     #[test]
@@ -1273,21 +1819,34 @@ mod tests {
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
-        assert_eq!(messages.len(), 3, "Should have 3 assistant messages");
+        assert_eq!(
+            messages.len(),
+            4,
+            "Should include 3 assistant messages plus 1 tool-result input message"
+        );
+        let assistant_messages: Vec<_> = messages
+            .iter()
+            .filter(|message| message.tokens.output > 0)
+            .collect();
+        assert_eq!(
+            assistant_messages.len(),
+            3,
+            "Should have 3 assistant usage messages"
+        );
 
         // First assistant after first human user → turn start
         assert!(
-            messages[0].is_turn_start,
+            assistant_messages[0].is_turn_start,
             "First response should be turn start"
         );
         // Assistant after tool_result → NOT a new turn
         assert!(
-            !messages[1].is_turn_start,
+            !assistant_messages[1].is_turn_start,
             "Response after tool_result should NOT be turn start"
         );
         // First assistant after second human user → turn start
         assert!(
-            messages[2].is_turn_start,
+            assistant_messages[2].is_turn_start,
             "Response after real user input should be turn start"
         );
 
@@ -1347,6 +1906,128 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_read, 200);
         assert_eq!(messages[0].tokens.cache_write, 100);
         assert_eq!(messages[0].tokens.reasoning, 0);
+    }
+
+    #[test]
+    fn test_opus_4_7_usage_is_parsed_when_usage_metadata_exists() {
+        let content = r#"{"type":"assistant","timestamp":"2026-04-16T10:00:00.000Z","requestId":"req_opus47","message":{"id":"msg_opus47","model":"claude-opus-4-7","usage":{"input_tokens":321,"output_tokens":654,"cache_read_input_tokens":987,"cache_creation_input_tokens":111}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-7");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 321);
+        assert_eq!(messages[0].tokens.output, 654);
+        assert_eq!(messages[0].tokens.cache_read, 987);
+        assert_eq!(messages[0].tokens.cache_write, 111);
+    }
+
+    #[test]
+    fn test_tool_result_output_counts_as_input() {
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_input","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 4);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+        assert_eq!(messages[0].tokens.cache_write, 0);
+        let expected_dedup_key = format!(
+            "claude:tool_result:{}:tool_result:toolu_input",
+            messages[0].session_id
+        );
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some(expected_dedup_key.as_str())
+        );
+        assert_eq!(messages[0].message_count, 0);
+    }
+
+    #[test]
+    fn test_cc_mirror_tool_result_keeps_variant_client_and_provider() {
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_cc_mirror","tool_output":{"input_tokens":7,"output":"tool output"}}]}}"#;
+
+        let (_temp_dir, path) = create_cc_mirror_project_file(
+            content,
+            "zai-worker",
+            "zai",
+            "project-one",
+            "session.jsonl",
+        );
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "cc-mirror/zai-worker");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].model_id, "sonnet");
+        assert_eq!(messages[0].tokens.input, 7);
+        assert_eq!(messages[0].message_count, 0);
+    }
+
+    #[test]
+    fn test_tool_result_duplicate_uses_max_input_tokens() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnop"}}}
+{"type":"tool_result","timestamp":"2026-05-27T10:00:00.100Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd"}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(messages[0].timestamp, 1_779_876_000_100);
+    }
+
+    #[test]
+    fn test_tool_result_repeated_in_same_record_is_not_counted_twice() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 4);
+    }
+
+    #[test]
+    fn test_tool_result_prefers_input_token_metadata_over_char_estimate() {
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"claude-sonnet-4-6","content":[{"type":"tool_result","tool_use_id":"toolu_metadata","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd","input_tokens":3}}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 3);
+    }
+
+    #[test]
+    fn test_assistant_usage_with_tool_use_is_not_estimated_from_prompt_text() {
+        let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"id":"msg_tool_use","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/tmp/large.txt"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+    }
+
+    #[test]
+    fn test_anthropic_prefixed_claude_model_is_canonicalized() {
+        let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
     }
 
     #[test]

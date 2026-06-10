@@ -8,6 +8,8 @@ import { getGroupMembership } from "@/lib/groups/permissions";
 import { getGroupBySlug, getGroupMemberCount } from "@/lib/groups/queries";
 import { generateUniqueGroupSlug } from "@/lib/groups/slugs";
 
+const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
+
 interface RouteParams {
   params: Promise<{ slug: string }>;
 }
@@ -79,7 +81,7 @@ export async function GET(request: Request, { params }: RouteParams) {
 
 export async function PATCH(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, BROWSER_SESSION_OPTIONS);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
@@ -174,7 +176,7 @@ export async function PATCH(request: Request, { params }: RouteParams) {
 
 export async function DELETE(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, BROWSER_SESSION_OPTIONS);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }

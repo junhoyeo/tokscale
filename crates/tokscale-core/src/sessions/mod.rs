@@ -5,6 +5,7 @@
 pub mod amp;
 pub mod antigravity;
 pub mod claudecode;
+pub mod cline;
 pub mod codebuff;
 pub mod codex;
 pub mod copilot;
@@ -12,7 +13,9 @@ pub mod crush;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod gjc;
 pub mod goose;
+pub mod grok;
 pub mod hermes;
 pub mod kilo;
 pub mod kilocode;
@@ -27,6 +30,7 @@ pub mod roocode;
 pub mod synthetic;
 pub mod trae;
 pub(crate) mod utils;
+pub mod warp;
 pub mod zed;
 
 use crate::TokenBreakdown;
@@ -374,6 +378,72 @@ where
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn warp_cache_parser_preserves_requests_and_spend_without_tokens() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{
+  "version": 1,
+  "syncedAt": "2026-05-29T12:00:00Z",
+  "usage": {
+    "requestsUsed": 42,
+    "requestLimit": 100,
+    "spendCents": 1234,
+    "nextRefreshTime": "2026-06-01T00:00:00Z"
+  },
+  "workspaces": [
+    {
+      "id": "workspace-1",
+      "name": "Personal",
+      "requestsUsed": 12,
+      "spendCents": 345
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let messages = crate::sessions::warp::parse_warp_file(file.path());
+        assert_eq!(messages.len(), 1);
+
+        let workspace = messages
+            .iter()
+            .find(|message| message.session_id == "warp-aggregate-workspace-1")
+            .unwrap();
+        assert_eq!(workspace.client, "warp");
+        assert_eq!(workspace.model_id, "aggregate-requests");
+        assert_eq!(workspace.provider_id, "warp");
+        assert_eq!(workspace.workspace_label.as_deref(), Some("Personal"));
+        assert_eq!(workspace.message_count, 12);
+        assert_eq!(workspace.tokens, TokenBreakdown::default());
+        assert!((workspace.cost - 3.45).abs() < 1e-9);
+
+        std::fs::write(
+            file.path(),
+            r#"{
+  "version": 1,
+  "syncedAt": "2026-05-29T12:00:00Z",
+  "usage": {
+    "requestsUsed": 42,
+    "requestLimit": 100,
+    "spendCents": 1234,
+    "nextRefreshTime": "2026-06-01T00:00:00Z"
+  },
+  "workspaces": []
+}"#,
+        )
+        .unwrap();
+
+        let messages = crate::sessions::warp::parse_warp_file(file.path());
+        assert_eq!(messages.len(), 1);
+        let account = &messages[0];
+        assert_eq!(account.session_id, "warp-aggregate-account");
+        assert_eq!(account.message_count, 42);
+        assert_eq!(account.tokens, TokenBreakdown::default());
+        assert!((account.cost - 12.34).abs() < 1e-9);
+    }
 
     #[test]
     fn test_timestamp_to_date_with_positive_offset() {

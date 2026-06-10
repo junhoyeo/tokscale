@@ -347,13 +347,18 @@ async function fetchLeaderboardData(
     : sortBy === "time"
     ? sql`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`
     : sql`SUM(${submissions.totalTokens})`;
+  const secondaryOrderByColumn = sortBy === "cost"
+    ? sql`SUM(${submissions.totalTokens})`
+    : sortBy === "time"
+    ? sql`SUM(${submissions.totalTokens})`
+    : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`;
 
   if (search) {
     // When searching, use a subquery to compute global ranks for ALL users,
     // then filter by username. This preserves each user's true rank.
     const rankedSubquery = db
       .select({
-        rank: sql<number>`ROW_NUMBER() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
+        rank: sql<number>`RANK() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
         userId: users.id,
         username: users.username,
         displayName: users.displayName,
@@ -378,6 +383,11 @@ async function fetchLeaderboardData(
       .innerJoin(users, eq(submissions.userId, users.id))
       .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
       .as("ranked");
+    const rankedSecondaryOrderByColumn = sortBy === "cost"
+      ? rankedSubquery.totalTokens
+      : sortBy === "time"
+      ? rankedSubquery.totalTokens
+      : rankedSubquery.totalCost;
 
     const escapedSearch = search.toLowerCase().replace(/[%_\\]/g, "\\$&");
     const searchPattern = `%${escapedSearch}%`;
@@ -385,7 +395,11 @@ async function fetchLeaderboardData(
       .select()
       .from(rankedSubquery)
       .where(sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`)
-      .orderBy(sql`${rankedSubquery.rank} ASC`)
+      .orderBy(
+        sql`${rankedSubquery.rank} ASC`,
+        sql`${rankedSecondaryOrderByColumn} DESC`,
+        sql`LOWER(${rankedSubquery.username}) ASC`
+      )
       .limit(limit)
       .offset(offset);
 
@@ -446,10 +460,10 @@ async function fetchLeaderboardData(
     };
   }
 
-  // Non-search path: original query with sequential rank
+  // Non-search path: competition rank with deterministic row ordering for ties.
   const leaderboardQuery = db
     .select({
-      rank: sql<number>`ROW_NUMBER() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
+      rank: sql<number>`RANK() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
       userId: users.id,
       username: users.username,
       displayName: users.displayName,
@@ -473,7 +487,11 @@ async function fetchLeaderboardData(
     .from(submissions)
     .innerJoin(users, eq(submissions.userId, users.id))
     .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
-    .orderBy(desc(orderByColumn))
+    .orderBy(
+      desc(orderByColumn),
+      desc(secondaryOrderByColumn),
+      sql`LOWER(${users.username}) ASC`
+    )
     .limit(limit)
     .offset(offset);
 
@@ -493,8 +511,8 @@ async function fetchLeaderboardData(
   const totalPages = Math.ceil(totalUsers / limit);
 
   return {
-    users: (results as AllTimeLeaderboardDbRow[]).map((row, index) => ({
-      rank: offset + index + 1,
+    users: (results as RankedLeaderboardDbRow[]).map((row) => ({
+      rank: Number(row.rank),
       userId: row.userId,
       username: row.username,
       displayName: row.displayName,

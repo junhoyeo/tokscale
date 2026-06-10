@@ -70,8 +70,8 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
           RANK() OVER (
             ORDER BY
               ${sortBy === "cost"
-                ? sql`CAST(total_cost AS DECIMAL(12,4)) DESC, total_tokens DESC`
-                : sql`total_tokens DESC, CAST(total_cost AS DECIMAL(12,4)) DESC`}
+                ? sql`CAST(total_cost AS DECIMAL(12,4)) DESC`
+                : sql`total_tokens DESC`}
           ) AS rank
         FROM submissions
       )

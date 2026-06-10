@@ -1,11 +1,13 @@
 mod antigravity;
 mod auth;
+mod claude_diagnostics;
 mod commands;
 mod cursor;
 mod device;
 mod paths;
 mod trae;
 mod tui;
+mod warp;
 
 use crate::tui::client_ui;
 use anyhow::Result;
@@ -164,7 +166,7 @@ enum Commands {
         json: bool,
         #[arg(
             long,
-            help = "Force specific provider (custom, litellm, or openrouter)"
+            help = "Force specific pricing source (custom, litellm, openrouter, or models.dev)"
         )]
         provider: Option<String>,
         #[arg(long, help = "Disable spinner")]
@@ -269,6 +271,11 @@ enum Commands {
         #[arg(long, help = "Light terminal output (no TUI)")]
         light: bool,
     },
+    #[command(about = "Codex account integration commands")]
+    Codex {
+        #[command(subcommand)]
+        subcommand: CodexSubcommand,
+    },
     #[command(about = "Cursor API cache integration commands")]
     Cursor {
         #[command(subcommand)]
@@ -283,6 +290,11 @@ enum Commands {
     Trae {
         #[command(subcommand)]
         subcommand: TraeSubcommand,
+    },
+    #[command(about = "Warp/Oz aggregate usage integration commands")]
+    Warp {
+        #[command(subcommand)]
+        subcommand: WarpSubcommand,
     },
     #[command(about = "Delete all submitted usage data from the server")]
     DeleteSubmittedData,
@@ -342,6 +354,37 @@ enum CursorSubcommand {
 }
 
 #[derive(Subcommand)]
+enum CodexSubcommand {
+    #[command(about = "Import the current Codex OAuth credentials as a saved account")]
+    Import {
+        #[arg(long, help = "Label for this Codex account (e.g., work, personal)")]
+        name: Option<String>,
+    },
+    #[command(about = "List saved Codex accounts")]
+    Accounts {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Switch active Codex account and write Codex auth.json")]
+    Switch {
+        #[arg(help = "Account label or id")]
+        name: String,
+    },
+    #[command(about = "Remove a saved Codex account")]
+    Remove {
+        #[arg(help = "Account label or id")]
+        name: String,
+    },
+    #[command(about = "Check Codex subscription usage for an account")]
+    Status {
+        #[arg(long, help = "Account label or id")]
+        name: Option<String>,
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum AntigravitySubcommand {
     #[command(about = "Sync usage from running Antigravity language servers")]
     Sync,
@@ -382,6 +425,35 @@ enum TraeSubcommand {
     },
 }
 
+#[derive(Subcommand)]
+enum WarpSubcommand {
+    #[command(about = "Save Warp GraphQL authentication for aggregate usage sync")]
+    Login {
+        #[arg(long, help = "Warp bearer token or cookie header value")]
+        token: Option<String>,
+        #[arg(
+            long,
+            help = "Treat token as a Cookie header instead of a bearer token"
+        )]
+        cookie: bool,
+    },
+    #[command(about = "Remove cached Warp credentials")]
+    Logout {
+        #[arg(long, help = "Also delete cached Warp aggregate usage")]
+        purge_cache: bool,
+    },
+    #[command(about = "Show Warp aggregate sync status")]
+    Status {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Sync Warp aggregate usage into local cache")]
+    Sync {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+}
+
 fn main() -> Result<()> {
     use std::io::IsTerminal;
 
@@ -410,30 +482,22 @@ fn main() -> Result<()> {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             });
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients, &cli.home);
             if json || light || !can_use_tui {
                 run_models_report(
                     json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &date,
                     benchmark,
                     no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                     group_by,
                     write_cache,
                     no_write_cache,
                 )
             } else {
+                let (since, until) = build_date_filter(&date);
+                let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -456,27 +520,19 @@ fn main() -> Result<()> {
             benchmark,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients, &cli.home);
             if json || light || !can_use_tui {
                 run_monthly_report(
                     json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &date,
                     benchmark,
                     no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                 )
             } else {
+                let (since, until) = build_date_filter(&date);
+                let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -499,27 +555,19 @@ fn main() -> Result<()> {
             benchmark,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients, &cli.home);
             if json || light || !can_use_tui {
                 run_hourly_report(
                     json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &date,
                     benchmark,
                     no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                 )
             } else {
+                let (since, until) = build_date_filter(&date);
+                let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -567,11 +615,8 @@ fn main() -> Result<()> {
             benchmark,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
             run_graph_command(
                 output,
@@ -586,11 +631,8 @@ fn main() -> Result<()> {
         }
         Some(Commands::Tui { clients, date }) => {
             ensure_home_supported_for_tui(&cli.home)?;
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
             auto_sync_cursor_before_tui(&cli.home, &clients)?;
             tui::run(
@@ -610,11 +652,8 @@ fn main() -> Result<()> {
             dry_run,
         }) => {
             reject_unsupported_home_override(&cli.home, "submit")?;
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             // Bypass settings.json defaultClients for the submit path: we want the
             // submit-specific default_submit_clients() fallback (in run_submit_command)
             // to fire when the user passes no client flags, not the user's general
@@ -667,9 +706,17 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "usage")?;
             commands::usage::run(json, light)
         }
+        Some(Commands::Codex { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "codex")?;
+            run_codex_command(subcommand)
+        }
         Some(Commands::Trae { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "trae")?;
             run_trae_command(subcommand)
+        }
+        Some(Commands::Warp { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "warp")?;
+            run_warp_command(subcommand)
         }
         Some(Commands::DeleteSubmittedData) => {
             reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
@@ -681,11 +728,8 @@ fn main() -> Result<()> {
             date,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
             run_time_metrics_report(
                 json,
@@ -699,13 +743,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::WarmTuiCache) => run_warm_tui_cache(),
         None => {
-            let today = cli.date.today;
-            let week = cli.date.week;
-            let month = cli.date.month;
             let clients = build_client_filter(cli.clients, &cli.home);
-            let (since, until) =
-                build_date_filter(today, week, month, cli.date.since, cli.date.until);
-            let year = normalize_year_filter(today, week, month, cli.date.year);
             let group_by: tokscale_core::GroupBy = cli.group_by.parse().unwrap_or_else(|e| {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -716,14 +754,9 @@ fn main() -> Result<()> {
                     cli.json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &cli.date,
                     cli.benchmark,
                     cli.no_spinner || cli.json,
-                    today,
-                    week,
-                    month,
                     group_by,
                     cli.write_cache,
                     cli.no_write_cache,
@@ -733,19 +766,16 @@ fn main() -> Result<()> {
                     false,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &cli.date,
                     cli.benchmark,
                     cli.no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                     group_by,
                     cli.write_cache,
                     cli.no_write_cache,
                 )
             } else {
+                let (since, until) = build_date_filter(&cli.date);
+                let year = normalize_year_filter(&cli.date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -804,6 +834,10 @@ pub enum ClientFilter {
     Kiro,
     #[value(name = "trae")]
     Trae,
+    Warp,
+    Cline,
+    Gjc,
+    Grok,
     Synthetic,
 }
 
@@ -837,6 +871,10 @@ impl ClientFilter {
             Self::Zed => "zed",
             Self::Kiro => "kiro",
             Self::Trae => "trae",
+            Self::Warp => "warp",
+            Self::Cline => "cline",
+            Self::Gjc => "gjc",
+            Self::Grok => "grok",
             Self::Synthetic => "synthetic",
         }
     }
@@ -873,6 +911,10 @@ impl ClientFilter {
             Self::Zed => Some(ClientId::Zed),
             Self::Kiro => Some(ClientId::Kiro),
             Self::Trae => Some(ClientId::Trae),
+            Self::Warp => Some(ClientId::Warp),
+            Self::Cline => Some(ClientId::Cline),
+            Self::Gjc => Some(ClientId::Gjc),
+            Self::Grok => Some(ClientId::Grok),
             Self::Synthetic => None,
         }
     }
@@ -906,6 +948,10 @@ impl ClientFilter {
             ClientId::Zed => Self::Zed,
             ClientId::Kiro => Self::Kiro,
             ClientId::Trae => Self::Trae,
+            ClientId::Warp => Self::Warp,
+            ClientId::Cline => Self::Cline,
+            ClientId::Gjc => Self::Gjc,
+            ClientId::Grok => Self::Grok,
         }
     }
 
@@ -1007,16 +1053,42 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub trae: bool,
     #[arg(long, hide = true)]
+    pub warp: bool,
+    #[arg(long, hide = true)]
+    pub cline: bool,
+    #[arg(long, hide = true)]
+    pub gjc: bool,
+    #[arg(long, hide = true)]
+    pub grok: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct DateRangeFlags {
-    #[arg(long, help = "Show only today's usage")]
+    #[arg(
+        long,
+        help = "Show only today's usage",
+        conflicts_with_all = ["yesterday", "week", "month", "since", "until", "year"]
+    )]
     pub today: bool,
-    #[arg(long, help = "Show last 7 days")]
+    #[arg(
+        long,
+        help = "Show only yesterday's usage",
+        conflicts_with_all = ["week", "month", "since", "until", "year"]
+    )]
+    pub yesterday: bool,
+    #[arg(
+        long,
+        help = "Show last 7 days",
+        conflicts_with_all = ["month", "since", "until", "year"]
+    )]
     pub week: bool,
-    #[arg(long, help = "Show current month")]
+    #[arg(
+        long,
+        help = "Show current month",
+        conflicts_with_all = ["since", "until", "year"]
+    )]
     pub month: bool,
     #[arg(long, help = "Start date (YYYY-MM-DD)")]
     pub since: Option<String>,
@@ -1060,7 +1132,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 25] = [
+    let legacy: [(bool, ClientFilter); 29] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1085,6 +1157,10 @@ fn build_client_filter_with_defaults(
         (flags.zed, ClientFilter::Zed),
         (flags.kiro, ClientFilter::Kiro),
         (flags.trae, ClientFilter::Trae),
+        (flags.warp, ClientFilter::Warp),
+        (flags.cline, ClientFilter::Cline),
+        (flags.gjc, ClientFilter::Gjc),
+        (flags.grok, ClientFilter::Grok),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -1154,6 +1230,12 @@ fn client_filter_explicitly_requests_cursor(clients: &Option<Vec<String>>) -> bo
         .is_some_and(|sources| sources.iter().any(|source| source == "cursor"))
 }
 
+fn client_filter_explicitly_requests_warp(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_some_and(|sources| sources.iter().any(|source| source == "warp"))
+}
+
 #[derive(Debug)]
 struct CursorSetupState {
     has_credentials: bool,
@@ -1204,7 +1286,7 @@ fn cursor_setup_warnings_for_report(
 
     let Some(state) = cursor_setup_state(home_dir) else {
         return vec![
-            "Cursor usage requires Tokscale's Cursor API cache, but the home directory could not be resolved. Tokscale does not parse local ~/.cursor session data.".to_string(),
+            "Cursor usage requires Tokscale's Cursor API cache, but the home directory could not be resolved. Run `tokscale cursor login` and `tokscale cursor sync --json`. Tokscale does not parse local `~/.cursor` session data.".to_string(),
         ];
     };
     if state.has_cache {
@@ -1212,11 +1294,11 @@ fn cursor_setup_warnings_for_report(
     }
 
     let action = if state.home_override {
-        "populate that cache before running a report with --home"
+        "run `tokscale cursor login` and `tokscale cursor sync --json`, or populate that cache before running a report with --home"
     } else if state.has_credentials {
-        "run `tokscale cursor sync`"
+        "run `tokscale cursor sync --json`"
     } else {
-        "run `tokscale cursor login` and `tokscale cursor sync`"
+        "run `tokscale cursor login` and `tokscale cursor sync --json`"
     };
 
     vec![format!(
@@ -1234,6 +1316,65 @@ fn emit_cursor_setup_warnings(warnings: &[String]) {
     for warning in warnings {
         eprintln!("{}", format!("  Warning: {}", warning).yellow());
     }
+}
+
+fn warp_setup_warnings_for_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Vec<String> {
+    if !client_filter_explicitly_requests_warp(clients) {
+        return Vec::new();
+    }
+
+    let (home_path, home_override) = match home_dir {
+        Some(home) => (PathBuf::from(home), true),
+        None => match dirs::home_dir() {
+            Some(home) => (home, false),
+            None => {
+                return vec![
+                    "Warp usage requires Tokscale's Warp aggregate cache, but the home directory could not be resolved. Tokscale does not parse local Warp transcripts.".to_string(),
+                ];
+            }
+        },
+    };
+    let has_cache = if home_override {
+        warp::has_usage_cache_in_home(&home_path)
+    } else {
+        warp::load_usage_cache().is_some()
+    };
+    if has_cache {
+        return Vec::new();
+    }
+
+    let cache_glob = if home_override {
+        home_path
+            .join(".config/tokscale/warp-cache/usage*.json")
+            .to_string_lossy()
+            .to_string()
+    } else {
+        "~/.config/tokscale/warp-cache/usage*.json".to_string()
+    };
+    let action = if home_override {
+        "run `tokscale warp sync` for the default profile or populate that cache before running a report with --home"
+    } else if warp::has_credentials() {
+        "run `tokscale warp sync`"
+    } else {
+        "run `tokscale warp login` and `tokscale warp sync`"
+    };
+
+    vec![format!(
+        "Warp usage requires Tokscale's aggregate API cache at `{}`; {}. Tokscale does not parse local Warp/Oz session transcripts and does not infer tokens from request counts.",
+        cache_glob, action
+    )]
+}
+
+fn setup_warnings_for_report(
+    home_dir: &Option<String>,
+    clients: &Option<Vec<String>>,
+) -> Vec<String> {
+    let mut warnings = cursor_setup_warnings_for_report(home_dir, clients);
+    warnings.extend(warp_setup_warnings_for_report(home_dir, clients));
+    warnings
 }
 
 fn should_auto_sync_cursor_for_local_report(
@@ -1295,7 +1436,7 @@ fn auto_sync_cursor_before_tui(
         had_cursor_cache,
         explicit_cursor_filter,
     );
-    let cursor_setup_warnings = cursor_setup_warnings_for_report(home_dir, clients);
+    let cursor_setup_warnings = setup_warnings_for_report(home_dir, clients);
     emit_cursor_setup_warnings(&cursor_setup_warnings);
     Ok(())
 }
@@ -1348,6 +1489,36 @@ fn use_env_roots(home_dir: &Option<String>) -> bool {
     home_dir.is_none()
 }
 
+fn resolve_effective_home_dir(home_dir: &Option<String>) -> Option<PathBuf> {
+    home_dir.as_ref().map(PathBuf::from).or_else(dirs::home_dir)
+}
+
+fn model_usage_includes_client(entry: &tokscale_core::ModelUsage, client: &str) -> bool {
+    if entry.client == client {
+        return true;
+    }
+
+    entry
+        .merged_clients
+        .as_deref()
+        .is_some_and(|clients| clients.split(", ").any(|id| id == client))
+}
+
+fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientDiagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+
+    use colored::Colorize;
+    for diagnostic in diagnostics {
+        eprintln!(
+            "{}",
+            format!("  {}: {}", diagnostic.severity, diagnostic.message).yellow()
+        );
+        eprintln!("{}", format!("  {}", diagnostic.help).bright_black());
+    }
+}
+
 fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
     if home_dir.is_some() {
         return Err(anyhow::anyhow!(
@@ -1358,39 +1529,29 @@ fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn build_date_filter(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: Option<String>,
-    until: Option<String>,
-) -> (Option<String>, Option<String>) {
-    build_date_filter_for_date(
-        today,
-        week,
-        month,
-        since,
-        until,
-        chrono::Local::now().date_naive(),
-    )
+fn build_date_filter(date: &DateRangeFlags) -> (Option<String>, Option<String>) {
+    build_date_filter_for_date(date, chrono::Local::now().date_naive())
 }
 
 fn build_date_filter_for_date(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: Option<String>,
-    until: Option<String>,
+    date: &DateRangeFlags,
     current_date: chrono::NaiveDate,
 ) -> (Option<String>, Option<String>) {
     use chrono::{Datelike, Duration};
 
-    if today {
-        let date = current_date.format("%Y-%m-%d").to_string();
-        return (Some(date.clone()), Some(date));
+    if date.today {
+        let day = current_date.format("%Y-%m-%d").to_string();
+        return (Some(day.clone()), Some(day));
     }
 
-    if week {
+    if date.yesterday {
+        let day = (current_date - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        return (Some(day.clone()), Some(day));
+    }
+
+    if date.week {
         let start = current_date - Duration::days(6);
         return (
             Some(start.format("%Y-%m-%d").to_string()),
@@ -1398,7 +1559,7 @@ fn build_date_filter_for_date(
         );
     }
 
-    if month {
+    if date.month {
         let start = current_date.with_day(1).unwrap_or(current_date);
         return (
             Some(start.format("%Y-%m-%d").to_string()),
@@ -1406,67 +1567,45 @@ fn build_date_filter_for_date(
         );
     }
 
-    (since, until)
+    (date.since.clone(), date.until.clone())
 }
 
-fn normalize_year_filter(
-    today: bool,
-    week: bool,
-    month: bool,
-    year: Option<String>,
-) -> Option<String> {
-    if today || week || month {
+fn normalize_year_filter(date: &DateRangeFlags) -> Option<String> {
+    if date.today || date.yesterday || date.week || date.month {
         None
     } else {
-        year
+        date.year.clone()
     }
 }
 
-fn get_date_range_label(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: &Option<String>,
-    until: &Option<String>,
-    year: &Option<String>,
-) -> Option<String> {
-    get_date_range_label_for_date(
-        today,
-        week,
-        month,
-        since,
-        until,
-        year,
-        chrono::Local::now().date_naive(),
-    )
+fn get_date_range_label(date: &DateRangeFlags) -> Option<String> {
+    get_date_range_label_for_date(date, chrono::Local::now().date_naive())
 }
 
 fn get_date_range_label_for_date(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: &Option<String>,
-    until: &Option<String>,
-    year: &Option<String>,
+    date: &DateRangeFlags,
     current_date: chrono::NaiveDate,
 ) -> Option<String> {
-    if today {
+    if date.today {
         return Some("Today".to_string());
     }
-    if week {
+    if date.yesterday {
+        return Some("Yesterday".to_string());
+    }
+    if date.week {
         return Some("Last 7 days".to_string());
     }
-    if month {
+    if date.month {
         return Some(current_date.format("%B %Y").to_string());
     }
-    if let Some(y) = year {
+    if let Some(y) = &date.year {
         return Some(y.clone());
     }
     let mut parts = Vec::new();
-    if let Some(s) = since {
+    if let Some(s) = &date.since {
         parts.push(format!("from {}", s));
     }
-    if let Some(u) = until {
+    if let Some(u) = &date.until {
         parts.push(format!("to {}", u));
     }
     if parts.is_empty() {
@@ -1593,14 +1732,9 @@ fn run_models_report(
     json: bool,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
+    date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
-    today: bool,
-    week: bool,
-    month_flag: bool,
     group_by: tokscale_core::GroupBy,
     cli_write_cache: bool,
     cli_no_write_cache: bool,
@@ -1609,7 +1743,10 @@ fn run_models_report(
     use tokio::runtime::Runtime;
     use tokscale_core::{get_model_report, GroupBy, ReportOptions};
 
-    let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let (since, until) = build_date_filter(date);
+    let year = normalize_year_filter(date);
+    let date_range = get_date_range_label(date);
+    let effective_home_dir = resolve_effective_home_dir(&home_dir);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -1619,7 +1756,7 @@ fn run_models_report(
         Some(LightSpinner::start("Scanning session data..."))
     };
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = cursor_setup_warnings_for_report(&home_dir, &clients);
+    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -1648,6 +1785,22 @@ fn run_models_report(
         explicit_cursor_filter,
     );
     let processing_time_ms = start.elapsed().as_millis();
+    let claude_message_count = report
+        .entries
+        .iter()
+        .filter(|entry| model_usage_includes_client(entry, "claude"))
+        .map(|entry| entry.message_count)
+        .sum();
+    let diagnostics = effective_home_dir
+        .as_deref()
+        .map(|home| {
+            claude_diagnostics::diagnostics_for_empty_explicit_report(
+                home,
+                &clients,
+                claude_message_count,
+            )
+        })
+        .unwrap_or_default();
 
     if json {
         #[derive(serde::Serialize)]
@@ -1687,6 +1840,8 @@ fn run_models_report(
             processing_time_ms: u32,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
         }
 
         let output = ModelReportJson {
@@ -1736,10 +1891,12 @@ fn run_models_report(
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
             warnings: cursor_setup_warnings,
+            diagnostics,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
+        emit_client_diagnostics(&diagnostics);
 
         emit_cursor_setup_warnings(&cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);
@@ -2363,25 +2520,21 @@ fn run_models_report(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_monthly_report(
     json: bool,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
+    date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
-    today: bool,
-    week: bool,
-    month_flag: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
     use tokscale_core::{get_monthly_report, GroupBy, ReportOptions};
 
-    let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let (since, until) = build_date_filter(date);
+    let year = normalize_year_filter(date);
+    let date_range = get_date_range_label(date);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -2391,7 +2544,7 @@ fn run_monthly_report(
         Some(LightSpinner::start("Scanning session data..."))
     };
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = cursor_setup_warnings_for_report(&home_dir, &clients);
+    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -2662,25 +2815,21 @@ fn run_monthly_report(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_hourly_report(
     json: bool,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
+    date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
-    today: bool,
-    week: bool,
-    month_flag: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
     use tokscale_core::{get_hourly_report, GroupBy, ReportOptions};
 
-    let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let (since, until) = build_date_filter(date);
+    let year = normalize_year_filter(date);
+    let date_range = get_date_range_label(date);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -2690,7 +2839,7 @@ fn run_hourly_report(
         Some(LightSpinner::start("Scanning session data..."))
     };
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = cursor_setup_warnings_for_report(&home_dir, &clients);
+    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let start = Instant::now();
     let rt = Runtime::new()?;
@@ -3008,14 +3157,14 @@ fn run_pricing_lookup(
 
     let provider_normalized = provider.map(|p| p.to_lowercase());
     if let Some(ref p) = provider_normalized {
-        if p != "custom" && p != "litellm" && p != "openrouter" {
+        if p != "custom" && p != "litellm" && p != "openrouter" && p != "models.dev" {
             println!(
                 "\n  {}",
                 format!("Invalid provider: {}", provider.unwrap_or("")).red()
             );
             println!(
                 "{}\n",
-                "  Valid providers: custom, litellm, openrouter".bright_black()
+                "  Valid providers: custom, litellm, openrouter, models.dev".bright_black()
             );
             std::process::exit(1);
         }
@@ -3131,6 +3280,7 @@ fn run_pricing_lookup(
                     "custom" => "Custom",
                     "litellm" => "LiteLLM",
                     "openrouter" => "OpenRouter",
+                    "models.dev" => "Models.dev",
                     _ => pricing.source.as_str(),
                 };
                 println!("  Source: {}", source_label);
@@ -3382,7 +3532,10 @@ fn capitalize_client(client: &str) -> String {
         "openclaw" => "openclaw".to_string(),
         "hermes" => "Hermes Agent".to_string(),
         "goose" => "Goose".to_string(),
+        "warp" => "Warp".to_string(),
+        "grok" => "Grok Build".to_string(),
         "pi" => "Pi".to_string(),
+        "gjc" => "Gajae-Code".to_string(),
         other => other.to_string(),
     }
 }
@@ -3446,6 +3599,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
         exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
     }
 
     #[derive(serde::Serialize)]
@@ -3579,6 +3734,12 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     },
                 ));
 
+                let diagnostics = if client == ClientId::Claude {
+                    claude_diagnostics::diagnostics_for_clients_row(&home_dir)
+                } else {
+                    Vec::new()
+                };
+
                 ClientRow {
                     client: client.as_str().to_string(),
                     label,
@@ -3594,6 +3755,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         && copilot_exporter_path.is_some())
                     .then(|| "configured".to_string()),
                     extra_paths,
+                    diagnostics,
                 }
             })
             .collect();
@@ -3729,6 +3891,14 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     "  {}",
                     format!("messages: {}", format_number(row.message_count)).bright_black()
                 );
+            }
+
+            for diagnostic in &row.diagnostics {
+                println!(
+                    "  {}",
+                    format!("{}: {}", diagnostic.severity, diagnostic.message).yellow()
+                );
+                println!("  {}", diagnostic.help.bright_black());
             }
 
             println!();
@@ -3886,6 +4056,8 @@ struct TsTokenContributionData {
     contributions: Vec<TsDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_metrics: Option<TsTimeMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_servers: Option<Vec<String>>,
 }
 
 fn to_ts_token_contribution_data(
@@ -3977,6 +4149,14 @@ fn to_ts_token_contribution_data(
             max_concurrent_sessions: tm.max_concurrent_sessions,
             session_count: tm.session_count,
         }),
+        mcp_servers: {
+            let servers = tokscale_core::mcp::discover_mcp_server_names(None);
+            if servers.is_empty() {
+                None
+            } else {
+                Some(servers)
+            }
+        },
     }
 }
 
@@ -4326,7 +4506,7 @@ fn run_time_metrics_report(
         Some(LightSpinner::start("Computing time metrics..."))
     };
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = cursor_setup_warnings_for_report(&home_dir, &clients);
+    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let rt = Runtime::new()?;
     let report = rt
@@ -4430,19 +4610,10 @@ fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let include_cursor = home_dir.is_none()
-        && clients
-            .as_ref()
-            .is_none_or(|s| s.iter().any(|src| src == "cursor"));
+    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
-    let has_cursor_cache = include_cursor && has_cursor_usage_cache_for_report(&home_dir);
-    let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
-
-    if include_cursor && cursor::is_cursor_logged_in() {
-        let rt_sync = tokio::runtime::Runtime::new()?;
-        cursor_sync_result = Some(rt_sync.block_on(async { cursor::sync_cursor_cache().await }));
-    }
-    let cursor_setup_warnings = cursor_setup_warnings_for_report(&home_dir, &clients);
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
+    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
 
     if show_progress {
         eprintln!("  Scanning session data...");
@@ -4471,7 +4642,7 @@ fn run_graph_command(
         .map_err(|e| anyhow::anyhow!(e))?;
     emit_cursor_sync_warning(
         cursor_sync_result.as_ref(),
-        has_cursor_cache,
+        had_cursor_cache,
         explicit_cursor_filter,
     );
     emit_cursor_setup_warnings(&cursor_setup_warnings);
@@ -4522,7 +4693,7 @@ fn run_graph_command(
                         .bright_black()
                     );
                 } else if let Some(err) = sync.error {
-                    if has_cursor_cache {
+                    if had_cursor_cache {
                         eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
                     }
                 }
@@ -4614,11 +4785,17 @@ fn is_legacy_tokenless_cursor_row(client: &tokscale_core::ClientContribution) ->
         && client_token_total(&client.tokens) == 0
 }
 
+fn is_aggregate_only_warp_row(client: &tokscale_core::ClientContribution) -> bool {
+    client.client == "warp"
+        && client.model_id == "aggregate-requests"
+        && client_token_total(&client.tokens) == 0
+}
+
 /// A row the server's "Cost submitted without tokens" sanity check would
 /// reject: real cost with every token bucket at zero, excluding the Cursor
 /// `premium-tool-call` carve-out above.
 fn is_tokenless_costed_row(client: &tokscale_core::ClientContribution) -> bool {
-    client.cost > 0.0
+    (is_aggregate_only_warp_row(client) || client.cost > 0.0)
         && client_token_total(&client.tokens) == 0
         && !is_legacy_tokenless_cursor_row(client)
 }
@@ -4628,13 +4805,10 @@ fn is_tokenless_costed_row(client: &tokscale_core::ClientContribution) -> bool {
 /// rejected wholesale.
 ///
 /// Cursor's usage export lists historical request/On-Demand charges (e.g.
-/// `auto`, `claude-3.5-sonnet`, `o3`) with empty token columns, which the
-/// parser turns into cost > 0 / tokens = 0 rows. The server rejects the entire
-/// submission when it sees any such row (see
-/// packages/frontend/src/lib/validation/submission.ts), permanently blocking
-/// users with that historical data. Rather than weaken the server check (which
-/// still guards against genuine parser regressions), we exclude the offending
-/// rows here and report them to the user.
+/// `auto`, `claude-3.5-sonnet`, `o3`) with empty token columns, and Warp/Oz
+/// only exposes aggregate request/spend counters. The server rejects cost with
+/// no tokens, and request counts must not be submitted as fabricated tokens, so
+/// we exclude the offending rows here and report them to the user.
 ///
 /// Excluded rows always carry zero tokens, so only cost/messages change; token
 /// totals, breakdowns, and intensities are untouched. Summary and year rollups
@@ -4696,7 +4870,7 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
     println!(
         "{}",
         format!(
-            "  Excluded {} cost-only row(s) with no token data (Cursor historical billing):",
+            "  Excluded {} aggregate/cost-only row(s) with no token data:",
             excluded.len()
         )
         .yellow()
@@ -4772,6 +4946,7 @@ fn run_submit_command(
     println!("\n  {}\n", "Tokscale - Submit Usage Data".cyan());
 
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
+    let explicit_warp_filter = client_filter_explicitly_requests_warp(&clients);
     let clients = clients.or_else(|| Some(default_submit_clients()));
 
     let include_cursor = clients
@@ -4797,8 +4972,8 @@ fn run_submit_command(
             }
         }
     }
-    if explicit_cursor_filter {
-        let cursor_setup_warnings = cursor_setup_warnings_for_report(&report_home, &clients);
+    if explicit_cursor_filter || explicit_warp_filter {
+        let cursor_setup_warnings = setup_warnings_for_report(&report_home, &clients);
         emit_cursor_setup_warnings(&cursor_setup_warnings);
     }
 
@@ -5102,19 +5277,15 @@ fn write_light_cache(
     year: &Option<String>,
     group_by: &tokscale_core::GroupBy,
 ) {
-    use crate::tui::{save_cached_data, DataLoader};
+    use crate::tui::{save_cached_data, CacheReportScope, DataLoader};
 
-    // The TUI cache key is `(enabled_clients, group_by)` only — it does
-    // NOT include `--since`, `--until`, `--year`, or `--home`. Writing
-    // date-filtered or home-scoped data under that key would silently
-    // poison subsequent TUI launches: the next `tokscale tui` would
-    // hit the cache and render the date-filtered slice as if it were
-    // the full report. Refuse the write when any of those filters is
-    // present and tell the user; their CLI report still prints fine.
-    if since.is_some() || until.is_some() || year.is_some() || home_dir.is_some() {
+    // The TUI cache key includes date filters, but not `--home`. Writing
+    // home-scoped data would still poison the default cache, so keep that
+    // guard until home is part of the cache key.
+    if home_dir.is_some() {
         eprintln!(
-            "tokscale: --write-cache skipped because --since/--until/--year/--home are set; \
-             the TUI cache key does not include those filters and writing would poison future TUI launches."
+            "tokscale: --write-cache skipped because --home is set; \
+             the TUI cache key does not include that filter and writing would poison future TUI launches."
         );
         return;
     }
@@ -5126,23 +5297,20 @@ fn write_light_cache(
         .collect();
     let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
 
-    // No date/home filters at this point (guarded above), so passing
-    // None into `with_filters` matches what the TUI itself does on
-    // launch — keeps the cache key derivation byte-identical.
-    //
     // Cache writes are best-effort: the report has already been flushed
     // to stdout by the time we reach here, so a scan failure from the
     // background loader must NOT propagate up and turn a successful
     // user-visible report into a non-zero exit code. Mirrors the
     // pattern in `run_warm_tui_cache` below.
-    let loader = DataLoader::with_filters(None, None, None, None);
+    let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
+    let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
     if let Ok(data) = loader.load(&scan_clients, group_by, include_synthetic) {
-        save_cached_data(&data, &enabled_set, group_by);
+        save_cached_data(&data, &enabled_set, group_by, &report_scope);
     }
 }
 
 fn run_warm_tui_cache() -> Result<()> {
-    use crate::tui::{save_cached_data, DataLoader, TUI_DEFAULT_GROUP_BY};
+    use crate::tui::{save_cached_data, CacheReportScope, DataLoader, TUI_DEFAULT_GROUP_BY};
     use tokscale_core::ClientId;
 
     // Warm the cache using the same default filter set the TUI uses on
@@ -5168,7 +5336,12 @@ fn run_warm_tui_cache() -> Result<()> {
     let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
     let loader = DataLoader::with_filters(None, None, None, None);
     if let Ok(data) = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY, include_synthetic) {
-        save_cached_data(&data, &enabled_set, &TUI_DEFAULT_GROUP_BY);
+        save_cached_data(
+            &data,
+            &enabled_set,
+            &TUI_DEFAULT_GROUP_BY,
+            &CacheReportScope::default(),
+        );
     }
     Ok(())
 }
@@ -5185,6 +5358,18 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
         CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
         CursorSubcommand::Sync { json } => cursor::run_cursor_sync(json),
         CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
+    }
+}
+
+fn run_codex_command(subcommand: CodexSubcommand) -> Result<()> {
+    match subcommand {
+        CodexSubcommand::Import { name } => commands::usage::codex::run_codex_import(name),
+        CodexSubcommand::Accounts { json } => commands::usage::codex::run_codex_accounts(json),
+        CodexSubcommand::Switch { name } => commands::usage::codex::run_codex_switch(&name),
+        CodexSubcommand::Remove { name } => commands::usage::codex::run_codex_remove(&name),
+        CodexSubcommand::Status { name, json } => {
+            commands::usage::codex::run_codex_status(name, json)
+        }
     }
 }
 
@@ -5339,6 +5524,15 @@ fn run_trae_command(subcommand: TraeSubcommand) -> Result<()> {
     }
 }
 
+fn run_warp_command(subcommand: WarpSubcommand) -> Result<()> {
+    match subcommand {
+        WarpSubcommand::Login { token, cookie } => warp::run_warp_login(token, cookie),
+        WarpSubcommand::Logout { purge_cache } => warp::run_warp_logout(purge_cache),
+        WarpSubcommand::Status { json } => warp::run_warp_status(json),
+        WarpSubcommand::Sync { json } => warp::run_warp_sync(json),
+    }
+}
+
 fn format_tokens_with_commas(n: i64) -> String {
     let s = n.to_string();
     let bytes = s.as_bytes();
@@ -5353,6 +5547,96 @@ fn format_tokens_with_commas(n: i64) -> String {
     result
 }
 
+struct CaptureCommandOutcome {
+    exit_code: i32,
+    timed_out: bool,
+}
+
+fn run_capture_command(
+    command: &str,
+    args: &[String],
+    output_path: &Path,
+    timeout: Duration,
+) -> Result<CaptureCommandOutcome> {
+    use std::io::{Read, Write};
+    use std::process::Command;
+    use std::thread;
+    use std::time::Instant;
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", command, e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
+
+    let mut output_file = std::fs::File::create(output_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create output file '{}': {}",
+            output_path.display(),
+            e
+        )
+    })?;
+
+    let output_handle = thread::spawn(move || -> Result<()> {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buffer = [0; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(n) => output_file
+                    .write_all(&buffer[..n])
+                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to read from subprocess stdout: {}",
+                        e
+                    ));
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?
+        {
+            break status;
+        }
+
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child
+                .wait()
+                .map_err(|e| anyhow::anyhow!("Failed to wait for timed-out subprocess: {}", e))?;
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let output_result = output_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
+    if !timed_out {
+        output_result?;
+    }
+
+    Ok(CaptureCommandOutcome {
+        exit_code: status.code().unwrap_or(1),
+        timed_out,
+    })
+}
+
 fn run_headless_command(
     source: &str,
     args: Vec<String>,
@@ -5361,10 +5645,6 @@ fn run_headless_command(
     no_auto_flags: bool,
 ) -> Result<()> {
     use chrono::Utc;
-    use std::io::{Read, Write};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use uuid::Uuid;
 
     let source_lower = source.to_lowercase();
@@ -5435,76 +5715,10 @@ fn run_headless_command(
     );
     println!();
 
-    let mut child = Command::new(&source_lower)
-        .args(&final_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .stdin(std::process::Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", source_lower, e))?;
+    let outcome =
+        run_capture_command(&source_lower, &final_args, Path::new(&output_path), timeout)?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
-
-    let mut output_file = std::fs::File::create(&output_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create output file '{}': {}", output_path, e))?;
-
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let timed_out_clone = Arc::clone(&timed_out);
-    let child_id = child.id();
-
-    let timeout_handle = std::thread::spawn(move || {
-        std::thread::sleep(timeout);
-        if !timed_out_clone.load(Ordering::SeqCst) {
-            timed_out_clone.store(true, Ordering::SeqCst);
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(child_id.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &child_id.to_string()])
-                    .output();
-            }
-        }
-    });
-
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut buffer = [0; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                output_file
-                    .write_all(&buffer[..n])
-                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?;
-            }
-            Err(e) => {
-                if timed_out.load(Ordering::SeqCst) {
-                    break;
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to read from subprocess stdout: {}",
-                    e
-                ));
-            }
-        }
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?;
-
-    timed_out.store(true, Ordering::SeqCst);
-    let _ = timeout_handle.join();
-
-    if timed_out.load(Ordering::SeqCst) && !status.success() {
+    if outcome.timed_out {
         eprintln!(
             "{}",
             format!("\n  Subprocess timed out after {}s", timeout.as_secs()).red()
@@ -5514,16 +5728,14 @@ fn run_headless_command(
         std::process::exit(124);
     }
 
-    let exit_code = status.code().unwrap_or(1);
-
     println!(
         "{}",
         format!("✓ Saved headless output to {}", output_path).green()
     );
     println!();
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    if outcome.exit_code != 0 {
+        std::process::exit(outcome.exit_code);
     }
 
     Ok(())
@@ -5727,6 +5939,10 @@ mod tests {
             zed: true,
             kiro: true,
             trae: true,
+            warp: true,
+            cline: true,
+            gjc: true,
+            grok: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -5761,6 +5977,10 @@ mod tests {
             "zed",
             "kiro",
             "trae",
+            "warp",
+            "cline",
+            "gjc",
+            "grok",
             "synthetic",
         ] {
             assert!(
@@ -5870,6 +6090,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_client_filter_gjc_round_trip() {
+        use tokscale_core::ClientId;
+        // gjc parses as the canonical lowercase id and round-trips through
+        // both the ClientId<->ClientFilter conversions and the id string.
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
+        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
+        assert_eq!(
+            ClientFilter::from_client_id(ClientId::Gjc),
+            ClientFilter::Gjc
+        );
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
     }
 
     #[test]
@@ -6297,20 +6531,18 @@ mod tests {
 
     #[test]
     fn test_build_date_filter_custom_range() {
-        let (since, until) = build_date_filter(
-            false,
-            false,
-            false,
-            Some("2024-01-01".to_string()),
-            Some("2024-12-31".to_string()),
-        );
+        let (since, until) = build_date_filter(&DateRangeFlags {
+            since: Some("2024-01-01".to_string()),
+            until: Some("2024-12-31".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(since, Some("2024-01-01".to_string()));
         assert_eq!(until, Some("2024-12-31".to_string()));
     }
 
     #[test]
     fn test_build_date_filter_no_filters() {
-        let (since, until) = build_date_filter(false, false, false, None, None);
+        let (since, until) = build_date_filter(&DateRangeFlags::default());
         assert_eq!(since, None);
         assert_eq!(until, None);
     }
@@ -6318,15 +6550,41 @@ mod tests {
     #[test]
     fn test_build_date_filter_today_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let (since, until) = build_date_filter_for_date(true, false, false, None, None, today);
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                today: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(since, Some("2026-03-08".to_string()));
         assert_eq!(until, Some("2026-03-08".to_string()));
     }
 
     #[test]
+    fn test_build_date_filter_yesterday_uses_provided_local_date() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                yesterday: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
+        assert_eq!(since, Some("2026-03-07".to_string()));
+        assert_eq!(until, Some("2026-03-07".to_string()));
+    }
+
+    #[test]
     fn test_build_date_filter_week_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let (since, until) = build_date_filter_for_date(false, true, false, None, None, today);
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                week: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(since, Some("2026-03-02".to_string()));
         assert_eq!(until, Some("2026-03-08".to_string()));
     }
@@ -6334,39 +6592,123 @@ mod tests {
     #[test]
     fn test_build_date_filter_month_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let (since, until) = build_date_filter_for_date(false, false, true, None, None, today);
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                month: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(since, Some("2026-03-01".to_string()));
         assert_eq!(until, Some("2026-03-08".to_string()));
     }
 
     #[test]
     fn test_normalize_year_filter_with_year() {
-        let year = normalize_year_filter(false, false, false, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, Some("2024".to_string()));
     }
 
     #[test]
     fn test_normalize_year_filter_with_today() {
-        let year = normalize_year_filter(true, false, false, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            today: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
+        assert_eq!(year, None);
+    }
+
+    #[test]
+    fn test_normalize_year_filter_with_yesterday() {
+        let year = normalize_year_filter(&DateRangeFlags {
+            yesterday: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, None);
     }
 
     #[test]
     fn test_normalize_year_filter_with_week() {
-        let year = normalize_year_filter(false, true, false, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            week: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, None);
     }
 
     #[test]
     fn test_normalize_year_filter_with_month() {
-        let year = normalize_year_filter(false, false, true, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            month: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, None);
     }
 
     #[test]
     fn test_normalize_year_filter_no_year() {
-        let year = normalize_year_filter(false, false, false, None);
+        let year = normalize_year_filter(&DateRangeFlags::default());
         assert_eq!(year, None);
+    }
+
+    /// Parses `args` expecting failure; panics if parsing unexpectedly
+    /// succeeds. Avoids `unwrap_err()` since `Cli` does not derive `Debug`.
+    fn expect_parse_error(args: &[&str]) -> clap::Error {
+        match Cli::try_parse_from(args) {
+            Ok(_) => panic!("expected `{}` to fail to parse", args.join(" ")),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn test_date_shortcut_flags_conflict() {
+        let err = expect_parse_error(&["tokscale", "--today", "--yesterday"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = expect_parse_error(&["tokscale", "--week", "--month"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_date_shortcut_conflicts_with_since_until_year() {
+        let err = expect_parse_error(&["tokscale", "--today", "--since", "2024-01-01"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = expect_parse_error(&["tokscale", "--week", "--until", "2024-12-31"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = expect_parse_error(&["tokscale", "--month", "--year", "2024"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_date_shortcut_conflict_applies_to_subcommands() {
+        let err = expect_parse_error(&["tokscale", "models", "--today", "--yesterday"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_since_until_year_still_combine() {
+        let cli = Cli::try_parse_from([
+            "tokscale",
+            "--since",
+            "2024-01-01",
+            "--until",
+            "2024-12-31",
+            "--year",
+            "2024",
+        ])
+        .unwrap();
+        assert_eq!(cli.date.since.as_deref(), Some("2024-01-01"));
+        assert_eq!(cli.date.until.as_deref(), Some("2024-12-31"));
+        assert_eq!(cli.date.year.as_deref(), Some("2024"));
     }
 
     #[test]
@@ -6487,72 +6829,84 @@ mod tests {
 
     #[test]
     fn test_get_date_range_label_today() {
-        let label = get_date_range_label(true, false, false, &None, &None, &None);
+        let label = get_date_range_label(&DateRangeFlags {
+            today: true,
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("Today".to_string()));
     }
 
     #[test]
+    fn test_get_date_range_label_yesterday() {
+        let label = get_date_range_label(&DateRangeFlags {
+            yesterday: true,
+            ..DateRangeFlags::default()
+        });
+        assert_eq!(label, Some("Yesterday".to_string()));
+    }
+
+    #[test]
     fn test_get_date_range_label_week() {
-        let label = get_date_range_label(false, true, false, &None, &None, &None);
+        let label = get_date_range_label(&DateRangeFlags {
+            week: true,
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("Last 7 days".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_month_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
-        let label = get_date_range_label_for_date(false, false, true, &None, &None, &None, today);
+        let label = get_date_range_label_for_date(
+            &DateRangeFlags {
+                month: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(label, Some("March 2026".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_year() {
-        let label =
-            get_date_range_label(false, false, false, &None, &None, &Some("2024".to_string()));
+        let label = get_date_range_label(&DateRangeFlags {
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("2024".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_custom_since() {
-        let label = get_date_range_label(
-            false,
-            false,
-            false,
-            &Some("2024-01-01".to_string()),
-            &None,
-            &None,
-        );
+        let label = get_date_range_label(&DateRangeFlags {
+            since: Some("2024-01-01".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("from 2024-01-01".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_custom_until() {
-        let label = get_date_range_label(
-            false,
-            false,
-            false,
-            &None,
-            &Some("2024-12-31".to_string()),
-            &None,
-        );
+        let label = get_date_range_label(&DateRangeFlags {
+            until: Some("2024-12-31".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("to 2024-12-31".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_custom_range() {
-        let label = get_date_range_label(
-            false,
-            false,
-            false,
-            &Some("2024-01-01".to_string()),
-            &Some("2024-12-31".to_string()),
-            &None,
-        );
+        let label = get_date_range_label(&DateRangeFlags {
+            since: Some("2024-01-01".to_string()),
+            until: Some("2024-12-31".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("from 2024-01-01 to 2024-12-31".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_none() {
-        let label = get_date_range_label(false, false, false, &None, &None, &None);
+        let label = get_date_range_label(&DateRangeFlags::default());
         assert_eq!(label, None);
     }
 
@@ -6827,6 +7181,31 @@ mod tests {
     }
 
     #[test]
+    fn test_exclude_tokenless_cost_drops_warp_aggregate_requests() {
+        let mut graph = graph_result_with_contributions(vec![day_with_clients(
+            "2026-01-02",
+            0,
+            vec![client_contribution(
+                "warp",
+                "aggregate-requests",
+                "warp",
+                0,
+                12.34,
+                42,
+            )],
+        )]);
+
+        let excluded = exclude_tokenless_cost_contributions(&mut graph);
+
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].client, "warp");
+        assert_eq!(excluded[0].model_id, "aggregate-requests");
+        assert!(graph.contributions[0].clients.is_empty());
+        assert_eq!(graph.summary.total_tokens, 0);
+        assert_eq!(graph.summary.total_cost, 0.0);
+    }
+
+    #[test]
     fn test_submit_payload_includes_device_when_provided() {
         let graph = graph_result_with_contributions(vec![daily_contribution(
             "2026-12-31",
@@ -7018,6 +7397,82 @@ mod tests {
     }
 
     #[test]
+    fn clap_accepts_codex_account_commands() {
+        assert!(Cli::try_parse_from(["tokscale", "codex", "import", "--name", "work"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "accounts"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "accounts", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "switch", "work"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "remove", "work"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "status", "--name", "work"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["tokscale", "codex", "status", "--name", "work", "--json"])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn clap_accepts_warp_status_and_sync_commands() {
+        assert!(Cli::try_parse_from(["tokscale", "warp", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "warp", "status", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "warp", "sync"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "warp", "sync", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn client_filter_round_trips_warp() {
+        assert_eq!(
+            ClientFilter::from_filter_str("warp"),
+            Some(ClientFilter::Warp)
+        );
+        assert_eq!(ClientFilter::Warp.as_filter_str(), "warp");
+        assert_eq!(
+            ClientFilter::Warp.to_client_id(),
+            Some(tokscale_core::ClientId::Warp)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Warp),
+            ClientFilter::Warp
+        );
+    }
+
+    #[test]
+    fn client_filter_round_trips_grok() {
+        assert_eq!(
+            ClientFilter::from_filter_str("grok"),
+            Some(ClientFilter::Grok)
+        );
+        assert_eq!(ClientFilter::Grok.as_filter_str(), "grok");
+        assert_eq!(
+            ClientFilter::Grok.to_client_id(),
+            Some(tokscale_core::ClientId::Grok)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Grok),
+            ClientFilter::Grok
+        );
+    }
+
+    #[test]
+    fn default_submit_clients_excludes_warp_aggregate_source() {
+        let clients = default_submit_clients();
+        assert!(!clients.contains(&"warp".to_string()));
+    }
+
+    #[test]
+    fn warp_setup_warning_explains_missing_aggregate_cache() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let warnings = warp_setup_warnings_for_report(
+            &Some(temp.path().to_string_lossy().to_string()),
+            &Some(vec!["warp".to_string()]),
+        );
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("tokscale warp"));
+        assert!(warnings[0].contains("does not infer tokens from request counts"));
+    }
+
+    #[test]
     fn cursor_auto_sync_enabled_for_default_report() {
         assert!(should_auto_sync_cursor_for_local_report(&None, &None));
     }
@@ -7062,51 +7517,6 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("runtime unavailable")));
-    }
-
-    #[test]
-    fn write_light_cache_refuses_when_since_filter_set() {
-        // Date/home filters are NOT part of the TUI cache key. Writing
-        // the filtered slice would silently poison subsequent TUI launches
-        // (next `tokscale tui` would render the filtered slice as if it
-        // were the default report). The function returns `()` and prints
-        // an eprintln; reaching this assertion line proves the function
-        // returned normally without panicking or attempting the write.
-        let group_by = tokscale_core::GroupBy::default();
-        write_light_cache(
-            &None,
-            &None,
-            &Some("2025-01-01".to_string()),
-            &None,
-            &None,
-            &group_by,
-        );
-    }
-
-    #[test]
-    fn write_light_cache_refuses_when_until_filter_set() {
-        let group_by = tokscale_core::GroupBy::default();
-        write_light_cache(
-            &None,
-            &None,
-            &None,
-            &Some("2025-12-31".to_string()),
-            &None,
-            &group_by,
-        );
-    }
-
-    #[test]
-    fn write_light_cache_refuses_when_year_filter_set() {
-        let group_by = tokscale_core::GroupBy::default();
-        write_light_cache(
-            &None,
-            &None,
-            &None,
-            &None,
-            &Some("2025".to_string()),
-            &group_by,
-        );
     }
 
     #[test]

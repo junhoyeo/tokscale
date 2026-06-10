@@ -147,6 +147,24 @@ function session() {
   return { id: "user-1", username: "alice", displayName: null, avatarUrl: null };
 }
 
+function mockBrowserSessionOnly() {
+  mockGroups.getSessionFromRequest.mockImplementation(
+    async (
+      request: Request,
+      options?: { allowAuthorizationHeader?: boolean }
+    ) => {
+      if (
+        request.headers.has("Authorization") &&
+        options?.allowAuthorizationHeader === false
+      ) {
+        return null;
+      }
+
+      return session();
+    }
+  );
+}
+
 function group() {
   return {
     id: "group-1",
@@ -170,6 +188,26 @@ const BAD_BODIES = [
 // ─── POST /api/groups ─────────────────────────────────────────────────────────
 
 describe("POST /api/groups — payload guard (B2)", () => {
+  it("rejects Authorization header sessions when creating groups", async () => {
+    mockBrowserSessionOnly();
+
+    const response = await groupsPOST(
+      new Request("http://localhost:3000/api/groups", {
+        method: "POST",
+        body: JSON.stringify({ name: "Team" }),
+        headers: {
+          Authorization: "Bearer tt_personal",
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+        },
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockGroups.db.transaction).not.toHaveBeenCalled();
+  });
+
   it.each(BAD_BODIES)("returns 400 for $label body", async ({ body }) => {
     mockGroups.getSessionFromRequest.mockResolvedValue(session());
 
@@ -190,6 +228,30 @@ describe("POST /api/groups — payload guard (B2)", () => {
 // ─── PATCH /api/groups/[slug] ─────────────────────────────────────────────────
 
 describe("PATCH /api/groups/[slug] — payload guard (B2)", () => {
+  it("rejects Authorization header sessions when updating groups", async () => {
+    mockBrowserSessionOnly();
+    mockGroups.getGroupBySlug.mockResolvedValue(group());
+    mockGroups.getGroupMembership.mockResolvedValue({ role: "admin" });
+
+    const response = await slugPATCH(
+      new Request("http://localhost:3000/api/groups/team", {
+        method: "PATCH",
+        body: JSON.stringify({ description: "Updated" }),
+        headers: {
+          Authorization: "Bearer tt_personal",
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+        },
+      }),
+      { params: Promise.resolve({ slug: "team" }) }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockGroups.getGroupBySlug).not.toHaveBeenCalled();
+    expect(mockGroups.db.update).not.toHaveBeenCalled();
+  });
+
   it.each(BAD_BODIES)("returns 400 for $label body", async ({ body }) => {
     mockGroups.getSessionFromRequest.mockResolvedValue(session());
     mockGroups.getGroupBySlug.mockResolvedValue(group());
@@ -213,6 +275,30 @@ describe("PATCH /api/groups/[slug] — payload guard (B2)", () => {
 // ─── PATCH /api/groups/[slug]/members/[userId]/role ───────────────────────────
 
 describe("PATCH /api/groups/[slug]/members/[userId]/role — payload guard (B2)", () => {
+  it("rejects Authorization header sessions when updating member roles", async () => {
+    mockBrowserSessionOnly();
+    mockGroups.getGroupBySlug.mockResolvedValue(group());
+    mockGroups.getGroupMembership.mockResolvedValue({ role: "owner" });
+
+    const response = await rolePATCH(
+      new Request("http://localhost:3000/api/groups/team/members/user-2/role", {
+        method: "PATCH",
+        body: JSON.stringify({ role: "admin" }),
+        headers: {
+          Authorization: "Bearer tt_personal",
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+        },
+      }),
+      { params: Promise.resolve({ slug: "team", userId: "user-2" }) }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockGroups.getGroupBySlug).not.toHaveBeenCalled();
+    expect(mockGroups.db.update).not.toHaveBeenCalled();
+  });
+
   it.each(BAD_BODIES)("returns 400 for $label body", async ({ body }) => {
     mockGroups.getSessionFromRequest.mockResolvedValue(session());
     mockGroups.getGroupBySlug.mockResolvedValue(group());

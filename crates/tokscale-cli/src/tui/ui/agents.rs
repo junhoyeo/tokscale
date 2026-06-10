@@ -1,9 +1,11 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
-use super::widgets::{format_cost, format_tokens, get_client_display_name};
+use super::widgets::{
+    format_cost, format_tokens, get_client_display_name, viewport_scrollbar_state,
+};
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
 
@@ -34,6 +36,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
+    let striped_row_style = app.theme.striped_row_style();
 
     let agents = app.get_sorted_agents();
     if agents.is_empty() {
@@ -136,7 +139,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
             } else if is_striped {
-                Style::default().bg(Color::Rgb(20, 24, 30))
+                striped_row_style
             } else {
                 Style::default()
             };
@@ -175,7 +178,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(agents_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(agents_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,

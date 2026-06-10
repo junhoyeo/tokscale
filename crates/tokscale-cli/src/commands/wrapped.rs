@@ -1452,6 +1452,9 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "goose" => Some("Goose"),
         "antigravity" => Some("Antigravity"),
         "zed" => Some("Zed Agent"),
+        "warp" => Some("Warp"),
+        "cline" => Some("Cline"),
+        "gjc" => Some("Gajae-Code"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -3002,9 +3005,9 @@ fn cursor_setup_warning_for_wrapped(
     }
 
     let action = if cursor_logged_in {
-        "run `tokscale cursor sync`"
+        "run `tokscale cursor sync --json`"
     } else {
-        "run `tokscale cursor login` and `tokscale cursor sync`"
+        "run `tokscale cursor login` and `tokscale cursor sync --json`"
     };
 
     Some(format!(
@@ -3020,14 +3023,14 @@ mod cursor_setup_warning_tests {
     fn wrapped_cursor_warning_suggests_login_when_not_authenticated() {
         let warning = cursor_setup_warning_for_wrapped(true, false, false).unwrap();
         assert!(warning.contains("tokscale cursor login"));
-        assert!(warning.contains("tokscale cursor sync"));
+        assert!(warning.contains("tokscale cursor sync --json"));
     }
 
     #[test]
     fn wrapped_cursor_warning_suggests_sync_only_when_authenticated() {
         let warning = cursor_setup_warning_for_wrapped(true, false, true).unwrap();
         assert!(!warning.contains("tokscale cursor login"));
-        assert!(warning.contains("tokscale cursor sync"));
+        assert!(warning.contains("tokscale cursor sync --json"));
     }
 
     #[test]

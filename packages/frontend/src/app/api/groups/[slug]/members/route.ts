@@ -3,8 +3,11 @@ import { and, eq } from "drizzle-orm";
 import { db, groupMembers, users } from "@/lib/db";
 import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { revalidateGroupCaches } from "@/lib/groups/cache";
-import { canManageGroupMember, getGroupMembership } from "@/lib/groups/permissions";
+import { getGroupMembership } from "@/lib/groups/permissions";
 import { getGroupBySlug } from "@/lib/groups/queries";
+import { canManageGroupRole } from "@/lib/groups/utils";
+
+const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
 
 interface RouteParams {
   params: Promise<{ slug: string }>;
@@ -57,7 +60,7 @@ export async function GET(request: Request, { params }: RouteParams) {
 
 export async function DELETE(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, BROWSER_SESSION_OPTIONS);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
@@ -83,16 +86,48 @@ export async function DELETE(request: Request, { params }: RouteParams) {
       return NextResponse.json({ error: "Group not found" }, { status: 404 });
     }
 
-    if (!membership || !(await canManageGroupMember(group.id, session.id, userId))) {
+    const deleteResult = await db.transaction(async (tx) => {
+      const [actor] = await tx
+        .select({ role: groupMembers.role })
+        .from(groupMembers)
+        .where(and(eq(groupMembers.groupId, group.id), eq(groupMembers.userId, session.id)))
+        .limit(1)
+        .for("update");
+
+      if (!actor) {
+        return { status: "forbidden" as const };
+      }
+
+      const [target] = await tx
+        .select({ role: groupMembers.role })
+        .from(groupMembers)
+        .where(and(eq(groupMembers.groupId, group.id), eq(groupMembers.userId, userId)))
+        .limit(1)
+        .for("update");
+
+      if (!target) {
+        return { status: "not_found" as const };
+      }
+
+      if (!canManageGroupRole(actor.role, target.role)) {
+        return { status: "forbidden" as const };
+      }
+
+      const deleted = await tx
+        .delete(groupMembers)
+        .where(and(eq(groupMembers.groupId, group.id), eq(groupMembers.userId, userId)))
+        .returning({ id: groupMembers.id });
+
+      return deleted.length === 0
+        ? { status: "not_found" as const }
+        : { status: "deleted" as const };
+    });
+
+    if (deleteResult.status === "forbidden") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    const deleted = await db
-      .delete(groupMembers)
-      .where(and(eq(groupMembers.groupId, group.id), eq(groupMembers.userId, userId)))
-      .returning({ id: groupMembers.id });
-
-    if (deleted.length === 0) {
+    if (deleteResult.status === "not_found") {
       return NextResponse.json({ error: "Member not found" }, { status: 404 });
     }
 

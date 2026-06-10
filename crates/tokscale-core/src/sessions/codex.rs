@@ -32,6 +32,7 @@ pub struct CodexPayload {
     pub model_name: Option<String>,
     pub model_info: Option<CodexModelInfo>,
     pub info: Option<CodexInfo>,
+    pub turn_id: Option<String>,
     pub source: Option<Value>,
     /// Current working directory from session_meta.
     pub cwd: Option<String>,
@@ -39,6 +40,11 @@ pub struct CodexPayload {
     pub model_provider: Option<String>,
     /// Agent name from session_meta
     pub agent_nickname: Option<String>,
+    /// Free-text body of an `event_msg` `user_message` payload. Used to detect
+    /// human turn boundaries: real human input is plain text, whereas
+    /// system-injected context (`<environment_context>`, `<system-reminder>`,
+    /// `<user_instructions>`, …) begins with `<`.
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +125,13 @@ impl CodexTotals {
             .saturating_add(self.reasoning)
     }
 
+    fn is_within(self, baseline: Self) -> bool {
+        self.input <= baseline.input
+            && self.output <= baseline.output
+            && self.cached <= baseline.cached
+            && self.reasoning <= baseline.reasoning
+    }
+
     fn looks_like_stale_regression(self, previous: Self, last: Self) -> bool {
         let previous_total = previous.total();
         let current_total = self.total();
@@ -159,6 +172,8 @@ pub(crate) struct CodexParseState {
     pub session_is_headless: bool,
     pub session_id_from_meta: Option<String>,
     pub session_forked_from_id: Option<String>,
+    pub forked_child_session_id: Option<String>,
+    pub forked_child_replay_session_id: Option<String>,
     pub session_provider: Option<String>,
     pub session_agent: Option<String>,
     pub session_workspace_key: Option<String>,
@@ -166,6 +181,11 @@ pub(crate) struct CodexParseState {
     pub forked_child_waiting_for_turn_context: bool,
     pub forked_child_inherited_baseline: Option<CodexTotals>,
     pub forked_child_inherited_reported_total: Option<i64>,
+    /// Set when a human `user_message` event is seen; consumed by the next
+    /// token_count-derived message to mark it as a turn start. `#[serde(default)]`
+    /// keeps a pending turn alive across incremental re-parses of appended chunks.
+    #[serde(default)]
+    pub pending_turn_start: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -268,11 +288,33 @@ fn parse_codex_reader<R: BufRead>(
                 let event_model = payload_model.clone().or(info_model.clone());
 
                 if state.forked_child_waiting_for_turn_context {
-                    if entry.entry_type == "turn_context" {
+                    if entry.entry_type == "turn_context"
+                        && forked_child_turn_starts_own_session(&state, payload.turn_id.as_deref())
+                    {
                         state.forked_child_waiting_for_turn_context = false;
+                        state.forked_child_replay_session_id = None;
+                        if let Some(ref id) = state.forked_child_session_id {
+                            state.session_id_from_meta = Some(id.clone());
+                        }
                         state.current_model = payload_model.clone();
                         handled = true;
                     } else {
+                        if entry.entry_type == "session_meta" {
+                            if let Some(ref id) = payload.id {
+                                if state
+                                    .forked_child_session_id
+                                    .as_deref()
+                                    .is_some_and(|child_id| child_id != id)
+                                {
+                                    // Newer Codex fork logs can embed the
+                                    // parent session metadata before replaying
+                                    // parent token_count history. Keep
+                                    // skipping while that copied upstream
+                                    // transcript is active.
+                                    state.forked_child_replay_session_id = Some(id.clone());
+                                }
+                            }
+                        }
                         if is_token_count {
                             if let Some(info) = payload.info.as_ref() {
                                 remember_forked_child_inherited_baseline(&mut state, info);
@@ -302,9 +344,16 @@ fn parse_codex_reader<R: BufRead>(
                     if let Some(ref id) = payload.id {
                         state.session_id_from_meta = Some(id.clone());
                     }
-                    if let Some(ref forked_from_id) = payload.forked_from_id {
-                        state.session_forked_from_id = Some(forked_from_id.clone());
+                    let forked_from_id = payload
+                        .forked_from_id
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| forked_from_id_from_source(payload.source.as_ref()));
+                    if let Some(forked_from_id) = forked_from_id {
+                        state.session_forked_from_id = Some(forked_from_id.to_string());
+                        state.forked_child_session_id = payload.id.clone();
                         state.forked_child_waiting_for_turn_context = true;
+                        state.forked_child_replay_session_id = None;
                         state.forked_child_inherited_baseline = None;
                         state.forked_child_inherited_reported_total = None;
                     }
@@ -336,6 +385,26 @@ fn parse_codex_reader<R: BufRead>(
                     handled = true;
                 }
 
+                // A human `user_message` event starts a new turn. The event
+                // itself carries no tokens, so we defer the flag to the next
+                // token_count-derived message (the assistant's reply). This
+                // counts `codex exec` one-shots too: they are headless but still
+                // carry a real human prompt, so each is one turn. Only
+                // system-injected messages (leading `<`, e.g.
+                // <environment_context>, <system-reminder>) are excluded as
+                // non-human input. Forked-child replays of the parent prompt
+                // arrive before turn_context and are skipped by the
+                // `forked_child_waiting_for_turn_context` branch above, so they
+                // never reach here.
+                if entry.entry_type == "event_msg"
+                    && payload.payload_type.as_deref() == Some("user_message")
+                {
+                    if codex_message_is_human_turn(payload.message.as_deref()) {
+                        state.pending_turn_start = true;
+                    }
+                    handled = true;
+                }
+
                 // Process token_count events
                 if is_token_count {
                     let info = match payload.info {
@@ -363,16 +432,15 @@ fn parse_codex_reader<R: BufRead>(
                     let total_usage = info.total_token_usage.as_ref().map(CodexTotals::from_usage);
                     let last_usage = info.last_token_usage.as_ref().map(CodexTotals::from_usage);
 
-                    if forked_child_matches_inherited_baseline(
+                    // Forked child logs can replay more than one parent
+                    // token_count row after the first child turn_context,
+                    // often with child-local timestamps. Keep the inherited
+                    // baseline active until totals move beyond it.
+                    if forked_child_should_skip_inherited_snapshot(
                         &state,
                         info.total_token_usage.as_ref(),
                         total_usage,
                     ) {
-                        if let Some(total) = total_usage {
-                            state.previous_totals = Some(total);
-                        }
-                        state.forked_child_inherited_baseline = None;
-                        state.forked_child_inherited_reported_total = None;
                         continue;
                     }
                     state.forked_child_inherited_baseline = None;
@@ -456,10 +524,33 @@ fn parse_codex_reader<R: BufRead>(
                         agent,
                     );
                     message.duration_ms = duration_ms;
-                    if parsed_timestamp.is_some() {
-                        if let Some(model) = model.as_deref() {
-                            set_codex_dedup_key(&mut message, model);
-                        }
+                    // Apply a deferred human-turn marker from a preceding
+                    // user_message to this assistant reply — the first
+                    // token-bearing message after the human input.
+                    if state.pending_turn_start {
+                        message.is_turn_start = true;
+                        state.pending_turn_start = false;
+                    }
+                    if parsed_timestamp.is_some() || total_usage.is_some() {
+                        // Fork/subagent children replay the same upstream
+                        // token_count history into many sibling files. Those
+                        // replays carry identical cumulative totals but a
+                        // distinct per-file session id, so a session-scoped key
+                        // never collapses them and the totals get counted once
+                        // per sibling. Scope the key to the fork parent instead
+                        // so sibling replays share one key. Unrelated sessions
+                        // keep their own id and never merge.
+                        let dedup_scope_id = state
+                            .session_forked_from_id
+                            .as_deref()
+                            .or(state.session_id_from_meta.as_deref())
+                            .unwrap_or(session_id);
+                        set_codex_dedup_key(
+                            &mut message,
+                            model.as_deref().unwrap_or("unknown"),
+                            dedup_scope_id,
+                            total_usage,
+                        );
                     }
                     message.set_workspace(
                         state.session_workspace_key.clone(),
@@ -561,6 +652,61 @@ fn codex_source_is_exec(source: Option<&Value>) -> bool {
     source.and_then(Value::as_str) == Some("exec")
 }
 
+fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
+    source?
+        .get("subagent")?
+        .get("thread_spawn")?
+        .get("parent_thread_id")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+}
+
+fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option<&str>) -> bool {
+    if state.forked_child_replay_session_id.is_none() {
+        return true;
+    }
+
+    let Some(child_session_id) = state.forked_child_session_id.as_deref() else {
+        return true;
+    };
+
+    match (turn_id, codex_uuid_v7_order_key(child_session_id)) {
+        (Some(turn_id), Some(child_key)) => {
+            codex_uuid_v7_order_key(turn_id).is_none_or(|turn_key| turn_key >= child_key)
+        }
+        _ => true,
+    }
+}
+
+fn codex_uuid_v7_order_key(id: &str) -> Option<String> {
+    let mut parts = id.split('-');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    let third = parts.next()?;
+    let fourth = parts.next()?;
+    let fifth = parts.next()?;
+
+    if parts.next().is_some()
+        || first.len() != 8
+        || second.len() != 4
+        || third.len() != 4
+        || fourth.len() != 4
+        || fifth.len() != 12
+        || !third.starts_with('7')
+    {
+        return None;
+    }
+
+    let mut key = String::with_capacity(32);
+    for part in [first, second, third, fourth, fifth] {
+        if !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        key.push_str(&part.to_ascii_lowercase());
+    }
+    Some(key)
+}
+
 fn parse_codex_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
     timestamp
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
@@ -572,7 +718,29 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
     (duration > 0).then_some(duration)
 }
 
-fn codex_token_count_dedup_key(message: &UnifiedMessage, model: &str) -> String {
+fn codex_token_count_dedup_key(
+    message: &UnifiedMessage,
+    model: &str,
+    upstream_session_id: &str,
+    total_usage: Option<CodexTotals>,
+) -> String {
+    if let Some(total) = total_usage {
+        // Codex fork/subagent logs can replay the same upstream token_count
+        // history into many child files with child-local timestamps. The
+        // cumulative total is the stable upstream identity; timestamp is only
+        // a fallback when older rows do not carry totals.
+        return format!(
+            "codex:token_count-total:{}:{}:{}:{}:{}:{}:{}",
+            upstream_session_id,
+            message.provider_id,
+            model,
+            total.input,
+            total.output,
+            total.cached,
+            total.reasoning
+        );
+    }
+
     format!(
         "codex:token_count:{}:{}:{}:{}:{}:{}:{}:{}",
         message.timestamp,
@@ -586,9 +754,19 @@ fn codex_token_count_dedup_key(message: &UnifiedMessage, model: &str) -> String 
     )
 }
 
-fn set_codex_dedup_key(message: &mut UnifiedMessage, model: &str) {
+fn set_codex_dedup_key(
+    message: &mut UnifiedMessage,
+    model: &str,
+    upstream_session_id: &str,
+    total_usage: Option<CodexTotals>,
+) {
     if message.dedup_key.is_none() {
-        message.dedup_key = Some(codex_token_count_dedup_key(message, model));
+        message.dedup_key = Some(codex_token_count_dedup_key(
+            message,
+            model,
+            upstream_session_id,
+            total_usage,
+        ));
     }
 }
 
@@ -600,7 +778,8 @@ fn flush_pending_model_messages(
 ) {
     for (mut message, used_fallback_timestamp) in pending_model_messages.drain(..) {
         if !used_fallback_timestamp {
-            set_codex_dedup_key(&mut message, model);
+            let upstream_session_id = message.session_id.clone();
+            set_codex_dedup_key(&mut message, model, &upstream_session_id, None);
         }
         message.model_id = model.to_string();
         messages.push(message);
@@ -664,7 +843,7 @@ fn remember_forked_child_inherited_baseline(state: &mut CodexParseState, info: &
     state.forked_child_inherited_reported_total = reported_total_tokens(total_usage);
 }
 
-fn forked_child_matches_inherited_baseline(
+fn forked_child_should_skip_inherited_snapshot(
     state: &CodexParseState,
     total_usage: Option<&CodexTokenUsage>,
     totals: Option<CodexTotals>,
@@ -672,13 +851,13 @@ fn forked_child_matches_inherited_baseline(
     if let (Some(usage), Some(baseline)) =
         (total_usage, state.forked_child_inherited_reported_total)
     {
-        if reported_total_tokens(usage) == Some(baseline) {
+        if reported_total_tokens(usage).is_some_and(|total| total <= baseline) {
             return true;
         }
     }
 
     if let (Some(totals), Some(baseline)) = (totals, state.forked_child_inherited_baseline) {
-        return totals == baseline;
+        return totals.is_within(baseline);
     }
 
     false
@@ -863,11 +1042,62 @@ fn extract_timestamp_from_value(value: &Value) -> Option<i64> {
         .and_then(parse_timestamp_value)
 }
 
+/// Prefixes Codex prepends to context it injects as `user_message` events.
+/// These are the bodies that must NOT be counted as human turns.
+const CODEX_SYSTEM_INJECTED_PREFIXES: [&str; 3] = [
+    "<environment_context>",
+    "<system-reminder>",
+    "<user_instructions>",
+];
+
+/// Returns true when a Codex `user_message` payload represents real human input
+/// rather than system-injected context. Codex stores the body as a plain string
+/// in `payload.message`; the harness injects context blocks that open with one of
+/// the known tags in [`CODEX_SYSTEM_INJECTED_PREFIXES`] after trimming. Matching
+/// those specific prefixes — rather than any leading `<` — avoids dropping
+/// legitimate human prompts that happen to start with markup (asking about a
+/// `<div>`, pasting an XML snippet, etc.). The `kind` field can't be used to
+/// distinguish them: both human and injected bodies appear as `kind:"plain"` or
+/// with no `kind` at all.
+fn codex_message_is_human_turn(message: Option<&str>) -> bool {
+    match message {
+        Some(text) => {
+            let trimmed = text.trim_start();
+            !CODEX_SYSTEM_INJECTED_PREFIXES
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, Cursor, Error, ErrorKind, Seek, SeekFrom, Write};
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn codex_human_turn_matches_only_known_system_tags() {
+        // Real human prompts that happen to start with markup must still count.
+        assert!(codex_message_is_human_turn(Some(
+            "how do I center a <div>?"
+        )));
+        assert!(codex_message_is_human_turn(Some("<div>hi</div>")));
+        assert!(codex_message_is_human_turn(Some("  plain question")));
+        // Known system-injected context blocks are not human turns.
+        assert!(!codex_message_is_human_turn(Some(
+            "<environment_context>cwd=/tmp</environment_context>"
+        )));
+        assert!(!codex_message_is_human_turn(Some(
+            "  <system-reminder>be concise</system-reminder>"
+        )));
+        assert!(!codex_message_is_human_turn(Some(
+            "<user_instructions>do X</user_instructions>"
+        )));
+        // A missing body is never a human turn.
+        assert!(!codex_message_is_human_turn(None));
+    }
 
     fn create_test_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -1520,6 +1750,118 @@ mod tests {
     }
 
     #[test]
+    fn test_forked_child_ignores_replayed_parent_rows_after_turn_context() {
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo-child"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:57.994Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.947Z","type":"turn_context","payload":{"model":"gpt-5.5","cwd":"/repo-child"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.948Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55},"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.949Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":250,"output_tokens":25,"total_tokens":275}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:59.253Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":310,"output_tokens":32,"total_tokens":342},"last_token_usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_forked_child_submit_cap_regression_skips_large_inherited_cache_replays() {
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1,"agent_role":"architect"}}},"model_provider":"openai","agent_nickname":"architect","cwd":"/repo-child"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:57.994Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200000000,"cached_input_tokens":1180000000,"output_tokens":1000000,"reasoning_output_tokens":100000,"total_tokens":1201100000},"last_token_usage":{"input_tokens":750000000,"cached_input_tokens":740000000,"output_tokens":500000,"reasoning_output_tokens":50000,"total_tokens":750550000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.947Z","type":"turn_context","payload":{"model":"gpt-5.5","cwd":"/repo-child"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.948Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1180000000,"cached_input_tokens":1160000000,"output_tokens":900000,"reasoning_output_tokens":90000,"total_tokens":1180990000},"last_token_usage":{"input_tokens":20000000,"cached_input_tokens":20000000,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":20000000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.949Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200000000,"cached_input_tokens":1180000000,"output_tokens":1000000,"reasoning_output_tokens":100000,"total_tokens":1201100000},"last_token_usage":{"input_tokens":20000000,"cached_input_tokens":20000000,"output_tokens":100000,"reasoning_output_tokens":10000,"total_tokens":20110000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:59.253Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200001500,"cached_input_tokens":1180001000,"output_tokens":1000200,"reasoning_output_tokens":100050,"total_tokens":1201101750},"last_token_usage":{"input_tokens":1500,"cached_input_tokens":1000,"output_tokens":200,"reasoning_output_tokens":50,"total_tokens":1750}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].tokens.input, 500);
+        assert_eq!(messages[0].tokens.cache_read, 1000);
+        assert_eq!(messages[0].tokens.output, 200);
+        assert_eq!(messages[0].tokens.reasoning, 50);
+    }
+
+    #[test]
+    fn test_forked_child_detects_thread_spawn_source_without_top_level_fork_id() {
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"child-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo-child"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:57.994Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.947Z","type":"turn_context","payload":{"model":"gpt-5.5","cwd":"/repo-child"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.948Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55},"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:59.253Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":310,"output_tokens":32,"total_tokens":342},"last_token_usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_forked_child_skips_nested_parent_replay_until_own_turn() {
+        let parent = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.000Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:51:58.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n"
+        ));
+        let child = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5c03-1e99-7000-8000-000000000001","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.100Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-6425-7000-8000-000000000001"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-6425-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":320,"output_tokens":32,"total_tokens":352},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+            "\n"
+        ));
+
+        let parent_messages = parse_codex_file(parent.path());
+        let child_messages = parse_codex_file(child.path());
+
+        assert_eq!(parent_messages.len(), 1);
+        assert_eq!(child_messages.len(), 1);
+        assert_ne!(parent_messages[0].dedup_key, child_messages[0].dedup_key);
+        assert_eq!(child_messages[0].tokens.input, 20);
+        assert_eq!(child_messages[0].tokens.output, 2);
+    }
+
+    #[test]
     fn test_forked_child_incremental_state_skips_inherited_prefix() {
         let file = create_test_file(concat!(
             r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo-child"}}"#,
@@ -1767,5 +2109,119 @@ mod tests {
         assert!(!parsed.unresolved_model_events);
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].model_id, "gpt-5.5");
+    }
+
+    #[test]
+    fn test_user_message_marks_next_token_count_as_turn_start() {
+        let content = [
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"continue please"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+        ]
+        .join("\n");
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages[0].is_turn_start,
+            "first reply after a human user_message is a turn start"
+        );
+        assert!(
+            !messages[1].is_turn_start,
+            "a later reply with no new user_message is not a turn start"
+        );
+    }
+
+    #[test]
+    fn test_xml_user_message_does_not_mark_turn_start() {
+        let content = [
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"\n<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+        ]
+        .join("\n");
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert!(
+            !messages[0].is_turn_start,
+            "a system-injected <...> message is not a human turn"
+        );
+    }
+
+    #[test]
+    fn test_exec_user_message_still_marks_turn_start() {
+        // A `codex exec` one-shot is headless but still carries a real human
+        // prompt, so it counts as exactly one turn (verified against a real
+        // `codex exec` session: 1 user_message -> turn_count 1).
+        let content = [
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"source":"exec"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}"#,
+            // A real `codex exec` interleaves an agent_message between the user
+            // prompt and the token_count; the deferred turn flag must survive it.
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"hi"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+        ]
+        .join("\n");
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].is_turn_start,
+            "an exec one-shot with a human prompt counts as one turn"
+        );
+        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+    }
+
+    #[test]
+    fn test_incremental_parse_preserves_pending_turn_start() {
+        let content = [
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}"#,
+            "",
+        ]
+        .join("\n");
+        let file = create_test_file(&content);
+        let initial_size = file.as_file().metadata().unwrap().len();
+
+        let initial = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(
+            initial.messages.is_empty(),
+            "no token_count yet, so no message"
+        );
+        assert!(
+            initial.state.pending_turn_start,
+            "a pending turn survives a chunk that ends before the token_count"
+        );
+
+        let appended = format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
+        );
+        let mut reopened = file.reopen().unwrap();
+        reopened.seek(SeekFrom::End(0)).unwrap();
+        reopened.write_all(appended.as_bytes()).unwrap();
+        reopened.flush().unwrap();
+
+        let incremental =
+            parse_codex_file_incremental(file.path(), initial_size, initial.state.clone());
+
+        assert_eq!(incremental.messages.len(), 1);
+        assert!(
+            incremental.messages[0].is_turn_start,
+            "the deferred turn applies to the message parsed in the next chunk"
+        );
+        assert!(
+            !incremental.state.pending_turn_start,
+            "the pending flag is consumed once applied"
+        );
     }
 }

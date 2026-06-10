@@ -66,7 +66,61 @@ beforeEach(() => {
   mockState.reset();
 });
 
+function session() {
+  return { id: "user-1", username: "alice", displayName: null, avatarUrl: null };
+}
+
+function mockBrowserSessionOnly() {
+  mockState.getSessionFromRequest.mockImplementation(
+    async (
+      request: Request,
+      options?: { allowAuthorizationHeader?: boolean }
+    ) => {
+      if (
+        request.headers.has("Authorization") &&
+        options?.allowAuthorizationHeader === false
+      ) {
+        return null;
+      }
+
+      return session();
+    }
+  );
+}
+
 describe("POST /api/groups/[slug]/invite", () => {
+  it("rejects Authorization header sessions when creating invites", async () => {
+    mockBrowserSessionOnly();
+    mockState.getGroupBySlug.mockResolvedValue({
+      id: "group-1",
+      slug: "team",
+      name: "Team",
+      isPublic: true,
+      createdBy: "user-2",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      description: null,
+      avatarUrl: null,
+    });
+    mockState.getGroupMembership.mockResolvedValue({ role: "admin" });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/groups/team/invite", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_personal",
+          Origin: "http://localhost:3000",
+        },
+      }),
+      { params: Promise.resolve({ slug: "team" }) }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getGroupBySlug).not.toHaveBeenCalled();
+    expect(mockState.createGroupInvite).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when request body contains malformed JSON", async () => {
     mockState.getSessionFromRequest.mockResolvedValue({
       id: "user-1",

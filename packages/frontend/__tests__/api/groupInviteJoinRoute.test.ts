@@ -45,6 +45,28 @@ beforeEach(() => {
   mockState.reset();
 });
 
+function session() {
+  return { id: "user-1", username: "Alice", displayName: null, avatarUrl: null };
+}
+
+function mockBrowserSessionOnly() {
+  mockState.getSessionFromRequest.mockImplementation(
+    async (
+      request: Request,
+      options?: { allowAuthorizationHeader?: boolean }
+    ) => {
+      if (
+        request.headers.has("Authorization") &&
+        options?.allowAuthorizationHeader === false
+      ) {
+        return null;
+      }
+
+      return session();
+    }
+  );
+}
+
 describe("/api/groups/join/[token]", () => {
   it("shows a safe invite preview without requiring authentication", async () => {
     mockState.getGroupInvitePreview.mockResolvedValue({
@@ -77,6 +99,29 @@ describe("/api/groups/join/[token]", () => {
     );
 
     expect(response.status).toBe(401);
+    expect(mockState.acceptGroupInvite).not.toHaveBeenCalled();
+  });
+
+  it("rejects Authorization header sessions when accepting an invite", async () => {
+    mockBrowserSessionOnly();
+    mockState.acceptGroupInvite.mockResolvedValue({
+      group: { id: "group-1", name: "Team", slug: "team" },
+      role: "member",
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/groups/join/tg_token", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_personal",
+          Origin: "http://localhost:3000",
+        },
+      }),
+      { params: Promise.resolve({ token: "tg_token" }) }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
     expect(mockState.acceptGroupInvite).not.toHaveBeenCalled();
   });
 

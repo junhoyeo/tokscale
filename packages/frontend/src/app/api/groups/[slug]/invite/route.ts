@@ -7,12 +7,14 @@ import { getGroupBySlug } from "@/lib/groups/queries";
 import { canManageGroupRole, isGroupRole } from "@/lib/groups/utils";
 import type { GroupRole } from "@/lib/db";
 
+const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ slug: string }> }
 ) {
   try {
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, BROWSER_SESSION_OPTIONS);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }

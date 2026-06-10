@@ -204,9 +204,25 @@ export function formatTokenCount(count: number): string {
     const val = (count / 1_000_000_000_000).toFixed(3).replace(/\.?0+$/, '');
     return `${val}T`;
   }
-  if (count >= 1_000_000_000) return `${(count / 1_000_000_000).toFixed(1)}B`;
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  if (count >= 1_000_000_000) {
+    const val = count / 1_000_000_000;
+    // toFixed(1) rounds 999.95+ to "1000.0"; promote to next unit instead
+    return val >= 999.95
+      ? `${(val / 1000).toFixed(1)}T`
+      : `${val.toFixed(1)}B`;
+  }
+  if (count >= 1_000_000) {
+    const val = count / 1_000_000;
+    return val >= 999.95
+      ? `${(val / 1000).toFixed(1)}B`
+      : `${val.toFixed(1)}M`;
+  }
+  if (count >= 1_000) {
+    const val = count / 1_000;
+    return val >= 999.95
+      ? `${(val / 1000).toFixed(1)}M`
+      : `${val.toFixed(1)}K`;
+  }
   return count.toLocaleString('en-US');
 }
 

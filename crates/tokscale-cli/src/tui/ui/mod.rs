@@ -81,7 +81,7 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner)[1];
 
-    let mut spans = spinner::get_scanner_spans(app.spinner_frame);
+    let mut spans = spinner::get_scanner_spans(app.spinner_frame, &app.theme);
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
         spinner::get_phase_message("parsing-sources"),

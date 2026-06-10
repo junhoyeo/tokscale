@@ -85,6 +85,27 @@
       "when": 1780086400000,
       "tag": "0011_drop_dead_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1780150000000,
+      "tag": "0012_hash_browser_session_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1780172800000,
+      "tag": "0013_add_mcp_servers",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1780915651573,
+      "tag": "0014_widen_cost_columns",
+      "breakpoints": true
     }
   ]
 }

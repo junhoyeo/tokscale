@@ -11,7 +11,7 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/check-version-coherence.sh'
+      - 'scripts/*.sh'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
@@ -23,7 +23,7 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/check-version-coherence.sh'
+      - 'scripts/*.sh'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
 
@@ -35,20 +35,22 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-        with:
-          # Check out the PR branch for same-repo PRs so we can push auto-fixes back
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || '' }}
-          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - name: Verify version coherence
         run: bash scripts/check-version-coherence.sh
+      - name: Run release helper tests
+        run: |
+          bash scripts/test-calculate-release-version.sh
+          bash scripts/test-check-version-coherence.sh
+          bash scripts/test-npm-release-state.sh
+          bash scripts/test-prepare-release-provenance.sh
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
@@ -61,33 +63,10 @@ jobs:
           key: lint-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             lint-${{ runner.os }}-cargo-
-
-      - name: Auto-fix lint issues
-        id: autofix
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          # Apply machine-fixable clippy lints
-          cargo clippy --fix --workspace --all-features --allow-dirty --allow-staged 2>&1 || true
-          # Apply formatting
-          cargo fmt --all
-          # Check if anything changed
-          if ! git diff --quiet; then
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Commit auto-fixes
-        if: steps.autofix.outputs.has_changes == 'true'
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add -A
-          git diff --staged --quiet || git commit -m "style: auto-fix lint issues"
-          git pull --rebase origin "${{ github.head_ref }}"
-          git push origin "HEAD:${{ github.head_ref }}"
-      - name: Run Clippy (strict)
-        run: cargo clippy --workspace --all-features -- -D warnings
       - name: Check formatting (strict)
         run: cargo fmt --all -- --check
+      - name: Run Clippy (strict)
+        run: cargo clippy --locked --workspace --all-features -- -D warnings
 
   coverage:
     name: Code Coverage
@@ -183,7 +162,13 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add .github/badges/coverage.svg
-          git diff --staged --quiet || (git commit -m "ci: update coverage badge [skip ci]" && git push)
+          git diff --staged --quiet && exit 0
+          git commit -m "ci: update coverage badge [skip ci]"
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase -X theirs origin main || exit 1
+          done
+          git push
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v6

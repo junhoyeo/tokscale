@@ -32,6 +32,9 @@ if tomllib is None:
 with (root / "Cargo.toml").open("rb") as cargo_file:
     cargo_data = tomllib.load(cargo_file)
 
+with (root / "Cargo.lock").open("rb") as cargo_lock_file:
+    cargo_lock_data = tomllib.load(cargo_lock_file)
+
 workspace_section = cargo_data.get("workspace", {}).get("package", {})
 workspace_version = workspace_section.get("version")
 if not workspace_version:
@@ -53,6 +56,17 @@ if not platform_packages:
 
 errors: list[str] = []
 
+required_platform_names = {
+    "@tokscale/cli-darwin-arm64",
+    "@tokscale/cli-darwin-x64",
+    "@tokscale/cli-linux-arm64-gnu",
+    "@tokscale/cli-linux-arm64-musl",
+    "@tokscale/cli-linux-x64-gnu",
+    "@tokscale/cli-linux-x64-musl",
+    "@tokscale/cli-win32-arm64-msvc",
+    "@tokscale/cli-win32-x64-msvc",
+}
+
 def expect_equal(label: str, actual: str, expected: str) -> None:
     if actual != expected:
         errors.append(f"{label}: expected {expected}, found {actual}")
@@ -72,20 +86,28 @@ for path in platform_packages:
     if not name:
         errors.append(f"{path} missing package name")
         continue
+    if not name.startswith("@tokscale/cli-"):
+        errors.append(f"{path} package name must start with @tokscale/cli-")
+        continue
     platform_names.add(name)
     expect_equal(f"{path} version", manifest["version"], workspace_version)
 
-expected_optional = {
-    "@tokscale/cli-darwin-arm64",
-    "@tokscale/cli-darwin-x64",
-    "@tokscale/cli-linux-x64-gnu",
-    "@tokscale/cli-linux-x64-musl",
-    "@tokscale/cli-linux-arm64-gnu",
-    "@tokscale/cli-linux-arm64-musl",
-    "@tokscale/cli-win32-x64-msvc",
-    "@tokscale/cli-win32-arm64-msvc",
-}
+expected_optional = platform_names
 actual_optional = set(cli_package["optionalDependencies"].keys())
+missing_required_manifests = required_platform_names - platform_names
+if missing_required_manifests:
+    errors.append(
+        "Missing required platform package manifests: "
+        f"{sorted(missing_required_manifests)}"
+    )
+
+missing_required_optional = required_platform_names - actual_optional
+if missing_required_optional:
+    errors.append(
+        "Missing required platform optionalDependencies: "
+        f"{sorted(missing_required_optional)}"
+    )
+
 if actual_optional != expected_optional:
     errors.append(
         "packages/cli optionalDependencies keys mismatch: "
@@ -94,6 +116,19 @@ if actual_optional != expected_optional:
 
 for name, version in cli_package["optionalDependencies"].items():
     expect_equal(f"packages/cli optional dependency {name}", version, workspace_version)
+
+lock_workspace_packages = {"tokscale-cli", "tokscale-core"}
+lock_packages = {
+    package.get("name"): package.get("version")
+    for package in cargo_lock_data.get("package", [])
+    if package.get("name") in lock_workspace_packages and "source" not in package
+}
+for package_name in sorted(lock_workspace_packages):
+    lock_version = lock_packages.get(package_name)
+    if lock_version is None:
+        errors.append(f"Cargo.lock missing package {package_name}")
+    else:
+        expect_equal(f"Cargo.lock package {package_name}", lock_version, workspace_version)
 
 missing_manifests = actual_optional - platform_names
 extra_manifests = platform_names - actual_optional

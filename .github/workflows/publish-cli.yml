@@ -17,10 +17,20 @@ on:
         description: "Override version (e.g., 2.0.0-beta.1). Takes precedence over bump."
         required: false
         type: string
+      recovery:
+        description: "Retry publishing an already committed release version. Requires version."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   pull-requests: read
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "10.13"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   bump-versions:
@@ -28,62 +38,47 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
+      base_version: ${{ steps.bump.outputs.base_version }}
     steps:
       - uses: actions/checkout@v5
 
+      - name: Check release workflow safety
+        run: python3 scripts/check-release-workflow-safety.py
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Calculate version
         id: bump
+        env:
+          RELEASE_BUMP: ${{ inputs.bump }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_RECOVERY: ${{ inputs.recovery }}
         run: |
           # Read current version from packages/cli/package.json (source of truth)
           CURRENT_VERSION=$(jq -r '.version' packages/cli/package.json)
           echo "📦 Current version: $CURRENT_VERSION"
-          
-          # Calculate new version
-          if [ -n "${{ inputs.version }}" ]; then
-            NEW_VERSION="${{ inputs.version }}"
+
+          VERSION_FILE="$(mktemp)"
+          RELEASE_VERSION_FILE="$VERSION_FILE" bash scripts/calculate-release-version.sh
+          NEW_VERSION="$(cat "$VERSION_FILE")"
+          rm -f "$VERSION_FILE"
+
+          if [ -n "$RELEASE_VERSION" ]; then
             echo "📌 Using override version: $NEW_VERSION"
           else
-            # Strip any prerelease suffix for calculation
-            BASE="${CURRENT_VERSION%%-*}"
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-            
-            case "${{ inputs.bump }}" in
-              "major (X.0.0)")
-                NEW_VERSION="$((MAJOR + 1)).0.0"
-                ;;
-              "minor (x.X.0)")
-                NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
-                ;;
-              *)
-                NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-                ;;
-            esac
-            echo "🎯 Bump type: ${{ inputs.bump }}"
+            echo "🎯 Bump type: $RELEASE_BUMP"
           fi
           echo "🚀 New version: $NEW_VERSION"
           
           # Update packages/cli/package.json (version + platform optionalDependencies)
           jq --arg v "$NEW_VERSION" '.version = $v
-            | .optionalDependencies["@tokscale/cli-darwin-arm64"] = $v
-            | .optionalDependencies["@tokscale/cli-darwin-x64"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-x64-gnu"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-x64-musl"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-arm64-gnu"] = $v
-            | .optionalDependencies["@tokscale/cli-linux-arm64-musl"] = $v
-            | .optionalDependencies["@tokscale/cli-win32-x64-msvc"] = $v
-            | .optionalDependencies["@tokscale/cli-win32-arm64-msvc"] = $v' packages/cli/package.json > tmp.json && mv tmp.json packages/cli/package.json
+            | .optionalDependencies = ((.optionalDependencies // {}) | with_entries(.value = $v))' packages/cli/package.json > tmp.json && mv tmp.json packages/cli/package.json
           echo "✅ Updated packages/cli/package.json"
 
           # Update platform package versions
-          for pkg in \
-            cli-darwin-arm64 \
-            cli-darwin-x64 \
-            cli-linux-x64-gnu \
-            cli-linux-x64-musl \
-            cli-linux-arm64-gnu \
-            cli-linux-arm64-musl \
-            cli-win32-x64-msvc \
-            cli-win32-arm64-msvc; do
+          mapfile -t PLATFORM_PACKAGES < <(jq -r '.optionalDependencies | keys[] | sub("^@tokscale/"; "")' packages/cli/package.json | sort)
+          for pkg in "${PLATFORM_PACKAGES[@]}"; do
             jq --arg v "$NEW_VERSION" '.version = $v' "packages/$pkg/package.json" > tmp.json && mv tmp.json "packages/$pkg/package.json"
             echo "✅ Updated packages/$pkg/package.json"
           done
@@ -113,6 +108,9 @@ jobs:
           path.write_text(updated)
           PY
           echo "✅ Updated Cargo.toml workspace version"
+
+          cargo update --workspace
+          echo "✅ Updated Cargo.lock workspace package versions"
           
           # Verify all versions are updated
           echo ""
@@ -129,13 +127,11 @@ jobs:
           echo "  cli -> darwin arm64: $(jq -r '.optionalDependencies["@tokscale/cli-darwin-arm64"]' packages/cli/package.json)"
           echo "  tokscale -> cli: $(jq -r '.dependencies["@tokscale/cli"]' packages/tokscale/package.json)"
           echo "  Platform packages:"
-          for pkg in cli-darwin-arm64 cli-darwin-x64 cli-linux-x64-gnu cli-linux-x64-musl cli-linux-arm64-gnu cli-linux-arm64-musl cli-win32-x64-msvc cli-win32-arm64-msvc; do
+          for pkg in "${PLATFORM_PACKAGES[@]}"; do
             echo "    $pkg: $(jq -r '.version' "packages/$pkg/package.json")"
           done
 
           bash scripts/check-version-coherence.sh --expect-version "$NEW_VERSION"
-          
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "📝 Version bump prepared (will commit after successful publish)"
 
       - name: Upload bumped manifest files
@@ -144,15 +140,9 @@ jobs:
           name: bumped-manifests
           path: |
             Cargo.toml
+            Cargo.lock
             packages/cli/package.json
-            packages/cli-darwin-arm64/package.json
-            packages/cli-darwin-x64/package.json
-            packages/cli-linux-x64-gnu/package.json
-            packages/cli-linux-x64-musl/package.json
-            packages/cli-linux-arm64-gnu/package.json
-            packages/cli-linux-arm64-musl/package.json
-            packages/cli-win32-x64-msvc/package.json
-            packages/cli-win32-arm64-msvc/package.json
+            packages/cli-*/package.json
             packages/tokscale/package.json
           retention-days: 1
 
@@ -198,14 +188,14 @@ jobs:
             artifact_name: cli-binary-aarch64-unknown-linux-gnu
             bin_name: tokscale
             build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-gnu
-            strip: aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/tokscale
+            strip: ""
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
             package_dir: cli-linux-arm64-musl
             artifact_name: cli-binary-aarch64-unknown-linux-musl
             bin_name: tokscale
             build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-musl
-            strip: aarch64-linux-gnu-strip target/aarch64-unknown-linux-musl/release/tokscale
+            strip: ""
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             package_dir: cli-win32-x64-msvc
@@ -224,7 +214,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Download bumped package.json files
+      - name: Download bumped release files
         uses: actions/download-artifact@v6
         with:
           name: bumped-manifests
@@ -306,10 +296,24 @@ jobs:
           name: bumped-manifests
           path: .
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check npm release state
+        env:
+          NEW_VERSION: ${{ needs.bump-versions.outputs.version }}
+          RELEASE_BASE_VERSION: ${{ needs.bump-versions.outputs.base_version }}
+          RELEASE_RECOVERY: ${{ inputs.recovery }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash scripts/check-npm-release-state.sh
 
       - name: Commit and push release provenance
         id: prepare
@@ -318,6 +322,7 @@ jobs:
           RELEASE_REF_NAME: ${{ github.ref_name }}
           RELEASE_REF_TYPE: ${{ github.ref_type }}
           EXPECTED_RELEASE_BASE_SHA: ${{ github.sha }}
+          RELEASE_RECOVERY: ${{ inputs.recovery }}
         run: bash scripts/prepare-release-provenance.sh
 
   publish-platform-packages:
@@ -371,6 +376,12 @@ jobs:
         with:
           bun-version: 1.1.38
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
       - name: Download CLI binary artifact
         uses: actions/download-artifact@v6
         with:
@@ -388,12 +399,12 @@ jobs:
           ls -la "packages/${{ matrix.settings.package_dir }}/bin"
 
       - name: Publish platform package
-        working-directory: packages/${{ matrix.settings.package_dir }}
         run: |
-          echo "📦 Publishing ${{ matrix.settings.package_name }} version: $(jq -r '.version' package.json)"
-          bun publish --access public
+          echo "📦 Publishing ${{ matrix.settings.package_name }} version: $(jq -r '.version' "packages/${{ matrix.settings.package_dir }}/package.json")"
+          bash scripts/publish-npm-package.sh "packages/${{ matrix.settings.package_dir }}"
         env:
-          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_RECOVERY: ${{ inputs.recovery }}
 
   publish-cli:
     name: Publish @tokscale/cli
@@ -410,6 +421,12 @@ jobs:
         with:
           bun-version: 1.1.38
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
       - name: Install dependencies
         working-directory: packages/cli
         run: bun install
@@ -419,12 +436,12 @@ jobs:
         run: bun run build
 
       - name: Publish @tokscale/cli
-        working-directory: packages/cli
         run: |
-          echo "📦 Publishing version: $(jq -r '.version' package.json)"
-          bun publish --access public
+          echo "📦 Publishing version: $(jq -r '.version' packages/cli/package.json)"
+          bash scripts/publish-npm-package.sh packages/cli
         env:
-          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_RECOVERY: ${{ inputs.recovery }}
 
   publish-alias:
     name: Publish tokscale (wrapper)
@@ -441,13 +458,19 @@ jobs:
         with:
           bun-version: 1.1.38
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
       - name: Publish tokscale
-        working-directory: packages/tokscale
         run: |
-          echo "📦 Publishing version: $(jq -r '.version' package.json)"
-          bun publish --access public
+          echo "📦 Publishing version: $(jq -r '.version' packages/tokscale/package.json)"
+          bash scripts/publish-npm-package.sh packages/tokscale
         env:
-          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_RECOVERY: ${{ inputs.recovery }}
 
   finalize:
     name: Create release

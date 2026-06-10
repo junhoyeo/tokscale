@@ -1,8 +1,10 @@
 #![deny(clippy::all)]
 
 mod aggregator;
+mod cc_mirror;
 pub mod clients;
 pub mod fs_atomic;
+pub mod mcp;
 mod message_cache;
 mod parser;
 pub mod paths;
@@ -118,6 +120,7 @@ fn retain_for_requested_clients(
     requested: &HashSet<&str>,
 ) -> bool {
     requested.contains(client)
+        || (requested.contains("claude") && client.starts_with("cc-mirror/"))
         || (requested.contains("synthetic")
             && sessions::synthetic::matches_synthetic_filter(client, model_id, provider_id))
 }
@@ -627,15 +630,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         ))
     }
 
-    fn load_or_parse_source_with_fingerprint_and_policy<F>(
+    fn load_or_parse_source_with_fingerprint_and_policy<F, FingerprintFn>(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
-        fingerprint_from_path: fn(&Path) -> Option<message_cache::SourceFingerprint>,
+        fingerprint_from_path: FingerprintFn,
         parse: F,
     ) -> CachedParseOutcome
     where
         F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
+        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
     {
         let Some(fingerprint) = fingerprint_from_path(path) else {
             let (mut messages, _) = parse(path);
@@ -678,15 +682,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    fn load_or_parse_source_with_fingerprint<F>(
+    fn load_or_parse_source_with_fingerprint<F, FingerprintFn>(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
-        fingerprint_from_path: fn(&Path) -> Option<message_cache::SourceFingerprint>,
+        fingerprint_from_path: FingerprintFn,
         parse: F,
     ) -> CachedParseOutcome
     where
         F: Fn(&Path) -> Vec<UnifiedMessage>,
+        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
     {
         load_or_parse_source_with_fingerprint_and_policy(
             path,
@@ -888,6 +893,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let claude_home = PathBuf::from(home_dir);
     let claude_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Claude)
         .par_iter()
@@ -896,8 +902,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_claude_code_path,
-                sessions::claudecode::parse_claude_file,
+                |path| {
+                    message_cache::SourceFingerprint::from_claude_code_path_with_home(
+                        path,
+                        Some(&claude_home),
+                    )
+                },
+                |path| sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home)),
             )
         })
         .collect();
@@ -1003,6 +1014,38 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let warp_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Warp)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::warp::parse_warp_file(path)
+            })
+        })
+        .collect();
+    for outcome in warp_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    let grok_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Grok)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::grok::parse_grok_updates_file(path)
+            })
+        })
+        .collect();
+    for outcome in grok_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let amp_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Amp)
         .par_iter()
@@ -1083,13 +1126,47 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // gjc (gajae-code) JSONL sessions. Binding note N1: this cached cluster
+    // MUST obtain messages via the non-repricing parser and apply the A1
+    // Hermes guard explicitly (reprice only when the embedded usage.cost.total
+    // was absent, i.e. cost <= 0.0). Routing through load_or_parse_source /
+    // apply_pricing_to_messages / cached_messages would reprice unconditionally
+    // and overwrite gjc's authoritative embedded cost, silently downgrading to
+    // A2 on the dominant cached path. Message-level dedup via
+    // should_keep_deduped_message collapses depth-1/depth-2 replays.
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::gjc::parse_gjc_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    if msg.cost <= 0.0 {
+                        apply_pricing_if_available(&mut msg, pricing);
+                    }
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(
+        gjc_messages
+            .into_iter()
+            .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
+    );
+
     let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kimi::parse_kimi_file(path)
-            })
+            let parse: fn(&Path) -> Vec<UnifiedMessage> = if sessions::kimi::is_kimi_code_path(path)
+            {
+                sessions::kimi::parse_kimi_code_file
+            } else {
+                sessions::kimi::parse_kimi_file
+            };
+            load_or_parse_source(path, &source_cache, pricing, parse)
         })
         .collect();
     for outcome in kimi_outcomes {
@@ -1148,6 +1225,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let cline_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Cline)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::cline::parse_cline_file(path)
+            })
+        })
+        .collect();
+    for outcome in cline_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let mux_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Mux)
         .par_iter()
@@ -1197,8 +1290,8 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(goose_messages);
     }
 
-    if let Some(db_path) = &scan_result.zed_db {
-        let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+    for db_path in scan_result.zed_db_paths() {
+        let outcome = load_or_parse_sqlite_source(&db_path, &source_cache, pricing, |path| {
             sessions::zed::parse_zed_sqlite(path)
         });
         all_messages.extend(outcome.messages);
@@ -1666,11 +1759,11 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         clients
     });
 
-    let pricing = pricing::PricingService::get_or_init().await?;
+    let pricing = load_pricing_for_local_parse().await;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        Some(&pricing),
+        pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
     );
@@ -2063,17 +2156,22 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     };
     counts.set(ClientId::OpenCode, opencode_count);
 
+    let claude_home = PathBuf::from(&home_dir);
     let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
         .get(ClientId::Claude)
         .par_iter()
         .map_init(std::collections::HashMap::new, |parent_cache, path| {
-            sessions::claudecode::parse_claude_file_with_cache(path, parent_cache)
-                .into_iter()
-                .map(|msg| {
-                    let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-                    (dedup_key, unified_to_parsed(&msg))
-                })
-                .collect::<Vec<_>>()
+            sessions::claudecode::parse_claude_file_with_cache_and_home(
+                path,
+                parent_cache,
+                Some(&claude_home),
+            )
+            .into_iter()
+            .map(|msg| {
+                let dedup_key = msg.dedup_key.clone().unwrap_or_default();
+                (dedup_key, unified_to_parsed(&msg))
+            })
+            .collect::<Vec<_>>()
         })
         .flatten()
         .collect();
@@ -2210,13 +2308,38 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
 
+    // gjc (gajae-code) JSONL sessions. This non-cached path produces
+    // ParsedMessage (no cost field) and has no pricing service in scope, so
+    // the A1 cost guard is a no-op here — cost correctness is enforced on the
+    // cached pricing path (see the gjc_outcomes block). What matters here is
+    // message-level dedup (codebuff-style key via should_keep_deduped_message)
+    // to collapse depth-1/depth-2 replays, mirroring the codex cluster.
+    let gjc_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| sessions::gjc::parse_gjc_file(path))
+        .collect();
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_msgs: Vec<ParsedMessage> = gjc_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut gjc_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let gjc_count = gjc_msgs.len() as i32;
+    counts.set(ClientId::Gjc, gjc_count);
+    messages.extend(gjc_msgs);
+
     // Parse Kimi wire.jsonl files in parallel
     let kimi_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
         .flat_map(|path| {
-            sessions::kimi::parse_kimi_file(path)
-                .into_iter()
+            let msgs = if sessions::kimi::is_kimi_code_path(path) {
+                sessions::kimi::parse_kimi_code_file(path)
+            } else {
+                sessions::kimi::parse_kimi_file(path)
+            };
+            msgs.into_iter()
                 .map(|msg| unified_to_parsed(&msg))
                 .collect::<Vec<_>>()
         })
@@ -2267,6 +2390,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let kilocode_count = summed_parsed_message_count(&kilocode_msgs);
     counts.set(ClientId::KiloCode, kilocode_count);
     messages.extend(kilocode_msgs);
+
+    let cline_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Cline)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::cline::parse_cline_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let cline_count = summed_parsed_message_count(&cline_msgs);
+    counts.set(ClientId::Cline, cline_count);
+    messages.extend(cline_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Mux)
@@ -2320,9 +2457,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         messages.extend(goose_msgs);
     }
 
-    if let Some(db_path) = &scan_result.zed_db {
-        let zed_msgs: Vec<ParsedMessage> = sessions::zed::parse_zed_sqlite(db_path)
-            .into_iter()
+    let zed_db_paths = scan_result.zed_db_paths();
+    if !zed_db_paths.is_empty() {
+        let zed_msgs: Vec<ParsedMessage> = zed_db_paths
+            .iter()
+            .flat_map(|db_path| sessions::zed::parse_zed_sqlite(db_path))
             .map(|msg| unified_to_parsed(&msg))
             .collect();
         let count = summed_parsed_message_count(&zed_msgs);
@@ -2401,6 +2540,34 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let trae_count = trae_msgs.len() as i32;
     counts.set(ClientId::Trae, trae_count);
     messages.extend(trae_msgs);
+
+    let warp_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Warp)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::warp::parse_warp_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let warp_count = summed_parsed_message_count(&warp_msgs);
+    counts.set(ClientId::Warp, warp_count);
+    messages.extend(warp_msgs);
+
+    let grok_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Grok)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::grok::parse_grok_updates_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let grok_count = summed_parsed_message_count(&grok_msgs);
+    counts.set(ClientId::Grok, grok_count);
+    messages.extend(grok_msgs);
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
@@ -2543,10 +2710,11 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        generate_graph_with_loaded_pricing, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
+        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -2671,6 +2839,49 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    fn create_zed_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                data BLOB NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_zed_thread(conn: &rusqlite::Connection, id: &str, model: &str) {
+        let payload = format!(
+            r#"{{
+                "version": "0.3.0",
+                "title": "Test thread",
+                "updated_at": "2026-05-01T12:30:00Z",
+                "request_token_usage": {{
+                    "turn-1": {{
+                        "input_tokens": 42,
+                        "output_tokens": 7,
+                        "cache_creation_input_tokens": 3,
+                        "cache_read_input_tokens": 5
+                    }}
+                }},
+                "model": {{
+                    "provider": "zed.dev",
+                    "model": "{model}"
+                }},
+                "imported": false
+            }}"#
+        );
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, "Test thread", "2026-05-01T12:30:00Z", "json", payload.as_bytes()],
+        )
+        .unwrap();
     }
 
     fn insert_hermes_session(
@@ -3388,6 +3599,83 @@ mod tests {
         assert!(messages[0].cost > 0.0);
     }
 
+    fn write_kimi_repeated_status_fixture(source_home: &std::path::Path) {
+        let session_dir = source_home.join(".kimi/sessions/group-1/session-1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("wire.jsonl"),
+            r#"{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 10, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}
+{"timestamp": 1770983420.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 20, "output": 2, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}
+{"timestamp": 1770983430.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 5, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-distinct"}}}
+{"timestamp": 1770983440.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 7, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}}}}
+{"timestamp": 1770983450.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 8, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}}}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_kimi_deduplicates_repeated_status_updates() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_kimi_repeated_status_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["kimi".to_string()],
+                None,
+            );
+
+            assert_eq!(messages.len(), 4);
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 40);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 5);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_kimi_deduplicates_repeated_status_updates() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_kimi_repeated_status_fixture(source_home.path());
+
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(vec!["kimi".to_string()]),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+
+            assert_eq!(parsed.counts.get(ClientId::Kimi), 4);
+            assert_eq!(parsed.messages.len(), 4);
+            assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 40);
+            assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 5);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_source_cache_refreshes_stale_date_on_cache_hit() {
@@ -3939,7 +4227,9 @@ mod tests {
                 "\n",
                 r#"{"timestamp":"2026-04-30T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+                r#"{"timestamp":"2026-04-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
                 "\n"
             ),
         )
@@ -3947,17 +4237,83 @@ mod tests {
         std::fs::write(
             codex_dir.join("fork.jsonl"),
             concat!(
-                r#"{"timestamp":"2026-04-30T10:01:00Z","type":"session_meta","payload":{"id":"fork-session","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","cwd":"/Users/alice/root-worktree"}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:00Z","type":"session_meta","payload":{"id":"fork-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","cwd":"/Users/alice/root-worktree"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:01:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130}}}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:02Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:01:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T10:01:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T10:01:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"total_tokens":143},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"total_tokens":13}}}}"#,
                 "\n"
             ),
         )
         .unwrap();
+    }
+
+    fn write_codex_parent_replay_fixture(source_home: &std::path::Path) {
+        let codex_dir = source_home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("parent.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-05-24T20:00:00Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:01Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"output_tokens":13,"total_tokens":143},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        for (filename, child_id, child_turn_id, timestamp) in [
+            (
+                "child-a.jsonl",
+                "019e5c03-1e99-7000-8000-000000000001",
+                "019e5c03-6425-7000-8000-000000000001",
+                "2026-05-24T21:00:00Z",
+            ),
+            (
+                "child-b.jsonl",
+                "019e5c04-1e99-7000-8000-000000000001",
+                "019e5c04-6425-7000-8000-000000000001",
+                "2026-05-24T22:00:00Z",
+            ),
+        ] {
+            std::fs::write(
+                codex_dir.join(filename),
+                format!(
+                    concat!(
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"{child_id}","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}}}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"last_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":130,"output_tokens":13,"total_tokens":143}},"last_token_usage":{{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"task_started","turn_id":"{child_turn_id}"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"{child_turn_id}","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":140,"output_tokens":14,"total_tokens":154}},"last_token_usage":{{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}}}}}}"#,
+                        "\n",
+                    ),
+                    timestamp = timestamp,
+                    child_id = child_id,
+                    child_turn_id = child_turn_id,
+                ),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -3977,7 +4333,7 @@ mod tests {
                 None,
             );
 
-            assert_eq!(messages.len(), 2);
+            assert_eq!(messages.len(), 3);
             assert_eq!(
                 messages
                     .iter()
@@ -4007,12 +4363,49 @@ mod tests {
         }
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_parent_replay_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            // Parent contributes its two turns. The two forks each replay the
+            // parent history (skipped) and then emit one own turn that lands on
+            // the identical cumulative total (140/14). Sibling forks sharing a
+            // cumulative total is the signature of a replayed row, so the
+            // fork-parent-scoped dedup key collapses them into one. Real fork
+            // fan-out replays the same upstream totals into 10-100+ siblings;
+            // two distinct turns reaching a byte-identical cumulative vector by
+            // chance does not happen in practice because the cumulative encodes
+            // each fork's divergent context size.
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 140);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 14);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
         // Single session with two turns whose `last_token_usage` deltas are
         // byte-identical but emitted at different timestamps. The fork-dedup
-        // key includes timestamp, so both turns must survive — collapsing
-        // them would erase legitimate usage when a user happens to send two
-        // turns producing the same per-turn delta.
+        // key includes the cumulative total, so both turns must survive even
+        // when a user happens to send two turns producing the same per-turn
+        // delta.
         let codex_dir = source_home.join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(
@@ -4105,8 +4498,8 @@ mod tests {
             })
             .unwrap();
 
-            assert_eq!(parsed.counts.get(ClientId::Codex), 2);
-            assert_eq!(parsed.messages.len(), 2);
+            assert_eq!(parsed.counts.get(ClientId::Codex), 3);
+            assert_eq!(parsed.messages.len(), 3);
             assert_eq!(
                 parsed
                     .messages
@@ -5258,6 +5651,42 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_pricing_if_available_prices_kimi_k2p6_alias() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "moonshotai/kimi-k2.6".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(9.5e-7),
+                output_cost_per_token: Some(0.000004),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(HashMap::new(), openrouter);
+
+        let mut msg = UnifiedMessage::new(
+            "kimi",
+            "k2p6",
+            "kimi-for-coding",
+            "session-1",
+            1_776_000_000_000,
+            TokenBreakdown {
+                input: 1_000_000,
+                output: 250_000,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        let expected = 1_000_000.0 * 9.5e-7 + 250_000.0 * 0.000004;
+        assert!((msg.cost - expected).abs() < 1e-12);
+        assert!(msg.cost > 0.0);
+    }
+
+    #[test]
     fn test_select_local_parse_pricing_prefers_fresh_service_for_new_models() {
         let mut fresh_litellm = HashMap::new();
         fresh_litellm.insert(
@@ -5664,6 +6093,172 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_local_clients_honors_scanner_extra_scan_paths_for_zed_threads_db() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let windows_threads_dir = temp_dir.path().join("AppData/Local/Zed/threads");
+        std::fs::create_dir_all(&windows_threads_dir).unwrap();
+        let threads_db = windows_threads_dir.join("threads.db");
+        let conn = create_zed_sqlite_db(&threads_db);
+        insert_zed_thread(&conn, "zed-extra-thread", "claude-sonnet-4-5");
+        drop(conn);
+
+        let parsed_default = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["zed".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(parsed_default.counts.get(ClientId::Zed), 0);
+        assert!(parsed_default.messages.is_empty());
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert("zed".to_string(), vec![windows_threads_dir]);
+        let parsed_with_settings = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["zed".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        assert_eq!(parsed_with_settings.counts.get(ClientId::Zed), 1);
+        assert_eq!(parsed_with_settings.messages.len(), 1);
+        assert_eq!(parsed_with_settings.messages[0].client, "zed");
+        assert_eq!(
+            parsed_with_settings.messages[0].session_id,
+            "zed-extra-thread"
+        );
+        assert_eq!(
+            parsed_with_settings.messages[0].model_id,
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(parsed_with_settings.messages[0].input, 42);
+        assert_eq!(parsed_with_settings.messages[0].output, 7);
+    }
+
+    #[test]
+    fn test_submit_default_graph_includes_antigravity_cache_rows() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = temp_dir
+            .path()
+            .join(".config/tokscale/antigravity-cache/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("ag-submit.jsonl"),
+            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+"#,
+        )
+        .unwrap();
+
+        let mut clients: Vec<String> = ClientId::iter()
+            .filter(|client| client.submit_default())
+            .map(|client| client.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let graph = rt
+            .block_on(generate_graph_with_loaded_pricing(
+                ReportOptions {
+                    home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    use_env_roots: false,
+                    clients: Some(clients),
+                    since: None,
+                    until: None,
+                    year: None,
+                    group_by: GroupBy::default(),
+                    scanner_settings: scanner::ScannerSettings::default(),
+                },
+                None,
+            ))
+            .unwrap();
+
+        assert_eq!(graph.summary.clients, vec!["antigravity"]);
+        assert_eq!(graph.summary.models, vec!["model_placeholder_m84"]);
+        assert_eq!(graph.summary.total_tokens, 19);
+        assert_eq!(graph.contributions.len(), 1);
+        assert_eq!(graph.contributions[0].clients[0].client, "antigravity");
+        assert_eq!(
+            graph.contributions[0].clients[0].model_id,
+            "model_placeholder_m84"
+        );
+    }
+
+    #[test]
+    fn test_parse_local_clients_dedups_zed_threads_across_default_and_extra_dbs() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        // Place threads.db at the default platform path so the scanner finds it
+        // as `zed_db` AND we also pass it via extraScanPaths.
+        let default_threads_dir = temp_dir.path().join(".local/share/zed/threads");
+        std::fs::create_dir_all(&default_threads_dir).unwrap();
+        let default_db = default_threads_dir.join("threads.db");
+        let conn = create_zed_sqlite_db(&default_db);
+        insert_zed_thread(&conn, "shared-zed-thread", "claude-sonnet-4-5");
+        drop(conn);
+
+        // Point extraScanPaths.zed at the same directory — dedup should prevent
+        // the thread from appearing twice.
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert("zed".to_string(), vec![default_threads_dir.clone()]);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["zed".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        // Should see exactly 1 message, not 2 (deduped by canonicalize).
+        assert_eq!(parsed.counts.get(ClientId::Zed), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].session_id, "shared-zed-thread");
+    }
+
+    #[test]
+    fn test_parse_local_clients_zed_extra_scan_paths_nonexistent_dir_is_silent() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert(
+            "zed".to_string(),
+            vec![temp_dir.path().join("does/not/exist")],
+        );
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["zed".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Zed), 0);
+        assert!(parsed.messages.is_empty());
+    }
+
+    #[test]
     fn test_parse_local_clients_dedups_hermes_sessions_across_default_and_extra_dbs() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -5854,6 +6449,117 @@ mod tests {
         assert_eq!(parsed.messages[0].output, 45);
         assert_eq!(parsed.messages[0].cache_read, 67);
         assert_eq!(parsed.messages[0].cache_write, 8);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_refreshes_cc_mirror_provider_when_variant_metadata_changes() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let variant_dir = source_home.path().join(".cc-mirror/kimi-code");
+            let config_dir = source_home.path().join("mirror-configs/kimi-code");
+            let project_dir = config_dir.join("projects/project-one");
+            std::fs::create_dir_all(&project_dir).unwrap();
+            std::fs::create_dir_all(&variant_dir).unwrap();
+            let variant_path = variant_dir.join("variant.json");
+            std::fs::write(
+                &variant_path,
+                format!(
+                    r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
+                    config_dir.display()
+                ),
+            )
+            .unwrap();
+            let session_path = project_dir.join("session.jsonl");
+            std::fs::write(
+                &session_path,
+                r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+            )
+            .unwrap();
+
+            let first_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+            );
+            assert_eq!(first_messages.len(), 1);
+            assert_eq!(first_messages[0].client, "cc-mirror/kimi-code");
+            assert_eq!(first_messages[0].provider_id, "kimi");
+
+            std::fs::write(
+                &variant_path,
+                format!(
+                    r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
+                    config_dir.display()
+                ),
+            )
+            .unwrap();
+
+            let refreshed_messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+            );
+            assert_eq!(refreshed_messages.len(), 1);
+            assert_eq!(refreshed_messages[0].client, "cc-mirror/kimi-code");
+            assert_eq!(refreshed_messages[0].provider_id, "minimax");
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_keeps_normal_claude_when_cc_mirror_points_at_claude_config() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let claude_dir = source_home.path().join(".claude");
+            let project_dir = claude_dir.join("projects/project-one");
+            std::fs::create_dir_all(&project_dir).unwrap();
+            let session_path = project_dir.join("session.jsonl");
+            std::fs::write(
+                &session_path,
+                r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+            )
+            .unwrap();
+
+            let variant_dir = source_home.path().join(".cc-mirror/plain-mirror");
+            std::fs::create_dir_all(&variant_dir).unwrap();
+            std::fs::write(
+                variant_dir.join("variant.json"),
+                format!(
+                    r#"{{"name":"plain-mirror","provider":"mirror","configDir":"{}"}}"#,
+                    claude_dir.display()
+                ),
+            )
+            .unwrap();
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+            );
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].client, "claude");
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

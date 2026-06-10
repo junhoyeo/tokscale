@@ -3,7 +3,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 // ── Fixture helpers ────────────────────────────────────────────────────────
@@ -119,6 +119,122 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
 
 fn create_temp_fixture_dir() -> TempDir {
     create_temp_fixture_dir_with_pricing_cache(true)
+}
+
+fn create_fake_codex_bin() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create fake codex dir");
+    let codex_path = tmp.path().join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+case "$TOKSCALE_FAKE_CODEX_MODE" in
+  success)
+    printf 'captured ok'
+    exit 0
+    ;;
+  fail)
+    printf 'captured fail'
+    exit 17
+    ;;
+  slow)
+    exec sleep 20
+    ;;
+  *)
+    echo "unknown TOKSCALE_FAKE_CODEX_MODE" >&2
+    exit 2
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&codex_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&codex_path, permissions).unwrap();
+    }
+
+    tmp
+}
+
+fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> Command {
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let joined_path = std::env::join_paths(
+        std::iter::once(fake_bin.to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+
+    cmd.env("HOME", fake_bin)
+        .env("TOKSCALE_FAKE_CODEX_MODE", mode)
+        .env("TOKSCALE_NATIVE_TIMEOUT_MS", "10000")
+        .env("PATH", joined_path)
+        .args([
+            "headless",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--no-auto-flags",
+            "codex",
+        ]);
+
+    cmd
+}
+
+#[test]
+fn headless_capture_fast_success_does_not_wait_for_timeout() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("success.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(fake_bin.path(), &output_path, "success")
+        .assert()
+        .success();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "fast success waited too long: {elapsed:?}"
+    );
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "captured ok");
+}
+
+#[test]
+fn headless_capture_fast_nonzero_preserves_exit_code() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("fail.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(fake_bin.path(), &output_path, "fail")
+        .assert()
+        .failure()
+        .code(17);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "fast failure waited too long: {elapsed:?}"
+    );
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "captured fail");
+}
+
+#[test]
+fn headless_capture_slow_command_times_out() {
+    let fake_bin = create_fake_codex_bin();
+    let output_path = fake_bin.path().join("slow.jsonl");
+
+    let started = Instant::now();
+    headless_capture_command(fake_bin.path(), &output_path, "slow")
+        .assert()
+        .failure()
+        .code(124);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(14),
+        "slow command timeout duration was unexpected: {elapsed:?}"
+    );
 }
 
 fn create_temp_fixture_dir_without_pricing_cache() -> TempDir {
@@ -325,7 +441,20 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
-        .env("TOKSCALE_PRICING_CACHE_ONLY", "1");
+        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
+        // Clear scan-path overrides inherited from the dev's shell, otherwise a
+        // developer who exports e.g. TOKSCALE_EXTRA_DIRS=~/.codex/sessions (for
+        // codefuse mirror tracking) makes the scanner read real session data
+        // and breaks fixture-count assertions. Hermetic on CI either way.
+        .env_remove("TOKSCALE_EXTRA_DIRS")
+        .env_remove("TOKSCALE_HEADLESS_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
+        .env_remove("GOOSE_PATH_ROOT")
+        .env_remove("CODEBUFF_DATA_DIR")
+        .env_remove("GEMINI_CLI_HOME")
+        .env_remove("HERMES_HOME")
+        .env_remove("TOKSCALE_CONFIG_DIR");
     cmd
 }
 
@@ -351,7 +480,17 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9");
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        // Clear scan-path overrides (mirrors cmd_with_home)
+        .env_remove("TOKSCALE_EXTRA_DIRS")
+        .env_remove("TOKSCALE_HEADLESS_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
+        .env_remove("GOOSE_PATH_ROOT")
+        .env_remove("CODEBUFF_DATA_DIR")
+        .env_remove("GEMINI_CLI_HOME")
+        .env_remove("HERMES_HOME")
+        .env_remove("TOKSCALE_CONFIG_DIR");
     cmd
 }
 
@@ -581,6 +720,18 @@ fn test_clients_command_help() {
 }
 
 #[test]
+fn test_codex_command_help() {
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    cmd.arg("codex")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Codex account integration commands",
+        ));
+}
+
+#[test]
 fn test_graph_command_help() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("graph")
@@ -650,6 +801,18 @@ fn test_invalid_command() {
 fn test_invalid_subcommand() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("models").arg("invalid-flag").assert().failure();
+}
+
+#[test]
+fn test_codex_accounts_empty_json() {
+    let tmp = TempDir::new().expect("failed to create temp home");
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    cmd.env("HOME", tmp.path())
+        .env_remove("CODEX_HOME")
+        .args(["codex", "accounts", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""accounts": []"#));
 }
 
 #[test]
@@ -1089,10 +1252,13 @@ fn assert_cursor_setup_warning(json: &serde_json::Value) {
         .as_array()
         .expect("explicit Cursor report should expose setup warnings");
     assert!(
-        warnings.iter().any(|warning| warning
-            .as_str()
-            .is_some_and(|text| text.contains("tokscale cursor login")
-                && text.contains("cursor-cache/usage*.csv"))),
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| text
+                .contains("tokscale cursor login")
+                && text.contains("tokscale cursor sync --json")
+                && text.contains("cursor-cache/usage*.csv")
+                && text.contains("Tokscale does not parse local `~/.cursor`"))),
         "warnings did not explain Cursor setup: {warnings:?}"
     );
 }
@@ -1100,6 +1266,31 @@ fn assert_cursor_setup_warning(json: &serde_json::Value) {
 #[test]
 fn test_models_cursor_explicit_missing_cache_reports_setup_warning_json() {
     let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_cursor_setup_warning(&json);
+}
+
+#[test]
+fn test_models_cursor_explicit_local_cursor_state_still_reports_setup_warning_json() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(
+        tmp.path()
+            .join(".cursor/projects/demo/agent-transcripts/session"),
+    )
+    .unwrap();
+    fs::write(
+        tmp.path()
+            .join(".cursor/projects/demo/agent-transcripts/session/session.jsonl"),
+        r#"{"role":"user","content":"hello"}"#,
+    )
+    .unwrap();
+
     let output = cmd_with_home(tmp.path())
         .args(["models", "--json", "--client", "cursor", "--no-spinner"])
         .output()
@@ -1158,10 +1349,12 @@ fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
         .as_array()
         .expect("explicit Cursor --home report should expose setup warnings");
     assert!(
-        warnings.iter().any(|warning| warning
-            .as_str()
-            .is_some_and(|text| text.contains(tmp.path().to_str().unwrap())
-                && text.contains("populate that cache")
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| text
+                .contains(tmp.path().to_str().unwrap())
+                && text.contains("tokscale cursor login")
+                && text.contains("tokscale cursor sync --json")
                 && text.contains("cursor-cache/usage*.csv"))),
         "warnings did not explain Cursor --home setup: {warnings:?}"
     );
@@ -1175,7 +1368,11 @@ fn test_models_cursor_explicit_missing_cache_reports_setup_warning_text() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Cursor usage requires"))
-        .stderr(predicate::str::contains("tokscale cursor login"));
+        .stderr(predicate::str::contains("tokscale cursor login"))
+        .stderr(predicate::str::contains("tokscale cursor sync --json"))
+        .stderr(predicate::str::contains(
+            "Tokscale does not parse local `~/.cursor`",
+        ));
 }
 
 #[test]
@@ -1237,7 +1434,7 @@ fn test_models_cursor_logged_in_missing_cache_suggests_sync_only_json() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let warnings = json["warnings"].as_array().unwrap();
     let warning = warnings[0].as_str().unwrap();
-    assert!(warning.contains("tokscale cursor sync"));
+    assert!(warning.contains("tokscale cursor sync --json"));
     assert!(
         !warning.contains("tokscale cursor login"),
         "logged-in users with no cache should be told to sync, not log in again: {warning}"
@@ -1276,6 +1473,32 @@ fn test_graph_cursor_explicit_missing_cache_reports_setup_warning_text() {
         .success()
         .stderr(predicate::str::contains("Cursor usage requires"))
         .stderr(predicate::str::contains("tokscale cursor login"));
+}
+
+#[test]
+fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
+    let tmp = create_empty_fixture_dir();
+    write_cursor_credentials(tmp.path());
+    write_cursor_usage_cache(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        .args(["graph", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Cursor sync failed") && !stderr.contains("Cursor sync warning"),
+        "fresh Cursor cache should skip implicit graph sync; stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -1457,6 +1680,43 @@ fn test_graph_offline_without_pricing_cache_still_succeeds() {
 }
 
 #[test]
+fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["hourly", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["input"].as_i64().unwrap())
+            .sum::<i64>(),
+        2400
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["output"].as_i64().unwrap())
+            .sum::<i64>(),
+        1000
+    );
+    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.10).abs() < 1e-9,
+        "unexpected totalCost without pricing: {total_cost}"
+    );
+}
+
+#[test]
 fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
@@ -1519,6 +1779,45 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
+    assert!(
+        (total_cost - 0.0209).abs() < 1e-9,
+        "unexpected totalCost: {total_cost}"
+    );
+}
+
+#[test]
+fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    write_pricing_cache(tmp.path(), 1);
+
+    let output = offline_cmd_with_home(tmp.path())
+        .args(["hourly", "--json", "--opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["input"].as_i64().unwrap())
+            .sum::<i64>(),
+        2400
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["output"].as_i64().unwrap())
+            .sum::<i64>(),
+        1000
+    );
+    let total_cost = json["totalCost"].as_f64().unwrap();
     assert!(
         (total_cost - 0.0209).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
@@ -2169,6 +2468,76 @@ fn test_clients_command_includes_claude_transcripts_text() {
 }
 
 #[test]
+fn test_clients_json_includes_claude_desktop_diagnostic() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "claude")
+        .unwrap();
+    let diagnostics = claude["diagnostics"].as_array().unwrap();
+
+    assert!(diagnostics.iter().any(|item| {
+        item["code"] == "claude_desktop_not_scanned"
+            && item["severity"] == "warning"
+            && item["message"]
+                .as_str()
+                .unwrap()
+                .contains("Claude Desktop app data was detected")
+    }));
+}
+
+#[test]
+fn test_clients_command_includes_claude_desktop_diagnostic_text() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
+
+    cmd_with_home(tmp.path())
+        .arg("clients")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Claude Desktop app data was detected",
+        ))
+        .stdout(predicate::str::contains(
+            "Claude Code JSONL transcripts only",
+        ));
+}
+
+#[test]
+fn test_models_json_includes_claude_desktop_diagnostic_for_empty_explicit_claude_report() {
+    let tmp = create_empty_fixture_dir();
+    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--client", "claude", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let diagnostics = json["diagnostics"].as_array().unwrap();
+
+    assert!(diagnostics.iter().any(|item| {
+        item["code"] == "claude_desktop_not_scanned"
+            && item["message"]
+                .as_str()
+                .unwrap()
+                .contains("Tokscale counts Claude Code JSONL transcripts")
+    }));
+}
+
+#[test]
 fn test_clients_json_includes_settings_extra_paths() {
     let tmp = create_empty_fixture_dir();
     write_settings_json(
@@ -2531,4 +2900,142 @@ fn test_submit_offline_without_pricing_cache_fails() {
         stderr.contains("error") || stderr.contains("Error"),
         "stderr should contain a pricing/network error: {stderr}"
     );
+}
+// ── gjc client filter tests ────────────────────────────────────────────────
+
+/// Write a gjc session JSONL file at
+/// <home>/.gjc/agent/sessions/<slug>/sess.jsonl
+/// with one assistant message: model claude-sonnet-4, provider anthropic,
+/// input 1000 / output 500, usage.cost.total 0.5.
+fn write_gjc_session_fixture(base: &Path) {
+    let session_dir = base.join(".gjc/agent/sessions/test-project");
+    fs::create_dir_all(&session_dir).unwrap();
+    let jsonl = concat!(
+        r#"{"type":"session","id":"gjc_e2e_session","timestamp":"2025-06-15T12:00:00.000Z","cwd":"/work/test-project"}"#,
+        "\n",
+        r#"{"type":"message","id":"gjc_e2e_msg_1","parentId":null,"timestamp":"2025-06-15T12:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4","provider":"anthropic","api":"anthropic","timestamp":1750082401000,"usage":{"input":1000,"output":500,"cacheRead":0,"cacheWrite":0,"totalTokens":1500,"cost":{"input":0.3,"output":0.2,"cacheRead":0.0,"cacheWrite":0.0,"total":0.5}}}}"#,
+        "\n"
+    );
+    fs::write(session_dir.join("sess.jsonl"), jsonl).unwrap();
+}
+
+/// Build a Command that uses HOME=tmp AND removes gjc-related env overrides
+/// so the scanner uses only the home-derived ~/.gjc/agent/sessions path.
+fn gjc_cmd_with_home(tmp: &Path) -> Command {
+    let mut cmd = cmd_with_home(tmp);
+    cmd.env_remove("GJC_CODING_AGENT_DIR")
+        .env_remove("GJC_CONFIG_DIR")
+        .env_remove("PI_CONFIG_DIR");
+    cmd
+}
+
+#[test]
+fn test_models_with_client_filter_gjc() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+    write_gjc_session_fixture(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "gjc", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+
+    assert!(
+        !entries.is_empty(),
+        "expected gjc entries but got none; full JSON: {json}"
+    );
+
+    // Every returned entry must be from the gjc client.
+    for entry in entries {
+        assert_eq!(
+            entry["client"].as_str().unwrap_or(""),
+            "gjc",
+            "unexpected client in entry: {entry}"
+        );
+    }
+
+    // The fixture model claude-sonnet-4 must appear.
+    let has_sonnet = entries.iter().any(|e| {
+        e["model"]
+            .as_str()
+            .unwrap_or("")
+            .contains("claude-sonnet-4")
+    });
+    assert!(
+        has_sonnet,
+        "expected claude-sonnet-4 in gjc entries; got: {entries:?}"
+    );
+}
+
+#[test]
+fn test_client_filter_gjc_empty_is_clean() {
+    // No gjc fixture data on disk — command must still exit successfully
+    // and return an empty (zero-entry) result without panicking.
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "gjc", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed with no gjc data; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert!(
+        entries.is_empty(),
+        "expected zero entries for empty gjc fixture, got: {entries:?}"
+    );
+}
+
+#[test]
+fn test_client_filter_gjc_isolation() {
+    // Write gjc fixture, then query with --client claude (NOT gjc).
+    // The gjc model must NOT appear in the output (filter isolation).
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    prime_pricing_cache(tmp.path());
+    write_gjc_session_fixture(tmp.path());
+
+    let output = gjc_cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "claude", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+
+    // No gjc entry should leak through when filtering for claude.
+    for entry in entries {
+        assert_ne!(
+            entry["client"].as_str().unwrap_or(""),
+            "gjc",
+            "gjc entry leaked into --client claude output: {entry}"
+        );
+    }
 }

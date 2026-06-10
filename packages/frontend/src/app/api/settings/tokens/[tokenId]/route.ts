@@ -1,14 +1,16 @@
 import { NextResponse } from "next/server";
-import { getSession } from "@/lib/auth/session";
+import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { revokePersonalToken } from "@/lib/auth/personalTokens";
 
 interface RouteParams {
   params: Promise<{ tokenId: string }>;
 }
 
-export async function DELETE(_request: Request, { params }: RouteParams) {
+export async function DELETE(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSession();
+    const session = await getSessionFromRequest(request, {
+      allowAuthorizationHeader: false,
+    });
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }

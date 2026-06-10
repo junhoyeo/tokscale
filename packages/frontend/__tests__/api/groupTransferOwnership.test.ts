@@ -128,6 +128,24 @@ function ownerSession() {
   return { id: "owner-1", username: "alice", displayName: null, avatarUrl: null };
 }
 
+function mockBrowserSessionOnly() {
+  mockState.getSessionFromRequest.mockImplementation(
+    async (
+      request: Request,
+      options?: { allowAuthorizationHeader?: boolean }
+    ) => {
+      if (
+        request.headers.has("Authorization") &&
+        options?.allowAuthorizationHeader === false
+      ) {
+        return null;
+      }
+
+      return ownerSession();
+    }
+  );
+}
+
 function makeRequest(body: unknown) {
   return new Request("http://localhost:3000/api/groups/team/transfer-ownership", {
     method: "POST",
@@ -137,6 +155,30 @@ function makeRequest(body: unknown) {
 }
 
 describe("POST /api/groups/[slug]/transfer-ownership", () => {
+  it("rejects Authorization header sessions when transferring ownership", async () => {
+    mockBrowserSessionOnly();
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership.mockResolvedValue({ role: "owner" });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/groups/team/transfer-ownership", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_personal",
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({ targetUserId: "bob" }),
+      }),
+      { params: Promise.resolve({ slug: "team" }) }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getGroupBySlug).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+  });
+
   it("returns 401 when not authenticated", async () => {
     mockState.getSessionFromRequest.mockResolvedValue(null);
     mockState.getGroupBySlug.mockResolvedValue(group());

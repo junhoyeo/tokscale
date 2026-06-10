@@ -67,7 +67,7 @@
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; override via `CODEBUFF_DATA_DIR`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` and `~/.omp/agent/sessions/` ([Oh My Pi](https://github.com/can1357/oh-my-pi)) | ✅ Yes |
-| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | `~/.kimi/sessions/` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (override via `KIMI_CODE_HOME`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo" /> | [Kilo](https://github.com/Kilo-Org/kilocode) | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/`) | ✅ Yes |
@@ -77,8 +77,12 @@
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support, legacy Block/goose paths; override via `GOOSE_PATH_ROOT`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | Cached via `tokscale antigravity sync` to `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` (live RPC against the local language server) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-trae.png" alt="Trae" /> | [Trae IDE](https://www.trae.ai/) / [Trae Solo](https://www.trae.ai/solo) (international) | Cached via `tokscale trae sync` to `~/.config/tokscale/trae-cache/sessions/*.json` (account-level usage from the official API) | ✅ Yes |
+| <img width="48px" src="https://github.com/warpdotdev.png" alt="Warp" /> | [Warp](https://www.warp.dev/) / Oz | Cached via `tokscale warp sync` to `~/.config/tokscale/warp-cache/usage.json` (aggregate requests and spend only; no token transcripts) | ✅ Yes |
+| <img width="48px" src="https://github.com/xai-org.png" alt="Grok Build" /> | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl` (fallback: `~/.grok/sessions/*/*/updates.jsonl`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; hosted Zed models only, not external ACP agents) | ✅ Yes |
-| Kiro | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`) and `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`) | ✅ Yes |
+| <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`) and `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`) | ✅ Yes |
+| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage tasks (Linux: `~/.config/Code/...`; macOS: `~/Library/Application Support/Code/...`; Windows: `%APPDATA%\Code\...`; server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`) | ✅ Yes |
+| <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/` (override via `GJC_CODING_AGENT_DIR`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`; `$XDG_DATA_HOME/gjc/sessions/` on Linux/macOS) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | Re-attributed from other sources via `hf:` model prefix or `synthetic` provider (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ Yes |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
@@ -111,6 +115,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - [Cursor IDE Commands](#cursor-ide-commands)
   - [Antigravity Commands](#antigravity-commands)
   - [Trae Commands](#trae-commands)
+  - [Warp/Oz Commands](#warpoz-commands)
   - [Subscription Usage](#subscription-usage)
   - [Example Output](#example-output---light-version)
   - [Configuration](#configuration)
@@ -147,7 +152,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, and Synthetic
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, and Synthetic
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -347,7 +352,7 @@ tokscale --client opencode,claude
 # Repeated: same effect, useful with shell aliases
 tokscale -c opencode -c claude
 
-# Cursor IDE uses Tokscale's API cache; run login + sync first
+# Cursor IDE uses Tokscale's API cache; run login + sync --json first
 tokscale --client cursor
 
 # Synthetic (synthetic.new) is detected from other agent sessions
@@ -357,7 +362,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `zed`, `kiro`, `trae`, `synthetic`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `zed`, `kiro`, `trae`, `cline`, `gjc`, `synthetic`.
 
 > **Deprecation notice**: The legacy single-client flags (`--opencode`, `--claude`, `--codex`, etc.) still work for backward compatibility but are hidden from `--help` and will be removed in the next major release. Migrate to `--client` whenever possible. Running tokscale in an interactive terminal will print a one-line warning when a legacy flag is used.
 
@@ -368,6 +373,7 @@ Date filters work across all commands that generate reports (`tokscale`, `toksca
 ```bash
 # Quick date shortcuts
 tokscale --today              # Today only
+tokscale --yesterday          # Yesterday only
 tokscale --week               # Last 7 days
 tokscale --month              # Current calendar month
 
@@ -514,7 +520,7 @@ Setup:
    - Network tab: make any request to `cursor.com/api/*`, then copy the value after `WorkosCursorSessionToken=` from the `Cookie` request header.
    - Application tab: open Cookies -> `https://www.cursor.com`, then copy the `WorkosCursorSessionToken` value.
 3. Run `tokscale cursor login --name work` and paste the token.
-4. Run `tokscale cursor sync` to populate `~/.config/tokscale/cursor-cache/usage.csv`.
+4. Run `tokscale cursor sync --json` to populate `~/.config/tokscale/cursor-cache/usage.csv`.
 5. Run `tokscale --client cursor` or any report command.
 
 Treat the session token like a password. It is stored locally in `~/.config/tokscale/cursor-credentials.json`.
@@ -531,7 +537,7 @@ tokscale cursor status
 tokscale cursor accounts
 
 # Manually refresh cached Cursor usage
-tokscale cursor sync
+tokscale cursor sync --json
 
 # Switch active account (controls which account syncs to cursor-cache/usage.csv)
 tokscale cursor switch work
@@ -611,6 +617,28 @@ tokscale trae logout --variant solo
 
 > **China variants**: The China editions (`trae.com.cn`) are intentionally **not** supported. The CN backend does not expose a session-level usage query API. Trae CN / Trae Solo CN support will be added once an official endpoint becomes available upstream.
 
+### Warp/Oz Commands
+
+Warp/Oz does not expose local token transcripts. Tokscale only syncs the aggregate request and spend counters returned by Warp's GraphQL API, then reports them as `warp` / `aggregate-requests` rows with zero token buckets.
+
+```bash
+# Save a bearer token or Cookie header copied from an authenticated Warp request
+tokscale warp login
+
+# Inspect credential/cache state and diagnostics
+tokscale warp status
+
+# Sync aggregate requests and spend into tokscale's local cache
+tokscale warp sync
+
+# Remove saved credentials; add --purge-cache to delete synced usage too
+tokscale warp logout --purge-cache
+```
+
+**Cache location**: `~/.config/tokscale/warp-cache/usage.json`
+
+**How it works**: `tokscale warp sync` calls Warp's authenticated GraphQL API for account and workspace aggregate counters. Tokscale preserves request counts as message counts and vendor-reported spend as cost, but it never converts requests into synthetic tokens. Warp is excluded from default `submit` data because the public leaderboard accepts token-attributed usage, not aggregate request counters.
+
 ### Subscription Usage
 
 Tokscale can fetch and display your real-time subscription quota across AI providers. This shows how much of your plan you've used and when limits reset.
@@ -626,7 +654,7 @@ tokscale usage --json
 tokscale usage --light
 ```
 
-In the TUI, navigate to the **Usage** tab to see subscription data. Press `u` or `r` to refresh.
+In the TUI, navigate to the **Usage** tab to see subscription data. Use `[Refresh]` to refresh subscription quotas. The keyboard refresh shortcut `r` uses the same refresh path.
 
 > **Note**: Subscription quotas and balances are **vendor-reported** — tokscale calls each provider's own quota endpoint and surfaces the response verbatim. Numbers reflect what the provider reports (which is also what shows up in their official dashboards) and are not independently verified against tokscale's own usage tracking.
 
@@ -635,14 +663,45 @@ In the TUI, navigate to the **Usage** tab to see subscription data. Press `u` or
 | Provider | Auth Method | Metrics | Setup |
 |----------|-------------|---------|-------|
 | **Claude** | OAuth (credentials file or macOS Keychain) | Session (5hr), Weekly, Opus quotas | Run `claude` to log in |
-| **Codex** (OpenAI) | OAuth (`~/.config/codex/auth.json` or `~/.codex/auth.json`) | Session, Weekly quotas | Run `codex` to log in |
+| **Codex** (OpenAI) | OAuth (`~/.config/codex/auth.json`, `~/.codex/auth.json`, or saved Tokscale accounts) | Session, Weekly quotas | Use `[Add Codex]` in the TUI Usage tab, run `codex` to log in, or import an existing auth with `tokscale codex import --name work` |
 | **Z.ai** | API key (env var) | Token limits, Web Searches | Set `ZAI_API_KEY` or `GLM_API_KEY` |
 | **Amp** | API key (`~/.local/share/amp/secrets.json`) | Free tier balance, Credits | Run `amp` to log in |
 | **GitHub Copilot** | GitHub token (keychain or `~/.config/gh/hosts.yml`) | Premium interactions, Chat quotas | Run `gh auth login` |
+| **Grok Build** | OAuth (`~/.grok/auth.json`) | Credits, subscription plan | Run `grok login` |
 | **Kimi** | OAuth (`~/.kimi/credentials/kimi-code.json`) | Session, Weekly quotas | Run `kimi` to log in |
 | **MiniMax** | API key (env var) | Prompt quotas per model | Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN` |
 
 Providers are auto-detected — only those with valid credentials are shown. If a provider is missing, ensure you've logged in or set the required environment variable.
+
+#### Codex Multi-Account Usage
+
+Tokscale can save multiple Codex OAuth accounts for subscription usage display. The TUI Usage tab groups saved accounts under one **Codex** section. The active account is marked with `*`; inactive accounts can be selected with `[Use]`; account removal uses `[Remove]` followed by `[Confirm]`.
+
+To add an account without leaving the TUI, click `[Add Codex]` in the Usage tab. Tokscale starts `codex login` with a temporary `CODEX_HOME`, displays the login output in the Usage tab, imports the resulting auth into Tokscale's saved account store, and then refreshes usage. This keeps the login isolated and does not switch the current Codex auth; click `[Use]` on a saved account when you want Tokscale to write that account into the real Codex auth file.
+
+The CLI commands are still available for scripted or manual account management:
+
+```bash
+# Save the current Codex auth as a named Tokscale account
+tokscale codex import --name work
+
+# List saved Codex accounts
+tokscale codex accounts
+tokscale codex accounts --json
+
+# Switch the active Codex account and write Codex auth.json
+tokscale codex switch work
+
+# Stop tracking a saved Codex account (removes it from Tokscale's store
+# only — the codex CLI's own auth.json/login is never touched)
+tokscale codex remove personal
+
+# Check subscription usage for the active or a named account
+tokscale codex status
+tokscale codex status --name personal --json
+```
+
+When saved Codex accounts exist, `tokscale usage --json` includes structured account metadata for each Codex entry and the TUI displays those entries under one Codex group. Without saved accounts, Tokscale falls back to the current Codex auth discovery path (`CODEX_HOME/auth.json`, `~/.config/codex/auth.json`, `~/.codex/auth.json`, then macOS Keychain).
 
 #### Example Output
 
@@ -828,7 +887,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Synthetic)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Synthetic)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -1114,6 +1173,8 @@ cd packages/core && bun run bench
 | Windows | x86_64 | ✅ Supported |
 | Windows | aarch64 | ✅ Supported |
 
+On Linux, the launcher detects glibc vs musl automatically (via `process.report`, the musl dynamic loader at `/lib/ld-musl-*.so.1`, and `ldd`). If detection ever picks the wrong flavor — e.g. in minimal containers — set `TOKSCALE_LIBC=musl` (or `TOKSCALE_LIBC=gnu`) to force it.
+
 ### Windows Support
 
 Tokscale fully supports Windows. The TUI and CLI work the same as on macOS/Linux.
@@ -1145,9 +1206,11 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | Same path on all platforms |
 | Pi | `~/.pi/` and `~/.omp/` | `%USERPROFILE%\.pi\` and `%USERPROFILE%\.omp\` | Same path on all platforms (supports both Pi and [Oh My Pi](https://github.com/can1357/oh-my-pi)) |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | Same path on all platforms |
+| Kimi Code | `~/.kimi-code/` | `%USERPROFILE%\.kimi-code\` | Same path on all platforms |
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | Same path on all platforms |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage task logs |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage task logs |
+| Cline | Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`; macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`; server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/` | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\tasks\` | VS Code globalStorage task logs |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | Same path on all platforms |
 | Codebuff | `~/.config/manicode/projects/` (+ `manicode-dev`, `manicode-staging`) | `%USERPROFILE%\.config\manicode\projects\` | Override via `CODEBUFF_DATA_DIR` env var |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | Uses `xdg-basedir` like OpenCode |
@@ -1157,6 +1220,9 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Zed Agent | `~/.local/share/zed/threads/threads.db` | `%LOCALAPPDATA%\Zed\threads\threads.db` | Hosted Zed model usage only; external ACP agents are not included |
 | Kiro | `~/.kiro/sessions/cli/` and `~/.local/share/kiro-cli/data.sqlite3` | `%USERPROFILE%\.kiro\sessions\cli\` and `%USERPROFILE%\.local\share\kiro-cli\data.sqlite3` | Parses Kiro session files plus the Kiro CLI SQLite database when present |
 | Trae | `~/.config/tokscale/trae-cache/sessions/` | `%APPDATA%\tokscale\trae-cache\sessions\` | Synced once via `tokscale trae sync`; credentials are auto-discovered from any installed Trae IDE or Trae Solo desktop app |
+| Warp/Oz | `~/.config/tokscale/warp-cache/usage.json` | `%APPDATA%\tokscale\warp-cache\usage.json` | Synced via `tokscale warp sync`; aggregate requests and spend only, no token transcripts |
+| Grok Build | `~/.grok/sessions/` | `%USERPROFILE%\.grok\sessions\` | Configurable via `GROK_HOME` env var; parses `updates.jsonl` session updates |
+| Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | Configurable via `GJC_CODING_AGENT_DIR` (also `GJC_CONFIG_DIR`/`PI_CONFIG_DIR`; `$XDG_DATA_HOME/gjc/sessions/` flattens on Linux/macOS) |
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 
 > **Note**: On Windows, `~` expands to `%USERPROFILE%` (e.g., `C:\Users\YourName`). These tools intentionally use Unix-style paths (like `.local/share`) even on Windows for cross-platform consistency, rather than Windows-native paths like `%APPDATA%`.
@@ -1316,6 +1382,8 @@ JSONL format with assistant messages containing usage data:
 
 Wrapper transcript files under `~/.claude/transcripts/` are counted only when they contain real Claude usage metadata. Files with user/tool events but no `usage` block are skipped rather than estimated.
 
+Tokscale's `claude` client is Claude Code token accounting, not Claude Desktop chat accounting. Claude Desktop stores app data under locations such as `~/Library/Application Support/Claude`, but Anthropic does not document a stable local per-message token ledger for consumer desktop chat or chat-history exports. Run `tokscale clients` to see a diagnostic when Claude Desktop data is present but only Claude Code JSONL roots are scannable. `tokscale usage` can show best-effort Claude subscription quota bars from Claude Code credentials, while organization/API usage belongs to Anthropic's Admin Usage and Cost APIs and is intentionally separate from local transcript scanning.
+
 ### Codex CLI
 
 Location: `~/.codex/sessions/*.jsonl`
@@ -1390,6 +1458,18 @@ Location: `~/.config/tokscale/trae-cache/sessions/*.json` (synced via official u
 
 Trae data is not fetched automatically by the root command. Run `tokscale trae login` once, then `tokscale trae sync` before reports. Tokscale parses the synced API dumps as session-level records and preserves the cost totals reported by Trae.
 
+### Warp/Oz
+
+Location: `~/.config/tokscale/warp-cache/usage.json` (synced via authenticated GraphQL API)
+
+Warp/Oz data is not fetched automatically by the root command. Run `tokscale warp login`, then `tokscale warp sync` before reports. Tokscale records only aggregate request counts and spend because Warp does not expose token-attributed local transcripts.
+
+### Grok Build
+
+Location: `$GROK_HOME/sessions/*/*/updates.jsonl` (fallback: `~/.grok/sessions/*/*/updates.jsonl`)
+
+Grok Build data is parsed directly from local session updates. Current logs expose cumulative `totalTokens` counters without a stable input/output split, so Tokscale records positive per-turn deltas as input tokens. `grok-composer-2.5-fast` is temporarily mapped to the Composer 2.5 Fast pricing override until a dedicated public price is available.
+
 ### OpenClaw
 
 Location: `~/.openclaw/agents/*/sessions/sessions.json` (also scans legacy paths: `~/.clawdbot/`, `~/.moltbot/`, `~/.moldbot/`)
@@ -1434,6 +1514,13 @@ wire.jsonl format with StatusUpdate messages:
 ```json
 {"type": "metadata", "protocol_version": "1.3"}
 {"timestamp": 1770983426.420942, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1562, "output": 2463, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "chatcmpl-xxx"}}}
+```
+
+### Kimi Code
+
+Location: `~/.kimi-code/sessions/{WORKDIR}/{SESSION_UUID}/agents/{AGENT}/wire.jsonl`
+```json
+{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":1163,"output":352,"inputCacheRead":22272,"inputCacheCreation":0},"usageScope":"turn","time":1780410897480}
 ```
 
 ### Qwen CLI
@@ -1481,6 +1568,19 @@ Kilo uses the same task log shape as Roo Code. Tokscale applies the same rules:
 - parse `tokensIn`, `tokensOut`, `cacheReads`, `cacheWrites`, `cost`, and `apiProtocol` from `text` JSON
 - enrich model/agent metadata from sibling `api_conversation_history.json` when available
 
+### Cline
+
+Location:
+- Linux desktop VS Code: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/{TASK_ID}/ui_messages.json`
+- macOS desktop VS Code: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/{TASK_ID}/ui_messages.json`
+- Windows desktop VS Code: `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\tasks\{TASK_ID}\ui_messages.json`
+- Server (best-effort): `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/{TASK_ID}/ui_messages.json`
+
+Cline is the upstream project that Roo Code and Kilo forked from, so it uses the same VS Code globalStorage task log shape. Tokscale applies the same rules:
+- count only `say/api_req_started` events from `ui_messages.json`
+- parse `tokensIn`, `tokensOut`, `cacheReads`, `cacheWrites`, `cost`, and `apiProtocol` from `text` JSON
+- enrich model/agent metadata from sibling `api_conversation_history.json` when available
+
 ### Mux
 
 Location:
@@ -1514,6 +1614,17 @@ Goose stores per-session usage in a SQLite `sessions.db`. Tokscale extracts the 
 Location: `~/.config/manicode/projects/<project>/chats/<chatId>/chat-messages.json` (also scans `manicode-dev` and `manicode-staging` channels; override via `CODEBUFF_DATA_DIR`)
 
 Codebuff (formerly Manicode) writes per-chat JSON files. Tokscale parses token usage from `metadata.usage`, `metadata.codebuff.usage`, and the run-state `messageHistory[*].providerOptions` fallback, walking the history in reverse so partial newer entries don't shadow earlier entries that carry the actual token counts. Per-message timestamps fall back to the chat-id directory name and finally to file mtime when missing.
+
+### Gajae-Code (gjc)
+
+Location: `~/.gjc/agent/sessions/<project-slug>/*.jsonl` (override the agent dir via `GJC_CODING_AGENT_DIR`; also resolves `GJC_CONFIG_DIR`/`PI_CONFIG_DIR` joined with `agent/sessions`, and the flattened `$XDG_DATA_HOME/gjc/sessions/` redirect on Linux/macOS). Depth-2 per-pass sub-agent transcripts (`<slug>/<session>/N-*.jsonl`) are discovered too.
+
+JSONL format with a session header and message entries. Tokscale emits only assistant messages and reuses gjc's authoritative per-message `usage.cost.total` (USD) when present, recomputing from tokens only when it is absent:
+```json
+{"type":"session","id":"S1","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/work/proj"}
+{"type":"message","id":"M1","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4","provider":"anthropic","usage":{"input":1000,"output":500,"cacheRead":0,"cacheWrite":0,"totalTokens":1500,"cost":{"input":0.1,"output":0.2,"total":0.3}}}}
+```
+Messages dedup by `<session id>:<message id>` (with a deterministic fallback) so replayed depth-1/depth-2 transcripts are counted once. `service_tier_change` and malformed lines are skipped per line.
 
 ### Synthetic (synthetic.new)
 

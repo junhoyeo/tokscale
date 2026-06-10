@@ -7,6 +7,8 @@ import {
   GroupInviteError,
 } from "@/lib/groups/invites";
 
+const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
+
 interface RouteParams {
   params: Promise<{ token: string }>;
 }
@@ -34,7 +36,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
 
 export async function POST(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, BROWSER_SESSION_OPTIONS);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }

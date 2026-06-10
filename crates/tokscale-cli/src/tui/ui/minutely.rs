@@ -1,10 +1,10 @@
 use chrono::{Local, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
-use super::widgets::{format_cache_hit_rate, format_cost, format_tokens};
+use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, viewport_scrollbar_state};
 use crate::tui::app::{App, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -43,6 +43,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected_index = app.selected_index;
     let theme_accent = app.theme.accent;
     let theme_selection = app.theme.selection;
+    let metric_input_style = app.theme.metric_input_style();
+    let metric_output_style = app.theme.metric_output_style();
+    let metric_cache_read_style = app.theme.metric_cache_read_style();
+    let metric_cache_write_style = app.theme.metric_cache_write_style();
+    let current_row_style = app.theme.current_row_style();
+    let striped_row_style = app.theme.striped_row_style();
     let now = Local::now().naive_local();
     let current_minute = now
         .date()
@@ -195,14 +201,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 cells.extend([
                     Cell::from(minute.message_count.to_string()),
-                    Cell::from(format_tokens(minute.tokens.input))
-                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    Cell::from(format_tokens(minute.tokens.output))
-                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    Cell::from(format_tokens(minute.tokens.input)).style(metric_input_style),
+                    Cell::from(format_tokens(minute.tokens.output)).style(metric_output_style),
                     Cell::from(format_tokens(minute.tokens.cache_read))
-                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
+                        .style(metric_cache_read_style),
                     Cell::from(format_tokens(minute.tokens.cache_write))
-                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
+                        .style(metric_cache_write_style),
                     Cell::from(format_cache_hit_rate(
                         minute.tokens.cache_read,
                         minute.tokens.input,
@@ -218,9 +222,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
             } else if is_current {
-                Style::default().bg(Color::Rgb(28, 42, 34))
+                current_row_style
             } else if is_striped {
-                Style::default().bg(Color::Rgb(20, 24, 30))
+                striped_row_style
             } else {
                 Style::default()
             };
@@ -288,7 +292,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(minutely_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(minutely_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,

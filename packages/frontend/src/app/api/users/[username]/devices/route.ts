@@ -83,9 +83,11 @@ export async function GET(_request: Request, { params }: RouteParams) {
       devices: rows.map((row) => ({
         id: row.id,
         deviceKey: row.deviceKey,
-        // Public consumers see the fallback label, not the underlying null.
-        // Owners get the raw value via /api/settings/devices/[id] for editing.
+        // Public consumers render the resolved fallback label; `customName`
+        // carries the raw nullable value so owners (settings UI) can
+        // distinguish "user typed this" from "fallback label".
         displayName: deviceDisplayLabel(row.deviceKey, row.displayName),
+        customName: row.displayName,
         createdAt: toIsoString(row.createdAt),
         lastSubmittedAt: toIsoString(row.lastSubmittedAt),
         totalTokens: Number(row.totalTokens) || 0,

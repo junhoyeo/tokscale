@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
+  const getSessionFromHeader = vi.fn();
   const authenticatePersonalToken = vi.fn();
   const revalidateTag = vi.fn();
   const revalidatePath = vi.fn();
@@ -54,6 +55,7 @@ const mockState = vi.hoisted(() => {
 
   return {
     getSession,
+    getSessionFromHeader,
     authenticatePersonalToken,
     revalidateTag,
     revalidatePath,
@@ -65,6 +67,7 @@ const mockState = vi.hoisted(() => {
     where,
     reset() {
       getSession.mockReset();
+      getSessionFromHeader.mockReset();
       authenticatePersonalToken.mockReset();
       revalidateTag.mockReset();
       revalidatePath.mockReset();
@@ -98,6 +101,7 @@ vi.mock("drizzle-orm", () => ({
 
 vi.mock("@/lib/auth/session", () => ({
   getSession: mockState.getSession,
+  getSessionFromHeader: mockState.getSessionFromHeader,
 }));
 
 vi.mock("@/lib/auth/personalTokens", () => ({
@@ -132,10 +136,13 @@ beforeEach(() => {
   mockState.reset();
 });
 
-function createRequest(token?: string) {
+function createRequest(options: { token?: string; origin?: string | null } = {}) {
   const headers = new Headers();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
+  if (options.token) {
+    headers.set("Authorization", `Bearer ${options.token}`);
+  }
+  if (options.origin !== null) {
+    headers.set("Origin", options.origin ?? "http://localhost:3000");
   }
   return new Request("http://localhost/api/settings/submitted-data", {
     method: "DELETE",
@@ -151,6 +158,42 @@ describe("DELETE /api/settings/submitted-data", () => {
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.db.delete).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for cookie auth when Origin is missing", async () => {
+    mockState.getSession.mockResolvedValue({
+      id: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+    });
+
+    const response = await DELETE(createRequest({ origin: null }));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getSession).not.toHaveBeenCalled();
+    expect(mockState.db.delete).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for cookie auth when Origin is not allowed", async () => {
+    mockState.getSession.mockResolvedValue({
+      id: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+    });
+
+    const response = await DELETE(
+      createRequest({ origin: "https://attacker.example" })
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getSession).not.toHaveBeenCalled();
     expect(mockState.db.delete).not.toHaveBeenCalled();
     expect(mockState.db.transaction).not.toHaveBeenCalled();
   });
@@ -260,7 +303,12 @@ describe("DELETE /api/settings/submitted-data", () => {
     });
     mockState.setDeletedRows([{ id: "submission-2" }]);
 
-    const response = await DELETE(createRequest("tt_valid"));
+    const response = await DELETE(
+      createRequest({
+        token: "tt_valid",
+        origin: "https://attacker.example",
+      })
+    );
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({

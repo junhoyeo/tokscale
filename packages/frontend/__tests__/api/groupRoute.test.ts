@@ -95,11 +95,13 @@ type ModuleExports = typeof import("../../src/app/api/groups/[slug]/route");
 
 let GET: ModuleExports["GET"];
 let PATCH: ModuleExports["PATCH"];
+let DELETE: ModuleExports["DELETE"];
 
 beforeAll(async () => {
   const routeModule = await import("../../src/app/api/groups/[slug]/route");
   GET = routeModule.GET;
   PATCH = routeModule.PATCH;
+  DELETE = routeModule.DELETE;
 });
 
 beforeEach(() => {
@@ -119,6 +121,34 @@ function group(overrides: Record<string, unknown> = {}) {
     updatedAt: new Date("2026-01-01T00:00:00Z"),
     ...overrides,
   };
+}
+
+function session(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "owner-1",
+    username: "owner",
+    displayName: null,
+    avatarUrl: null,
+    ...overrides,
+  };
+}
+
+function mockBrowserSessionOnly() {
+  mockState.getSessionFromRequest.mockImplementation(
+    async (
+      request: Request,
+      options?: { allowAuthorizationHeader?: boolean }
+    ) => {
+      if (
+        request.headers.has("Authorization") &&
+        options?.allowAuthorizationHeader === false
+      ) {
+        return null;
+      }
+
+      return session();
+    }
+  );
 }
 
 describe("/api/groups/[slug]", () => {
@@ -169,6 +199,30 @@ describe("/api/groups/[slug]", () => {
     expect(mockState.db.update).not.toHaveBeenCalled();
   });
 
+  it("rejects Authorization header sessions when updating a group", async () => {
+    mockBrowserSessionOnly();
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership.mockResolvedValue({ role: "admin" });
+
+    const response = await PATCH(
+      new Request("http://localhost:3000/api/groups/team", {
+        method: "PATCH",
+        body: JSON.stringify({ description: "Updated" }),
+        headers: {
+          Authorization: "Bearer tt_personal",
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+        },
+      }),
+      { params: Promise.resolve({ slug: "team" }) }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getGroupBySlug).not.toHaveBeenCalled();
+    expect(mockState.db.update).not.toHaveBeenCalled();
+  });
+
   it("allows explicit null PATCH fields to clear optional group metadata", async () => {
     mockState.getSessionFromRequest.mockResolvedValue({
       id: "admin-1",
@@ -201,5 +255,27 @@ describe("/api/groups/[slug]", () => {
       })
     );
     expect(mockState.revalidateGroupCaches).toHaveBeenCalledWith("group-1", "team");
+  });
+
+  it("rejects Authorization header sessions when deleting a group", async () => {
+    mockBrowserSessionOnly();
+    mockState.getGroupBySlug.mockResolvedValue(group());
+    mockState.getGroupMembership.mockResolvedValue({ role: "owner" });
+
+    const response = await DELETE(
+      new Request("http://localhost:3000/api/groups/team", {
+        method: "DELETE",
+        headers: {
+          Authorization: "Bearer tt_personal",
+          Origin: "http://localhost:3000",
+        },
+      }),
+      { params: Promise.resolve({ slug: "team" }) }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getGroupBySlug).not.toHaveBeenCalled();
+    expect(mockState.db.delete).not.toHaveBeenCalled();
   });
 });

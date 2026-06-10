@@ -1,25 +1,53 @@
 import type { Metadata } from 'next';
 import { notFound, permanentRedirect } from 'next/navigation';
+import { normalizeUsernameCacheKey } from '@/lib/db/usernameLookup';
 import ProfilePageClient from './ProfilePageClient';
 
 export const revalidate = 60;
 
-async function getProfileData(username: string) {
-  // In production: use explicit URL or Vercel auto-URL.
-  // In dev: use 127.0.0.1 to avoid ECONNREFUSED from localhost dual-stack DNS.
-  const baseUrl = process.env.NEXT_PUBLIC_URL
+// In production: use explicit URL or Vercel auto-URL.
+// In dev: use 127.0.0.1 to avoid ECONNREFUSED from localhost dual-stack DNS.
+function getBaseUrl(): string {
+  return process.env.NEXT_PUBLIC_URL
     || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null)
     || 'http://127.0.0.1:3000';
-  
-  const res = await fetch(`${baseUrl}/api/users/${username}`, {
+}
+
+async function getProfileData(username: string) {
+  const res = await fetch(`${getBaseUrl()}/api/users/${username}`, {
     next: { revalidate: 60 },
   });
-  
+
   if (!res.ok) {
     return null;
   }
-  
+
   return res.json();
+}
+
+// Devices are an enrichment on top of the core profile: if this fetch fails
+// we still render the profile, just without the Devices section.
+async function getProfileDevices(username: string) {
+  try {
+    const res = await fetch(`${getBaseUrl()}/api/users/${username}/devices`, {
+      // Tagged so PATCH /api/settings/devices/[deviceId] (rename) can
+      // invalidate this immediately via revalidateTag(`user:...`) instead of
+      // waiting out the 60s revalidate window.
+      next: {
+        revalidate: 60,
+        tags: [`user:${normalizeUsernameCacheKey(username)}`],
+      },
+    });
+
+    if (!res.ok) {
+      return [];
+    }
+
+    const data = await res.json();
+    return Array.isArray(data.devices) ? data.devices : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function generateMetadata({ params }: { params: Promise<{ username: string }> }): Promise<Metadata> {
@@ -52,8 +80,11 @@ export async function generateMetadata({ params }: { params: Promise<{ username:
 
 export default async function ProfilePage({ params }: { params: Promise<{ username: string }> }) {
   const { username } = await params;
-  const data = await getProfileData(username);
-  
+  const [data, devices] = await Promise.all([
+    getProfileData(username),
+    getProfileDevices(username),
+  ]);
+
   if (!data) {
     notFound();
   }
@@ -61,6 +92,6 @@ export default async function ProfilePage({ params }: { params: Promise<{ userna
   if (data.user?.username && data.user.username !== username) {
     permanentRedirect(`/u/${data.user.username}`);
   }
-  
-  return <ProfilePageClient initialData={data} username={username} />;
+
+  return <ProfilePageClient initialData={data} initialDevices={devices} username={username} />;
 }

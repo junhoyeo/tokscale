@@ -6,12 +6,15 @@ pub mod config;
 pub mod data;
 mod event;
 mod export;
+pub mod remote;
 pub mod settings;
 mod themes;
 mod ui;
 
 pub use app::{App, Tab, TuiConfig};
-pub use cache::{load_cache, save_cached_data, CacheResult, TUI_DEFAULT_GROUP_BY};
+pub use cache::{
+    load_cache, save_cached_data, CacheReportScope, CacheResult, TUI_DEFAULT_GROUP_BY,
+};
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
 
@@ -58,6 +61,14 @@ fn background_data_loader(
     minutely_enabled: bool,
 ) -> DataLoader {
     DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
+}
+
+fn background_cache_scope(
+    since: &Option<String>,
+    until: &Option<String>,
+    year: &Option<String>,
+) -> CacheReportScope {
+    CacheReportScope::new(since.clone(), until.clone(), year.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -108,8 +119,12 @@ pub fn run(
     // on the same constant. Hard-coding a different value here would
     // silently invalidate the cache on every launch after `submit`.
     let initial_group_by = TUI_DEFAULT_GROUP_BY;
-    let (cached_data, needs_background_load) =
-        decide_initial_data(load_cache(&enabled_clients, &initial_group_by));
+    let initial_report_scope = background_cache_scope(&since, &until, &year);
+    let (cached_data, needs_background_load) = decide_initial_data(load_cache(
+        &enabled_clients,
+        &initial_group_by,
+        &initial_report_scope,
+    ));
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -146,6 +161,11 @@ pub fn run(
         }
     };
 
+    // Cache-first load of server-side aggregated multi-device stats. The
+    // background refresh (when the cache is stale or missing) is driven by
+    // App::on_tick, and every failure path degrades silently to local-only.
+    app.init_remote_stats();
+
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
 
     if needs_background_load {
@@ -166,6 +186,7 @@ pub fn run(
         let bg_year = year.clone();
         let bg_enabled_clients = enabled_clients.clone();
         let bg_group_by = app.group_by.borrow().clone();
+        let bg_report_scope = background_cache_scope(&since, &until, &year);
         let bg_minutely_enabled = app.settings.minutely_tab_enabled;
 
         thread::spawn(move || {
@@ -173,7 +194,7 @@ pub fn run(
             let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
 
             if let Ok(ref data) = result {
-                save_cached_data(data, &bg_enabled_clients, &bg_group_by);
+                save_cached_data(data, &bg_enabled_clients, &bg_group_by, &bg_report_scope);
             }
 
             let _ = tx.send(result);
@@ -198,6 +219,10 @@ pub fn run(
         #[cfg(unix)]
         &sigcont_flag,
     );
+
+    // Don't orphan a `codex login` child (it would keep holding the OAuth
+    // port after the TUI exits).
+    app.kill_codex_login_child();
 
     restore_terminal(&mut terminal);
 
@@ -284,13 +309,14 @@ fn run_loop_with_background(
             let year = app.data_loader.year.clone();
             let enabled_clients = app.enabled_clients.borrow().clone();
             let group_by = app.group_by.borrow().clone();
+            let report_scope = background_cache_scope(&since, &until, &year);
             let minutely_enabled = app.settings.minutely_tab_enabled;
 
             thread::spawn(move || {
                 let loader = background_data_loader(since, until, year, minutely_enabled);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
-                    save_cached_data(data, &enabled_clients, &group_by);
+                    save_cached_data(data, &enabled_clients, &group_by, &report_scope);
                 }
                 let _ = tx.send(result);
             });
@@ -395,5 +421,23 @@ mod tests {
 
         let disabled = background_data_loader(None, None, None, false);
         assert!(!disabled.minutely_enabled);
+    }
+
+    #[test]
+    fn background_cache_scope_uses_date_filters() {
+        let scope = background_cache_scope(
+            &Some("2026-05-01".to_string()),
+            &Some("2026-05-07".to_string()),
+            &Some("2026".to_string()),
+        );
+
+        assert_eq!(
+            scope,
+            crate::tui::cache::CacheReportScope::new(
+                Some("2026-05-01".to_string()),
+                Some("2026-05-07".to_string()),
+                Some("2026".to_string()),
+            )
+        );
     }
 }

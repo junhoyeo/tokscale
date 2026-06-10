@@ -5,6 +5,8 @@ import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { generateUniqueGroupSlug } from "@/lib/groups/slugs";
 import { listPublicGroups, listUserGroups } from "@/lib/groups/queries";
 
+const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
+
 function parseIntSafe(value: string | null, defaultValue: number): number {
   if (!value) return defaultValue;
   const parsed = Number(value);
@@ -39,7 +41,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, BROWSER_SESSION_OPTIONS);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }

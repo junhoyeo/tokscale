@@ -270,6 +270,42 @@ describe("POST /api/submit auth path", () => {
     });
   });
 
+  it("returns validation errors for a null JSON body without entering the transaction path", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+    mockState.validateSubmission.mockReturnValue({
+      valid: false,
+      data: null,
+      errors: ["Submission data must be an object"],
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: "null",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockState.validateSubmission).toHaveBeenCalledWith(null);
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({
+      error: "Validation failed",
+      details: ["Submission data must be an object"],
+    });
+  });
+
   it("revalidates username ISR paths after a successful submit", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",
@@ -370,10 +406,20 @@ describe("POST /api/submit auth path", () => {
     let insertCall = 0;
     let submittedDeviceValues: unknown;
     let dailyInsertValues: unknown;
+    let submissionUpdateValues: unknown;
     const tx = {
-      update: vi.fn(() => {
+      update: vi.fn((table: unknown) => {
         const builder = {
-          set: vi.fn(() => builder),
+          set: vi.fn((values: unknown) => {
+            if (
+              table &&
+              typeof table === "object" &&
+              (table as { userId?: unknown }).userId === "submissions.userId"
+            ) {
+              submissionUpdateValues = values;
+            }
+            return builder;
+          }),
           where: vi.fn(() => Promise.resolve()),
         };
         return builder;
@@ -429,7 +475,11 @@ describe("POST /api/submit auth path", () => {
           Authorization: "Bearer tt_valid",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ meta: {}, contributions: [] }),
+        body: JSON.stringify({
+          meta: {},
+          contributions: [],
+          mcpServers: ["github", "", "slack", 123, null],
+        }),
       })
     );
 
@@ -449,6 +499,11 @@ describe("POST /api/submit auth path", () => {
         date: "2026-04-30",
       }),
     ]);
+    expect(submissionUpdateValues).toEqual(
+      expect.objectContaining({
+        mcpServers: ["github", "slack"],
+      })
+    );
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "leaderboard", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "user:alice", "max");
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user-rank", "max");
@@ -642,6 +697,564 @@ describe("POST /api/submit auth path", () => {
     }));
   });
 
+  it("merges after a concurrent first submit creates the submission first", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_laptop",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    const incomingBreakdown = {
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    };
+    const existingBreakdown = {
+      codex: {
+        tokens: 12,
+        cost: 0.5,
+        input: 7,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 1,
+        models: { "gpt-5.5": { tokens: 12 } },
+      },
+    };
+    const mergedBreakdown = {
+      codex: {
+        ...incomingBreakdown,
+        models: { "gpt-5.5": incomingBreakdown },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
+    mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
+      merged: mergedBreakdown,
+      warnings: [],
+    });
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(456);
+
+    const selectResults = [
+      [],
+      [{ id: "submission-1" }],
+      [{
+        id: "daily-1",
+        date: "2026-04-30",
+        timestampMs: 123,
+        activeTimeMs: null,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
+        totalTokens: 15,
+        totalCost: "0.7500",
+        inputTokens: 10,
+        outputTokens: 5,
+        dateStart: "2026-04-30",
+        dateEnd: "2026-04-30",
+        activeDays: 1,
+        rowCount: 1,
+      }],
+      [{ sourceBreakdown: mergedBreakdown }],
+    ];
+
+    let insertCall = 0;
+    let dailyInsertValues: unknown;
+    const uniqueSubmissionRace = Object.assign(
+      new Error("duplicate key value violates unique constraint"),
+      {
+        code: "23505",
+        constraint: "submissions_user_id_unique",
+      }
+    );
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        insertCall += 1;
+        if (insertCall === 1) {
+          const builder = {
+            values: vi.fn(() => builder),
+            returning: vi.fn(() => Promise.reject(uniqueSubmissionRace)),
+          };
+          return builder;
+        }
+
+        if (insertCall === 2) {
+          const builder = {
+            values: vi.fn(() => builder),
+            onConflictDoUpdate: vi.fn(() => builder),
+            returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+          };
+          return builder;
+        }
+
+        const builder = {
+          values: vi.fn((values: unknown) => {
+            dailyInsertValues = values;
+            return Promise.resolve();
+          }),
+        };
+        return builder;
+      }),
+      execute: vi.fn(() => Promise.resolve()),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(dailyInsertValues).toBeUndefined();
+    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
+      existingBreakdown,
+      {
+        codex: {
+          ...mergedBreakdown.codex,
+          provenance: {
+            schemaVersion: 1,
+            messageCount: 1,
+            modelCount: 1,
+          },
+        },
+      },
+      expect.any(Set)
+    );
+    expect(await response.json()).toEqual(expect.objectContaining({
+      success: true,
+      metrics: expect.objectContaining({
+        totalTokens: 15,
+        activeDays: 1,
+      }),
+      mode: "merge",
+    }));
+  });
+
+  it("sets all-time active time from all submitted device daily rows", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_desktop",
+          name: "Desktop",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            activeTimeMs: 4_000,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+        timeMetrics: {
+          totalActiveTimeMs: 4_000,
+          longestContinuousMs: 4_000,
+          maxConcurrentSessions: 1,
+          sessionCount: 1,
+        },
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    const incomingBreakdown = {
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    };
+    const insertedBreakdown = {
+      codex: {
+        ...incomingBreakdown,
+        models: { "gpt-5.5": incomingBreakdown },
+        provenance: {
+          schemaVersion: 1,
+          messageCount: 1,
+          modelCount: 1,
+        },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      [],
+      [],
+      [{
+        totalTokens: 42,
+        totalCost: "1.7500",
+        inputTokens: 27,
+        outputTokens: 15,
+        dateStart: "2026-04-30",
+        dateEnd: "2026-04-30",
+        activeDays: 1,
+        rowCount: 3,
+        totalActiveTimeMs: 10_000,
+      }],
+      [{ sourceBreakdown: insertedBreakdown }],
+    ];
+
+    const submissionUpdateSets: Array<Record<string, unknown>> = [];
+    let insertCall = 0;
+    let dailyInsertValues: unknown;
+    const tx = {
+      update: vi.fn((table: unknown) => {
+        const builder = {
+          set: vi.fn((values: Record<string, unknown>) => {
+            if ((table as { id?: unknown }).id === "submissions.id") {
+              submissionUpdateSets.push(values);
+            }
+            return builder;
+          }),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        insertCall += 1;
+        if (insertCall === 1) {
+          const builder = {
+            values: vi.fn(() => builder),
+            onConflictDoUpdate: vi.fn(() => builder),
+            returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-2" }])),
+          };
+          return builder;
+        }
+
+        const builder = {
+          values: vi.fn((values: unknown) => {
+            dailyInsertValues = values;
+            return Promise.resolve();
+          }),
+        };
+        return builder;
+      }),
+      execute: vi.fn(() => Promise.resolve()),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(dailyInsertValues).toEqual([expect.objectContaining({
+      activeTimeMs: 4_000,
+    })]);
+    expect(submissionUpdateSets.at(-1)).toEqual(expect.objectContaining({
+      totalActiveTimeMs: 10_000,
+      longestContinuousMs: 4_000,
+      maxConcurrentSessions: 1,
+      sessionCount: 1,
+    }));
+  });
+
+  it("updates same-device active time totals without double-counting the replaced row", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_laptop",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            activeTimeMs: 5_000,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+        timeMetrics: {
+          totalActiveTimeMs: 5_000,
+          longestContinuousMs: 5_000,
+          maxConcurrentSessions: 1,
+          sessionCount: 1,
+        },
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    const incomingBreakdown = {
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    };
+    const existingBreakdown = {
+      codex: {
+        tokens: 12,
+        cost: 0.5,
+        input: 7,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 1,
+        models: { "gpt-5.5": { tokens: 12 } },
+      },
+    };
+    const mergedBreakdown = {
+      codex: {
+        ...incomingBreakdown,
+        models: { "gpt-5.5": incomingBreakdown },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
+    mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
+      merged: mergedBreakdown,
+      warnings: [],
+    });
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(456);
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      [{
+        id: "daily-1",
+        date: "2026-04-30",
+        timestampMs: 123,
+        activeTimeMs: 2_000,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
+        totalTokens: 27,
+        totalCost: "1.2500",
+        inputTokens: 17,
+        outputTokens: 10,
+        dateStart: "2026-04-30",
+        dateEnd: "2026-04-30",
+        activeDays: 1,
+        rowCount: 2,
+        totalActiveTimeMs: 13_000,
+      }],
+      [{ sourceBreakdown: mergedBreakdown }],
+    ];
+
+    const submissionUpdateSets: Array<Record<string, unknown>> = [];
+    const tx = {
+      update: vi.fn((table: unknown) => {
+        const builder = {
+          set: vi.fn((values: Record<string, unknown>) => {
+            if ((table as { id?: unknown }).id === "submissions.id") {
+              submissionUpdateSets.push(values);
+            }
+            return builder;
+          }),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn(() => Promise.resolve()),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(submissionUpdateSets.at(-1)).toEqual(expect.objectContaining({
+      totalActiveTimeMs: 13_000,
+    }));
+  });
   it("adopts legacy daily rows into the first modern device instead of duplicating totals", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",

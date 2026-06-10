@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { db, groupMembers } from "@/lib/db";
 import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { revalidateGroupCaches } from "@/lib/groups/cache";
@@ -8,13 +8,15 @@ import { getGroupBySlug } from "@/lib/groups/queries";
 import { canManageGroupRole, isGroupRole } from "@/lib/groups/utils";
 import type { GroupRole } from "@/lib/db";
 
+const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
+
 interface RouteParams {
   params: Promise<{ slug: string; userId: string }>;
 }
 
 export async function PATCH(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, BROWSER_SESSION_OPTIONS);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
@@ -35,63 +37,102 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       return NextResponse.json({ error: "Role must be member or admin" }, { status: 400 });
     }
 
-    const [actor, target] = await Promise.all([
-      getGroupMembership(group.id, session.id),
-      getGroupMembership(group.id, userId),
-    ]);
-
-    if (!group.isPublic && !actor) {
+    const membership = await getGroupMembership(group.id, session.id);
+    if (!group.isPublic && !membership) {
       return NextResponse.json({ error: "Group not found" }, { status: 404 });
     }
 
-    if (
-      !actor ||
-      !target ||
-      !canManageGroupRole(actor.role, target.role) ||
-      !canManageGroupRole(actor.role, nextRole)
-    ) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
+    const updateResult = await db.transaction(async (tx) => {
+      const lockedMembers = new Map<string, { role: GroupRole }>();
+      const lockUserIds = Array.from(new Set([session.id, userId])).sort();
 
-    // Demoting an owner would orphan the group if no other owners remain.
-    // The route already rejects nextRole === "owner" above, so reaching this
-    // branch with target.role === "owner" always means we're demoting.
-    if (target.role === "owner") {
-      const [{ count: otherOwnerCount }] = await db
-        .select({ count: sql<number>`COUNT(*)::int` })
-        .from(groupMembers)
+      for (const lockUserId of lockUserIds) {
+        const [member] = await tx
+          .select({ role: groupMembers.role })
+          .from(groupMembers)
+          .where(and(eq(groupMembers.groupId, group.id), eq(groupMembers.userId, lockUserId)))
+          .limit(1)
+          .for("update");
+
+        if (member) {
+          lockedMembers.set(lockUserId, member);
+        }
+      }
+
+      const actor = lockedMembers.get(session.id);
+
+      if (!actor) {
+        return { status: "forbidden" as const };
+      }
+
+      const target = lockedMembers.get(userId);
+
+      if (!target) {
+        return { status: "not_found" as const };
+      }
+
+      if (target.role === "owner") {
+        const otherOwners = await tx
+          .select({ id: groupMembers.id })
+          .from(groupMembers)
+          .where(
+            and(
+              eq(groupMembers.groupId, group.id),
+              eq(groupMembers.role, "owner"),
+              ne(groupMembers.userId, userId)
+            )
+          )
+          .for("update");
+
+        return otherOwners.length === 0
+          ? { status: "last_owner" as const }
+          : { status: "forbidden" as const };
+      }
+
+      if (!canManageGroupRole(actor.role, target.role) || !canManageGroupRole(actor.role, nextRole)) {
+        return { status: "forbidden" as const };
+      }
+
+      const [updated] = await tx
+        .update(groupMembers)
+        .set({ role: nextRole as GroupRole })
         .where(
           and(
             eq(groupMembers.groupId, group.id),
-            eq(groupMembers.role, "owner"),
-            ne(groupMembers.userId, userId),
-          ),
-        );
+            eq(groupMembers.userId, userId),
+            eq(groupMembers.role, target.role)
+          )
+        )
+        .returning({
+          id: groupMembers.id,
+          userId: groupMembers.userId,
+          role: groupMembers.role,
+        });
 
-      if (otherOwnerCount === 0) {
-        return NextResponse.json(
-          {
-            error:
-              "Cannot demote the last owner. Use POST /api/groups/:slug/transfer-ownership to assign a new owner first.",
-          },
-          { status: 400 }
-        );
-      }
+      return updated
+        ? { status: "updated" as const, member: updated }
+        : { status: "not_found" as const };
+    });
+
+    if (updateResult.status === "forbidden") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    const [updated] = await db
-      .update(groupMembers)
-      .set({ role: nextRole as GroupRole })
-      .where(and(eq(groupMembers.groupId, group.id), eq(groupMembers.userId, userId)))
-      .returning({
-        id: groupMembers.id,
-        userId: groupMembers.userId,
-        role: groupMembers.role,
-      });
+    if (updateResult.status === "last_owner") {
+      return NextResponse.json(
+        {
+          error:
+            "Cannot demote the last owner. Use POST /api/groups/:slug/transfer-ownership to assign a new owner first.",
+        },
+        { status: 400 }
+      );
+    }
 
-    if (!updated) {
+    if (updateResult.status === "not_found") {
       return NextResponse.json({ error: "Member not found" }, { status: 404 });
     }
+
+    const updated = updateResult.member;
 
     try {
       await revalidateGroupCaches(group.id, group.slug);

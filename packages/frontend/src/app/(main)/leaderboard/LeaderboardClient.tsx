@@ -1104,7 +1104,8 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
     const qs = params.toString();
     const url = qs ? `${pathname}?${qs}` : pathname;
     window.history.replaceState(null, "", url);
-  }, [period, requestedPage, effectiveSortBy, appliedFrom, appliedTo, pathname, debouncedSearch, searchParams]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period, requestedPage, effectiveSortBy, appliedFrom, appliedTo, pathname, debouncedSearch]);
 
   // Debounce search input so URL/search sync updates after typing stops.
   const isSearchMounted = useRef(false);
@@ -1546,7 +1547,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         <CTATitle>Join the Leaderboard</CTATitle>
         <CTADescription>Install Tokscale CLI and submit your usage data:</CTADescription>
         <CodeBlock>
-          {typeof window !== "undefined" && window.location.hostname !== "tokscale.ai" && (
+          {mounted && typeof window !== "undefined" && window.location.hostname !== "tokscale.ai" && (
             <CodeLine>
               <CommandPrompt>$</CommandPrompt>
               <CommandPrefix>export</CommandPrefix>

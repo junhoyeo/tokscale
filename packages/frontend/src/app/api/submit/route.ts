@@ -75,6 +75,14 @@ function getSubmitDevice(data: SubmissionData): { key: string; name: string | nu
   };
 }
 
+function isUniqueConstraintViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const maybeError = error as { code?: unknown; cause?: unknown };
+  if (maybeError.code === "23505") return true;
+  const cause = maybeError.cause;
+  return Boolean(cause && typeof cause === "object" && (cause as { code?: unknown }).code === "23505");
+}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -127,6 +135,14 @@ export async function POST(request: Request) {
     }
 
     normalizeSubmissionData(rawData);
+
+    const mcpServers: string[] | null =
+      rawData != null && typeof rawData === "object" &&
+      Array.isArray((rawData as Record<string, unknown>).mcpServers)
+        ? ((rawData as Record<string, unknown>).mcpServers as unknown[]).filter(
+            (s): s is string => typeof s === "string" && s.length > 0
+          )
+        : null;
 
     const validation = validateSubmission(rawData);
 
@@ -189,27 +205,48 @@ export async function POST(request: Request) {
       if (existingSubmission) {
         submissionId = existingSubmission.id;
       } else {
-        isNewSubmission = true;
-        const [newSubmission] = await tx
-          .insert(submissions)
-          .values({
-            userId: tokenRecord.userId,
-            totalTokens: 0,
-            totalCost: "0",
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheCreationTokens: 0,
-            cacheReadTokens: 0,
-            dateStart: data.meta.dateRange.start,
-            dateEnd: data.meta.dateRange.end,
-            sourcesUsed: [],
-            modelsUsed: [],
-            cliVersion: data.meta.version,
-            submissionHash: generateSubmissionHash(hashData),
-          })
-          .returning({ id: submissions.id });
+        try {
+          const [newSubmission] = await tx.transaction(async (sp) =>
+            sp
+              .insert(submissions)
+              .values({
+                userId: tokenRecord.userId,
+                totalTokens: 0,
+                totalCost: "0",
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheCreationTokens: 0,
+                cacheReadTokens: 0,
+                dateStart: data.meta.dateRange.start,
+                dateEnd: data.meta.dateRange.end,
+                sourcesUsed: [],
+                modelsUsed: [],
+                cliVersion: data.meta.version,
+                submissionHash: generateSubmissionHash(hashData),
+              })
+              .returning({ id: submissions.id })
+          );
 
-        submissionId = newSubmission.id;
+          submissionId = newSubmission.id;
+          isNewSubmission = true;
+        } catch (creationErr) {
+          if (!isUniqueConstraintViolation(creationErr)) {
+            throw creationErr;
+          }
+
+          const [racedSubmission] = await tx
+            .select({ id: submissions.id })
+            .from(submissions)
+            .where(eq(submissions.userId, tokenRecord.userId))
+            .for('update')
+            .limit(1);
+
+          if (!racedSubmission) {
+            throw creationErr;
+          }
+
+          submissionId = racedSubmission.id;
+        }
       }
 
       const submitDevice = getSubmitDevice(data);
@@ -480,6 +517,7 @@ export async function POST(request: Request) {
           dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
           dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
           activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
+          totalActiveTimeMs: sql<number>`COALESCE(SUM(${dailyBreakdown.activeTimeMs}), 0)::bigint`,
           rowCount: sql<number>`COUNT(*)::int`,
         })
         .from(dailyBreakdown)
@@ -539,12 +577,14 @@ export async function POST(request: Request) {
           submissionHash: generateSubmissionHash(hashData),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
           schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
+          totalActiveTimeMs: aggregates.totalActiveTimeMs,
+          // Session-shape metrics cannot be safely recomputed from daily active-time buckets.
           ...(data.timeMetrics ? {
-            totalActiveTimeMs: data.timeMetrics.totalActiveTimeMs,
             longestContinuousMs: data.timeMetrics.longestContinuousMs,
             maxConcurrentSessions: data.timeMetrics.maxConcurrentSessions,
             sessionCount: data.timeMetrics.sessionCount,
           } : {}),
+          mcpServers: mcpServers && mcpServers.length > 0 ? mcpServers : null,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
