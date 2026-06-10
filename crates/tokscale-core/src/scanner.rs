@@ -854,6 +854,25 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
+    if enabled.contains(&ClientId::Claude) {
+        // Claude Desktop Cowork local-agent-mode sessions:
+        // ~/Library/Application Support/Claude/local-agent-mode-sessions/**/local_*/audit.jsonl
+        //
+        // These audit files use the Claude Code transcript shape but live outside
+        // ~/.claude/projects, so include the root as another Claude scan source.
+        let cowork_path = PathBuf::from(home_dir)
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("local-agent-mode-sessions");
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Claude,
+            cowork_path,
+        );
+    }
+
     if enabled.contains(&ClientId::OpenClaw) {
         // OpenClaw transcripts: ~/.openclaw/agents/**/*.jsonl
         let openclaw_path = ClientId::OpenClaw
@@ -1530,6 +1549,20 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(b"").unwrap();
         file_path
+    }
+
+    fn setup_mock_claude_cowork_dir(base: &std::path::Path) {
+        let cowork_path = base
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("local-agent-mode-sessions")
+            .join("host-session")
+            .join("task-session")
+            .join("local_bcf5462f-09ac-468b-ace7-0b4b01edc1dc");
+        fs::create_dir_all(&cowork_path).unwrap();
+        let mut file = File::create(cowork_path.join("audit.jsonl")).unwrap();
+        file.write_all(b"").unwrap();
     }
 
     fn setup_mock_codex_dir(base: &std::path::Path) {
@@ -2471,6 +2504,21 @@ mod tests {
             1,
             "cc-mirror variants pointing at ~/.claude must not duplicate normal Claude files"
         );
+    }
+
+    #[test]
+    fn test_scan_all_clients_claude_includes_cowork_local_agent_audits() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_claude_dir(home);
+        setup_mock_claude_cowork_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        assert_eq!(result.get(ClientId::Claude).len(), 2);
+        assert!(result
+            .get(ClientId::Claude)
+            .iter()
+            .any(|path| path.file_name().and_then(|name| name.to_str()) == Some("audit.jsonl")));
     }
 
     #[test]

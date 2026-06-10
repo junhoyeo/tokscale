@@ -23,10 +23,11 @@ type ParentSubagentTypeCache = HashMap<PathBuf, HashMap<String, String>>;
 pub struct ClaudeEntry {
     #[serde(rename = "type")]
     pub entry_type: String,
+    #[serde(alias = "_audit_timestamp")]
     pub timestamp: Option<String>,
     pub message: Option<ClaudeMessage>,
     /// Request ID for deduplication (used with message.id)
-    #[serde(rename = "requestId")]
+    #[serde(rename = "requestId", alias = "request_id")]
     pub request_id: Option<String>,
     /// True for subagent (sidechain) transcript lines
     #[serde(rename = "isSidechain", default)]
@@ -35,7 +36,7 @@ pub struct ClaudeEntry {
     #[serde(rename = "agentId")]
     pub agent_id: Option<String>,
     /// Parent session UUID (present on every sidechain line)
-    #[serde(rename = "sessionId")]
+    #[serde(rename = "sessionId", alias = "session_id")]
     pub session_id: Option<String>,
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
@@ -60,6 +61,13 @@ impl CcMirrorVariantMetadata {
     fn client_id(&self) -> String {
         format!("cc-mirror/{}", sanitize_cc_mirror_segment(&self.name))
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoworkMetadataFile {
+    session_id: Option<String>,
+    user_selected_folders: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,11 +345,27 @@ pub fn parse_claude_file_with_cache_and_home(
     let metadata_provider_hint = cc_mirror_metadata
         .as_ref()
         .and_then(|metadata| metadata.provider_id.as_deref());
+    let cowork_metadata = claude_cowork_metadata_from_path(path);
+    let workspace_key = cowork_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.workspace_key.clone())
+        .or(workspace_key);
+    let workspace_label = cowork_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.workspace_label.clone())
+        .or(workspace_label);
     let mut session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
+    if let Some(metadata_session_id) = cowork_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.session_id.as_ref())
+        .filter(|session_id| !session_id.trim().is_empty())
+    {
+        session_id = metadata_session_id.clone();
+    }
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
@@ -556,6 +580,22 @@ pub fn parse_claude_file_with_cache_and_home(
                 );
                 let provider_confidence = provider_choice.confidence;
                 let model = canonicalize_claude_model(&raw_model);
+                let tokens = TokenBreakdown {
+                    input: usage.input_tokens.unwrap_or(0).max(0),
+                    output: usage.output_tokens.unwrap_or(0).max(0),
+                    cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+                    cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
+                    reasoning: 0,
+                };
+                if model == "<synthetic>"
+                    && tokens.input == 0
+                    && tokens.output == 0
+                    && tokens.cache_read == 0
+                    && tokens.cache_write == 0
+                    && tokens.reasoning == 0
+                {
+                    continue;
+                }
 
                 let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
                 let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
@@ -573,13 +613,7 @@ pub fn parse_claude_file_with_cache_and_home(
                     provider_choice.id,
                     session_id.clone(),
                     timestamp,
-                    TokenBreakdown {
-                        input: usage.input_tokens.unwrap_or(0).max(0),
-                        output: usage.output_tokens.unwrap_or(0).max(0),
-                        cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
-                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
-                        reasoning: 0,
-                    },
+                    tokens,
                     0.0,
                     dedup_key,
                 );
@@ -1064,6 +1098,69 @@ fn canonicalize_claude_model(model: &str) -> String {
         .to_string()
 }
 
+#[derive(Debug, Clone)]
+struct CoworkMetadata {
+    session_id: Option<String>,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+}
+
+fn claude_cowork_metadata_from_path(path: &Path) -> Option<CoworkMetadata> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("audit.jsonl") {
+        return None;
+    }
+
+    let local_session_dir = path.parent()?;
+    let local_session_id = local_session_dir.file_name()?.to_str()?;
+    if !local_session_id.starts_with("local_") {
+        return None;
+    }
+
+    let session_root = local_session_dir.parent()?;
+    if !path_has_component(session_root, "local-agent-mode-sessions") {
+        return None;
+    }
+
+    let metadata_path = session_root.join(format!("{local_session_id}.json"));
+    let metadata = std::fs::read_to_string(metadata_path).ok()?;
+    let metadata: CoworkMetadataFile = serde_json::from_str(&metadata).ok()?;
+    let (workspace_key, workspace_label) = metadata
+        .user_selected_folders
+        .as_deref()
+        .and_then(cowork_workspace_from_selected_folders)
+        .unwrap_or((None, None));
+
+    Some(CoworkMetadata {
+        session_id: metadata.session_id,
+        workspace_key,
+        workspace_label,
+    })
+}
+
+fn path_has_component(path: &Path, component: &str) -> bool {
+    path.components().any(|path_component| {
+        path_component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(component)
+    })
+}
+
+fn cowork_workspace_from_selected_folders(
+    folders: &[String],
+) -> Option<(Option<String>, Option<String>)> {
+    let folder = folders.iter().find(|folder| !folder.trim().is_empty())?;
+    let key = normalize_workspace_key(&claude_project_key_from_abs_path(folder));
+    let label = key.as_deref().and_then(workspace_label_from_key);
+    Some((key, label))
+}
+
+fn claude_project_key_from_abs_path(path: &str) -> String {
+    path.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
+}
+
 #[derive(Default)]
 struct ClaudeHeadlessState {
     model: Option<String>,
@@ -1533,6 +1630,32 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, content).unwrap();
         (temp_dir, path)
+    }
+
+    fn create_cowork_audit_file(
+        audit_content: &str,
+        metadata_content: &str,
+        local_session_id: &str,
+    ) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir
+            .path()
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("local-agent-mode-sessions")
+            .join("host-session")
+            .join("task-session");
+        let audit_dir = root.join(local_session_id);
+        std::fs::create_dir_all(&audit_dir).unwrap();
+        std::fs::write(
+            root.join(format!("{local_session_id}.json")),
+            metadata_content,
+        )
+        .unwrap();
+        let audit_path = audit_dir.join("audit.jsonl");
+        std::fs::write(&audit_path, audit_content).unwrap();
+        (temp_dir, audit_path)
     }
 
     #[test]
@@ -2188,6 +2311,53 @@ mod tests {
             messages.is_empty(),
             "wrapper transcripts without usage metadata must not be estimated"
         );
+    }
+
+    #[test]
+    fn test_workspace_metadata_from_cowork_local_agent_sidecar() {
+        let audit = r#"{"type":"assistant","session_id":"cli-session-001","request_id":"req_001","_audit_timestamp":"2026-06-10T01:11:33.761Z","message":{"id":"msg_001","model":"claude-fable-5","usage":{"input_tokens":2,"output_tokens":60,"cache_read_input_tokens":54804,"cache_creation_input_tokens":202}}}"#;
+        let metadata = r#"{"sessionId":"local_bcf5462f-09ac-468b-ace7-0b4b01edc1dc","title":"Flip level resale pricing engine","model":"claude-fable-5[1m]","userSelectedFolders":["/Users/will.wang/projects/code","/Users/will.wang/projects/second-brain"]}"#;
+        let (_dir, path) = create_cowork_audit_file(
+            audit,
+            metadata,
+            "local_bcf5462f-09ac-468b-ace7-0b4b01edc1dc",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-fable-5");
+        assert_eq!(messages[0].tokens.input, 2);
+        assert_eq!(messages[0].tokens.output, 60);
+        assert_eq!(messages[0].tokens.cache_read, 54804);
+        assert_eq!(messages[0].tokens.cache_write, 202);
+        assert_eq!(
+            messages[0].session_id,
+            "local_bcf5462f-09ac-468b-ace7-0b4b01edc1dc"
+        );
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("-Users-will-wang-projects-code".to_string())
+        );
+        assert_eq!(
+            messages[0].workspace_label,
+            Some("-Users-will-wang-projects-code".to_string())
+        );
+    }
+
+    #[test]
+    fn test_zero_token_synthetic_cowork_error_is_skipped() {
+        let audit = r#"{"type":"assistant","session_id":"cli-session-001","request_id":"req_001","_audit_timestamp":"2026-06-10T01:11:33.761Z","message":{"id":"msg_001","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"API Error: Unable to connect to API"}]}}"#;
+        let metadata = r#"{"sessionId":"local_bcf5462f-09ac-468b-ace7-0b4b01edc1dc","userSelectedFolders":["/Users/will.wang/projects/code"]}"#;
+        let (_dir, path) = create_cowork_audit_file(
+            audit,
+            metadata,
+            "local_bcf5462f-09ac-468b-ace7-0b4b01edc1dc",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert!(messages.is_empty());
     }
 
     // --- Sidechain / Agent tracking tests ---
