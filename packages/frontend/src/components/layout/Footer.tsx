@@ -226,7 +226,7 @@ export function Footer() {
 
           <TextContainer>
             <CopyrightText>
-              © 2025 Tokscale. All rights reserved.
+              © {new Date().getFullYear()} Tokscale. All rights reserved.
             </CopyrightText>
             <GitHubLink 
               href="https://github.com/junhoyeo/tokscale" 
