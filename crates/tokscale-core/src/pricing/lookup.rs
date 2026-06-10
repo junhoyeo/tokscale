@@ -305,14 +305,23 @@ impl PricingLookup {
             }
             _ => self.lookup_auto(id, provider_id),
         };
-        let requested_opus_minor = normalize_claude_opus_4_minor(lower_ref);
-        let unsafe_opus_minor_resolution = |result: &LookupResult| {
-            resolves_different_claude_opus_4_minor(requested_opus_minor.as_deref(), result)
+        let requested_family = claude_family(lower_ref);
+        let requested_version = requested_claude_version(lower_ref);
+        let unparsed_modern_version = requested_family.is_some()
+            && requested_version.is_none()
+            && contains_delimited_modern_major_minor(lower_ref);
+        let unsafe_claude_resolution = |result: &LookupResult| {
+            resolves_unsafe_claude_version(
+                requested_family,
+                requested_version.as_deref(),
+                unparsed_modern_version,
+                result,
+            )
         };
 
         // 1. Try direct lookup
         if let Some(result) = do_lookup(lower_ref) {
-            if unsafe_opus_minor_resolution(&result) {
+            if unsafe_claude_resolution(&result) {
                 return None;
             }
             return Some(result);
@@ -323,7 +332,7 @@ impl PricingLookup {
         }
 
         let guarded_lookup = |candidate: &str| {
-            do_lookup(candidate).filter(|result| !unsafe_opus_minor_resolution(result))
+            do_lookup(candidate).filter(|result| !unsafe_claude_resolution(result))
         };
 
         // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
@@ -1221,79 +1230,196 @@ fn contains_model_id(key: &str, model_id: &str) -> bool {
 
 fn normalize_model_name(model_id: &str) -> Option<String> {
     let lower = model_id.to_lowercase();
+    let family = claude_family(&lower)?;
 
-    if lower.contains("opus") {
-        if let Some(model) = normalize_claude_opus_4_minor(&lower) {
-            return Some(model);
-        } else if contains_delimited_major_minor(&lower, '4') {
-            return None;
-        } else if contains_delimited_fragment(&lower, "4") {
-            return Some("claude-opus-4".into());
-        }
-    }
-    if lower.contains("sonnet") {
-        if contains_delimited_fragment(&lower, "4.5") || contains_delimited_fragment(&lower, "4-5")
-        {
-            return Some("claude-sonnet-4-5".into());
-        } else if contains_delimited_major_minor(&lower, '4') {
-            return None;
-        } else if contains_delimited_fragment(&lower, "4") {
-            return Some("claude-sonnet-4".into());
-        } else if contains_delimited_fragment(&lower, "3.7")
-            || contains_delimited_fragment(&lower, "3-7")
-        {
-            return Some("claude-3-7-sonnet".into());
-        } else if contains_delimited_fragment(&lower, "3.5")
-            || contains_delimited_fragment(&lower, "3-5")
-        {
-            return Some("claude-3.5-sonnet".into());
-        }
-    }
-    if lower.contains("haiku") {
-        if contains_delimited_fragment(&lower, "4.5") || contains_delimited_fragment(&lower, "4-5")
-        {
-            return Some("claude-haiku-4-5".into());
-        } else if contains_delimited_major_minor(&lower, '4') {
-            return None;
-        } else if contains_delimited_fragment(&lower, "3.5")
-            || contains_delimited_fragment(&lower, "3-5")
-        {
-            return Some("claude-3.5-haiku".into());
-        }
+    // Modern Claude line (major >= 4): explicit single-digit minor parsed
+    // straight from the id, in either order (claude-sonnet-4-6, opus-4.8,
+    // claude-4-6-sonnet). New minor releases need no code change.
+    if let Some(model) = normalize_claude_family_minor(&lower) {
+        return Some(model);
     }
 
-    None
+    // Never degrade: a delimited `major(-|.)minor` version whose minor was
+    // not recognized above (4-60, 4-0, 5-0, dated 4-20250514) must stay
+    // unresolved rather than fall through to a coarser or older key.
+    if contains_delimited_modern_major_minor(&lower) {
+        return None;
+    }
+
+    // Bare modern major adjacent to the family token (claude-sonnet-5,
+    // opus-5, 4-opus). Resolves only via an exact dataset hit downstream.
+    if let Some(model) = normalize_claude_family_bare_major(&lower) {
+        return Some(model);
+    }
+
+    // Catch-alls preserved from the hardcoded matcher: a delimited `4`
+    // anywhere still maps opus/sonnet to the bare 4.0 key, and the legacy
+    // 3.x line uses irregular naming (family after the version, dotted 3.5).
+    match family {
+        "opus" if contains_delimited_fragment(&lower, "4") => Some("claude-opus-4".into()),
+        "sonnet" => {
+            if contains_delimited_fragment(&lower, "4") {
+                Some("claude-sonnet-4".into())
+            } else if contains_delimited_fragment(&lower, "3.7")
+                || contains_delimited_fragment(&lower, "3-7")
+            {
+                Some("claude-3-7-sonnet".into())
+            } else if contains_delimited_fragment(&lower, "3.5")
+                || contains_delimited_fragment(&lower, "3-5")
+            {
+                Some("claude-3.5-sonnet".into())
+            } else {
+                None
+            }
+        }
+        "haiku" => {
+            if contains_delimited_fragment(&lower, "3.5")
+                || contains_delimited_fragment(&lower, "3-5")
+            {
+                Some("claude-3.5-haiku".into())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
-fn normalize_claude_opus_4_minor(lower: &str) -> Option<String> {
+/// Family tokens of the modern Claude model line.
+const CLAUDE_FAMILY_TOKENS: &[&str] = &["opus", "sonnet", "haiku", "fable"];
+
+/// The Claude family token contained in `lower`, if any.
+fn claude_family(lower: &str) -> Option<&'static str> {
+    CLAUDE_FAMILY_TOKENS
+        .iter()
+        .copied()
+        .find(|family| lower.contains(family))
+}
+
+/// Modern Claude majors are single digits >= 4. The 3.x line uses irregular
+/// naming and is matched explicitly by the legacy branches.
+fn is_modern_claude_major(value: &str) -> bool {
+    value.len() == 1 && value.as_bytes()[0].is_ascii_digit() && value.as_bytes()[0] >= b'4'
+}
+
+/// Canonical `claude-{family}-{major}-{minor}` key parsed from an id carrying
+/// an explicit single-digit minor for a modern major (>= 4), in either
+/// `family-major-minor` (claude-sonnet-4-6, opus-4.8) or reversed
+/// `major-minor-family` (claude-4-6-sonnet, 4-8-opus) order. Generalization
+/// of the former opus-only `normalize_claude_opus_4_minor` across families.
+fn normalize_claude_family_minor(lower: &str) -> Option<String> {
     let parts: Vec<&str> = lower
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|part| !part.is_empty())
         .collect();
 
     for window in parts.windows(3) {
-        if window[0] == "opus" && window[1] == "4" && is_single_digit_minor(window[2]) {
-            return Some(format!("claude-opus-4-{}", window[2]));
+        if CLAUDE_FAMILY_TOKENS.contains(&window[0])
+            && is_modern_claude_major(window[1])
+            && is_single_digit_minor(window[2])
+        {
+            return Some(format!("claude-{}-{}-{}", window[0], window[1], window[2]));
         }
-        if window[0] == "4" && is_single_digit_minor(window[1]) && window[2] == "opus" {
-            return Some(format!("claude-opus-4-{}", window[1]));
+        if is_modern_claude_major(window[0])
+            && is_single_digit_minor(window[1])
+            && CLAUDE_FAMILY_TOKENS.contains(&window[2])
+        {
+            return Some(format!("claude-{}-{}-{}", window[2], window[0], window[1]));
         }
     }
 
     None
 }
 
-fn resolves_different_claude_opus_4_minor(
-    requested_minor: Option<&str>,
+/// Canonical `claude-{family}-{major}` key for an id naming a modern major
+/// (>= 4) without a minor (claude-sonnet-5, opus-5, 4-opus). The major must
+/// be adjacent to the family token; in forward order it must not be followed
+/// by another digit run (dated `4-20250514` shapes are version-like, not
+/// bare), and in reversed order it must not itself be the minor of a
+/// preceding legacy major (claude-3-5-sonnet).
+fn normalize_claude_family_bare_major(lower: &str) -> Option<String> {
+    let parts: Vec<&str> = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect();
+    let all_digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+
+    for (idx, part) in parts.iter().enumerate() {
+        if !CLAUDE_FAMILY_TOKENS.contains(part) {
+            continue;
+        }
+        if let Some(major) = parts
+            .get(idx + 1)
+            .copied()
+            .filter(|p| is_modern_claude_major(p))
+        {
+            if parts.get(idx + 2).is_none_or(|next| !all_digits(next)) {
+                return Some(format!("claude-{part}-{major}"));
+            }
+        }
+        if idx >= 1
+            && is_modern_claude_major(parts[idx - 1])
+            && (idx < 2 || !all_digits(parts[idx - 2]))
+        {
+            return Some(format!("claude-{part}-{}", parts[idx - 1]));
+        }
+    }
+
+    None
+}
+
+/// True if the id carries a delimited modern `major(-|.)minor` version
+/// (4-6, 4.8, 5-0, 4-60, 4-20250514). Generalizes the former
+/// `contains_delimited_major_minor(lower, '4')` checks across all modern
+/// majors so the never-degrade contract also covers major 5 and up.
+fn contains_delimited_modern_major_minor(haystack: &str) -> bool {
+    ('4'..='9').any(|major| contains_delimited_major_minor(haystack, major))
+}
+
+/// The version-pinned canonical key a Claude id requests, used to veto
+/// fuzzy/stripped resolutions that would land on a different version.
+///
+/// - An explicit single-digit minor (claude-sonnet-4-7) always pins; this is
+///   main's opus-only minor guard generalized across families.
+/// - A bare major pins from major 5 up (claude-opus-5 must never bill as any
+///   opus 4.x key). Bare major 4 is deliberately left unpinned to preserve
+///   the long-standing behavior of e.g. `claude-opus-4` resolving to a
+///   dated or regional 4.x dataset key.
+fn requested_claude_version(lower: &str) -> Option<String> {
+    if let Some(model) = normalize_claude_family_minor(lower) {
+        return Some(model);
+    }
+    normalize_claude_family_bare_major(lower).filter(|model| !model.ends_with("-4"))
+}
+
+/// Veto for resolutions that violate the never-degrade contract:
+/// cross-family (a sonnet id billed at an opus key), cross-version (a 4-7 id
+/// billed at a 4-6 key, a major-5 id billed at a 4.x key), or any
+/// modern-Claude resolution for an id whose `major-minor` version could not
+/// be parsed (4-60, 5-0, dated forms). Exact dataset hits stay allowed: they
+/// either normalize back to the requested version or, for unparseable
+/// versions, do not normalize at all. Generalization of the former
+/// `resolves_different_claude_opus_4_minor`.
+fn resolves_unsafe_claude_version(
+    requested_family: Option<&'static str>,
+    requested_version: Option<&str>,
+    unparsed_modern_version: bool,
     result: &LookupResult,
 ) -> bool {
-    let Some(requested_minor) = requested_minor else {
+    let Some(requested_family) = requested_family else {
         return false;
     };
+    let matched_lower = result.matched_key.to_lowercase();
 
-    normalize_model_name(&result.matched_key).is_some_and(|resolved| {
-        resolved.starts_with("claude-opus-4") && resolved != requested_minor
-    })
+    if claude_family(&matched_lower).is_some_and(|family| family != requested_family) {
+        return true;
+    }
+
+    let resolved = normalize_model_name(&matched_lower);
+    if let Some(requested_version) = requested_version {
+        return resolved.is_some_and(|resolved| resolved != requested_version);
+    }
+    unparsed_modern_version && resolved.is_some()
 }
 
 fn is_single_digit_minor(value: &str) -> bool {
@@ -3125,6 +3251,311 @@ mod tests {
     #[test]
     fn test_normalize_haiku_14_5_does_not_map_to_4_5() {
         assert_eq!(normalize_model_name("haiku-14-5"), None);
+    }
+
+    // =========================================================================
+    // Generalized Claude family/major/minor normalization (PR #634 rework)
+    // =========================================================================
+
+    /// Synthetic dataset mirroring real LiteLLM/OpenRouter key shapes, with
+    /// deliberately adversarial gaps: bedrock-style `us.anthropic.` keys exist
+    /// for opus but not sonnet, and OpenRouter carries a pricier opus `-fast`
+    /// variant that the old fallbacks degraded other families onto.
+    fn claude_family_fixture() -> PricingLookup {
+        fn p(input: f64, output: f64) -> ModelPricing {
+            ModelPricing {
+                input_cost_per_token: Some(input),
+                output_cost_per_token: Some(output),
+                ..Default::default()
+            }
+        }
+
+        let mut litellm = HashMap::new();
+        litellm.insert("claude-opus-4".to_string(), p(15e-6, 75e-6));
+        litellm.insert("claude-opus-4-1".to_string(), p(15e-6, 75e-6));
+        litellm.insert("claude-opus-4-5".to_string(), p(5e-6, 25e-6));
+        litellm.insert("claude-opus-4-6".to_string(), p(5e-6, 25e-6));
+        litellm.insert("claude-opus-4-7".to_string(), p(5e-6, 25e-6));
+        litellm.insert("claude-opus-4-8".to_string(), p(5e-6, 25e-6));
+        litellm.insert("claude-sonnet-4".to_string(), p(3e-6, 15e-6));
+        litellm.insert("claude-sonnet-4-5".to_string(), p(3e-6, 15e-6));
+        litellm.insert("claude-sonnet-4-6".to_string(), p(3e-6, 15e-6));
+        litellm.insert("claude-haiku-4-5".to_string(), p(1e-6, 5e-6));
+        litellm.insert("us.anthropic.claude-opus-4-8".to_string(), p(5e-6, 25e-6));
+        litellm.insert("vertex_ai/claude-sonnet-4-6".to_string(), p(3e-6, 15e-6));
+
+        let mut openrouter = HashMap::new();
+        openrouter.insert("anthropic/claude-opus-4".to_string(), p(15e-6, 75e-6));
+        openrouter.insert("anthropic/claude-opus-4.8".to_string(), p(5e-6, 25e-6));
+        openrouter.insert("anthropic/claude-opus-4.8-fast".to_string(), p(7e-6, 30e-6));
+        openrouter.insert("anthropic/claude-sonnet-4.6".to_string(), p(3e-6, 15e-6));
+        openrouter.insert("anthropic/claude-haiku-4.5".to_string(), p(1e-6, 5e-6));
+        openrouter.insert("anthropic/claude-fable-5".to_string(), p(5e-6, 25e-6));
+
+        PricingLookup::new(litellm, openrouter, HashMap::new())
+    }
+
+    #[test]
+    fn test_normalize_minor_generalizes_across_families() {
+        assert_eq!(
+            normalize_model_name("claude-sonnet-4-7"),
+            Some("claude-sonnet-4-7".into())
+        );
+        assert_eq!(
+            normalize_model_name("sonnet-4.7"),
+            Some("claude-sonnet-4-7".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-haiku-4-6"),
+            Some("claude-haiku-4-6".into())
+        );
+        assert_eq!(
+            normalize_model_name("haiku-4.6"),
+            Some("claude-haiku-4-6".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-opus-4-9"),
+            Some("claude-opus-4-9".into())
+        );
+        assert_eq!(
+            normalize_model_name("opus-4.9"),
+            Some("claude-opus-4-9".into())
+        );
+        assert_eq!(
+            normalize_model_name("opus-5-2"),
+            Some("claude-opus-5-2".into())
+        );
+    }
+
+    #[test]
+    fn test_normalize_reversed_order_all_families() {
+        assert_eq!(
+            normalize_model_name("claude-4-8-opus"),
+            Some("claude-opus-4-8".into())
+        );
+        assert_eq!(
+            normalize_model_name("4-8-opus"),
+            Some("claude-opus-4-8".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-4-6-sonnet"),
+            Some("claude-sonnet-4-6".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-4-5-haiku"),
+            Some("claude-haiku-4-5".into())
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_modern_major() {
+        assert_eq!(
+            normalize_model_name("claude-sonnet-5"),
+            Some("claude-sonnet-5".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-opus-5"),
+            Some("claude-opus-5".into())
+        );
+        assert_eq!(
+            normalize_model_name("fable-5"),
+            Some("claude-fable-5".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-fable-5[1m]"),
+            Some("claude-fable-5".into())
+        );
+    }
+
+    /// Boundary contract preserved from main's hardcoded matcher: two-digit
+    /// minors and majors, zero minors, undelimited versions, and dated forms
+    /// must not normalize to a coarser key. (PR #634's original parser
+    /// degraded `opus-4-60` to `claude-opus-4`; main's contract is None.)
+    #[test]
+    fn test_normalize_modern_claude_boundaries() {
+        assert_eq!(normalize_model_name("opus-4-60"), None);
+        assert_eq!(normalize_model_name("sonnet-4-60"), None);
+        assert_eq!(normalize_model_name("opus-14-6"), None);
+        assert_eq!(normalize_model_name("opus4"), None);
+        assert_eq!(normalize_model_name("opus-4x"), None);
+        assert_eq!(normalize_model_name("opus-3"), None);
+        assert_eq!(normalize_model_name("claude-sonnet-5-0"), None);
+        assert_eq!(normalize_model_name("claude-opus-4-20250514"), None);
+    }
+
+    /// Legacy 3.x ids keep their irregular canonical keys; the reversed-order
+    /// and bare-major parsing must not hijack the digit pairs in them.
+    #[test]
+    fn test_normalize_legacy_line_not_hijacked_by_modern_parser() {
+        assert_eq!(
+            normalize_model_name("claude-3-5-sonnet"),
+            Some("claude-3.5-sonnet".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-3-7-sonnet-20250219"),
+            Some("claude-3-7-sonnet".into())
+        );
+        assert_eq!(
+            normalize_model_name("claude-3-5-haiku-20241022"),
+            Some("claude-3.5-haiku".into())
+        );
+    }
+
+    /// Regression (B1): a bedrock-style sonnet id must never be billed at an
+    /// opus key. Before the family guard, `us.anthropic.claude-sonnet-4-6-v1:0`
+    /// suffix-stripped down to `us.anthropic.claude` and fuzzy-matched the
+    /// dataset's `us.anthropic.claude-opus-4-8` entry ($5/M instead of $3/M).
+    #[test]
+    fn test_bedrock_sonnet_never_billed_as_opus() {
+        let lookup = claude_family_fixture();
+        let result = lookup
+            .lookup("us.anthropic.claude-sonnet-4-6-v1:0")
+            .unwrap();
+        assert_eq!(result.matched_key, "claude-sonnet-4-6");
+        assert_eq!(result.pricing.input_cost_per_token, Some(3e-6));
+    }
+
+    /// Regression (B2): reversed-order sonnet ids must resolve to the sonnet
+    /// key, not cross-family. Before reversed-order parsing was generalized
+    /// beyond opus, `claude-4-6-sonnet` stripped down to `claude` and
+    /// fuzzy-matched `anthropic/claude-opus-4.8-fast`.
+    #[test]
+    fn test_reversed_sonnet_resolves_canonical_not_cross_family() {
+        let lookup = claude_family_fixture();
+        for id in ["claude-4-6-sonnet", "4-6-sonnet"] {
+            let result = lookup.lookup(id).unwrap();
+            assert_eq!(result.matched_key, "claude-sonnet-4-6", "id: {id}");
+        }
+        let result = lookup.lookup("claude-4-5-haiku").unwrap();
+        assert_eq!(result.matched_key, "claude-haiku-4-5");
+    }
+
+    /// Regression (B3): the never-degrade contract that
+    /// `test_unknown_future_opus_minor_does_not_degrade_to_opus_4` pins for
+    /// opus now holds for sonnet and haiku too. Unknown minors previously
+    /// degraded: `sonnet-4-7` -> claude-sonnet-4.6, `haiku-4-6` ->
+    /// claude-haiku-4.5 (and with real data even claude-3.5-haiku).
+    #[test]
+    fn test_unknown_sonnet_haiku_minor_does_not_degrade() {
+        let lookup = claude_family_fixture();
+        for id in [
+            "sonnet-4-7",
+            "claude-sonnet-4-7",
+            "sonnet-4-60",
+            "haiku-4-6",
+            "claude-haiku-4-6",
+        ] {
+            assert!(lookup.lookup(id).is_none(), "id {id} must not degrade");
+        }
+    }
+
+    /// Regression (B4): major >= 5 ids resolve to a dataset-known exact id
+    /// when one exists, else None — never to a different major. Previously
+    /// `claude-opus-5` resolved to `anthropic/claude-opus-4.8-fast` and
+    /// `sonnet-5`/`claude-sonnet-5-0` to sonnet 4.6, while bare `opus-5`
+    /// happened to return None only because of a fuzzy length cutoff.
+    #[test]
+    fn test_major_five_never_resolves_to_different_major() {
+        let lookup = claude_family_fixture();
+        for id in [
+            "claude-opus-5",
+            "opus-5",
+            "opus-5-2",
+            "sonnet-5",
+            "claude-sonnet-5-0",
+        ] {
+            assert!(
+                lookup.lookup(id).is_none(),
+                "id {id} must not resolve to a 4.x key"
+            );
+        }
+
+        // fable-5 is dataset-known (OpenRouter) and resolves in all forms.
+        for id in [
+            "claude-fable-5",
+            "fable-5",
+            "claude-fable-5[1m]",
+            "anthropic/claude-fable-5",
+        ] {
+            let result = lookup.lookup(id).unwrap();
+            assert_eq!(result.matched_key, "anthropic/claude-fable-5", "id: {id}");
+        }
+    }
+
+    /// When the dataset later gains a major-5 key, the same ids resolve to it
+    /// with no code change — the "known version" decision is dataset-driven.
+    #[test]
+    fn test_major_five_resolves_once_dataset_knows_it() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-opus-5".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.00001),
+                output_cost_per_token: Some(0.00005),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        for id in ["claude-opus-5", "opus-5", "aws.claude-opus-5-thinking"] {
+            let result = lookup.lookup(id).unwrap();
+            assert_eq!(result.matched_key, "claude-opus-5", "id: {id}");
+        }
+    }
+
+    /// Known minors keep resolving across the id shapes seen in the wild:
+    /// dotted versions, vendor prefixes, tier/feature suffixes.
+    #[test]
+    fn test_known_minor_shapes_resolve_per_family() {
+        let lookup = claude_family_fixture();
+        let cases = [
+            ("opus-4-8", "claude-opus-4-8"),
+            ("opus-4.8", "claude-opus-4-8"),
+            ("aws.claude-opus-4-8", "claude-opus-4-8"),
+            ("claude-opus-4-8-thinking", "claude-opus-4-8"),
+            ("claude-sonnet-4-6", "claude-sonnet-4-6"),
+            ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+            ("sonnet-4-6", "claude-sonnet-4-6"),
+            ("sonnet-4.6", "claude-sonnet-4-6"),
+            ("aws.claude-sonnet-4-6-v1", "claude-sonnet-4-6"),
+            ("claude-sonnet-4-6-thinking", "claude-sonnet-4-6"),
+            ("haiku-4-5", "claude-haiku-4-5"),
+            ("haiku-4.5", "claude-haiku-4-5"),
+            ("vertex_ai/claude-sonnet-4-6", "vertex_ai/claude-sonnet-4-6"),
+        ];
+        for (id, expected) in cases {
+            let result = lookup.lookup(id).unwrap();
+            assert_eq!(result.matched_key, expected, "id: {id}");
+        }
+    }
+
+    /// Ported from PR #634: the next opus minor must prefer its own key over
+    /// the bare `claude-opus-4` catch-all, in dashed and dotted forms.
+    #[test]
+    fn test_normalize_opus_4_8_prefers_4_8_over_4() {
+        let lookup = claude_family_fixture();
+        for id in ["opus-4-8", "opus-4.8"] {
+            let result = lookup.lookup(id).unwrap();
+            assert_eq!(result.matched_key, "claude-opus-4-8", "id: {id}");
+            assert_eq!(result.source, "LiteLLM");
+        }
+    }
+
+    /// Ported from PR #634: `aws.claude-opus-4-8` must not degrade to
+    /// OpenRouter's legacy `anthropic/claude-opus-4` (~3x overcharge).
+    #[test]
+    fn test_aws_opus_4_8_does_not_degrade_to_opus_4() {
+        let lookup = claude_family_fixture();
+        let result = lookup.lookup("aws.claude-opus-4-8").unwrap();
+        assert_eq!(result.matched_key, "claude-opus-4-8");
+
+        // 8.4M input + 873K output at opus-4-8 rates is ~$64, not ~$191
+        // (legacy opus 4 at $15/$75 per M).
+        let cost = lookup.calculate_cost("aws.claude-opus-4-8", 8_400_000, 873_000, 0, 0, 0);
+        assert!(
+            (60.0..=70.0).contains(&cost),
+            "expected opus-4-8 priced cost around $64, got ${cost:.2}"
+        );
     }
 
     #[test]
