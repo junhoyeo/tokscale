@@ -36,7 +36,7 @@ esac
 
 PLATFORM_PACKAGE="$(node --input-type=module <<'NODE'
 import { execSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 
 // Keep in sync with detectLibcKind() in packages/cli/src/index.ts.
 function detectLibcKind() {
@@ -78,8 +78,9 @@ function detectLibcKind() {
     if (combined.includes("glibc") || combined.includes("gnu")) return "gnu";
   }
 
-  // ldd missing or inconclusive: look for dynamic loaders. The glibc loader
-  // wins when both exist (e.g. Debian with the musl package installed).
+  // ldd missing or inconclusive: look for dynamic loaders. Either loader can
+  // coexist with the other's libc (Debian's musl package installs ld-musl-*;
+  // Alpine's gcompat installs ld-linux-*), so the distro breaks ties.
   const loaderPresent = (prefix) => {
     for (const dir of ["/lib", "/lib64"]) {
       try {
@@ -90,8 +91,12 @@ function detectLibcKind() {
     }
     return false;
   };
-  if (loaderPresent("ld-linux-")) return "gnu";
-  if (loaderPresent("ld-musl-")) return "musl";
+  const hasGnuLoader = loaderPresent("ld-linux-");
+  const hasMuslLoader = loaderPresent("ld-musl-");
+  if (hasGnuLoader !== hasMuslLoader) return hasMuslLoader ? "musl" : "gnu";
+  if (hasGnuLoader && hasMuslLoader) {
+    return existsSync("/etc/alpine-release") ? "musl" : "gnu";
+  }
 
   return "gnu";
 }

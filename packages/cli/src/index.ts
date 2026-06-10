@@ -72,11 +72,16 @@ function detectLibcKind(): LibcKind {
     if (combined.includes("glibc") || combined.includes("gnu")) return "gnu";
   }
 
-  // ldd missing or inconclusive: look for dynamic loaders. The glibc loader
-  // wins when both exist - a musl loader can coexist on glibc hosts (e.g.
-  // Debian with the musl package installed), but not the reverse.
-  if (loaderPresent("ld-linux-")) return "gnu";
-  if (loaderPresent("ld-musl-")) return "musl";
+  // ldd missing or inconclusive: look for dynamic loaders. Either loader
+  // can coexist with the other's libc (Debian's musl package installs
+  // ld-musl-*; Alpine's gcompat installs ld-linux-*), so when both are
+  // present, let the distro break the tie.
+  const hasGnuLoader = loaderPresent("ld-linux-");
+  const hasMuslLoader = loaderPresent("ld-musl-");
+  if (hasGnuLoader !== hasMuslLoader) return hasMuslLoader ? "musl" : "gnu";
+  if (hasGnuLoader && hasMuslLoader) {
+    return existsSync("/etc/alpine-release") ? "musl" : "gnu";
+  }
 
   return "gnu";
 }
