@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { notFound, permanentRedirect } from 'next/navigation';
+import { normalizeUsernameCacheKey } from '@/lib/db/usernameLookup';
 import ProfilePageClient from './ProfilePageClient';
 
 export const revalidate = 60;
@@ -29,7 +30,13 @@ async function getProfileData(username: string) {
 async function getProfileDevices(username: string) {
   try {
     const res = await fetch(`${getBaseUrl()}/api/users/${username}/devices`, {
-      next: { revalidate: 60 },
+      // Tagged so PATCH /api/settings/devices/[deviceId] (rename) can
+      // invalidate this immediately via revalidateTag(`user:...`) instead of
+      // waiting out the 60s revalidate window.
+      next: {
+        revalidate: 60,
+        tags: [`user:${normalizeUsernameCacheKey(username)}`],
+      },
     });
 
     if (!res.ok) {

@@ -35,7 +35,10 @@ interface CreatedApiToken extends ApiToken {
 interface SettingsDevice {
   id: string;
   deviceKey: string;
+  /** Resolved label (custom name or fallback) — what we render. */
   displayName: string;
+  /** Raw user-set name (null = never renamed) — what we edit. */
+  customName: string | null;
   lastSubmittedAt: string | null;
   totalTokens: number;
   totalCost: number;
@@ -440,11 +443,10 @@ export default function SettingsClient() {
   const startEditingDevice = (device: SettingsDevice) => {
     setEditingDeviceId(device.id);
     setDeviceError(null);
-    // The public devices endpoint returns the fallback label ("Unnamed
-    // device" / "Legacy submissions") instead of the raw null name. Don't
-    // pre-fill the input with a fallback the user never typed.
-    const fallback = deviceDisplayLabel(device.deviceKey, null);
-    setEditingDeviceName(device.displayName === fallback ? "" : device.displayName);
+    // Pre-fill from the raw custom name, not the resolved display label, so
+    // an unnamed device starts empty and a custom name that happens to equal
+    // the fallback label ("Unnamed device" etc.) is preserved.
+    setEditingDeviceName(device.customName ?? "");
   };
 
   const cancelEditingDevice = () => {
@@ -487,6 +489,7 @@ export default function SettingsClient() {
                   data.device.deviceKey,
                   data.device.displayName
                 ),
+                customName: data.device.displayName ?? null,
               }
             : item
         )

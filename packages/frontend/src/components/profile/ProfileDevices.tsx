@@ -1,8 +1,10 @@
 "use client";
 
+import type { ReactNode } from "react";
 import styled from "styled-components";
 import { formatNumber, formatCurrency } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
+import { ListCard, ListHeader, ListMetricCell, ListRow } from "./listStyles";
 
 /**
  * Shape returned by GET /api/users/[username]/devices (route already coerces
@@ -11,7 +13,10 @@ import { formatRelativeTime } from "@/lib/format";
 export interface ProfileDevice {
   id: string;
   deviceKey: string;
+  /** Resolved label (custom name or fallback) — what public UIs render. */
   displayName: string;
+  /** Raw user-set name, null when the device has never been renamed. */
+  customName: string | null;
   createdAt: string | null;
   lastSubmittedAt: string | null;
   totalTokens: number;
@@ -33,57 +38,11 @@ const SectionHeading = styled.h2`
   margin-bottom: 0.75rem;
 `;
 
-const DevicesContainer = styled.div`
-  border-radius: 1rem;
-  border-width: 1px;
-  border-style: solid;
-  overflow: hidden;
-`;
-
-const DevicesHeader = styled.div`
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 0.75rem;
-  padding: 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-bottom-width: 1px;
-  border-bottom-style: solid;
-
-  @media (min-width: 480px) {
-    grid-template-columns: 1fr auto auto auto;
-    gap: 1rem;
-    padding-left: 1rem;
-    padding-right: 1rem;
-  }
-
-  @media (min-width: 640px) {
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
-  }
-`;
-
-const DeviceRow = styled.div`
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 0.75rem;
-  padding: 0.75rem;
-  align-items: center;
-
-  @media (min-width: 480px) {
-    grid-template-columns: 1fr auto auto auto;
-    gap: 1rem;
-    padding-left: 1rem;
-    padding-right: 1rem;
-  }
-
-  @media (min-width: 640px) {
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
-  }
-`;
+// Card/header/row/metric-cell primitives are shared with ProfileModels via
+// ./listStyles so the two profile tables stay visually in sync.
+const DevicesContainer = ListCard;
+const DevicesHeader = ListHeader;
+const DeviceRow = ListRow;
 
 const DeviceNameCell = styled.div`
   display: flex;
@@ -108,22 +67,14 @@ const DeviceSubText = styled.span`
   font-size: 0.75rem;
 `;
 
-const DeviceMetricCell = styled.div<{ $hideOnMobile?: boolean }>`
-  text-align: right;
-  width: 4.5rem;
-
-  ${(props) =>
-    props.$hideOnMobile &&
-    `
-    @media (max-width: 479px) {
-      display: none;
-    }
-  `}
-
-  @media (min-width: 640px) {
-    width: 5.5rem;
-  }
-`;
+// All device metric columns share the same fixed width, unlike the per-column
+// widths in ProfileModels, so bake them in here.
+function DeviceMetricCell(props: {
+  $hideOnMobile?: boolean;
+  children?: ReactNode;
+}) {
+  return <ListMetricCell $width="4.5rem" $smWidth="5.5rem" {...props} />;
+}
 
 const MetricText = styled.span`
   font-size: 0.8125rem;
