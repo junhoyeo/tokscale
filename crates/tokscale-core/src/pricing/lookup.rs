@@ -446,20 +446,29 @@ impl PricingLookup {
         if let Some(result) = self.exact_match_litellm(model_id) {
             return Some(result);
         }
-        if let Some(result) = self.exact_match_openrouter(model_id) {
+        // An unscoped OpenRouter FULL-KEY match is the id's own canonical key,
+        // so it wins even under a provider hint. The MODEL-PART fallback does
+        // not: it matches "some other provider's model whose model-part equals
+        // this id", which is exactly what a provider hint must override.
+        if let Some(result) = self.exact_match_openrouter_full_key(model_id) {
             return Some(result);
         }
 
         // A provider hint pins the lookup to that provider's catalog: the
-        // provider-scoped models.dev pass must run before the unscoped
-        // separator-normalized fallback below, otherwise a hinted lookup
-        // (e.g. `venice` + `claude-opus-4-6-fast`) would take OpenRouter's
-        // `anthropic/claude-opus-4.6-fast` price instead of the hinted
-        // provider's own `venice/claude-opus-4-6-fast` key.
+        // provider-scoped models.dev pass must run before BOTH the unscoped
+        // OpenRouter model-part fallback here and the separator-normalized
+        // fallback below. Otherwise a hinted lookup (e.g. `venice` + dotted
+        // `claude-opus-4.6-fast`, which already matches OpenRouter's
+        // `anthropic/claude-opus-4.6-fast` model-part) would take the canonical
+        // price instead of the hinted provider's own key. A hint with no
+        // matching key falls through to the canonical resolution below.
         if provider_id.is_some() {
             if let Some(result) = self.exact_match_models_dev_for_provider(model_id, provider_id) {
                 return Some(result);
             }
+        }
+        if let Some(result) = self.exact_match_openrouter_model_part(model_id) {
+            return Some(result);
         }
 
         // Separator-normalized exact passes against the canonical sources
@@ -851,17 +860,26 @@ impl PricingLookup {
     }
 
     fn exact_match_openrouter(&self, model_id: &str) -> Option<LookupResult> {
-        if let Some(key) = self.openrouter_lower.get(model_id) {
-            if let Some(pricing) = self.openrouter.get(key) {
-                return lookup_result_if_usable(pricing, "OpenRouter", key);
-            }
-        }
-        if let Some(key) = self.openrouter_model_part.get(model_id) {
-            if let Some(pricing) = self.openrouter.get(key) {
-                return lookup_result_if_usable(pricing, "OpenRouter", key);
-            }
-        }
-        None
+        self.exact_match_openrouter_full_key(model_id)
+            .or_else(|| self.exact_match_openrouter_model_part(model_id))
+    }
+
+    /// Full-key (`provider/model`) exact match against OpenRouter — the id's
+    /// own canonical key. This wins even under a provider hint.
+    fn exact_match_openrouter_full_key(&self, model_id: &str) -> Option<LookupResult> {
+        let key = self.openrouter_lower.get(model_id)?;
+        let pricing = self.openrouter.get(key)?;
+        lookup_result_if_usable(pricing, "OpenRouter", key)
+    }
+
+    /// Model-part exact match against OpenRouter — matches any provider whose
+    /// model-part equals `model_id`. A provider hint must take precedence over
+    /// this (see `lookup_auto`), otherwise a hinted lookup leaks to a different
+    /// provider's canonical key.
+    fn exact_match_openrouter_model_part(&self, model_id: &str) -> Option<LookupResult> {
+        let key = self.openrouter_model_part.get(model_id)?;
+        let pricing = self.openrouter.get(key)?;
+        lookup_result_if_usable(pricing, "OpenRouter", key)
     }
 
     fn exact_match_models_dev(&self, model_id: &str) -> Option<LookupResult> {
@@ -3801,6 +3819,64 @@ mod tests {
         let unhinted = lookup.lookup("claude-opus-4-6-fast").unwrap();
         assert_eq!(unhinted.matched_key, "anthropic/claude-opus-4.6-fast");
         assert_eq!(unhinted.pricing.input_cost_per_token, Some(30e-6));
+    }
+
+    /// Regression (#707 review, cubic follow-up): the provider-hint pin must
+    /// also beat the unscoped OpenRouter MODEL-PART fallback, not just the
+    /// separator-normalized passes. When the hinted provider's models.dev key
+    /// shares the dotted model-part spelling that OpenRouter already indexes
+    /// (here both `claude-opus-4.6-fast`), an unscoped model-part match would
+    /// otherwise return `anthropic/...` before the provider-scoped pass ran.
+    #[test]
+    fn provider_hint_beats_unscoped_openrouter_model_part_for_dotted_id() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4.6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(30e-6),
+                output_cost_per_token: Some(150e-6),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        // Hinted provider's key uses the SAME dotted spelling OpenRouter
+        // indexes as a model-part — this is what makes the unscoped model-part
+        // pass fire first without the fix.
+        models_dev.insert(
+            "venice/claude-opus-4.6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(36e-6),
+                output_cost_per_token: Some(180e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            openrouter,
+            HashMap::new(),
+            models_dev,
+        );
+
+        // Hinted dotted lookup must pin to venice, not the canonical OpenRouter
+        // model-part it also matches.
+        let hinted = lookup
+            .lookup_with_provider("claude-opus-4.6-fast", Some("venice"))
+            .unwrap();
+        assert_eq!(hinted.matched_key, "venice/claude-opus-4.6-fast");
+        assert_eq!(hinted.pricing.input_cost_per_token, Some(36e-6));
+
+        // Unhinted dotted lookup keeps the canonical OpenRouter resolution.
+        let unhinted = lookup.lookup("claude-opus-4.6-fast").unwrap();
+        assert_eq!(unhinted.matched_key, "anthropic/claude-opus-4.6-fast");
+        assert_eq!(unhinted.pricing.input_cost_per_token, Some(30e-6));
+
+        // A hint for a provider with no matching key must still fall through to
+        // the canonical resolution rather than returning None.
+        let no_match = lookup
+            .lookup_with_provider("claude-opus-4.6-fast", Some("groq"))
+            .unwrap();
+        assert_eq!(no_match.matched_key, "anthropic/claude-opus-4.6-fast");
+        assert_eq!(no_match.pricing.input_cost_per_token, Some(30e-6));
     }
 
     /// Regression (#707 review): the anthropic-first preference in the
