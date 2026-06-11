@@ -438,6 +438,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    MiMoCode = 28 => {
+        id: "micode",
+        root: PathRoot::XdgData,
+        relative: "micode",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -490,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 28);
+        assert_eq!(ClientId::COUNT, 29);
     }
 
     #[test]

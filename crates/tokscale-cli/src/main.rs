@@ -838,6 +838,7 @@ pub enum ClientFilter {
     Cline,
     Gjc,
     Grok,
+    Micode,
     Synthetic,
 }
 
@@ -875,6 +876,7 @@ impl ClientFilter {
             Self::Cline => "cline",
             Self::Gjc => "gjc",
             Self::Grok => "grok",
+            Self::Micode => "micode",
             Self::Synthetic => "synthetic",
         }
     }
@@ -915,6 +917,7 @@ impl ClientFilter {
             Self::Cline => Some(ClientId::Cline),
             Self::Gjc => Some(ClientId::Gjc),
             Self::Grok => Some(ClientId::Grok),
+            Self::Micode => Some(ClientId::MiMoCode),
             Self::Synthetic => None,
         }
     }
@@ -952,6 +955,7 @@ impl ClientFilter {
             ClientId::Cline => Self::Cline,
             ClientId::Gjc => Self::Gjc,
             ClientId::Grok => Self::Grok,
+            ClientId::MiMoCode => Self::Micode,
         }
     }
 
@@ -1061,6 +1065,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub grok: bool,
     #[arg(long, hide = true)]
+    pub micode: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -1132,7 +1138,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 29] = [
+    let legacy: [(bool, ClientFilter); 30] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1161,6 +1167,7 @@ fn build_client_filter_with_defaults(
         (flags.cline, ClientFilter::Cline),
         (flags.gjc, ClientFilter::Gjc),
         (flags.grok, ClientFilter::Grok),
+        (flags.micode, ClientFilter::Micode),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -5943,6 +5950,7 @@ mod tests {
             cline: true,
             gjc: true,
             grok: true,
+            micode: true,
             synthetic: true,
             ..ClientFlags::default()
         };

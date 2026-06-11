@@ -18,6 +18,7 @@ pub mod goose;
 pub mod grok;
 pub mod hermes;
 pub mod kilo;
+pub mod micode;
 pub mod kilocode;
 pub mod kimi;
 pub mod kiro;
