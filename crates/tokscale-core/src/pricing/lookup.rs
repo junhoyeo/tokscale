@@ -50,7 +50,23 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
 // no model information: a fuzzy hit from them can land on any model of the
 // brand (e.g. retired `claude-2.1` eroding to `claude` and billing at an
 // opus-fast key), so such a match is never trustworthy.
-const FUZZY_BLOCKLIST: &[&str] = &["auto", "mini", "chat", "base", "claude", "anthropic"];
+//
+// Generic English words ("model", "router") are blocked for the same reason:
+// they carry no model identity, yet substring-match real priced keys
+// (`azure_ai/model_router`, `kilo/switchpoint/router`). Without this guard an
+// id whose only fuzzy-eligible remnant after suffix stripping is the word
+// `model` (e.g. `model-zero-usage-v1` -> stripped `model`) misprices at the
+// router key's rate. See `fuzzy_match_does_not_resolve_generic_model_token`.
+const FUZZY_BLOCKLIST: &[&str] = &[
+    "auto",
+    "mini",
+    "chat",
+    "base",
+    "claude",
+    "anthropic",
+    "model",
+    "router",
+];
 
 const MAX_LOOKUP_CACHE_ENTRIES: usize = 512;
 const TIERED_PRICING_THRESHOLD_128K_TOKENS: f64 = 128_000.0;
@@ -2795,6 +2811,49 @@ mod tests {
         let result = lookup.lookup_with_provider("gpt-4", Some("azure")).unwrap();
         assert_eq!(result.matched_key, "azure/openai/gpt-4");
         assert_eq!(result.source, "LiteLLM");
+    }
+
+    // Regression: a generic id whose only fuzzy-eligible remnant after suffix
+    // stripping is the bare word `model` (real example seen in local data:
+    // `model-zero-usage-v1`, `test-model`) must NOT fuzzy-match a real priced
+    // key like `azure_ai/model_router`. The word `model` carries no model
+    // identity and is on the FUZZY_BLOCKLIST.
+    #[test]
+    fn fuzzy_match_does_not_resolve_generic_model_token() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure_ai/model_router".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1.4e-7),
+                output_cost_per_token: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        // The bare token must not resolve.
+        assert!(lookup.lookup("model").is_none());
+        // Ids that strip down to the bare `model` token must not misresolve.
+        assert!(lookup.lookup("model-zero-usage-v1").is_none());
+        assert!(lookup.lookup("model-nonzero-usage-v1").is_none());
+        assert!(lookup.lookup("test-model").is_none());
+
+        // But an EXACT key match is still honored — `model-router` is a real
+        // model id, not a fuzzy remnant.
+        let mut litellm2 = HashMap::new();
+        litellm2.insert(
+            "azure/model-router".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1.4e-7),
+                output_cost_per_token: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let lookup2 = PricingLookup::new(litellm2, HashMap::new(), HashMap::new());
+        assert_eq!(
+            lookup2.lookup("model-router").unwrap().matched_key,
+            "azure/model-router"
+        );
     }
 
     #[test]
