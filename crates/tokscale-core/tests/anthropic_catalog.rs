@@ -369,17 +369,20 @@ fn real_local_models_all_resolve_sanely() {
     for entry in parse_fixture() {
         let resolved = lookup_id(&lookup, &entry.id, entry.provider.as_deref());
 
-        // Documented acceptable-None: must stay unpriced.
+        // Documented acceptable-None: must stay unpriced. Flag ANY resolution
+        // (matching the sibling catalog test), not just an input-priced one —
+        // a key with `input: None` but `output: Some(..)` is still a wrong
+        // resolution and must not slip through.
         if entry.input_per_mtok.is_none() {
             if let Some((key, pricing)) = resolved {
-                if pricing.input_cost_per_token.is_some() {
-                    failures.push(format!(
-                        "{} [{}]: documented acceptable-None resolved to priced key {}",
-                        entry.id,
-                        entry.provider.as_deref().unwrap_or("-"),
-                        key
-                    ));
-                }
+                failures.push(format!(
+                    "{} [{}]: documented acceptable-None resolved to {} at in={:?} out={:?}",
+                    entry.id,
+                    entry.provider.as_deref().unwrap_or("-"),
+                    key,
+                    pricing.input_cost_per_token,
+                    pricing.output_cost_per_token
+                ));
             }
             continue;
         }
