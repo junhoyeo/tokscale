@@ -80,6 +80,7 @@
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; 호스팅된 Zed 모델 전용, 외부 ACP 에이전트 제외) | ✅ 지원 |
 | <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`) 및 `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`) | ✅ 지원 |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/` (`GJC_CODING_AGENT_DIR`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`로 오버라이드 가능; Linux/macOS에서는 `$XDG_DATA_HOME/gjc/sessions/`도 확인) | ✅ 지원 |
+| <img width="48px" src="https://github.com/xiaomi.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/xiaomi/mimo-code) | `~/.local/share/micode/mimocode.db` (XDG 데이터 디렉토리; SQLite) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ 지원 |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
@@ -147,7 +148,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 9가지 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Gajae-Code, Grok Build, Synthetic 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Gajae-Code, Grok Build, MiMo Code, Synthetic 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -325,7 +326,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `zed`, `kiro`, `trae`, `gjc`, `synthetic`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `zed`, `kiro`, `trae`, `cline`, `gjc`, `grok`, `warp`, `micode`, `synthetic`.
 
 > **Deprecation 안내**: 기존 단일 클라이언트 플래그 (`--opencode`, `--claude`, `--codex` 등)는 하위 호환성을 위해 여전히 동작하지만 `--help`에서 숨겨졌으며 다음 메이저 릴리스에서 제거됩니다. 가능한 한 `--client`로 마이그레이션하세요. 인터랙티브 터미널에서 레거시 플래그를 사용하면 한 줄 경고가 출력됩니다.
 
@@ -658,7 +659,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Gajae-Code, Grok Build, Synthetic)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Gajae-Code, Grok Build, MiMo Code, Synthetic)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -971,6 +972,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync`는 현재 macOS/Linux에서만 지원 |
 | Trae | `~/.config/tokscale/trae-cache/sessions/` | `%APPDATA%\tokscale\trae-cache\sessions\` | `tokscale trae sync`로 한 번 동기화; 설치된 Trae IDE 또는 Trae Solo 데스크톱 앱에서 자격 증명 자동 발견 |
 | Grok Build | `~/.grok/sessions/` | `%USERPROFILE%\.grok\sessions\` | `GROK_HOME` 환경변수로 설정 가능; `updates.jsonl` 세션 업데이트 파싱 |
+| MiMo Code | `~/.local/share/micode/` | `%USERPROFILE%\.local\share\micode\` | XDG 데이터 디렉토리 사용; SQLite 데이터베이스 `mimocode.db` |
 | Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | `GJC_CODING_AGENT_DIR`로 설정 가능 (`GJC_CONFIG_DIR`/`PI_CONFIG_DIR`도 지원; Linux/macOS에서는 `$XDG_DATA_HOME/gjc/sessions/`도 확인) |
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 
@@ -1319,6 +1321,41 @@ Codebuff(이전 Manicode)는 채팅별 JSON 파일을 저장합니다. Tokscale�
 Synthetic은 기존 에이전트 세션을 후처리하여 재귀속합니다. `hf:` 접두사 모델 ID 또는 `synthetic` / `glhf` / `octofriend` provider를 감지하면 해당 메시지를 `synthetic` 소스로 처리합니다.
 
 또한 `~/.local/share/octofriend/sqlite.db`를 감지해 토큰 정보가 있는 레코드를 파싱합니다.
+
+### MiMo Code
+
+위치: `~/.local/share/micode/mimocode.db` (XDG 데이터 디렉토리)
+
+MiMo Code는 SQLite 데이터베이스에 세션 데이터를 저장합니다. Tokscale은 워크스페이스 컨텍스트를 위해 `session` 테이블과 조인된 `message` 테이블을 쿼리합니다:
+
+```sql
+SELECT m.id, m.session_id, m.data, NULLIF(s.directory, '') AS workspace_root
+FROM message m
+LEFT JOIN session s ON s.id = m.session_id
+WHERE json_extract(m.data, '$.role') = 'assistant'
+  AND json_extract(m.data, '$.tokens') IS NOT NULL
+```
+
+`data` 컬럼은 JSON 형식이며 다음 토큰 관련 필드를 포함합니다:
+```json
+{
+  "role": "assistant",
+  "modelID": "claude-sonnet-4",
+  "providerID": "anthropic",
+  "cost": 0.0032,
+  "tokens": {
+    "input": 1200,
+    "output": 450,
+    "reasoning": 0,
+    "cache": { "read": 800, "write": 0 }
+  },
+  "time": { "created": 1780410897.0, "completed": 1780410912.0 },
+  "agent": "micode",
+  "path": { "root": "/Users/me/project" }
+}
+```
+
+Tokscale은 타임스탬프, 모델, 프로바이더, 토큰 수, 비용, 에이전트 이름의 지문을 사용하여 포크된 세션 간 메시지를 중복 제거합니다.
 
 ## 가격
 
