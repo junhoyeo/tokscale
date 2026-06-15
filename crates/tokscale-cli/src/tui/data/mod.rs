@@ -1450,6 +1450,10 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Grok),
             "Grok Build"
         );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::AntigravityCli),
+            "Antigravity CLI"
+        );
     }
 
     #[test]
@@ -1480,6 +1484,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), 'n');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gjc), 'g');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Grok), 'u');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::AntigravityCli), 'f');
     }
 
     #[test]
@@ -1567,6 +1572,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('u'),
             Some(ClientId::Grok)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('f'),
+            Some(ClientId::AntigravityCli)
         );
     }
 

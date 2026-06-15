@@ -186,18 +186,30 @@ fn file_modified_ms(path: &Path) -> i64 {
 }
 
 /// Convert a `file://` URI to a filesystem path, percent-decoding UTF-8 escapes
-/// (workspace paths on cloud drives can be percent-encoded CJK). A leading slash
-/// before a Windows drive letter (`/C:/...` from `file:///C:/...`) is dropped;
-/// POSIX absolute paths (`/home/...`) are preserved.
+/// (workspace paths on cloud drives can be percent-encoded CJK). After the
+/// scheme the remainder is `authority + path`; the three shapes RFC 8089 (and
+/// Antigravity) produce are handled:
+/// - `file:///C:/x`        → `C:/x`            (empty authority, Windows drive: drop the leading slash)
+/// - `file:///home/x`      → `/home/x`         (empty authority, POSIX absolute: keep as-is)
+/// - `file://host/share/x` → `//host/share/x`  (non-empty authority → UNC: restore the leading `//`)
 fn file_uri_to_path(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("file://")?;
-    let bytes = rest.as_bytes();
-    let rest = if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' {
-        &rest[1..]
+    let decoded = percent_decode(uri.strip_prefix("file://")?);
+    let bytes = decoded.as_bytes();
+    let path = if bytes.first() == Some(&b'/') {
+        // Empty authority. Drop the slash before a Windows drive letter
+        // (`/C:/...`); keep POSIX absolute paths untouched.
+        if bytes.len() >= 3 && bytes[2] == b':' {
+            decoded[1..].to_string()
+        } else {
+            decoded
+        }
     } else {
-        rest
+        // Non-empty authority (`host/share/...`) is a UNC path; restore the
+        // leading `//` so `normalize_workspace_key` preserves the UNC prefix
+        // instead of collapsing it into the path body.
+        format!("//{decoded}")
     };
-    Some(percent_decode(rest))
+    Some(path)
 }
 
 fn percent_decode(input: &str) -> String {
@@ -473,5 +485,31 @@ mod tests {
         // tolerated (timestamp falls back to file mtime).
         assert_eq!(messages.len(), 1);
         assert!(messages[0].timestamp > 0);
+    }
+
+    #[test]
+    fn file_uri_to_path_handles_windows_posix_and_unc() {
+        // Empty authority + Windows drive: drop the slash before the drive.
+        assert_eq!(
+            file_uri_to_path("file:///C:/Users/Frank/obsidian-vault").as_deref(),
+            Some("C:/Users/Frank/obsidian-vault")
+        );
+        // Empty authority + POSIX absolute: keep as-is.
+        assert_eq!(
+            file_uri_to_path("file:///home/frank/project").as_deref(),
+            Some("/home/frank/project")
+        );
+        // Non-empty authority is a UNC path; the host must survive as `//host`.
+        assert_eq!(
+            file_uri_to_path("file://server/share/code").as_deref(),
+            Some("//server/share/code")
+        );
+        // Percent-encoded UTF-8 (CJK) decodes to valid characters.
+        assert_eq!(
+            file_uri_to_path("file:///D:/%E6%88%91%E7%9A%84").as_deref(),
+            Some("D:/我的")
+        );
+        // Anything without the scheme prefix is rejected.
+        assert_eq!(file_uri_to_path("not-a-file-uri"), None);
     }
 }
