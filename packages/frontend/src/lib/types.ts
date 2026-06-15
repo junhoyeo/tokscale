@@ -28,6 +28,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "synthetic",
   "gjc",
   "grok",
+  "antigravity-cli",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

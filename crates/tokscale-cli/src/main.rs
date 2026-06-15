@@ -838,6 +838,8 @@ pub enum ClientFilter {
     Cline,
     Gjc,
     Grok,
+    #[value(name = "antigravity-cli")]
+    AntigravityCli,
     Synthetic,
 }
 
@@ -875,6 +877,7 @@ impl ClientFilter {
             Self::Cline => "cline",
             Self::Gjc => "gjc",
             Self::Grok => "grok",
+            Self::AntigravityCli => "antigravity-cli",
             Self::Synthetic => "synthetic",
         }
     }
@@ -915,6 +918,7 @@ impl ClientFilter {
             Self::Cline => Some(ClientId::Cline),
             Self::Gjc => Some(ClientId::Gjc),
             Self::Grok => Some(ClientId::Grok),
+            Self::AntigravityCli => Some(ClientId::AntigravityCli),
             Self::Synthetic => None,
         }
     }
@@ -952,6 +956,7 @@ impl ClientFilter {
             ClientId::Cline => Self::Cline,
             ClientId::Gjc => Self::Gjc,
             ClientId::Grok => Self::Grok,
+            ClientId::AntigravityCli => Self::AntigravityCli,
         }
     }
 
@@ -3713,6 +3718,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     ClientId::Gemini => "Gemini CLI",
                     ClientId::Cursor => "Cursor IDE",
                     ClientId::Kimi => "Kimi CLI",
+                    ClientId::AntigravityCli => "Antigravity CLI",
                     _ => client_ui::display_name(client),
                 }
                 .to_string();
@@ -5949,10 +5955,11 @@ mod tests {
         let result = build_client_filter_with_defaults(flags, &[]);
         assert!(result.is_some());
         let sources = result.unwrap();
-        // ClientId::COUNT does not include synthetic, but ClientFilter does.
-        let expected_len = tokscale_core::ClientId::iter().count() + 1;
-        assert_eq!(sources.len(), expected_len);
-        for required in [
+        // Every legacy per-client boolean flag plus synthetic. New clients such
+        // as `antigravity-cli` are canonical `--client` only and never get a
+        // deprecated boolean flag, so this set is fixed and is NOT derived from
+        // `ClientId::COUNT` (which now exceeds the legacy flag count).
+        let required = [
             "opencode",
             "claude",
             "codex",
@@ -5982,10 +5989,12 @@ mod tests {
             "gjc",
             "grok",
             "synthetic",
-        ] {
+        ];
+        assert_eq!(sources.len(), required.len());
+        for required_id in required {
             assert!(
-                sources.contains(&required.to_string()),
-                "missing client filter id: {required}"
+                sources.contains(&required_id.to_string()),
+                "missing client filter id: {required_id}"
             );
         }
     }
