@@ -855,8 +855,7 @@ fn scan_all_clients_with_env_strategy_inner(
     // MiMo Code: SQLite database(s) at ~/.local/share/micode/mimocode*.db
     if enabled.contains(&ClientId::MiMoCode) {
         let micode_xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME")
-                .unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
         } else {
             format!("{}/.local/share", home_dir)
         };

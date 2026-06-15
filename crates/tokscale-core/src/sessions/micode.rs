@@ -519,10 +519,7 @@ mod tests {
             messages[0].workspace_key.as_deref(),
             Some("/Users/alice/micode-repo")
         );
-        assert_eq!(
-            messages[0].workspace_label.as_deref(),
-            Some("micode-repo")
-        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("micode-repo"));
     }
 
     #[test]
