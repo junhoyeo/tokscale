@@ -89,7 +89,8 @@ fn parse_gen_metadata(
     // constant #1 is, to the best of our reverse-engineering, the agent's fixed
     // system prompt and counts as billable input; if an official schema later
     // contradicts this, only the input total needs revisiting.
-    let input = varint_field(usage, 1).unwrap_or(0) as i64 + varint_field(usage, 2).unwrap_or(0) as i64;
+    let input =
+        varint_field(usage, 1).unwrap_or(0) as i64 + varint_field(usage, 2).unwrap_or(0) as i64;
     let cache_read = varint_field(usage, 5).unwrap_or(0) as i64;
     let output = varint_field(usage, 9).unwrap_or(0) as i64;
     let reasoning = varint_field(usage, 10).unwrap_or(0) as i64;
@@ -139,10 +140,7 @@ fn parse_gen_metadata(
 /// timestamp (the per-turn proto carries only relative timings); this mirrors
 /// the IDE path, which falls back to `chatStartMetadata.createdAt` for every
 /// retry. Falls back to the file mtime when the blob is absent or undecodable.
-fn read_trajectory_meta(
-    conn: &Connection,
-    path: &Path,
-) -> (i64, Option<String>, Option<String>) {
+fn read_trajectory_meta(conn: &Connection, path: &Path) -> (i64, Option<String>, Option<String>) {
     let blob: Option<Vec<u8>> = conn
         .query_row(
             "SELECT data FROM trajectory_metadata_blob LIMIT 1",
@@ -443,7 +441,10 @@ mod tests {
         assert_eq!(message.tokens.reasoning, 40);
         assert_eq!(message.dedup_key.as_deref(), Some("resp-1"));
         assert_eq!(message.timestamp, 1_781_502_653_000);
-        assert_eq!(message.workspace_key.as_deref(), Some("C:/Users/Frank/obsidian-vault"));
+        assert_eq!(
+            message.workspace_key.as_deref(),
+            Some("C:/Users/Frank/obsidian-vault")
+        );
         assert_eq!(message.workspace_label.as_deref(), Some("obsidian-vault"));
     }
 
@@ -462,10 +463,8 @@ mod tests {
 
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE gen_metadata (idx integer, data blob, size integer);",
-            )
-            .unwrap();
+            conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+                .unwrap();
             for (idx, blob) in [
                 (0, build_gen_metadata()),
                 (1, build_gen_metadata()),
