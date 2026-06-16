@@ -1,8 +1,9 @@
 //! Kiro session parser
 //!
-//! Parses session data from two sources:
+//! Parses session data from three sources:
 //! 1. File-based: ~/.kiro/sessions/cli/*.json + *.jsonl
-//! 2. SQLite-based: ~/Library/Application Support/kiro-cli/data.sqlite3
+//! 2. Kiro IDE globalStorage snapshots
+//! 3. SQLite-based: ~/Library/Application Support/kiro-cli/data.sqlite3
 //!    (conversations_v2 table with history[*].request_metadata)
 //!
 //! Turn-level token counts are currently zero in both sources, so usage is
@@ -14,6 +15,7 @@ use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use rusqlite::Connection;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -94,6 +96,16 @@ struct KiroMessageContent {
 }
 
 pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
+    if is_kiro_global_storage_path(path)
+        || path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("chat"))
+            .unwrap_or(false)
+    {
+        return parse_kiro_global_storage_file(path);
+    }
+
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     let mut json_bytes = match std::fs::read(path) {
@@ -311,6 +323,156 @@ fn session_id_from_path(path: &Path) -> String {
         .to_string()
 }
 
+fn is_kiro_global_storage_path(path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+    path_str.contains("globalStorage") && path_str.contains("kiro.kiroagent")
+}
+
+#[derive(Debug, Default)]
+struct KiroSnapshotTextCounts {
+    prompt_chars: usize,
+    assistant_chars: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KiroSnapshotRole {
+    Prompt,
+    Assistant,
+}
+
+fn collect_kiro_snapshot_text(
+    value: &Value,
+    counts: &mut KiroSnapshotTextCounts,
+    mut role: Option<KiroSnapshotRole>,
+) {
+    match value {
+        Value::Object(map) => {
+            if let Some(kind) = map.get("role").and_then(|v| v.as_str()) {
+                role = match kind {
+                    "user" | "prompt" => Some(KiroSnapshotRole::Prompt),
+                    "assistant" | "response" => Some(KiroSnapshotRole::Assistant),
+                    _ => role,
+                };
+            }
+            if let Some(kind) = map.get("type").and_then(|v| v.as_str()) {
+                role = match kind {
+                    "user" | "prompt" => Some(KiroSnapshotRole::Prompt),
+                    "assistant" | "response" => Some(KiroSnapshotRole::Assistant),
+                    _ => role,
+                };
+            }
+
+            for key in ["prompt", "response", "content", "text", "message"] {
+                if let Some(item) = map.get(key) {
+                    collect_kiro_snapshot_text(item, counts, role);
+                }
+            }
+
+            for key in ["messages", "conversation", "chat", "transcript", "entries", "events", "history"] {
+                if let Some(item) = map.get(key) {
+                    collect_kiro_snapshot_text(item, counts, role);
+                }
+            }
+
+            for key in ["parts", "items", "nodes"] {
+                if let Some(item) = map.get(key) {
+                    collect_kiro_snapshot_text(item, counts, role);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_kiro_snapshot_text(item, counts, role);
+            }
+        }
+        Value::String(text) => match role {
+            Some(KiroSnapshotRole::Assistant) => counts.assistant_chars += text.chars().count(),
+            Some(KiroSnapshotRole::Prompt) => counts.prompt_chars += text.chars().count(),
+            _ => counts.assistant_chars += text.chars().count(),
+        },
+        _ => {}
+    }
+}
+
+fn find_kiro_snapshot_model_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in ["model_id", "modelId", "model"] {
+                if let Some(model) = map.get(key).and_then(|v| v.as_str()) {
+                    let model = model.trim();
+                    if !model.is_empty() {
+                        return Some(model.to_string());
+                    }
+                }
+            }
+
+            for key in ["messages", "conversation", "chat", "transcript", "entries", "events", "history", "content", "text", "message"] {
+                if let Some(item) = map.get(key) {
+                    if let Some(model) = find_kiro_snapshot_model_id(item) {
+                        return Some(model);
+                    }
+                }
+            }
+
+            None
+        }
+        Value::Array(items) => items.iter().find_map(find_kiro_snapshot_model_id),
+        _ => None,
+    }
+}
+
+fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
+    let fallback_timestamp = file_modified_timestamp_ms(path);
+    let json = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return Vec::new(),
+    };
+
+    let value: Value = match serde_json::from_str(&json) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+
+    let session_id = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let model_id = find_kiro_snapshot_model_id(&value).unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+    let workspace_key = None;
+    let workspace_label = None;
+
+    let mut counts = KiroSnapshotTextCounts::default();
+    collect_kiro_snapshot_text(&value, &mut counts, None);
+
+    let input = estimate_tokens(counts.prompt_chars);
+    let output = estimate_tokens(counts.assistant_chars);
+    if input + output == 0 {
+        return Vec::new();
+    }
+
+    let mut message = UnifiedMessage::new_with_dedup(
+        CLIENT_ID,
+        model_id,
+        PROVIDER_ID,
+        session_id.clone(),
+        fallback_timestamp,
+        TokenBreakdown {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        Some(format!("{}:globalstorage", session_id)),
+    );
+    message.message_count = 1;
+    message.is_turn_start = true;
+    message.set_workspace(workspace_key, workspace_label);
+    vec![message]
+}
+
 pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let conn = match Connection::open_with_flags(
         db_path,
@@ -376,7 +538,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .model_info
             .as_ref()
             .and_then(|info| info.model_id.as_deref())
-            .filter(|m| !m.trim().is_empty() && *m != "auto")
+            .filter(|m| !m.trim().is_empty())
             .unwrap_or(UNKNOWN_MODEL)
             .to_string();
         let workspace_key = normalize_workspace_key(&cwd);
@@ -460,6 +622,7 @@ struct KiroDbRequestMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -542,7 +705,7 @@ not valid json at all
         .unwrap();
         let value = r#"{
             "model_info": {
-                "model_id": "claude-sonnet-4-5",
+                "model_id": "auto",
                 "context_window_tokens": 1000
             },
             "history": [{
@@ -564,9 +727,38 @@ not valid json at all
         let messages = parse_kiro_sqlite(&db_path);
 
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "auto");
         assert_eq!(messages[0].timestamp, 1770983426000);
         assert_eq!(messages[0].duration_ms, Some(1500));
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 10);
+    }
+
+    #[test]
+    fn test_parse_kiro_global_storage_chat_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join(
+            "Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-a/execution.chat",
+        );
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(
+            &file_path,
+            r#"{
+                "model": "auto",
+                "messages": [
+                    {"role": "user", "content": "hello world"},
+                    {"role": "assistant", "content": "response text"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_kiro_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "kiro");
+        assert_eq!(messages[0].model_id, "auto");
+        assert!(messages[0].tokens.input > 0);
+        assert!(messages[0].tokens.output > 0);
     }
 }
