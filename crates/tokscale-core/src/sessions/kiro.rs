@@ -388,7 +388,7 @@ fn collect_kiro_snapshot_text(
         Value::String(text) => match role {
             Some(KiroSnapshotRole::Assistant) => counts.assistant_chars += text.chars().count(),
             Some(KiroSnapshotRole::Prompt) => counts.prompt_chars += text.chars().count(),
-            _ => counts.assistant_chars += text.chars().count(),
+            None => {}
         },
         _ => {}
     }
@@ -760,5 +760,30 @@ not valid json at all
         assert_eq!(messages[0].model_id, "auto");
         assert!(messages[0].tokens.input > 0);
         assert!(messages[0].tokens.output > 0);
+    }
+
+    #[test]
+    fn test_parse_kiro_global_storage_ignores_unknown_roles() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join(
+            "Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-a/execution.chat",
+        );
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(
+            &file_path,
+            r#"{
+                "model": "auto",
+                "messages": [
+                    {"role": "mystery", "content": "mystery text"},
+                    {"role": "assistant", "content": "response text"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_kiro_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 4);
     }
 }
