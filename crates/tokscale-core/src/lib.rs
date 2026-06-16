@@ -1126,6 +1126,27 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // Command Code does not persist token usage or cost locally, so tokens are
+    // estimated and priced. The model id comes from ~/.commandcode/config.json
+    // (canonicalized, e.g. "MiniMaxAI/MiniMax-M3-Free" -> "MiniMax-M3"), not the
+    // transcript, so the source cache — which fingerprints only the transcript
+    // file — is bypassed: otherwise a config.json model change would leave stale
+    // cached pricing until the transcript itself changed.
+    let commandcode_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::CommandCode)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::commandcode::parse_commandcode_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(commandcode_messages);
+
     // gjc (gajae-code) JSONL sessions. Binding note N1: this cached cluster
     // MUST obtain messages via the non-repricing parser and apply the A1
     // Hermes guard explicitly (reprice only when the embedded usage.cost.total
@@ -2307,6 +2328,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let pi_count = pi_msgs.len() as i32;
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
+
+    let commandcode_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::CommandCode)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::commandcode::parse_commandcode_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let commandcode_count = commandcode_msgs.len() as i32;
+    counts.set(ClientId::CommandCode, commandcode_count);
+    messages.extend(commandcode_msgs);
 
     // gjc (gajae-code) JSONL sessions. This non-cached path produces
     // ParsedMessage (no cost field) and has no pricing service in scope, so
