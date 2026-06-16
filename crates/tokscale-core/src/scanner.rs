@@ -637,12 +637,8 @@ fn kiro_global_storage_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf
     if cfg!(target_os = "windows") {
         if use_env_roots {
             if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
-                roots.push(
-                    PathBuf::from(&app_data).join("Kiro/User/globalStorage/kiro.kiroagent"),
-                );
-                roots.push(
-                    PathBuf::from(&app_data).join("kiro/User/globalStorage/kiro.kiroagent"),
-                );
+                roots.push(PathBuf::from(&app_data).join("Kiro/User/globalStorage/kiro.kiroagent"));
+                roots.push(PathBuf::from(&app_data).join("kiro/User/globalStorage/kiro.kiroagent"));
             }
         }
 

@@ -368,7 +368,15 @@ fn collect_kiro_snapshot_text(
                 }
             }
 
-            for key in ["messages", "conversation", "chat", "transcript", "entries", "events", "history"] {
+            for key in [
+                "messages",
+                "conversation",
+                "chat",
+                "transcript",
+                "entries",
+                "events",
+                "history",
+            ] {
                 if let Some(item) = map.get(key) {
                     collect_kiro_snapshot_text(item, counts, role);
                 }
@@ -406,7 +414,18 @@ fn find_kiro_snapshot_model_id(value: &Value) -> Option<String> {
                 }
             }
 
-            for key in ["messages", "conversation", "chat", "transcript", "entries", "events", "history", "content", "text", "message"] {
+            for key in [
+                "messages",
+                "conversation",
+                "chat",
+                "transcript",
+                "entries",
+                "events",
+                "history",
+                "content",
+                "text",
+                "message",
+            ] {
                 if let Some(item) = map.get(key) {
                     if let Some(model) = find_kiro_snapshot_model_id(item) {
                         return Some(model);
