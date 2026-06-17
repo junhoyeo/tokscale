@@ -476,9 +476,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
     // Attribute the snapshot to its IDE workspace folder, mirroring how the
     // file/sqlite Kiro paths derive workspace identity from `cwd`.
     let workspace = kiro_global_storage_workspace(path);
-    let workspace_key = workspace
-        .as_deref()
-        .and_then(normalize_workspace_key);
+    let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
     // Namespace the session id by workspace so two workspaces that both contain
     // e.g. `execution.chat` do not collapse into one session / dedup_key.
