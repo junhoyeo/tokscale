@@ -19,8 +19,6 @@ use std::path::Path;
 pub struct MiMoCodeMessage {
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(rename = "sessionID", default)]
-    pub session_id: Option<String>,
     pub role: String,
     #[serde(rename = "modelID")]
     pub model_id: Option<String>,
@@ -58,12 +56,18 @@ pub struct MiMoCodeTokens {
     pub input: i64,
     pub output: i64,
     pub reasoning: Option<i64>,
-    pub cache: MiMoCodeCache,
+    // MiMo assistant messages may omit `cache` (or its read/write); without a
+    // default a missing field would fail deserialization and silently drop the
+    // message in the parse loop's `Err(_) => continue` arm.
+    #[serde(default)]
+    pub cache: Option<MiMoCodeCache>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct MiMoCodeCache {
+    #[serde(default)]
     pub read: i64,
+    #[serde(default)]
     pub write: i64,
 }
 
@@ -219,8 +223,9 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let input = tokens.input.max(0);
         let output = tokens.output.max(0);
         let reasoning = tokens.reasoning.unwrap_or(0).max(0);
-        let cache_read = tokens.cache.read.max(0);
-        let cache_write = tokens.cache.write.max(0);
+        let cache = tokens.cache.unwrap_or_default();
+        let cache_read = cache.read.max(0);
+        let cache_write = cache.write.max(0);
         let cost = msg.cost.unwrap_or(0.0).max(0.0);
         let dedup_key = message_id.clone().unwrap_or(row_id);
         let fingerprint = MiMoCodeSqliteFingerprint {
@@ -242,6 +247,8 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             model_id,
             provider_id,
             session_id,
+            // `time.created` is epoch milliseconds (matching OpenCode);
+            // UnifiedMessage's timestamp_to_date treats it as ms.
             msg.time.created as i64,
             TokenBreakdown {
                 input,
@@ -553,5 +560,41 @@ mod tests {
         let messages = parse_micode_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent, Some("Build".to_string()));
+    }
+
+    #[test]
+    fn test_parse_micode_sqlite_missing_cache_defaults_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_micode.db");
+        let conn = create_micode_sqlite_db(&db_path);
+
+        // Assistant payload with no `cache` object at all — must parse (not be
+        // dropped) with cache tokens defaulting to 0.
+        let data_json = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 100
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg_no_cache", "ses_001", data_json],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_micode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 500);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+        assert_eq!(messages[0].tokens.cache_write, 0);
     }
 }

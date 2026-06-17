@@ -80,7 +80,7 @@
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; 호스팅된 Zed 모델 전용, 외부 ACP 에이전트 제외) | ✅ 지원 |
 | <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`) 및 `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`) | ✅ 지원 |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/` (`GJC_CODING_AGENT_DIR`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`로 오버라이드 가능; Linux/macOS에서는 `$XDG_DATA_HOME/gjc/sessions/`도 확인) | ✅ 지원 |
-| <img width="48px" src="https://github.com/xiaomi.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/xiaomi/mimo-code) | `~/.local/share/micode/mimocode.db` (XDG 데이터 디렉토리; SQLite) | ✅ 지원 |
+| <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db` (XDG 데이터 디렉토리; SQLite) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ 지원 |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
@@ -1349,7 +1349,7 @@ WHERE json_extract(m.data, '$.role') = 'assistant'
     "reasoning": 0,
     "cache": { "read": 800, "write": 0 }
   },
-  "time": { "created": 1780410897.0, "completed": 1780410912.0 },
+  "time": { "created": 1780410897000, "completed": 1780410912000 },
   "agent": "micode",
   "path": { "root": "/Users/me/project" }
 }

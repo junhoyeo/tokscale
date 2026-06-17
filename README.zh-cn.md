@@ -80,7 +80,7 @@
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db`（macOS: `~/Library/Application Support/Zed/threads/threads.db`；Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`；仅限托管 Zed 模型，不含外部 ACP 代理） | ✅ 支持 |
 | <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json`（+ `*.jsonl`）和 `~/.local/share/kiro-cli/data.sqlite3`（macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`） | ✅ 支持 |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/`（可通过 `GJC_CODING_AGENT_DIR`、`GJC_CONFIG_DIR`、`PI_CONFIG_DIR` 覆盖；Linux/macOS 上 `$XDG_DATA_HOME/gjc/sessions/` 亦支持） | ✅ 支持 |
-| <img width="48px" src="https://github.com/xiaomi.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/xiaomi/mimo-code) | `~/.local/share/micode/mimocode.db`（XDG 数据目录；SQLite） | ✅ 支持 |
+| <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db`（XDG 数据目录；SQLite） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | 通过 `hf:` 模型前缀或 `synthetic` provider 从其他来源重归属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） | ✅ 支持 |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
@@ -1354,7 +1354,7 @@ WHERE json_extract(m.data, '$.role') = 'assistant'
     "reasoning": 0,
     "cache": { "read": 800, "write": 0 }
   },
-  "time": { "created": 1780410897.0, "completed": 1780410912.0 },
+  "time": { "created": 1780410897000, "completed": 1780410912000 },
   "agent": "micode",
   "path": { "root": "/Users/me/project" }
 }

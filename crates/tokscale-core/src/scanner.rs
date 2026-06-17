@@ -860,9 +860,8 @@ fn scan_all_clients_with_env_strategy_inner(
             format!("{}/.local/share", home_dir)
         };
         let micode_data_dir = PathBuf::from(format!("{}/micode", micode_xdg_data));
+        // `discover_micode_dbs` already returns a sorted list.
         result.micode_dbs = discover_micode_dbs(&micode_data_dir);
-        result.micode_dbs.sort_unstable();
-        result.micode_dbs.dedup();
     }
 
     if enabled.contains(&ClientId::Kimi) {
@@ -1868,6 +1867,17 @@ mod tests {
         assert!(!is_opencode_db_filename("opencode-stable/beta.db"));
         assert!(!is_opencode_db_filename("auth.json"));
         assert!(!is_opencode_db_filename("other.db"));
+    }
+
+    #[test]
+    fn test_is_micode_db_filename_accepts_default_and_channel_rejects_sidecars() {
+        // Default and channel-suffixed db names are accepted.
+        assert!(is_micode_db_filename("mimocode.db"));
+        assert!(is_micode_db_filename("mimocode-stable.db"));
+        assert!(is_micode_db_filename("mimocode-nightly.db"));
+        // WAL/SHM sidecar files share the prefix — must be ignored.
+        assert!(!is_micode_db_filename("mimocode.db-wal"));
+        assert!(!is_micode_db_filename("mimocode.db-shm"));
     }
 
     #[test]

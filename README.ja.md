@@ -80,7 +80,7 @@
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db`（macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; ホスティング済み Zed モデル専用、外部 ACP エージェントは対象外） | ✅ 対応 |
 | <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json`（+ `*.jsonl`）と `~/.local/share/kiro-cli/data.sqlite3`（macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`） | ✅ 対応 |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/`（`GJC_CODING_AGENT_DIR`、`GJC_CONFIG_DIR`、`PI_CONFIG_DIR` でオーバーライド可能；Linux/macOS では `$XDG_DATA_HOME/gjc/sessions/` も解決） | ✅ 対応 |
-| <img width="48px" src="https://github.com/xiaomi.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/xiaomi/mimo-code) | `~/.local/share/micode/mimocode.db`（XDG データディレクトリ；SQLite） | ✅ 対応 |
+| <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db`（XDG データディレクトリ；SQLite） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:`モデルや`synthetic`プロバイダを検出して他ソースから再帰属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） | ✅ 対応 |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
@@ -1350,7 +1350,7 @@ WHERE json_extract(m.data, '$.role') = 'assistant'
     "reasoning": 0,
     "cache": { "read": 800, "write": 0 }
   },
-  "time": { "created": 1780410897.0, "completed": 1780410912.0 },
+  "time": { "created": 1780410897000, "completed": 1780410912000 },
   "agent": "micode",
   "path": { "root": "/Users/me/project" }
 }
