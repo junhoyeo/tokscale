@@ -438,6 +438,54 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Jcode = 28 => {
+        id: "jcode",
+        root: PathRoot::EnvVar {
+            var: "JCODE_HOME",
+            fallback_relative: ".jcode",
+        },
+        relative: "sessions",
+        pattern: "session_*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    CommandCode = 29 => {
+        id: "commandcode",
+        root: PathRoot::Home,
+        relative: ".commandcode/projects",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    MiMoCode = 30 => {
+        id: "micode",
+        root: PathRoot::XdgData,
+        relative: "micode",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    // Antigravity CLI stores each conversation as a SQLite `.db` under
+    // `~/.gemini/antigravity-cli/conversations/`. Unlike the IDE-backed
+    // `Antigravity` client (which pulls usage from a running language server
+    // over RPC and caches JSONL under the config dir), the CLI usage sits on
+    // disk and is read directly — no RPC, no `antigravity sync` needed. Honors
+    // `GEMINI_CLI_HOME` so a relocated Gemini home is picked up.
+    AntigravityCli = 31 => {
+        id: "antigravity-cli",
+        root: PathRoot::EnvVar {
+            var: "GEMINI_CLI_HOME",
+            fallback_relative: ".gemini",
+        },
+        relative: "antigravity-cli/conversations",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -490,7 +538,21 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 28);
+        assert_eq!(ClientId::COUNT, 32);
+    }
+
+    #[test]
+    fn test_commandcode_client_registered_as_local_session_source() {
+        let client =
+            ClientId::from_str("commandcode").expect("commandcode client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/tmp/home/.commandcode/projects"
+        );
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
     }
 
     #[test]
@@ -520,6 +582,15 @@ mod tests {
         let client = ClientId::from_str("grok").expect("grok client should be registered");
         assert_eq!(client.data().relative_path, "sessions");
         assert_eq!(client.data().pattern, "updates.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+    }
+
+    #[test]
+    fn test_jcode_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("jcode").expect("jcode client should be registered");
+        assert_eq!(client.data().relative_path, "sessions");
+        assert_eq!(client.data().pattern, "session_*.json");
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
     }

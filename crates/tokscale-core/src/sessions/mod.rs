@@ -4,10 +4,12 @@
 
 pub mod amp;
 pub mod antigravity;
+pub mod antigravity_cli;
 pub mod claudecode;
 pub mod cline;
 pub mod codebuff;
 pub mod codex;
+pub mod commandcode;
 pub mod copilot;
 pub mod crush;
 pub mod cursor;
@@ -17,10 +19,12 @@ pub mod gjc;
 pub mod goose;
 pub mod grok;
 pub mod hermes;
+pub mod jcode;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
 pub mod kiro;
+pub mod micode;
 pub mod mux;
 pub mod openclaw;
 pub mod opencode;

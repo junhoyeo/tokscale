@@ -888,6 +888,11 @@ pub enum ClientFilter {
     Cline,
     Gjc,
     Grok,
+    Jcode,
+    Commandcode,
+    Micode,
+    #[value(name = "antigravity-cli")]
+    AntigravityCli,
     Synthetic,
 }
 
@@ -925,6 +930,10 @@ impl ClientFilter {
             Self::Cline => "cline",
             Self::Gjc => "gjc",
             Self::Grok => "grok",
+            Self::Jcode => "jcode",
+            Self::Commandcode => "commandcode",
+            Self::Micode => "micode",
+            Self::AntigravityCli => "antigravity-cli",
             Self::Synthetic => "synthetic",
         }
     }
@@ -965,6 +974,10 @@ impl ClientFilter {
             Self::Cline => Some(ClientId::Cline),
             Self::Gjc => Some(ClientId::Gjc),
             Self::Grok => Some(ClientId::Grok),
+            Self::Jcode => Some(ClientId::Jcode),
+            Self::Commandcode => Some(ClientId::CommandCode),
+            Self::Micode => Some(ClientId::MiMoCode),
+            Self::AntigravityCli => Some(ClientId::AntigravityCli),
             Self::Synthetic => None,
         }
     }
@@ -1002,6 +1015,10 @@ impl ClientFilter {
             ClientId::Cline => Self::Cline,
             ClientId::Gjc => Self::Gjc,
             ClientId::Grok => Self::Grok,
+            ClientId::Jcode => Self::Jcode,
+            ClientId::CommandCode => Self::Commandcode,
+            ClientId::MiMoCode => Self::Micode,
+            ClientId::AntigravityCli => Self::AntigravityCli,
         }
     }
 
@@ -1111,6 +1128,12 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub grok: bool,
     #[arg(long, hide = true)]
+    pub jcode: bool,
+    #[arg(long, hide = true)]
+    pub commandcode: bool,
+    #[arg(long, hide = true)]
+    pub micode: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -1182,7 +1205,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 29] = [
+    let legacy: [(bool, ClientFilter); 32] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1211,6 +1234,9 @@ fn build_client_filter_with_defaults(
         (flags.cline, ClientFilter::Cline),
         (flags.gjc, ClientFilter::Gjc),
         (flags.grok, ClientFilter::Grok),
+        (flags.jcode, ClientFilter::Jcode),
+        (flags.commandcode, ClientFilter::Commandcode),
+        (flags.micode, ClientFilter::Micode),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -3586,6 +3612,8 @@ fn capitalize_client(client: &str) -> String {
         "grok" => "Grok Build".to_string(),
         "pi" => "Pi".to_string(),
         "gjc" => "Gajae-Code".to_string(),
+        "jcode" => "Jcode".to_string(),
+        "commandcode" => "Command Code".to_string(),
         other => other.to_string(),
     }
 }
@@ -3763,6 +3791,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     ClientId::Gemini => "Gemini CLI",
                     ClientId::Cursor => "Cursor IDE",
                     ClientId::Kimi => "Kimi CLI",
+                    ClientId::AntigravityCli => "Antigravity CLI",
                     _ => client_ui::display_name(client),
                 }
                 .to_string();
@@ -5993,16 +6022,20 @@ mod tests {
             cline: true,
             gjc: true,
             grok: true,
+            jcode: true,
+            commandcode: true,
+            micode: true,
             synthetic: true,
             ..ClientFlags::default()
         };
         let result = build_client_filter_with_defaults(flags, &[]);
         assert!(result.is_some());
         let sources = result.unwrap();
-        // ClientId::COUNT does not include synthetic, but ClientFilter does.
-        let expected_len = tokscale_core::ClientId::iter().count() + 1;
-        assert_eq!(sources.len(), expected_len);
-        for required in [
+        // Every legacy per-client boolean flag plus synthetic. New clients such
+        // as `antigravity-cli` are canonical `--client` only and never get a
+        // deprecated boolean flag, so this set is fixed and is NOT derived from
+        // `ClientId::COUNT` (which now exceeds the legacy flag count).
+        let required = [
             "opencode",
             "claude",
             "codex",
@@ -6031,11 +6064,15 @@ mod tests {
             "cline",
             "gjc",
             "grok",
+            "jcode",
+            "commandcode",
             "synthetic",
-        ] {
+        ];
+        assert_eq!(sources.len(), required.len());
+        for required_id in required {
             assert!(
-                sources.contains(&required.to_string()),
-                "missing client filter id: {required}"
+                sources.contains(&required_id.to_string()),
+                "missing client filter id: {required_id}"
             );
         }
     }
@@ -6870,6 +6907,11 @@ mod tests {
     #[test]
     fn test_capitalize_client_pi() {
         assert_eq!(capitalize_client("pi"), "Pi");
+    }
+
+    #[test]
+    fn test_capitalize_client_jcode() {
+        assert_eq!(capitalize_client("jcode"), "Jcode");
     }
 
     #[test]

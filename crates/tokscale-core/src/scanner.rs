@@ -88,6 +88,8 @@ pub struct ScanResult {
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
+    /// MiMo Code SQLite databases discovered under the data dir.
+    pub micode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -104,6 +106,7 @@ impl Default for ScanResult {
             zed_db: None,
             kiro_db: None,
             crush_dbs: Vec::new(),
+            micode_dbs: Vec::new(),
             opencode_json_dir: None,
         }
     }
@@ -312,8 +315,16 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "session-*.json" => {
                     file_name.starts_with("session-") && file_name.ends_with(".json")
                 }
+                "session_*.json" => {
+                    file_name.starts_with("session_") && file_name.ends_with(".json")
+                }
                 "T-*.json" => file_name.starts_with("T-") && file_name.ends_with(".json"),
                 "*.settings.json" => file_name.ends_with(".settings.json"),
+                "kiro-globalstorage" => {
+                    file_name.ends_with(".chat")
+                        || file_name.ends_with(".json")
+                        || path.extension().is_none()
+                }
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "updates.jsonl" => file_name == "updates.jsonl",
@@ -322,6 +333,10 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "chat-messages.json" => file_name == "chat-messages.json",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                // Antigravity CLI conversation databases. `ends_with(".db")`
+                // naturally rejects the `.db-wal`/`.db-shm`/`.db-journal`
+                // sidecars SQLite writes alongside the main file.
+                "*.db" => file_name.ends_with(".db"),
                 _ => false,
             }
         })
@@ -492,6 +507,59 @@ fn is_opencode_db_filename(name: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Discover MiMo Code SQLite databases under the given data directory.
+///
+/// Matches `mimocode.db` and `mimocode-<channel>.db` (channel names
+/// sanitized with the same `[a-zA-Z0-9._-]` character class that MiMo
+/// Code's `getChannelPath` normalizes to). Ignores WAL/SHM sidecar files.
+pub(crate) fn discover_micode_dbs(data_dir: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut dbs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() && !entry.path().is_file() {
+                return None;
+            }
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if !is_micode_db_filename(name) {
+                return None;
+            }
+            Some(path)
+        })
+        .collect();
+
+    dbs.sort_unstable();
+    dbs
+}
+
+/// Returns true if `name` matches the MiMo Code db naming rule:
+/// `mimocode.db` or `mimocode-<channel>.db`.
+fn is_micode_db_filename(name: &str) -> bool {
+    let stem = match name.strip_suffix(".db") {
+        Some(stem) => stem,
+        None => return false,
+    };
+    if stem == "mimocode" {
+        return true;
+    }
+    let channel = match stem.strip_prefix("mimocode-") {
+        Some(channel) => channel,
+        None => return false,
+    };
+    if channel.is_empty() {
+        return false;
+    }
+    channel
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 fn crush_db_path(data_dir: &Path) -> Option<PathBuf> {
     let candidate = data_dir.join("crush.db");
     candidate.is_file().then_some(candidate)
@@ -588,6 +656,16 @@ fn push_unique_scan_task(
     client_id: ClientId,
     raw_path: impl Into<PathBuf>,
 ) {
+    push_unique_scan_task_with_pattern(tasks, seen, client_id, raw_path, client_id.data().pattern);
+}
+
+fn push_unique_scan_task_with_pattern(
+    tasks: &mut Vec<(ClientId, String, &'static str)>,
+    seen: &mut HashSet<(ClientId, PathBuf)>,
+    client_id: ClientId,
+    raw_path: impl Into<PathBuf>,
+    pattern: &'static str,
+) {
     let raw_path = raw_path.into();
     if raw_path.as_os_str().is_empty() {
         return;
@@ -595,9 +673,49 @@ fn push_unique_scan_task(
 
     let key = std::fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
     if seen.insert((client_id, key)) {
-        let pattern = client_id.data().pattern;
         tasks.push((client_id, raw_path.to_string_lossy().to_string(), pattern));
     }
+}
+
+fn kiro_global_storage_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from(format!(
+            "{}/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/Library/Application Support/kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/.config/Kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/.config/kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+    ];
+
+    if cfg!(target_os = "windows") {
+        if use_env_roots {
+            if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+                roots.push(PathBuf::from(&app_data).join("Kiro/User/globalStorage/kiro.kiroagent"));
+                roots.push(PathBuf::from(&app_data).join("kiro/User/globalStorage/kiro.kiroagent"));
+            }
+        }
+
+        roots.push(PathBuf::from(format!(
+            "{}/AppData/Roaming/Kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )));
+        roots.push(PathBuf::from(format!(
+            "{}/AppData/Roaming/kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )));
+    }
+
+    roots
 }
 
 /// Merge user-configured OpenCode db paths from [`ScannerSettings`] into the
@@ -722,6 +840,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Codebuff
                 | ClientId::Kimi
                 | ClientId::Gjc
+                | ClientId::MiMoCode
         ) {
             continue;
         }
@@ -793,6 +912,18 @@ fn scan_all_clients_with_env_strategy_inner(
             ClientId::OpenCode,
             opencode_path,
         );
+    }
+
+    // MiMo Code: SQLite database(s) at ~/.local/share/micode/mimocode*.db
+    if enabled.contains(&ClientId::MiMoCode) {
+        let micode_xdg_data = if use_env_roots {
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+        } else {
+            format!("{}/.local/share", home_dir)
+        };
+        let micode_data_dir = PathBuf::from(format!("{}/micode", micode_xdg_data));
+        // `discover_micode_dbs` already returns a sorted list.
+        result.micode_dbs = discover_micode_dbs(&micode_data_dir);
     }
 
     if enabled.contains(&ClientId::Kimi) {
@@ -1074,6 +1205,27 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Kiro) {
+        let kiro_cli_path = ClientId::Kiro
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        push_unique_scan_task_with_pattern(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Kiro,
+            kiro_cli_path,
+            "*.json",
+        );
+
+        for root in kiro_global_storage_roots(home_dir, use_env_roots) {
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Kiro,
+                root,
+                "kiro-globalstorage",
+            );
+        }
+
         let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
         if xdg_path.is_file() {
             result.kiro_db = Some(xdg_path);
@@ -1470,6 +1622,28 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_directory_kiro_globalstorage_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        let root = path.join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent");
+        let workspace = root.join("workspace-a");
+        fs::create_dir_all(&workspace).unwrap();
+        File::create(workspace.join("execution.chat")).unwrap();
+        File::create(workspace.join("session.json")).unwrap();
+        File::create(workspace.join("execution")).unwrap();
+        File::create(workspace.join("index.sqlite")).unwrap();
+
+        let files = scan_directory(root.to_str().unwrap(), "kiro-globalstorage");
+        let names: Vec<_> = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert_eq!(names, vec!["execution", "execution.chat", "session.json"]);
+    }
+
+    #[test]
     fn test_scan_directory_nonexistent() {
         let files = scan_directory("/nonexistent/path/that/does/not/exist", "*.json");
         assert!(files.is_empty());
@@ -1560,6 +1734,21 @@ mod tests {
         file.write_all(b"{}").unwrap();
     }
 
+    fn setup_mock_kiro_dir(base: &std::path::Path) {
+        let kiro_path = base.join(".kiro/sessions/cli");
+        fs::create_dir_all(&kiro_path).unwrap();
+        File::create(kiro_path.join("session-001.json")).unwrap();
+    }
+
+    fn setup_mock_kiro_global_storage_dir(base: &std::path::Path) {
+        let root = base.join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent");
+        let workspace = root.join("workspace-a");
+        fs::create_dir_all(&workspace).unwrap();
+        File::create(workspace.join("execution.chat")).unwrap();
+        File::create(workspace.join("session.json")).unwrap();
+        File::create(workspace.join("execution")).unwrap();
+    }
+
     fn setup_mock_omp_dir(base: &std::path::Path) {
         let omp_path = base.join(".omp/agent/sessions/--omp-test--");
         fs::create_dir_all(&omp_path).unwrap();
@@ -1597,6 +1786,13 @@ mod tests {
         let mut file = File::create(grok_session.join("updates.jsonl")).unwrap();
         file.write_all(b"{\"method\":\"session/update\"}\n")
             .unwrap();
+    }
+
+    fn setup_mock_jcode_dir(base: &std::path::Path) {
+        let jcode_sessions = base.join(".jcode/sessions");
+        fs::create_dir_all(&jcode_sessions).unwrap();
+        File::create(jcode_sessions.join("session_fixture.json")).unwrap();
+        File::create(jcode_sessions.join("not-a-session.json")).unwrap();
     }
 
     fn setup_mock_openclaw_dir(base: &std::path::Path) {
@@ -1798,6 +1994,17 @@ mod tests {
         assert!(!is_opencode_db_filename("opencode-stable/beta.db"));
         assert!(!is_opencode_db_filename("auth.json"));
         assert!(!is_opencode_db_filename("other.db"));
+    }
+
+    #[test]
+    fn test_is_micode_db_filename_accepts_default_and_channel_rejects_sidecars() {
+        // Default and channel-suffixed db names are accepted.
+        assert!(is_micode_db_filename("mimocode.db"));
+        assert!(is_micode_db_filename("mimocode-stable.db"));
+        assert!(is_micode_db_filename("mimocode-nightly.db"));
+        // WAL/SHM sidecar files share the prefix — must be ignored.
+        assert!(!is_micode_db_filename("mimocode.db-wal"));
+        assert!(!is_micode_db_filename("mimocode.db-shm"));
     }
 
     #[test]
@@ -2595,6 +2802,29 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_all_clients_kiro_includes_cli_and_global_storage() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_kiro_dir(home);
+        setup_mock_kiro_global_storage_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["kiro".to_string()]);
+        assert_eq!(result.get(ClientId::Kiro).len(), 4);
+        assert!(result
+            .get(ClientId::Kiro)
+            .iter()
+            .any(|p| p.ends_with("session-001.json")));
+        assert!(result
+            .get(ClientId::Kiro)
+            .iter()
+            .any(|p| p.ends_with("execution.chat")));
+        assert!(result
+            .get(ClientId::Kiro)
+            .iter()
+            .any(|p| p.ends_with("execution")));
+    }
+
+    #[test]
     fn test_scan_crush_registry_resolves_relative_and_absolute_data_dirs() {
         let dir = TempDir::new().unwrap();
         let project_a = dir.path().join("project-a");
@@ -2883,6 +3113,23 @@ mod tests {
         );
         assert_eq!(result.get(ClientId::Grok).len(), 1);
         assert!(result.get(ClientId::Grok)[0].ends_with("updates.jsonl"));
+        assert!(result.get(ClientId::OpenCode).is_empty());
+        assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_jcode() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_jcode_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["jcode".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Jcode).len(), 1);
+        assert!(result.get(ClientId::Jcode)[0].ends_with("session_fixture.json"));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }
