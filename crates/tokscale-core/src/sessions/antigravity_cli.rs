@@ -432,7 +432,9 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
         assert_eq!(message.client, "antigravity-cli");
-        assert_eq!(message.model_id, "gemini-3-flash-a");
+        // `gemini-3-flash-a` (raw #19 responseModel) is alias-resolved to the
+        // priced canonical model so cost lookups don't fall through to 0.
+        assert_eq!(message.model_id, "gemini-3-flash-preview");
         assert_eq!(message.provider_id, "google");
         assert_eq!(message.session_id, "session-test");
         assert_eq!(message.tokens.input, 1632); // 1132 + 500
@@ -484,6 +486,72 @@ mod tests {
         // tolerated (timestamp falls back to file mtime).
         assert_eq!(messages.len(), 1);
         assert!(messages[0].timestamp > 0);
+    }
+
+    #[test]
+    fn emitted_model_string_resolves_to_priced_alias() {
+        // The parser emits the raw `#19` responseModel (`gemini-3-flash-a`) and
+        // relies on the alias table to map it onto a priced model. Without the
+        // alias the cost would resolve to 0, so lock the resolution here at the
+        // unit level (an end-to-end calculate_cost path needs the live pricing
+        // dataset, which is unavailable in unit tests).
+        assert_eq!(
+            pricing::aliases::resolve_alias("gemini-3-flash-a"),
+            Some("gemini-3-flash-preview")
+        );
+    }
+
+    #[test]
+    fn output_and_thinking_map_to_fields_9_and_10() {
+        // Lock the field-mapping contract asserted by the module doc-comment:
+        // `#9 + #10 == #3` (output + thinking == stored total output). Build a
+        // synthetic blob where #9=output, #10=thinking, #3=output+thinking and
+        // verify the parsed message keeps #9 as output and #10 as reasoning.
+        let output = 300u64;
+        let thinking = 40u64;
+        let total_output = output + thinking; // #3
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, 1132)); // fixed system prompt
+        usage.extend(enc_varint(2, 500)); // new input
+        usage.extend(enc_varint(3, total_output)); // stored total output (#3)
+        usage.extend(enc_varint(9, output)); // output (#9)
+        usage.extend(enc_varint(10, thinking)); // thinking (#10)
+        usage.extend(enc_len(11, b"invariant-1"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(&blob, "session", 0, &mut seen).unwrap();
+        assert_eq!(message.tokens.output, output as i64);
+        assert_eq!(message.tokens.reasoning, thinking as i64);
+        // The contract: the two component fields sum to the stored total.
+        assert_eq!(
+            (message.tokens.output + message.tokens.reasoning) as u64,
+            total_output
+        );
+    }
+
+    #[test]
+    fn malformed_blob_returns_none_without_panic() {
+        let mut seen = HashSet::new();
+        // Empty buffer: no chatModel sub-message.
+        assert!(parse_gen_metadata(&[], "s", 0, &mut seen).is_none());
+        // Garbage bytes that do not form a valid wire-format message.
+        assert!(parse_gen_metadata(&[0xff, 0xff, 0xff, 0xff], "s", 0, &mut seen).is_none());
+        // A length-delimited #1 whose declared length overruns the buffer:
+        // exercises the ProtoReader bounds check (must stop, not index OOB).
+        let truncated = [(1u8 << 3) | 2, 0x7f, 0x01, 0x02];
+        assert!(parse_gen_metadata(&truncated, "s", 0, &mut seen).is_none());
+        // Valid outer #1 wrapping a #4 usage whose declared length overruns:
+        // the inner reader must bail without panicking.
+        let inner = [(4u8 << 3) | 2, 0x40, 0x00];
+        let mut outer = vec![(1u8 << 3) | 2, inner.len() as u8];
+        outer.extend_from_slice(&inner);
+        assert!(parse_gen_metadata(&outer, "s", 0, &mut seen).is_none());
     }
 
     #[test]
