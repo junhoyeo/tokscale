@@ -46,7 +46,27 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
     "openrouter/",
 ];
 
-const FUZZY_BLOCKLIST: &[&str] = &["auto", "mini", "chat", "base"];
+// Bare brand tokens ("claude", "anthropic") are blocked because they contain
+// no model information: a fuzzy hit from them can land on any model of the
+// brand (e.g. retired `claude-2.1` eroding to `claude` and billing at an
+// opus-fast key), so such a match is never trustworthy.
+//
+// Generic English words ("model", "router") are blocked for the same reason:
+// they carry no model identity, yet substring-match real priced keys
+// (`azure_ai/model_router`, `kilo/switchpoint/router`). Without this guard an
+// id whose only fuzzy-eligible remnant after suffix stripping is the word
+// `model` (e.g. `model-zero-usage-v1` -> stripped `model`) misprices at the
+// router key's rate. See `fuzzy_match_does_not_resolve_generic_model_token`.
+const FUZZY_BLOCKLIST: &[&str] = &[
+    "auto",
+    "mini",
+    "chat",
+    "base",
+    "claude",
+    "anthropic",
+    "model",
+    "router",
+];
 
 const MAX_LOOKUP_CACHE_ENTRIES: usize = 512;
 const TIERED_PRICING_THRESHOLD_128K_TOKENS: f64 = 128_000.0;
@@ -152,13 +172,34 @@ impl PricingLookup {
         }
 
         let mut models_dev_lower = HashMap::with_capacity(models_dev.len());
-        let mut models_dev_model_part = HashMap::with_capacity(models_dev.len());
+        let mut models_dev_model_part: HashMap<String, String> =
+            HashMap::with_capacity(models_dev.len());
         for key in &models_dev_keys {
             let lower = key.to_lowercase();
             models_dev_lower.insert(lower.clone(), key.clone());
+            // Only priced entries enter the model-part index: the
+            // deterministic anthropic-first preference must choose among
+            // keys that can actually price usage, otherwise an unpriced
+            // `anthropic/<model>` row would shadow a priced reseller row
+            // and bill the model at zero cost. (The models.dev loader only
+            // emits entries with input+output costs — see
+            // `models_dev::cost_to_pricing` — but this constructor is
+            // public, so the index guards itself too.)
+            if !models_dev.get(key).is_some_and(has_any_usable_pricing) {
+                continue;
+            }
             if let Some(model_part) = lower.split('/').next_back() {
                 if model_part != lower {
-                    models_dev_model_part.insert(model_part.to_string(), key.clone());
+                    match models_dev_model_part.entry(model_part.to_string()) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if prefers_model_part_key(key, entry.get()) {
+                                entry.insert(key.clone());
+                            }
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(key.clone());
+                        }
+                    }
                 }
             }
         }
@@ -421,13 +462,39 @@ impl PricingLookup {
         if let Some(result) = self.exact_match_litellm(model_id) {
             return Some(result);
         }
-        if let Some(result) = self.exact_match_openrouter(model_id) {
-            return Some(result);
-        }
-        if let Some(result) = self.exact_match_models_dev_with_provider(model_id, provider_id) {
+        // An unscoped OpenRouter FULL-KEY match is the id's own canonical key,
+        // so it wins even under a provider hint. The MODEL-PART fallback does
+        // not: it matches "some other provider's model whose model-part equals
+        // this id", which is exactly what a provider hint must override.
+        if let Some(result) = self.exact_match_openrouter_full_key(model_id) {
             return Some(result);
         }
 
+        // A provider hint pins the lookup to that provider's catalog: the
+        // provider-scoped models.dev pass must run before BOTH the unscoped
+        // OpenRouter model-part fallback here and the separator-normalized
+        // fallback below. Otherwise a hinted lookup (e.g. `venice` + dotted
+        // `claude-opus-4.6-fast`, which already matches OpenRouter's
+        // `anthropic/claude-opus-4.6-fast` model-part) would take the canonical
+        // price instead of the hinted provider's own key. A hint with no
+        // matching key falls through to the canonical resolution below.
+        if provider_id.is_some() {
+            if let Some(result) = self.exact_match_models_dev_for_provider(model_id, provider_id) {
+                return Some(result);
+            }
+        }
+        if let Some(result) = self.exact_match_openrouter_model_part(model_id) {
+            return Some(result);
+        }
+
+        // Separator-normalized exact passes against the canonical sources
+        // (LiteLLM + OpenRouter) run BEFORE the models.dev model-part pass so
+        // ids like `claude-opus-4-6-fast` hit the canonical
+        // `anthropic/claude-opus-4.6-fast` key instead of a reseller's
+        // `venice/claude-opus-4-6-fast` markup. models.dev stays the
+        // long-tail fallback below. This reorder only preempts models.dev
+        // for UNhinted lookups: the provider-scoped passes above and below
+        // keep provider-hinted resolutions pinned to the hinted provider.
         if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) = choose_best_source_result(
                 self.exact_match_litellm_for_provider(&version_normalized, provider_id),
@@ -436,12 +503,25 @@ impl PricingLookup {
             ) {
                 return Some(result);
             }
+            if provider_id.is_some() {
+                if let Some(result) =
+                    self.exact_match_models_dev_for_provider(&version_normalized, provider_id)
+                {
+                    return Some(result);
+                }
+            }
             if let Some(result) = self.exact_match_litellm(&version_normalized) {
                 return Some(result);
             }
             if let Some(result) = self.exact_match_openrouter(&version_normalized) {
                 return Some(result);
             }
+        }
+
+        if let Some(result) = self.exact_match_models_dev_with_provider(model_id, provider_id) {
+            return Some(result);
+        }
+        if let Some(version_normalized) = normalize_version_separator(model_id) {
             if let Some(result) =
                 self.exact_match_models_dev_with_provider(&version_normalized, provider_id)
             {
@@ -796,17 +876,26 @@ impl PricingLookup {
     }
 
     fn exact_match_openrouter(&self, model_id: &str) -> Option<LookupResult> {
-        if let Some(key) = self.openrouter_lower.get(model_id) {
-            if let Some(pricing) = self.openrouter.get(key) {
-                return lookup_result_if_usable(pricing, "OpenRouter", key);
-            }
-        }
-        if let Some(key) = self.openrouter_model_part.get(model_id) {
-            if let Some(pricing) = self.openrouter.get(key) {
-                return lookup_result_if_usable(pricing, "OpenRouter", key);
-            }
-        }
-        None
+        self.exact_match_openrouter_full_key(model_id)
+            .or_else(|| self.exact_match_openrouter_model_part(model_id))
+    }
+
+    /// Full-key (`provider/model`) exact match against OpenRouter — the id's
+    /// own canonical key. This wins even under a provider hint.
+    fn exact_match_openrouter_full_key(&self, model_id: &str) -> Option<LookupResult> {
+        let key = self.openrouter_lower.get(model_id)?;
+        let pricing = self.openrouter.get(key)?;
+        lookup_result_if_usable(pricing, "OpenRouter", key)
+    }
+
+    /// Model-part exact match against OpenRouter — matches any provider whose
+    /// model-part equals `model_id`. A provider hint must take precedence over
+    /// this (see `lookup_auto`), otherwise a hinted lookup leaks to a different
+    /// provider's canonical key.
+    fn exact_match_openrouter_model_part(&self, model_id: &str) -> Option<LookupResult> {
+        let key = self.openrouter_model_part.get(model_id)?;
+        let pricing = self.openrouter.get(key)?;
+        lookup_result_if_usable(pricing, "OpenRouter", key)
     }
 
     fn exact_match_models_dev(&self, model_id: &str) -> Option<LookupResult> {
@@ -1661,13 +1750,41 @@ where
 }
 
 fn strips_claude_numeric_minor(candidate: &str, first_stripped_segment: &str) -> bool {
-    !first_stripped_segment.is_empty()
-        && first_stripped_segment.chars().all(|c| c.is_ascii_digit())
-        && (candidate.contains("claude")
-            || candidate.contains("opus")
-            || candidate.contains("sonnet")
-            || candidate.contains("haiku"))
-        && contains_delimited_fragment(candidate, "4")
+    if !is_version_segment(first_stripped_segment) {
+        return false;
+    }
+    let claude_branded = candidate.contains("claude")
+        || candidate.contains("opus")
+        || candidate.contains("sonnet")
+        || candidate.contains("haiku");
+    if !claude_branded {
+        return false;
+    }
+    // Refuse to strip a version segment when it would either peel a minor off
+    // a still-versioned claude-4 candidate (claude-sonnet-4-5 -> claude-sonnet-4)
+    // or erode the id's only version, leaving a bare brand token
+    // (claude-2.1 -> claude). Both candidates would resolve to a different
+    // model's price. Dated forms (claude-3-5-sonnet-20241022) keep stripping:
+    // their candidate retains a version, so neither arm fires.
+    contains_delimited_fragment(candidate, "4") || !candidate.bytes().any(|b| b.is_ascii_digit())
+}
+
+/// True for a bare version segment produced by splitting an id on `-`:
+/// digits with at most one interior dot (`4`, `6`, `2.1`, `20241022`).
+fn is_version_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_digit() || !bytes[bytes.len() - 1].is_ascii_digit() {
+        return false;
+    }
+    let mut seen_dot = false;
+    for &byte in bytes {
+        match byte {
+            b'0'..=b'9' => {}
+            b'.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn has_unrecognized_claude_four_minor(model_id: &str) -> bool {
@@ -1716,6 +1833,26 @@ where
     }
 
     None
+}
+
+/// Deterministic provider choice when multiple models.dev providers share a
+/// model part: the canonical `anthropic/` namespace wins outright; otherwise
+/// the shorter key is preferred (the historical winner of the insertion-order
+/// race, keeping existing resolutions stable), with lexicographic order
+/// breaking length ties so the result no longer depends on HashMap iteration
+/// order.
+fn prefers_model_part_key(candidate: &str, existing: &str) -> bool {
+    let candidate_lower = candidate.to_lowercase();
+    let existing_lower = existing.to_lowercase();
+    let is_anthropic = |key: &str| key.split('/').next() == Some("anthropic");
+    match (
+        is_anthropic(&candidate_lower),
+        is_anthropic(&existing_lower),
+    ) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => (candidate_lower.len(), candidate_lower) < (existing_lower.len(), existing_lower),
+    }
 }
 
 fn is_original_provider(key: &str) -> bool {
@@ -2676,6 +2813,49 @@ mod tests {
         assert_eq!(result.source, "LiteLLM");
     }
 
+    // Regression: a generic id whose only fuzzy-eligible remnant after suffix
+    // stripping is the bare word `model` (real example seen in local data:
+    // `model-zero-usage-v1`, `test-model`) must NOT fuzzy-match a real priced
+    // key like `azure_ai/model_router`. The word `model` carries no model
+    // identity and is on the FUZZY_BLOCKLIST.
+    #[test]
+    fn fuzzy_match_does_not_resolve_generic_model_token() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure_ai/model_router".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1.4e-7),
+                output_cost_per_token: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        // The bare token must not resolve.
+        assert!(lookup.lookup("model").is_none());
+        // Ids that strip down to the bare `model` token must not misresolve.
+        assert!(lookup.lookup("model-zero-usage-v1").is_none());
+        assert!(lookup.lookup("model-nonzero-usage-v1").is_none());
+        assert!(lookup.lookup("test-model").is_none());
+
+        // But an EXACT key match is still honored — `model-router` is a real
+        // model id, not a fuzzy remnant.
+        let mut litellm2 = HashMap::new();
+        litellm2.insert(
+            "azure/model-router".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1.4e-7),
+                output_cost_per_token: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let lookup2 = PricingLookup::new(litellm2, HashMap::new(), HashMap::new());
+        assert_eq!(
+            lookup2.lookup("model-router").unwrap().matched_key,
+            "azure/model-router"
+        );
+    }
+
     #[test]
     fn test_provider_hint_normalizes_openai_codex_alias() {
         let mut litellm = HashMap::new();
@@ -3558,6 +3738,291 @@ mod tests {
         );
     }
 
+    /// Regression (post-#634 catalog audit, bug 1): retired `claude-2.x` ids
+    /// (present in historical usage logs, absent from every pricing dataset)
+    /// must resolve to None, not to a modern model's price. Previously
+    /// `try_strip_unknown_suffix` eroded `claude-2.1` to bare `claude`
+    /// (the "2.1" segment failed the all-digits version check), which then
+    /// fuzzy-matched `anthropic/claude-opus-4.7-fast` at $30/$150. The #634
+    /// family veto was bypassed because `claude-2.1` carries no
+    /// opus/sonnet/haiku/fable token.
+    #[test]
+    fn claude_2x_never_fuzzy_matches_modern_models() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4.7-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(30e-6),
+                output_cost_per_token: Some(150e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(HashMap::new(), openrouter, HashMap::new());
+
+        for id in ["claude-2.1", "claude-2.0", "claude", "anthropic"] {
+            assert!(
+                lookup.lookup(id).is_none(),
+                "id {id} must resolve unpriced, never to another model's price"
+            );
+        }
+    }
+
+    /// Positive control for the claude-2.x guards: when a dataset actually
+    /// prices `claude-2.1`, it still resolves — the guards only block the
+    /// erosion-to-bare-brand path, not legitimate dataset hits.
+    #[test]
+    fn claude_2x_still_resolves_when_dataset_prices_it() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-2.1".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(8e-6),
+                output_cost_per_token: Some(24e-6),
+                ..Default::default()
+            },
+        );
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4.7-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(30e-6),
+                output_cost_per_token: Some(150e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+
+        let result = lookup.lookup("claude-2.1").unwrap();
+        assert_eq!(result.matched_key, "claude-2.1");
+        assert_eq!(result.pricing.input_cost_per_token, Some(8e-6));
+    }
+
+    /// Regression (post-#634 catalog audit, bug 2): `claude-opus-4-6-fast`
+    /// must hit the canonical OpenRouter `anthropic/claude-opus-4.6-fast`
+    /// key ($30/$150) via separator normalization, not Models.dev's reseller
+    /// `venice/claude-opus-4-6-fast` markup ($36/$180). Previously the
+    /// models.dev model-part pass ran before the version-normalized
+    /// OpenRouter exact pass in `lookup_auto`.
+    #[test]
+    fn canonical_fast_price_beats_reseller_markup() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4.6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(30e-6),
+                output_cost_per_token: Some(150e-6),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "venice/claude-opus-4-6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(36e-6),
+                output_cost_per_token: Some(180e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            openrouter,
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup.lookup("claude-opus-4-6-fast").unwrap();
+        assert_eq!(result.matched_key, "anthropic/claude-opus-4.6-fast");
+        assert_eq!(result.pricing.input_cost_per_token, Some(30e-6));
+    }
+
+    /// Regression (#707 review): a provider hint pins the lookup to that
+    /// provider's catalog. The canonical-source reorder asserted by
+    /// `canonical_fast_price_beats_reseller_markup` only applies to unhinted
+    /// lookups; with `provider_id = Some("venice")` the provider-scoped
+    /// models.dev pass must win over OpenRouter's unscoped `anthropic/...`
+    /// row, so provider-aware callers get the hinted provider's price.
+    #[test]
+    fn provider_hint_keeps_models_dev_provider_key_over_unscoped_canonical() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4.6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(30e-6),
+                output_cost_per_token: Some(150e-6),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "venice/claude-opus-4-6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(36e-6),
+                output_cost_per_token: Some(180e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            openrouter,
+            HashMap::new(),
+            models_dev,
+        );
+
+        let hinted = lookup
+            .lookup_with_provider("claude-opus-4-6-fast", Some("venice"))
+            .unwrap();
+        assert_eq!(hinted.matched_key, "venice/claude-opus-4-6-fast");
+        assert_eq!(hinted.pricing.input_cost_per_token, Some(36e-6));
+
+        // Unhinted lookups keep the canonical resolution.
+        let unhinted = lookup.lookup("claude-opus-4-6-fast").unwrap();
+        assert_eq!(unhinted.matched_key, "anthropic/claude-opus-4.6-fast");
+        assert_eq!(unhinted.pricing.input_cost_per_token, Some(30e-6));
+    }
+
+    /// Regression (#707 review, cubic follow-up): the provider-hint pin must
+    /// also beat the unscoped OpenRouter MODEL-PART fallback, not just the
+    /// separator-normalized passes. When the hinted provider's models.dev key
+    /// shares the dotted model-part spelling that OpenRouter already indexes
+    /// (here both `claude-opus-4.6-fast`), an unscoped model-part match would
+    /// otherwise return `anthropic/...` before the provider-scoped pass ran.
+    #[test]
+    fn provider_hint_beats_unscoped_openrouter_model_part_for_dotted_id() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/claude-opus-4.6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(30e-6),
+                output_cost_per_token: Some(150e-6),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        // Hinted provider's key uses the SAME dotted spelling OpenRouter
+        // indexes as a model-part — this is what makes the unscoped model-part
+        // pass fire first without the fix.
+        models_dev.insert(
+            "venice/claude-opus-4.6-fast".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(36e-6),
+                output_cost_per_token: Some(180e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            openrouter,
+            HashMap::new(),
+            models_dev,
+        );
+
+        // Hinted dotted lookup must pin to venice, not the canonical OpenRouter
+        // model-part it also matches.
+        let hinted = lookup
+            .lookup_with_provider("claude-opus-4.6-fast", Some("venice"))
+            .unwrap();
+        assert_eq!(hinted.matched_key, "venice/claude-opus-4.6-fast");
+        assert_eq!(hinted.pricing.input_cost_per_token, Some(36e-6));
+
+        // Unhinted dotted lookup keeps the canonical OpenRouter resolution.
+        let unhinted = lookup.lookup("claude-opus-4.6-fast").unwrap();
+        assert_eq!(unhinted.matched_key, "anthropic/claude-opus-4.6-fast");
+        assert_eq!(unhinted.pricing.input_cost_per_token, Some(30e-6));
+
+        // A hint for a provider with no matching key must still fall through to
+        // the canonical resolution rather than returning None.
+        let no_match = lookup
+            .lookup_with_provider("claude-opus-4.6-fast", Some("groq"))
+            .unwrap();
+        assert_eq!(no_match.matched_key, "anthropic/claude-opus-4.6-fast");
+        assert_eq!(no_match.pricing.input_cost_per_token, Some(30e-6));
+    }
+
+    /// Regression (#707 review): the anthropic-first preference in the
+    /// models.dev model-part index must only choose among priced keys. An
+    /// unpriced (all-None) `anthropic/<model>` row must not shadow a priced
+    /// reseller row, which would bill the model at zero cost.
+    #[test]
+    fn unpriced_anthropic_models_dev_key_does_not_shadow_priced_reseller() {
+        let mut models_dev = HashMap::new();
+        models_dev.insert("anthropic/model-x".to_string(), ModelPricing::default());
+        models_dev.insert(
+            "reseller/model-x".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(36e-6),
+                output_cost_per_token: Some(180e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup.lookup("model-x").unwrap();
+        assert_eq!(result.matched_key, "reseller/model-x");
+        assert_eq!(result.pricing.input_cost_per_token, Some(36e-6));
+    }
+
+    /// After the lookup_auto reorder, models.dev must remain the long-tail
+    /// fallback for ids no canonical source knows.
+    #[test]
+    fn models_dev_still_covers_long_tail_after_reorder() {
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "someprovider/exotic-model-9".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(2e-6),
+                output_cost_per_token: Some(6e-6),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup.lookup("exotic-model-9").unwrap();
+        assert_eq!(result.matched_key, "someprovider/exotic-model-9");
+        assert_eq!(result.pricing.input_cost_per_token, Some(2e-6));
+    }
+
+    /// Regression (post-#634 catalog audit, bug 2b): when multiple models.dev
+    /// providers share a model part, the winner must be deterministic and
+    /// prefer the canonical `anthropic/` namespace. Previously the winner
+    /// depended on HashMap iteration order (with real data `302ai/` beat
+    /// `anthropic/` for claude-3-5-haiku-20241022 because shorter keys were
+    /// inserted last).
+    #[test]
+    fn models_dev_provider_choice_is_deterministic_and_prefers_anthropic() {
+        let price = ModelPricing {
+            input_cost_per_token: Some(0.8e-6),
+            output_cost_per_token: Some(4e-6),
+            ..Default::default()
+        };
+        // Adversarial insertion order: the non-canonical provider first.
+        let mut models_dev = HashMap::new();
+        models_dev.insert("302ai/claude-3-5-haiku-20241022".to_string(), price.clone());
+        models_dev.insert(
+            "anthropic/claude-3-5-haiku-20241022".to_string(),
+            price.clone(),
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup.lookup("claude-3-5-haiku-20241022").unwrap();
+        assert_eq!(result.matched_key, "anthropic/claude-3-5-haiku-20241022");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.8e-6));
+    }
+
     #[test]
     fn test_blocklist_auto() {
         let lookup = create_lookup();
@@ -3751,7 +4216,10 @@ mod tests {
         assert!(!is_fuzzy_eligible("base"));
         assert!(!is_fuzzy_eligible("abc"));
         assert!(is_fuzzy_eligible("gpt-4o"));
-        assert!(is_fuzzy_eligible("claude"));
+        // Bare brand tokens carry no model information: a fuzzy hit from them
+        // can land on any model of the brand, so they are blocklisted.
+        assert!(!is_fuzzy_eligible("claude"));
+        assert!(!is_fuzzy_eligible("anthropic"));
     }
 
     // =========================================================================
