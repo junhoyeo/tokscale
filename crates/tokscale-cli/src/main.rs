@@ -333,6 +333,8 @@ enum Commands {
         summarizer: String,
         #[arg(long, help = "Reset all summaries and re-summarize from scratch")]
         rebuild: bool,
+        #[arg(long, help = "Show all sessions without truncation")]
+        full: bool,
     },
 }
 
@@ -771,6 +773,7 @@ fn main() -> Result<()> {
             no_summarize,
             summarizer,
             rebuild,
+            full,
         }) => {
             let today = date.today;
             let week = date.week;
@@ -790,6 +793,7 @@ fn main() -> Result<()> {
                 today,
                 week,
                 month,
+                full,
             })
         }
         None => {
