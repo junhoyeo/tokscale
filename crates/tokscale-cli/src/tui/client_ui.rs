@@ -119,6 +119,18 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         hotkey: 'u',
     },
     ClientUi {
+        display_name: "Jcode",
+        hotkey: 'j',
+    },
+    ClientUi {
+        display_name: "Command Code",
+        hotkey: 'd',
+    },
+    ClientUi {
+        display_name: "MiMo Code",
+        hotkey: 'm',
+    },
+    ClientUi {
         display_name: "Antigravity CLI",
         hotkey: 'f',
     },

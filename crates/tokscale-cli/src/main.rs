@@ -838,6 +838,9 @@ pub enum ClientFilter {
     Cline,
     Gjc,
     Grok,
+    Jcode,
+    Commandcode,
+    Micode,
     #[value(name = "antigravity-cli")]
     AntigravityCli,
     Synthetic,
@@ -877,6 +880,9 @@ impl ClientFilter {
             Self::Cline => "cline",
             Self::Gjc => "gjc",
             Self::Grok => "grok",
+            Self::Jcode => "jcode",
+            Self::Commandcode => "commandcode",
+            Self::Micode => "micode",
             Self::AntigravityCli => "antigravity-cli",
             Self::Synthetic => "synthetic",
         }
@@ -918,6 +924,9 @@ impl ClientFilter {
             Self::Cline => Some(ClientId::Cline),
             Self::Gjc => Some(ClientId::Gjc),
             Self::Grok => Some(ClientId::Grok),
+            Self::Jcode => Some(ClientId::Jcode),
+            Self::Commandcode => Some(ClientId::CommandCode),
+            Self::Micode => Some(ClientId::MiMoCode),
             Self::AntigravityCli => Some(ClientId::AntigravityCli),
             Self::Synthetic => None,
         }
@@ -956,6 +965,9 @@ impl ClientFilter {
             ClientId::Cline => Self::Cline,
             ClientId::Gjc => Self::Gjc,
             ClientId::Grok => Self::Grok,
+            ClientId::Jcode => Self::Jcode,
+            ClientId::CommandCode => Self::Commandcode,
+            ClientId::MiMoCode => Self::Micode,
             ClientId::AntigravityCli => Self::AntigravityCli,
         }
     }
@@ -1066,6 +1078,12 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub grok: bool,
     #[arg(long, hide = true)]
+    pub jcode: bool,
+    #[arg(long, hide = true)]
+    pub commandcode: bool,
+    #[arg(long, hide = true)]
+    pub micode: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -1137,7 +1155,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 29] = [
+    let legacy: [(bool, ClientFilter); 32] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1166,6 +1184,9 @@ fn build_client_filter_with_defaults(
         (flags.cline, ClientFilter::Cline),
         (flags.gjc, ClientFilter::Gjc),
         (flags.grok, ClientFilter::Grok),
+        (flags.jcode, ClientFilter::Jcode),
+        (flags.commandcode, ClientFilter::Commandcode),
+        (flags.micode, ClientFilter::Micode),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -3541,6 +3562,8 @@ fn capitalize_client(client: &str) -> String {
         "grok" => "Grok Build".to_string(),
         "pi" => "Pi".to_string(),
         "gjc" => "Gajae-Code".to_string(),
+        "jcode" => "Jcode".to_string(),
+        "commandcode" => "Command Code".to_string(),
         other => other.to_string(),
     }
 }
@@ -5949,6 +5972,9 @@ mod tests {
             cline: true,
             gjc: true,
             grok: true,
+            jcode: true,
+            commandcode: true,
+            micode: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -5988,6 +6014,8 @@ mod tests {
             "cline",
             "gjc",
             "grok",
+            "jcode",
+            "commandcode",
             "synthetic",
         ];
         assert_eq!(sources.len(), required.len());
@@ -6829,6 +6857,11 @@ mod tests {
     #[test]
     fn test_capitalize_client_pi() {
         assert_eq!(capitalize_client("pi"), "Pi");
+    }
+
+    #[test]
+    fn test_capitalize_client_jcode() {
+        assert_eq!(capitalize_client("jcode"), "Jcode");
     }
 
     #[test]

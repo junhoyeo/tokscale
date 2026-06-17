@@ -1456,6 +1456,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "warp" => Some("Warp"),
         "cline" => Some("Cline"),
         "gjc" => Some("Gajae-Code"),
+        "jcode" => Some("Jcode"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -1497,6 +1498,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Zed Agent" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
         ),
+        "Jcode" => Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
     }
@@ -2449,6 +2451,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_jcode() {
+        assert_eq!(client_display_name("jcode"), Some("Jcode"));
+    }
+
+    #[test]
     fn test_client_display_name_unknown() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
@@ -2620,6 +2627,14 @@ mod tests {
             Some(
                 "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp"
             )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_jcode() {
+        assert_eq!(
+            client_logo_url("Jcode"),
+            Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png")
         );
     }
 

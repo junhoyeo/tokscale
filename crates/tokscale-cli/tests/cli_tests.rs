@@ -619,6 +619,24 @@ fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, ou
     .unwrap();
 }
 
+fn write_jcode_session(base: &Path) {
+    let sessions_dir = base.join(".jcode/sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(
+        sessions_dir.join("session_cli_fixture.json"),
+        r#"{
+  "id":"session_cli_fixture",
+  "provider_key":"cliproxyapi",
+  "model":"jcode-cli-model",
+  "working_dir":"/work/cli-fixture",
+  "messages":[
+    {"id":"assistant_1","role":"assistant","timestamp":"2026-01-01T00:00:01Z","token_usage":{"input_tokens":1000,"output_tokens":250,"cache_read_input_tokens":400,"cache_creation_input_tokens":50,"reasoning_output_tokens":25}}
+  ]
+}"#,
+    )
+    .unwrap();
+}
+
 fn write_cursor_usage_cache(base: &Path) {
     let cache_dir = base.join(".config/tokscale/cursor-cache");
     fs::create_dir_all(&cache_dir).unwrap();
@@ -1245,6 +1263,35 @@ fn test_models_with_client_filter_multiple() {
         .args(["models", "--json", "--opencode", "--claude", "--no-spinner"])
         .assert()
         .success();
+}
+
+#[test]
+fn test_models_with_client_filter_jcode() {
+    let tmp = create_empty_fixture_dir();
+    write_jcode_session(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "jcode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["client"].as_str().unwrap(), "jcode");
+    assert_eq!(entry["provider"].as_str().unwrap(), "cliproxyapi");
+    assert_eq!(entry["model"].as_str().unwrap(), "jcode-cli-model");
+    assert_eq!(entry["input"].as_i64().unwrap(), 1000);
+    assert_eq!(entry["cacheRead"].as_i64().unwrap(), 400);
+    assert_eq!(entry["cacheWrite"].as_i64().unwrap(), 50);
+    assert_eq!(entry["output"].as_i64().unwrap(), 250);
+    assert_eq!(entry["reasoning"].as_i64().unwrap(), 25);
 }
 
 fn assert_cursor_setup_warning(json: &serde_json::Value) {
