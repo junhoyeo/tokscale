@@ -464,8 +464,14 @@ mod tests {
 
         // cache_read is always 0 — re-sent context is NOT attributed to cache.
         // Changing this requires a maintainer decision with real billing data.
-        assert_eq!(turn1.tokens.cache_read, 0, "cache_read must be 0 (no cache attribution)");
-        assert_eq!(turn2.tokens.cache_read, 0, "cache_read must be 0 (no cache attribution)");
+        assert_eq!(
+            turn1.tokens.cache_read, 0,
+            "cache_read must be 0 (no cache attribution)"
+        );
+        assert_eq!(
+            turn2.tokens.cache_read, 0,
+            "cache_read must be 0 (no cache attribution)"
+        );
         assert_eq!(turn1.tokens.cache_write, 0, "cache_write must be 0");
         assert_eq!(turn2.tokens.cache_write, 0, "cache_write must be 0");
     }
