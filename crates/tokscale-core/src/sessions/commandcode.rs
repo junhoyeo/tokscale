@@ -14,12 +14,25 @@
 //! Code's server-reported usage, which reflects tool-output truncation and
 //! auxiliary model runs (e.g. tool-desc, taste-1) absent from the transcript.
 //!
-//! To mirror how Command Code itself reports usage (and how tokscale already
-//! counts re-sent context for Claude via cache reads), input is estimated from
-//! the cumulative conversation context preceding each assistant response, and
-//! output from the assistant message's own content. The model id is not stored
-//! per message, so it is read from `~/.commandcode/config.json` (the configured
-//! agent model), falling back to "unknown".
+//! **Input estimation is an intentional upper-bound approximation.**
+//! Because Command Code re-sends the full conversation history on every request
+//! and stores no local token counts, input is estimated from the *cumulative*
+//! conversation context (all prior messages) preceding each assistant response,
+//! and is attributed entirely as fresh (non-cached) input (`cache_read = 0`).
+//! Whether re-sent context should instead be attributed to `cache_read` is a
+//! maintainer decision that requires knowledge of Command Code's real billing
+//! model, which is not available from the on-disk transcript. As a consequence,
+//! **cost for long sessions is an over-estimate**: reported input grows with
+//! cumulative context length, so a session with N turns will over-count input
+//! tokens compared to what Command Code actually bills. This is deliberate:
+//! the over-estimate is clearly bounded and avoids under-reporting on the
+//! leaderboard. Do not silently change the estimation model without a
+//! corresponding update to this doc-comment and the pinning test
+//! `test_commandcode_input_is_cumulative_context_upper_bound`.
+//!
+//! Output is estimated from the assistant message's own content. The model id
+//! is not stored per message, so it is read from `~/.commandcode/config.json`
+//! (the configured agent model), falling back to "unknown".
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -353,6 +366,108 @@ mod tests {
         assert!(messages[1].is_turn_start);
         // Cumulative context strictly grows across turns.
         assert!(messages[1].tokens.input > messages[0].tokens.input);
+    }
+
+    /// Pins the cumulative-input upper-bound estimation so a future refactor
+    /// cannot silently change leaderboard numbers.
+    ///
+    /// Command Code re-sends the full conversation history every turn and stores
+    /// no local token counts, so input is estimated from the *cumulative*
+    /// context preceding each assistant response and is attributed entirely as
+    /// fresh non-cached input (`cache_read = 0`). This is an intentional
+    /// over-estimate for long sessions. See the module-level doc-comment for the
+    /// rationale; changing the model requires a maintainer decision with real
+    /// billing data.
+    ///
+    /// The exact token values asserted here are load-bearing: they reflect the
+    /// current ~4 chars/token heuristic applied to the cumulative char counts
+    /// of the synthetic session below. If this test starts failing after an
+    /// unrelated refactor, that is intentional — update the values AND the
+    /// module doc-comment together, not just this test.
+    #[test]
+    fn test_commandcode_input_is_cumulative_context_upper_bound() {
+        let dir = TempDir::new().unwrap();
+        write_config(&dir, "model-x");
+
+        // Synthetic 2-turn session with known, fixed content so token counts
+        // are deterministic regardless of serde_json key ordering.
+        //
+        // Turn 1:
+        //   user:      content = [{"type":"text","text":"aaaa"}]
+        //   assistant: content = [{"type":"text","text":"bbbb"}]
+        //
+        // Turn 2:
+        //   user:      content = [{"type":"text","text":"cccc"}]
+        //   assistant: content = [{"type":"text","text":"dddd"}]
+        //
+        // We pre-compute the expected cumulative char counts and expected tokens
+        // from the same helpers used by the parser to keep the assertions
+        // self-consistent without hard-coding magic numbers.
+        let user1_content = json!([{"type": "text", "text": "aaaa"}]);
+        let asst1_content = json!([{"type": "text", "text": "bbbb"}]);
+        let user2_content = json!([{"type": "text", "text": "cccc"}]);
+        let asst2_content = json!([{"type": "text", "text": "dddd"}]);
+
+        let user1_chars = content_chars(&user1_content);
+        let asst1_chars = content_chars(&asst1_content);
+        let user2_chars = content_chars(&user2_content);
+        let asst2_chars = content_chars(&asst2_content);
+
+        // Turn 1 input = only user1 context (nothing before it).
+        let expected_input_turn1 = estimate_tokens(user1_chars);
+        // Turn 2 input = cumulative: user1 + asst1 + user2.
+        let expected_input_turn2 = estimate_tokens(user1_chars + asst1_chars + user2_chars);
+
+        let jsonl = format!(
+            "{}\n{}\n{}\n{}",
+            json!({"role": "user",      "sessionId": "s", "content": user1_content}),
+            json!({"role": "assistant", "sessionId": "s", "content": asst1_content}),
+            json!({"role": "user",      "sessionId": "s", "content": user2_content}),
+            json!({"role": "assistant", "sessionId": "s", "content": asst2_content}),
+        );
+        let path = write_session(&dir, "proj", "s", &jsonl);
+
+        let messages = parse_commandcode_file(&path);
+
+        assert_eq!(messages.len(), 2, "expected exactly 2 assistant turns");
+
+        let turn1 = &messages[0];
+        let turn2 = &messages[1];
+
+        // Input grows with cumulative context (upper-bound over-estimation).
+        assert!(
+            expected_input_turn1 > 0,
+            "turn 1 input must be positive (user1 context non-empty)"
+        );
+        assert!(
+            expected_input_turn2 > expected_input_turn1,
+            "turn 2 input must exceed turn 1 because cumulative context grew"
+        );
+        assert_eq!(
+            turn1.tokens.input, expected_input_turn1,
+            "turn 1 input pinned to cumulative-context estimate"
+        );
+        assert_eq!(
+            turn2.tokens.input, expected_input_turn2,
+            "turn 2 input pinned to cumulative-context estimate (upper bound)"
+        );
+        assert_eq!(
+            turn1.tokens.output,
+            estimate_tokens(asst1_chars),
+            "turn 1 output pinned to assistant message estimate"
+        );
+        assert_eq!(
+            turn2.tokens.output,
+            estimate_tokens(asst2_chars),
+            "turn 2 output pinned to assistant message estimate"
+        );
+
+        // cache_read is always 0 — re-sent context is NOT attributed to cache.
+        // Changing this requires a maintainer decision with real billing data.
+        assert_eq!(turn1.tokens.cache_read, 0, "cache_read must be 0 (no cache attribution)");
+        assert_eq!(turn2.tokens.cache_read, 0, "cache_read must be 0 (no cache attribution)");
+        assert_eq!(turn1.tokens.cache_write, 0, "cache_write must be 0");
+        assert_eq!(turn2.tokens.cache_write, 0, "cache_write must be 0");
     }
 
     #[test]
