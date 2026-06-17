@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tokscale_core::content_extractor::metadata_only_content;
 use tokscale_core::content_extractor::SessionContent;
+use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
-use tokscale_core::{parse_local_clients, LocalParseOptions, ParsedMessage};
+use tokscale_core::{parse_local_clients, LocalParseOptions, ParsedMessage, TokenBreakdown};
 
 pub struct ReportOptions {
     pub json: bool,
@@ -83,14 +84,12 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
             let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
             print_report_table(&entries, &db, is_multi_day)?;
         }
+    } else if opts.json {
+        let json = serde_json::to_string_pretty(&entries)?;
+        println!("{}", json);
     } else {
-        if opts.json {
-            let json = serde_json::to_string_pretty(&entries)?;
-            println!("{}", json);
-        } else {
-            let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
-            print_report_table(&entries, &db, is_multi_day)?;
-        }
+        let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
+        print_report_table(&entries, &db, is_multi_day)?;
     }
 
     Ok(())
@@ -111,6 +110,8 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
         scanner_settings: opts.scanner_settings.clone(),
     })
     .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let pricing = load_pricing_service();
 
     let mut session_map: HashMap<String, SessionAgg> = HashMap::new();
 
@@ -136,7 +137,7 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
         agg.total_input += msg.input;
         agg.total_output += msg.output;
         agg.total_cache_read += msg.cache_read;
-        agg.total_cost += compute_msg_cost(msg);
+        agg.total_cost += compute_msg_cost(msg, pricing.as_deref());
         *agg.models.entry(msg.model_id.clone()).or_insert(0) += 1;
         agg.message_count += msg.message_count;
     }
@@ -538,6 +539,9 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
 
     let mut by_model: HashMap<&str, (f64, i64, usize)> = HashMap::new();
     for entry in entries {
+        if entry.models_used.is_empty() {
+            continue;
+        }
         for model in &entry.models_used {
             let agg = by_model.entry(model.as_str()).or_insert((0.0, 0, 0));
             agg.0 += entry.total_cost / entry.models_used.len() as f64;
@@ -548,7 +552,7 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
     }
 
     let mut models: Vec<_> = by_model.iter().collect();
-    models.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+    models.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
 
     println!(
         "  {:<30} {:>8} {:>12} {:>8}",
@@ -591,7 +595,7 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
     }
 
     let mut groups: Vec<_> = by_group.iter().collect();
-    groups.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+    groups.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
 
     println!(
         "  {:<40} {:>5} {:>10} {:>8}",
@@ -599,8 +603,8 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
     );
     println!("  {}", "─".repeat(67));
     for (group, (cost, tokens, count, titles)) in groups.iter().take(15) {
-        let display_group: String = if group.len() > 40 {
-            format!("{}…", &group[..39])
+        let display_group: String = if group.chars().count() > 40 {
+            format!("{}…", group.chars().take(39).collect::<String>())
         } else {
             group.to_string()
         };
@@ -613,7 +617,11 @@ fn print_report_table(entries: &[WikiEntry], _db: &WikiDb, is_multi_day: bool) -
         );
         if *count > 1 {
             for t in titles.iter().take(3) {
-                let display_t: &str = if t.len() > 38 { &t[..38] } else { t };
+                let display_t: String = if t.chars().count() > 38 {
+                    t.chars().take(38).collect::<String>()
+                } else {
+                    t.to_string()
+                };
                 println!("    {}", display_t.dimmed());
             }
             if titles.len() > 3 {
@@ -679,10 +687,10 @@ fn print_daily_breakdown(entries: &[WikiEntry]) {
         for s in sessions.iter().take(5) {
             let title = s.title.as_deref().unwrap_or("(pending)");
             let model = s.models_used.first().map(|m| m.as_str()).unwrap_or("-");
-            let display_title: &str = if title.len() > 40 {
-                &title[..40]
+            let display_title: String = if title.chars().count() > 40 {
+                title.chars().take(40).collect::<String>()
             } else {
-                title
+                title.to_string()
             };
             println!(
                 "    {:>6} {:<18} {}",
@@ -782,11 +790,34 @@ fn parse_date_range(since: &Option<String>, until: &Option<String>) -> (Option<i
     (since_ts, until_ts)
 }
 
-fn compute_msg_cost(msg: &ParsedMessage) -> f64 {
-    let input_cost = msg.input as f64 * 0.000003;
-    let output_cost = msg.output as f64 * 0.000015;
-    let cache_cost = msg.cache_read as f64 * 0.0000003;
-    input_cost + output_cost + cache_cost
+/// Loads the canonical pricing dataset for cost attribution, preferring a fresh
+/// fetch but falling back to any cached dataset so reports still work offline.
+/// Returns `None` only when no pricing data is available at all.
+fn load_pricing_service() -> Option<std::sync::Arc<PricingService>> {
+    let fresh = tokio::runtime::Runtime::new()
+        .ok()
+        .and_then(|rt| rt.block_on(async { PricingService::get_or_init().await.ok() }));
+    fresh.or_else(|| PricingService::load_cached_any_age().map(std::sync::Arc::new))
+}
+
+/// Computes a message's cost using the canonical [`PricingService`], honoring
+/// per-model rates and every billed token type (input/output/cache read/cache
+/// write/reasoning). Returns 0.0 when no pricing dataset is available.
+fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f64 {
+    let Some(pricing) = pricing else {
+        return 0.0;
+    };
+    pricing.calculate_cost_with_provider(
+        &msg.model_id,
+        Some(&msg.provider_id),
+        &TokenBreakdown {
+            input: msg.input,
+            output: msg.output,
+            cache_read: msg.cache_read,
+            cache_write: msg.cache_write,
+            reasoning: msg.reasoning,
+        },
+    )
 }
 
 fn format_tokens(tokens: i64) -> String {
@@ -813,4 +844,75 @@ struct SessionAgg {
     total_cost: f64,
     models: HashMap<String, i32>,
     message_count: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokscale_core::pricing::{ModelPricing, PricingService};
+
+    fn test_pricing_service() -> PricingService {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "claude-haiku-4".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000004),
+                output_cost_per_token: Some(0.000006),
+                cache_read_input_token_cost: Some(0.000001),
+                ..Default::default()
+            },
+        );
+        PricingService::new(litellm, HashMap::new())
+    }
+
+    fn parsed_message(model_id: &str) -> ParsedMessage {
+        ParsedMessage {
+            client: "claude".to_string(),
+            model_id: model_id.to_string(),
+            provider_id: "anthropic".to_string(),
+            session_id: "s1".to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            timestamp: 0,
+            date: "2026-01-01".to_string(),
+            input: 1_000,
+            output: 500,
+            cache_read: 2_000,
+            cache_write: 0,
+            reasoning: 0,
+            duration_ms: None,
+            message_count: 1,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn compute_msg_cost_matches_canonical_pricing_service() {
+        let pricing = test_pricing_service();
+        let msg = parsed_message("claude-haiku-4");
+
+        let report_cost = compute_msg_cost(&msg, Some(&pricing));
+        let canonical = pricing.calculate_cost_with_provider(
+            &msg.model_id,
+            Some(&msg.provider_id),
+            &TokenBreakdown {
+                input: msg.input,
+                output: msg.output,
+                cache_read: msg.cache_read,
+                cache_write: msg.cache_write,
+                reasoning: msg.reasoning,
+            },
+        );
+
+        // The report must price exactly what PricingService yields — no
+        // hardcoded flat rates, no fuzzy matching.
+        assert_eq!(report_cost, canonical);
+        assert!(canonical > 0.0, "expected a positive cost for a known model");
+    }
+
+    #[test]
+    fn compute_msg_cost_without_pricing_is_zero() {
+        let msg = parsed_message("claude-haiku-4");
+        assert_eq!(compute_msg_cost(&msg, None), 0.0);
+    }
 }

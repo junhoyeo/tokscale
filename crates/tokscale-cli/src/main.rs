@@ -775,7 +775,7 @@ fn main() -> Result<()> {
             let today = date.today;
             let week = date.week;
             let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
+            let (since, until) = build_date_filter(&date);
             commands::report::run_report(commands::report::ReportOptions {
                 json,
                 since,
