@@ -368,7 +368,7 @@ define_clients!(
         pattern: "*.jsonl",
         headless: false,
         parse_local: true,
-        submit_default: false
+        submit_default: true
     },
     Zed = 21 => {
         id: "zed",
@@ -403,8 +403,41 @@ define_clients!(
         relative: "warp-cache",
         pattern: "usage*.json",
         headless: false,
-        parse_local: false,
+        parse_local: true,
         submit_default: false
+    },
+    Cline = 25 => {
+        id: "cline",
+        root: PathRoot::Home,
+        relative: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
+        pattern: "ui_messages.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Gjc = 26 => {
+        id: "gjc",
+        root: PathRoot::EnvVar {
+            var: "GJC_CODING_AGENT_DIR",
+            fallback_relative: ".gjc/agent",
+        },
+        relative: "sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Grok = 27 => {
+        id: "grok",
+        root: PathRoot::EnvVar {
+            var: "GROK_HOME",
+            fallback_relative: ".grok",
+        },
+        relative: "sessions",
+        pattern: "updates.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -457,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 25);
+        assert_eq!(ClientId::COUNT, 28);
     }
 
     #[test]
@@ -478,8 +511,17 @@ mod tests {
         let client = ClientId::from_str("warp").expect("warp client should be registered");
         assert_eq!(client.data().relative_path, "warp-cache");
         assert_eq!(client.data().pattern, "usage*.json");
-        assert!(!client.data().parse_local);
+        assert!(client.data().parse_local);
         assert!(!client.data().submit_default);
+    }
+
+    #[test]
+    fn test_grok_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("grok").expect("grok client should be registered");
+        assert_eq!(client.data().relative_path, "sessions");
+        assert_eq!(client.data().pattern, "updates.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
     }
 
     #[test]
@@ -699,6 +741,34 @@ mod tests {
     }
 
     #[test]
+    fn test_gjc_data_dir_path() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "GJC_CODING_AGENT_DIR";
+        let previous = std::env::var(var).ok();
+        // Env unset (cleared): resolves under home/.gjc/agent/sessions.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            ClientId::Gjc.data().resolve_path("/tmp/home"),
+            "/tmp/home/.gjc/agent/sessions"
+        );
+        assert_eq!(ClientId::Gjc.data().pattern, "*.jsonl");
+        assert!(ClientId::Gjc.data().parse_local);
+        assert!(ClientId::Gjc.data().submit_default);
+        assert_eq!(ClientId::from_str("gjc"), Some(ClientId::Gjc));
+
+        // Env set but env roots disabled: falls back to home, ignoring env.
+        unsafe { std::env::set_var(var, "/tmp/custom-gjc") };
+        assert_eq!(
+            ClientId::Gjc
+                .data()
+                .resolve_path_with_env_strategy("/tmp/home", false),
+            "/tmp/home/.gjc/agent/sessions"
+        );
+
+        restore_env(var, previous);
+    }
+
+    #[test]
     fn test_cursor_parse_local_is_false() {
         assert!(!ClientId::Cursor.data().parse_local);
     }
@@ -738,16 +808,22 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_submit_default_is_false() {
-        assert!(!ClientId::Antigravity.submit_default());
+    fn test_antigravity_submit_default_is_true() {
+        assert!(ClientId::Antigravity.submit_default());
     }
 
     #[test]
     fn test_zed_data_dir_path() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+
         assert_eq!(
             ClientId::Zed.data().resolve_path("/tmp/home"),
             "/tmp/home/.local/share/zed/threads/threads.db"
         );
+
+        restore_env("XDG_DATA_HOME", previous);
     }
 
     #[test]

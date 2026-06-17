@@ -163,6 +163,7 @@ pub fn fetch() -> Result<UsageOutput> {
 
         Ok(UsageOutput {
             provider: "Z.ai".into(),
+            account: None,
             plan,
             email: None,
             metrics,

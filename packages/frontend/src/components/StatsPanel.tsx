@@ -17,6 +17,7 @@ interface StatsPanelProps {
   palette: GraphColorPalette;
   totalActiveTimeMs?: number | null;
   sessionCount?: number | null;
+  mcpServers?: string[];
 }
 
 const Container = styled.div`
@@ -143,7 +144,20 @@ const StatItemSubValue = styled.div`
   color: var(--color-fg-muted);
 `;
 
-export function StatsPanel({ data, palette, totalActiveTimeMs, sessionCount }: StatsPanelProps) {
+function BadgeList({ label, items, palette }: { label: string; items: string[]; palette: GraphColorPalette }) {
+  return (
+    <SourcesContainer>
+      <SourcesLabel>{label}:</SourcesLabel>
+      {items.map((item) => (
+        <SourceBadge key={item} $backgroundColor={`${palette.grade3}20`}>
+          {item}
+        </SourceBadge>
+      ))}
+    </SourcesContainer>
+  );
+}
+
+export function StatsPanel({ data, palette, totalActiveTimeMs, sessionCount, mcpServers }: StatsPanelProps) {
   const { summary, contributions } = data;
   const currentStreak = calculateCurrentStreak(contributions);
   const longestStreak = calculateLongestStreak(contributions);
@@ -172,17 +186,10 @@ export function StatsPanel({ data, palette, totalActiveTimeMs, sessionCount }: S
         )}
       </Grid>
 
-      <SourcesContainer>
-        <SourcesLabel>Clients:</SourcesLabel>
-        {summary.clients.map((client) => (
-          <SourceBadge
-            key={client}
-            $backgroundColor={`${palette.grade3}20`}
-          >
-            {client}
-          </SourceBadge>
-        ))}
-      </SourcesContainer>
+      <BadgeList label="Clients" items={summary.clients} palette={palette} />
+      {mcpServers && mcpServers.length > 0 && (
+        <BadgeList label="MCPs" items={mcpServers} palette={palette} />
+      )}
     </Container>
   );
 }

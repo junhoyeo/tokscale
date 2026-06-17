@@ -11,7 +11,7 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/check-version-coherence.sh'
+      - 'scripts/*.sh'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
@@ -23,7 +23,7 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/check-version-coherence.sh'
+      - 'scripts/*.sh'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
 
@@ -45,6 +45,12 @@ jobs:
           components: clippy, rustfmt
       - name: Verify version coherence
         run: bash scripts/check-version-coherence.sh
+      - name: Run release helper tests
+        run: |
+          bash scripts/test-calculate-release-version.sh
+          bash scripts/test-check-version-coherence.sh
+          bash scripts/test-npm-release-state.sh
+          bash scripts/test-prepare-release-provenance.sh
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
@@ -156,7 +162,13 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add .github/badges/coverage.svg
-          git diff --staged --quiet || (git commit -m "ci: update coverage badge [skip ci]" && git push)
+          git diff --staged --quiet && exit 0
+          git commit -m "ci: update coverage badge [skip ci]"
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase -X theirs origin main || exit 1
+          done
+          git push
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v6

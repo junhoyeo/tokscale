@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 25);
+        assert_eq!(clients.len(), 28);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -1363,6 +1363,9 @@ mod tests {
         assert_eq!(clients[22], ClientId::Kiro);
         assert_eq!(clients[23], ClientId::Trae);
         assert_eq!(clients[24], ClientId::Warp);
+        assert_eq!(clients[25], ClientId::Cline);
+        assert_eq!(clients[26], ClientId::Gjc);
+        assert_eq!(clients[27], ClientId::Grok);
     }
 
     #[test]
@@ -1438,6 +1441,14 @@ mod tests {
         );
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Kiro), "Kiro");
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Trae), "Trae");
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Cline),
+            "Cline"
+        );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Grok),
+            "Grok Build"
+        );
     }
 
     #[test]
@@ -1465,6 +1476,9 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zed), 'z');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), 'i');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), 'y');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), 'n');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gjc), 'g');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Grok), 'u');
     }
 
     #[test]
@@ -1548,6 +1562,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('y'),
             Some(ClientId::Trae)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('u'),
+            Some(ClientId::Grok)
         );
     }
 

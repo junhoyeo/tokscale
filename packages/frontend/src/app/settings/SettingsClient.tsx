@@ -6,6 +6,9 @@ import styled from "styled-components";
 import { KeyIcon } from "@/components/ui/Icons";
 import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
+import { deviceDisplayLabel } from "@/lib/devices/shared";
+import { formatNumber, formatCurrency } from "@/lib/utils";
+import { formatRelativeTime } from "@/lib/format";
 
 interface User {
   id: string;
@@ -24,6 +27,37 @@ interface ApiToken {
 
 interface CreatedApiToken extends ApiToken {
   token: string;
+}
+
+// Subset of GET /api/users/[username]/devices we render here. That public
+// endpoint already aggregates usage per device, so settings reuses it with
+// the session user's username instead of adding a private listing route.
+interface SettingsDevice {
+  id: string;
+  deviceKey: string;
+  /** Resolved label (custom name or fallback) — what we render. */
+  displayName: string;
+  /** Raw user-set name (null = never renamed) — what we edit. */
+  customName: string | null;
+  lastSubmittedAt: string | null;
+  totalTokens: number;
+  totalCost: number;
+  activeDays: number;
+}
+
+// Mirror the server-side RenameBodySchema in
+// /api/settings/devices/[deviceId]/route.ts (varchar(120), no control chars).
+const DEVICE_NAME_MAX_LENGTH = 120;
+const DEVICE_NAME_CONTROL_CHARS = /\p{C}/u;
+
+function validateDeviceName(name: string): string | null {
+  if (name.length > DEVICE_NAME_MAX_LENGTH) {
+    return `Device name must be ${DEVICE_NAME_MAX_LENGTH} characters or fewer`;
+  }
+  if (DEVICE_NAME_CONTROL_CHARS.test(name)) {
+    return "Device name must not contain control characters";
+  }
+  return null;
 }
 
 const PageWrapper = styled.div`
@@ -220,7 +254,19 @@ const TokenInfo = styled.div`
 `;
 
 const IconWrapper = styled.div`
-  color: #737373;
+  color: var(--color-fg-muted);
+`;
+
+const DeviceEditRow = styled.div`
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+
+  @media (max-width: 560px) {
+    grid-template-columns: 1fr;
+  }
 `;
 
 
@@ -287,6 +333,15 @@ async function fetchApiTokens(): Promise<ApiToken[]> {
   return Array.isArray(tokensData.tokens) ? tokensData.tokens : [];
 }
 
+async function fetchDevices(username: string): Promise<SettingsDevice[]> {
+  const devicesResponse = await fetch(
+    `/api/users/${encodeURIComponent(username)}/devices`
+  );
+  if (!devicesResponse.ok) return [];
+  const devicesData = await devicesResponse.json();
+  return Array.isArray(devicesData.devices) ? devicesData.devices : [];
+}
+
 export default function SettingsClient() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
@@ -296,6 +351,11 @@ export default function SettingsClient() {
   const [createdToken, setCreatedToken] = useState<CreatedApiToken | null>(null);
   const [isCreatingToken, setIsCreatingToken] = useState(false);
   const [createTokenError, setCreateTokenError] = useState<string | null>(null);
+  const [devices, setDevices] = useState<SettingsDevice[]>([]);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+  const [editingDeviceName, setEditingDeviceName] = useState("");
+  const [isSavingDeviceName, setIsSavingDeviceName] = useState(false);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -311,11 +371,17 @@ export default function SettingsClient() {
           return;
         }
 
-        const loadedTokens = await fetchApiTokens().catch(() => []);
+        const [loadedTokens, loadedDevices] = await Promise.all([
+          fetchApiTokens().catch(() => []),
+          fetchDevices(sessionData.user.username).catch(
+            () => [] as SettingsDevice[]
+          ),
+        ]);
 
         if (!cancelled) {
           setUser(sessionData.user);
           setTokens((current) => mergeApiTokenList(loadedTokens, current));
+          setDevices(loadedDevices);
           setIsLoading(false);
         }
       } catch {
@@ -371,6 +437,71 @@ export default function SettingsClient() {
       setCreateTokenError(error instanceof Error ? error.message : "Failed to create token");
     } finally {
       setIsCreatingToken(false);
+    }
+  };
+
+  const startEditingDevice = (device: SettingsDevice) => {
+    setEditingDeviceId(device.id);
+    setDeviceError(null);
+    // Pre-fill from the raw custom name, not the resolved display label, so
+    // an unnamed device starts empty and a custom name that happens to equal
+    // the fallback label ("Unnamed device" etc.) is preserved.
+    setEditingDeviceName(device.customName ?? "");
+  };
+
+  const cancelEditingDevice = () => {
+    setEditingDeviceId(null);
+    setEditingDeviceName("");
+    setDeviceError(null);
+  };
+
+  const handleSaveDeviceName = async (device: SettingsDevice) => {
+    const trimmed = editingDeviceName.trim();
+    const validationError = validateDeviceName(trimmed);
+    if (validationError) {
+      setDeviceError(validationError);
+      return;
+    }
+
+    setIsSavingDeviceName(true);
+    setDeviceError(null);
+
+    try {
+      const response = await fetch(`/api/settings/devices/${device.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        // Empty input clears the custom name; server stores null and the
+        // display label falls back via deviceDisplayLabel.
+        body: JSON.stringify({ name: trimmed === "" ? null : trimmed }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.device) {
+        throw new Error(data.error || "Failed to rename device");
+      }
+
+      setDevices((current) =>
+        current.map((item) =>
+          item.id === device.id
+            ? {
+                ...item,
+                displayName: deviceDisplayLabel(
+                  data.device.deviceKey,
+                  data.device.displayName
+                ),
+                customName: data.device.displayName ?? null,
+              }
+            : item
+        )
+      );
+      setEditingDeviceId(null);
+      setEditingDeviceName("");
+    } catch (error) {
+      setDeviceError(
+        error instanceof Error ? error.message : "Failed to rename device"
+      );
+    } finally {
+      setIsSavingDeviceName(false);
     }
   };
 
@@ -548,6 +679,107 @@ export default function SettingsClient() {
           )}
         </Section>
 
+        <Section
+          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+        >
+          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+            Devices
+          </SectionTitle>
+          <Description style={{ color: "var(--color-fg-muted)" }}>
+            Machines that have submitted usage data. Rename a device to tell
+            your machines apart — the name is shown on your public profile.
+          </Description>
+
+          {deviceError && <ErrorText>{deviceError}</ErrorText>}
+
+          {devices.length === 0 ? (
+            <EmptyState style={{ color: "var(--color-fg-muted)" }}>
+              <p>No devices yet.</p>
+              <EmptyText>
+                Run{" "}
+                <CodeText
+                  style={{ backgroundColor: "var(--color-bg-subtle)" }}
+                >
+                  bunx tokscale submit
+                </CodeText>{" "}
+                to register this machine.
+              </EmptyText>
+            </EmptyState>
+          ) : (
+            <TokenList>
+              {devices.map((device) => (
+                <TokenItem
+                  key={device.id}
+                  style={{ backgroundColor: "var(--color-bg-elevated)" }}
+                >
+                  {editingDeviceId === device.id ? (
+                    <DeviceEditRow>
+                      <TextInput
+                        aria-label="Device name"
+                        value={editingDeviceName}
+                        maxLength={DEVICE_NAME_MAX_LENGTH}
+                        placeholder="Device name (empty to reset)"
+                        autoFocus
+                        disabled={isSavingDeviceName}
+                        onChange={(event) =>
+                          setEditingDeviceName(event.target.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            handleSaveDeviceName(device);
+                          } else if (event.key === "Escape") {
+                            cancelEditingDevice();
+                          }
+                        }}
+                      />
+                      <PrimaryButton
+                        type="button"
+                        disabled={isSavingDeviceName}
+                        onClick={() => handleSaveDeviceName(device)}
+                      >
+                        {isSavingDeviceName ? "Saving..." : "Save"}
+                      </PrimaryButton>
+                      <SecondaryButton
+                        type="button"
+                        disabled={isSavingDeviceName}
+                        onClick={cancelEditingDevice}
+                      >
+                        Cancel
+                      </SecondaryButton>
+                    </DeviceEditRow>
+                  ) : (
+                    <>
+                      <TokenInfo>
+                        <div>
+                          <TokenName style={{ color: "var(--color-fg-default)" }}>
+                            {device.displayName}
+                          </TokenName>
+                          <SmallText style={{ color: "var(--color-fg-muted)" }}>
+                            {formatNumber(device.totalTokens)} tokens
+                            {" · "}
+                            {formatCurrency(device.totalCost)}
+                            {" · "}
+                            {device.activeDays} active{" "}
+                            {device.activeDays === 1 ? "day" : "days"}
+                            {" · "}
+                            Last submit {formatRelativeTime(device.lastSubmittedAt)}
+                          </SmallText>
+                        </div>
+                      </TokenInfo>
+                      <SecondaryButton
+                        type="button"
+                        onClick={() => startEditingDevice(device)}
+                      >
+                        Rename
+                      </SecondaryButton>
+                    </>
+                  )}
+                </TokenItem>
+              ))}
+            </TokenList>
+          )}
+        </Section>
 
       </MainContent>
 

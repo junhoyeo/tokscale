@@ -170,6 +170,162 @@ afterEach(() => {
 });
 
 describe("all-time leaderboard freshness queries", () => {
+  it("uses competition-rank SQL for all-time list and search ranks", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 }]);
+
+    await getLeaderboardData("all", 1, 50, "tokens");
+    const listSqlTexts = serializeSqlCalls();
+
+    expect(listSqlTexts.some((text) => text.includes("RANK() OVER (ORDER BY"))).toBe(true);
+    expect(listSqlTexts.some((text) => text.includes("ROW_NUMBER() OVER"))).toBe(false);
+
+    mockState.reset();
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 }]);
+
+    await getLeaderboardData("all", 1, 50, "tokens", "ali");
+    const searchSqlTexts = serializeSqlCalls();
+
+    expect(searchSqlTexts.some((text) => text.includes("RANK() OVER (ORDER BY"))).toBe(true);
+    expect(searchSqlTexts.some((text) => text.includes("ROW_NUMBER() OVER"))).toBe(false);
+  });
+
+  it("keeps tied all-time users at the same rank across list, search, and user rank", async () => {
+    mockState.pushAwaitedResult([
+      {
+        rank: 1,
+        userId: "user-bob",
+        username: "bob",
+        displayName: "Bob",
+        avatarUrl: null,
+        totalTokens: 5000,
+        totalCost: 50,
+        totalActiveTimeMs: 500,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T10:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+      {
+        rank: 2,
+        userId: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+        totalActiveTimeMs: 400,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T09:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+      {
+        rank: 2,
+        userId: "user-alicia",
+        username: "alicia",
+        displayName: "Alicia",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 30,
+        totalActiveTimeMs: 300,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T08:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 11000,
+        totalCost: 120,
+        totalSubmissions: 3,
+        uniqueUsers: 3,
+      },
+    ]);
+
+    const leaderboard = await getLeaderboardData("all", 1, 50, "tokens");
+    const aliceListRank = leaderboard.users.find((user) => user.username === "alice")?.rank;
+    const aliciaListRank = leaderboard.users.find((user) => user.username === "alicia")?.rank;
+
+    mockState.reset();
+    mockState.pushAwaitedResult([
+      {
+        rank: 2,
+        userId: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+        totalActiveTimeMs: 400,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T09:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+      {
+        rank: 2,
+        userId: "user-alicia",
+        username: "alicia",
+        displayName: "Alicia",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 30,
+        totalActiveTimeMs: 300,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T08:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 2 }]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 11000,
+        totalCost: 120,
+        totalSubmissions: 3,
+        uniqueUsers: 3,
+      },
+    ]);
+
+    const searchLeaderboard = await getLeaderboardData("all", 1, 50, "tokens", "ali");
+    const aliceSearchRank = searchLeaderboard.users.find((user) => user.username === "alice")?.rank;
+    const aliciaSearchRank = searchLeaderboard.users.find((user) => user.username === "alicia")?.rank;
+
+    mockState.reset();
+    mockState.pushAwaitedResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+      },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 3000,
+        totalCost: 40,
+        totalActiveTimeMs: 400,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T09:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 1 }]);
+
+    const aliceUserRank = await getUserRank("alice", "all", "tokens");
+
+    expect(aliceListRank).toBe(2);
+    expect(aliciaListRank).toBe(2);
+    expect(aliceSearchRank).toBe(2);
+    expect(aliciaSearchRank).toBe(2);
+    expect(aliceUserRank?.rank).toBe(2);
+  });
+
   it("uses latest-row scalar subqueries instead of MAX(cliVersion/schemaVersion)", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-12T18:45:00Z"));

@@ -5,6 +5,7 @@
 pub mod amp;
 pub mod antigravity;
 pub mod claudecode;
+pub mod cline;
 pub mod codebuff;
 pub mod codex;
 pub mod copilot;
@@ -12,7 +13,9 @@ pub mod crush;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod gjc;
 pub mod goose;
+pub mod grok;
 pub mod hermes;
 pub mod kilo;
 pub mod kilocode;

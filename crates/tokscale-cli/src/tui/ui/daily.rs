@@ -1,12 +1,12 @@
 use chrono::Local;
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name,
+    get_client_display_name, get_provider_display_name, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -58,6 +58,24 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let current_row_style = app.theme.current_row_style();
     let striped_row_style = app.theme.striped_row_style();
     let today = Local::now().date_naive();
+
+    // Date format adapts to *available* width, not just the narrow breakpoint.
+    // In full mode the table can still be wider than the terminal, so the year
+    // would otherwise get compressed to "2026-0". When the full layout doesn't
+    // fit we drop the year (near-constant in a by-day list) to "%m-%d" and
+    // shrink the date column, freeing 5 columns. `full_layout_width` is the
+    // ideal full-mode total (Length(12) date + spacing); keep it in sync with
+    // the `widths` block below.
+    let full_layout_width: u16 = if has_turn_data { 112 } else { 105 };
+    let compact_full_date = !is_narrow && !is_very_narrow && inner.width < full_layout_width;
+    let date_col_width: u16 = if compact_full_date { 7 } else { 12 };
+    let date_fmt: &str = if is_very_narrow {
+        "%m/%d"
+    } else if is_narrow || compact_full_date {
+        "%m-%d"
+    } else {
+        "%Y-%m-%d"
+    };
 
     let header_cells = if is_very_narrow {
         vec!["Date", "Cost"]
@@ -136,79 +154,81 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_striped = idx % 2 == 1;
             let is_today = day.date == today;
 
-            let cells: Vec<Cell> =
-                if is_very_narrow {
+            let cells: Vec<Cell> = if is_very_narrow {
+                vec![
+                    Cell::from(day.date.format(date_fmt).to_string()).style(if is_today {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    }),
+                    Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
+                ]
+            } else if is_narrow {
+                let mut cells =
                     vec![
-                        Cell::from(day.date.format("%m/%d").to_string()).style(if is_today {
+                        Cell::from(day.date.format(date_fmt).to_string()).style(if is_today {
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         }),
-                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                    ]
-                } else if is_narrow {
-                    let mut cells = vec![Cell::from(day.date.format("%Y-%m-%d").to_string())
-                        .style(if is_today {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        })];
-                    if has_turn_data {
-                        let turn_str = if day.turn_count > 0 {
-                            day.turn_count.to_string()
-                        } else {
-                            "\u{2014}".to_string()
-                        };
-                        cells.push(Cell::from(turn_str));
-                    }
-                    cells.extend([
-                        Cell::from(day.message_count.to_string()),
-                        Cell::from(format_tokens(day.tokens.total())),
-                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                    ]);
-                    cells
-                } else {
-                    let mut cells = vec![Cell::from(day.date.format("%Y-%m-%d").to_string())
-                        .style(if is_today {
+                    ];
+                if has_turn_data {
+                    let turn_str = if day.turn_count > 0 {
+                        day.turn_count.to_string()
+                    } else {
+                        "\u{2014}".to_string()
+                    };
+                    cells.push(Cell::from(turn_str));
+                }
+                cells.extend([
+                    Cell::from(day.message_count.to_string()),
+                    Cell::from(format_tokens(day.tokens.total())),
+                    Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
+                ]);
+                cells
+            } else {
+                let mut cells =
+                    vec![
+                        Cell::from(day.date.format(date_fmt).to_string()).style(if is_today {
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().add_modifier(Modifier::BOLD)
-                        })];
-                    if has_turn_data {
-                        let turn_str = if day.turn_count > 0 {
-                            day.turn_count.to_string()
-                        } else {
-                            "\u{2014}".to_string()
-                        };
-                        cells.push(Cell::from(turn_str));
-                    }
-                    cells.extend([
-                        Cell::from(day.message_count.to_string()),
-                        Cell::from(format_tokens(day.tokens.input)).style(metric_input_style),
-                        Cell::from(format_tokens(day.tokens.output)).style(metric_output_style),
-                        Cell::from(format_tokens(day.tokens.cache_read))
-                            .style(metric_cache_read_style),
-                        Cell::from(format_tokens(day.tokens.cache_write))
-                            .style(metric_cache_write_style),
-                        Cell::from(format_cache_hit_rate(
-                            day.tokens.cache_read,
-                            day.tokens.input,
-                            day.tokens.cache_write,
-                        ))
-                        .style(Style::default().fg(Color::Cyan)),
-                        Cell::from(format_tokens(day.tokens.total())),
-                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                        Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
-                            .style(Style::default().fg(Color::Rgb(150, 200, 150))),
-                    ]);
-                    cells
-                };
+                        }),
+                    ];
+                if has_turn_data {
+                    let turn_str = if day.turn_count > 0 {
+                        day.turn_count.to_string()
+                    } else {
+                        "\u{2014}".to_string()
+                    };
+                    cells.push(Cell::from(turn_str));
+                }
+                cells.extend([
+                    Cell::from(day.message_count.to_string()),
+                    Cell::from(format_tokens(day.tokens.input)).style(metric_input_style),
+                    Cell::from(format_tokens(day.tokens.output)).style(metric_output_style),
+                    Cell::from(format_tokens(day.tokens.cache_read)).style(metric_cache_read_style),
+                    Cell::from(format_tokens(day.tokens.cache_write))
+                        .style(metric_cache_write_style),
+                    Cell::from(format_cache_hit_rate(
+                        day.tokens.cache_read,
+                        day.tokens.input,
+                        day.tokens.cache_write,
+                    ))
+                    .style(Style::default().fg(Color::Cyan)),
+                    Cell::from(format_tokens(day.tokens.total())),
+                    Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
+                    Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                ]);
+                cells
+            };
 
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
@@ -243,7 +263,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         ]
     } else if has_turn_data {
         vec![
-            Constraint::Length(12),
+            Constraint::Length(date_col_width),
             Constraint::Length(6),
             Constraint::Length(6),
             Constraint::Length(10),
@@ -257,7 +277,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         ]
     } else {
         vec![
-            Constraint::Length(12),
+            Constraint::Length(date_col_width),
             Constraint::Length(6),
             Constraint::Length(10),
             Constraint::Length(10),
@@ -281,7 +301,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(daily_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(daily_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -505,7 +526,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(detail_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(detail_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -530,5 +552,93 @@ fn truncate(s: &str, max_chars: usize) -> String {
     } else {
         let head: String = s.chars().take(max_chars - 3).collect();
         format!("{}...", head)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::{Tab, TuiConfig};
+    use crate::tui::data::{DailyUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::collections::BTreeMap;
+
+    fn day(date: NaiveDate, cost: f64) -> DailyUsage {
+        DailyUsage {
+            date,
+            tokens: TokenBreakdown::default(),
+            cost,
+            source_breakdown: BTreeMap::new(),
+            message_count: 10,
+            turn_count: 3,
+        }
+    }
+
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            day(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap(), 3.0),
+            day(NaiveDate::from_ymd_opt(2026, 5, 28).unwrap(), 2.0),
+        ];
+        app
+    }
+
+    fn render_body(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn wide_terminal_keeps_year() {
+        let mut app = make_app(130);
+        let body = render_body(&mut app, 130, 12);
+        assert!(
+            body.contains("2026-05-29"),
+            "a layout that fits should keep the full date\n{body}"
+        );
+    }
+
+    #[test]
+    fn full_mode_drops_year_when_layout_does_not_fit() {
+        // 110 cols is full mode (>= 100) but narrower than the ~112-col full
+        // layout, so the year is dropped — the date stays readable as "05-29"
+        // instead of being compressed to "2026-0".
+        let mut app = make_app(110);
+        let body = render_body(&mut app, 110, 12);
+        assert!(
+            !body.contains("2026-05-29"),
+            "year should be dropped when the full layout does not fit\n{body}"
+        );
+        assert!(body.contains("05-29"), "expected compact date\n{body}");
     }
 }

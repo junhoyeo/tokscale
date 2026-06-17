@@ -40,6 +40,47 @@ pub struct TimeMetrics {
     pub session_count: u32,
 }
 
+#[derive(Debug)]
+struct SessionMessageSpan<'a> {
+    msg: &'a UnifiedMessage,
+    start_ts: i64,
+    end_ts: i64,
+}
+
+#[derive(Debug)]
+struct SessionBlock {
+    start_ts: i64,
+    end_ts: i64,
+    tokens: TokenBreakdown,
+    cost: f64,
+    message_count: i32,
+}
+
+impl SessionBlock {
+    fn new(span: &SessionMessageSpan<'_>) -> Self {
+        let mut block = Self {
+            start_ts: span.start_ts,
+            end_ts: span.end_ts,
+            tokens: TokenBreakdown::default(),
+            cost: 0.0,
+            message_count: 0,
+        };
+        block.add(span);
+        block
+    }
+
+    fn add(&mut self, span: &SessionMessageSpan<'_>) {
+        self.end_ts = self.end_ts.max(span.end_ts);
+        self.tokens.input += span.msg.tokens.input;
+        self.tokens.output += span.msg.tokens.output;
+        self.tokens.cache_read += span.msg.tokens.cache_read;
+        self.tokens.cache_write += span.msg.tokens.cache_write;
+        self.tokens.reasoning += span.msg.tokens.reasoning;
+        self.cost += span.msg.cost;
+        self.message_count += span.msg.message_count.max(1);
+    }
+}
+
 /// Derive session intervals from unified messages.
 ///
 /// Groups messages by `(client, session_id)`, sorts each group by timestamp,
@@ -47,7 +88,8 @@ pub struct TimeMetrics {
 ///
 /// `idle_gap_ms` controls how much silence between messages is still counted
 /// as "active". Time gaps exceeding this threshold are excluded from
-/// `active_duration_ms`.
+/// `active_duration_ms` by splitting a source session into separate active
+/// intervals.
 pub fn sessionize(messages: &[UnifiedMessage], idle_gap_ms: i64) -> Vec<SessionInterval> {
     if messages.is_empty() {
         return Vec::new();
@@ -68,48 +110,48 @@ pub fn sessionize(messages: &[UnifiedMessage], idle_gap_ms: i64) -> Vec<SessionI
     let mut intervals: Vec<SessionInterval> = Vec::with_capacity(groups.len());
 
     for ((client, session_id), mut msgs) in groups {
-        // Sort by timestamp within session
         msgs.sort_unstable_by_key(|m| m.timestamp);
 
-        let start_ts = msgs.first().unwrap().timestamp;
-        let end_ts = msgs.last().unwrap().timestamp;
-        let wall_duration_ms = end_ts - start_ts;
+        let spans: Vec<SessionMessageSpan<'_>> = msgs
+            .into_iter()
+            .map(|msg| {
+                let duration_ms = msg
+                    .duration_ms
+                    .filter(|duration| *duration > 0)
+                    .unwrap_or(0);
+                SessionMessageSpan {
+                    msg,
+                    start_ts: msg.timestamp,
+                    end_ts: msg.timestamp.saturating_add(duration_ms),
+                }
+            })
+            .collect();
 
-        // Calculate active duration: sum of gaps that are <= idle_gap_ms
-        let mut active_duration_ms: i64 = 0;
-        for window in msgs.windows(2) {
-            let gap = window[1].timestamp - window[0].timestamp;
-            if gap <= idle_gap_ms {
-                active_duration_ms += gap;
+        let mut blocks: Vec<SessionBlock> = Vec::new();
+        for span in spans {
+            match blocks.last_mut() {
+                Some(block) if span.start_ts <= block.end_ts.saturating_add(idle_gap_ms) => {
+                    block.add(&span);
+                }
+                _ => blocks.push(SessionBlock::new(&span)),
             }
         }
 
-        // Aggregate tokens and cost
-        let mut tokens = TokenBreakdown::default();
-        let mut cost = 0.0;
-        let mut message_count: i32 = 0;
+        for block in blocks {
+            let wall_duration_ms = block.end_ts.saturating_sub(block.start_ts);
 
-        for msg in &msgs {
-            tokens.input += msg.tokens.input;
-            tokens.output += msg.tokens.output;
-            tokens.cache_read += msg.tokens.cache_read;
-            tokens.cache_write += msg.tokens.cache_write;
-            tokens.reasoning += msg.tokens.reasoning;
-            cost += msg.cost;
-            message_count += msg.message_count.max(1);
+            intervals.push(SessionInterval {
+                client: client.to_string(),
+                session_id: session_id.to_string(),
+                start_ts: block.start_ts,
+                end_ts: block.end_ts,
+                wall_duration_ms,
+                active_duration_ms: wall_duration_ms,
+                message_count: block.message_count,
+                tokens: block.tokens,
+                cost: block.cost,
+            });
         }
-
-        intervals.push(SessionInterval {
-            client: client.to_string(),
-            session_id: session_id.to_string(),
-            start_ts,
-            end_ts,
-            wall_duration_ms,
-            active_duration_ms,
-            message_count,
-            tokens,
-            cost,
-        });
     }
 
     // Sort by start time for downstream consumers
@@ -358,6 +400,17 @@ mod tests {
         }
     }
 
+    fn make_timed_msg(
+        client: &str,
+        session_id: &str,
+        timestamp: i64,
+        duration_ms: i64,
+    ) -> UnifiedMessage {
+        let mut message = make_msg(client, session_id, timestamp);
+        message.duration_ms = Some(duration_ms);
+        message
+    }
+
     #[test]
     fn test_sessionize_empty() {
         let result = sessionize(&[], DEFAULT_IDLE_GAP_MS);
@@ -372,6 +425,36 @@ mod tests {
         assert_eq!(result[0].wall_duration_ms, 0);
         assert_eq!(result[0].active_duration_ms, 0);
         assert_eq!(result[0].message_count, 1);
+    }
+
+    #[test]
+    fn test_sessionize_counts_single_timed_message_duration() {
+        let msgs = vec![make_timed_msg("opencode", "ses1", 1_000_000, 45_000)];
+        let result = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start_ts, 1_000_000);
+        assert_eq!(result[0].end_ts, 1_045_000);
+        assert_eq!(result[0].wall_duration_ms, 45_000);
+        assert_eq!(result[0].active_duration_ms, 45_000);
+    }
+
+    #[test]
+    fn test_sessionize_splits_timed_messages_across_idle_gap() {
+        let msgs = vec![
+            make_timed_msg("opencode", "ses1", 1_000_000, 60_000),
+            make_timed_msg("opencode", "ses1", 1_000_000 + 10 * 60_000, 30_000),
+        ];
+
+        let result = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_ts, 1_000_000);
+        assert_eq!(result[0].end_ts, 1_060_000);
+        assert_eq!(result[0].active_duration_ms, 60_000);
+        assert_eq!(result[1].start_ts, 1_600_000);
+        assert_eq!(result[1].end_ts, 1_630_000);
+        assert_eq!(result[1].active_duration_ms, 30_000);
     }
 
     #[test]
@@ -398,11 +481,13 @@ mod tests {
         ];
 
         let result = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
-        assert_eq!(result.len(), 1);
-        // Wall duration = 6 minutes
-        assert_eq!(result[0].wall_duration_ms, 6 * 60_000);
-        // Active duration = only the first gap (1 min), second gap (5 min) excluded
+        assert_eq!(result.len(), 2);
         assert_eq!(result[0].active_duration_ms, 60_000);
+        assert_eq!(result[0].wall_duration_ms, 60_000);
+        assert_eq!(result[0].message_count, 2);
+        assert_eq!(result[1].active_duration_ms, 0);
+        assert_eq!(result[1].wall_duration_ms, 0);
+        assert_eq!(result[1].message_count, 1);
     }
 
     #[test]
@@ -627,6 +712,33 @@ mod tests {
 
         assert_eq!(daily.get("2026-01-01"), Some(&1_800_000));
         assert_eq!(daily.get("2026-01-02"), Some(&1_800_000));
+        assert_eq!(daily.len(), 2);
+    }
+
+    #[test]
+    fn test_daily_active_time_keeps_idle_separated_timed_blocks_on_their_days() {
+        let timezone = FixedOffset::east_opt(0).unwrap();
+        let first_start = timezone
+            .with_ymd_and_hms(2026, 1, 1, 23, 58, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let second_start = timezone
+            .with_ymd_and_hms(2026, 1, 2, 0, 10, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let msgs = vec![
+            make_timed_msg("opencode", "ses1", first_start, 120_000),
+            make_timed_msg("opencode", "ses1", second_start, 60_000),
+        ];
+
+        let intervals = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        let daily = compute_daily_active_time_with_timezone(&intervals, &timezone);
+
+        assert_eq!(intervals.len(), 2);
+        assert_eq!(daily.get("2026-01-01"), Some(&120_000));
+        assert_eq!(daily.get("2026-01-02"), Some(&60_000));
         assert_eq!(daily.len(), 2);
     }
 }

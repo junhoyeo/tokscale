@@ -157,6 +157,53 @@ beforeEach(() => {
 });
 
 describe("user embed data", () => {
+  it("keeps embed tie-breakers out of the rank window", async () => {
+    mockState.pushAwaitedResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+        submissionCount: 1,
+        updatedAt: new Date("2026-03-12T09:00:00.000Z"),
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: 2, total: 3 }]);
+
+    await getUserEmbedStats("alice", "tokens");
+    const tokenSqlTexts = serializeSqlCalls();
+
+    expect(tokenSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(true);
+    expect(tokenSqlTexts.some((text) =>
+      text.includes("total_tokens DESC, CAST(total_cost AS DECIMAL(12,4)) DESC")
+    )).toBe(false);
+
+    mockState.reset();
+    mockState.pushAwaitedResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+        submissionCount: 1,
+        updatedAt: new Date("2026-03-12T09:00:00.000Z"),
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: 2, total: 3 }]);
+
+    await getUserEmbedStats("alice", "cost");
+    const costSqlTexts = serializeSqlCalls();
+
+    expect(costSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(true);
+    expect(costSqlTexts.some((text) =>
+      text.includes("CAST(total_cost AS DECIMAL(12,4)) DESC, total_tokens DESC")
+    )).toBe(false);
+  });
+
   it("looks up embed stats usernames case-insensitively and returns the canonical username", async () => {
     mockState.pushAwaitedResult([
       {

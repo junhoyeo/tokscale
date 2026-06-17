@@ -136,6 +136,14 @@ export async function POST(request: Request) {
 
     normalizeSubmissionData(rawData);
 
+    const mcpServers: string[] | null =
+      rawData != null && typeof rawData === "object" &&
+      Array.isArray((rawData as Record<string, unknown>).mcpServers)
+        ? ((rawData as Record<string, unknown>).mcpServers as unknown[]).filter(
+            (s): s is string => typeof s === "string" && s.length > 0
+          )
+        : null;
+
     const validation = validateSubmission(rawData);
 
     if (!validation.valid || !validation.data) {
@@ -576,6 +584,7 @@ export async function POST(request: Request) {
             maxConcurrentSessions: data.timeMetrics.maxConcurrentSessions,
             sessionCount: data.timeMetrics.sessionCount,
           } : {}),
+          mcpServers: mcpServers && mcpServers.length > 0 ? mcpServers : null,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));

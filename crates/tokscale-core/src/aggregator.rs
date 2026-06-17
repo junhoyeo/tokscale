@@ -104,7 +104,10 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
     let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
     let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum();
-    let active_days = contributions.iter().filter(|c| c.totals.tokens > 0).count() as i32;
+    let active_days = contributions
+        .iter()
+        .filter(|c| c.totals.tokens > 0 || c.totals.cost > 0.0 || c.totals.messages > 0)
+        .count() as i32;
     let max_cost = contributions
         .iter()
         .map(|c| c.totals.cost)
@@ -936,6 +939,53 @@ mod tests {
         assert_eq!(summary.total_days, 2);
         assert_eq!(summary.active_days, 1);
         assert!((summary.average_per_day - 0.05).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_calculate_summary_counts_cost_only_days_as_active() {
+        let contributions = vec![
+            DailyContribution {
+                date: "2024-01-01".to_string(),
+                totals: DailyTotals {
+                    tokens: 1000,
+                    cost: 0.05,
+                    messages: 1,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+            DailyContribution {
+                date: "2024-01-02".to_string(),
+                totals: DailyTotals {
+                    tokens: 0,
+                    cost: 1.25,
+                    messages: 0,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+            DailyContribution {
+                date: "2024-01-03".to_string(),
+                totals: DailyTotals {
+                    tokens: 0,
+                    cost: 0.0,
+                    messages: 0,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+        ];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_days, 3);
+        assert_eq!(summary.active_days, 2);
+        assert!((summary.average_per_day - 0.65).abs() < 0.0001);
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod config;
 pub mod data;
 mod event;
 mod export;
+pub mod remote;
 pub mod settings;
 mod themes;
 mod ui;
@@ -160,6 +161,11 @@ pub fn run(
         }
     };
 
+    // Cache-first load of server-side aggregated multi-device stats. The
+    // background refresh (when the cache is stale or missing) is driven by
+    // App::on_tick, and every failure path degrades silently to local-only.
+    app.init_remote_stats();
+
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
 
     if needs_background_load {
@@ -213,6 +219,10 @@ pub fn run(
         #[cfg(unix)]
         &sigcont_flag,
     );
+
+    // Don't orphan a `codex login` child (it would keep holding the OAuth
+    // port after the TUI exits).
+    app.kill_codex_login_child();
 
     restore_terminal(&mut terminal);
 

@@ -44,6 +44,7 @@ pub fn fetch() -> Result<UsageOutput> {
 
     Ok(UsageOutput {
         provider: "Warp/Oz".to_string(),
+        account: None,
         plan: Some("Aggregate API cache".to_string()),
         email: None,
         metrics,

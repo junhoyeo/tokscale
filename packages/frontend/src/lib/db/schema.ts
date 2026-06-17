@@ -72,7 +72,7 @@ export const sessions = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    token: varchar("token", { length: 64 }).notNull().unique(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     source: varchar("source", { length: 10 }).notNull().default("web"),
     userAgent: text("user_agent"),
@@ -81,9 +81,7 @@ export const sessions = pgTable(
       .defaultNow(),
   },
   (table) => [
-    // Planner picks the explicit non-unique idx over the unique-constraint
-    // sibling (~89k vs 0 scans on prod 2026-05-25); keep both.
-    index("idx_sessions_token").on(table.token),
+    index("idx_sessions_token_hash").on(table.tokenHash),
     index("idx_sessions_user_id").on(table.userId),
     index("idx_sessions_expires_at").on(table.expiresAt),
   ]
@@ -170,7 +168,7 @@ export const submissions = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
 
     totalTokens: bigint("total_tokens", { mode: "number" }).notNull(),
-    totalCost: decimal("total_cost", { precision: 12, scale: 4 }).notNull(),
+    totalCost: decimal("total_cost", { precision: 18, scale: 4 }).notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
     cacheCreationTokens: bigint("cache_creation_tokens", { mode: "number" })
@@ -199,6 +197,8 @@ export const submissions = pgTable(
     longestContinuousMs: bigint("longest_continuous_ms", { mode: "number" }),
     maxConcurrentSessions: integer("max_concurrent_sessions"),
     sessionCount: integer("session_count"),
+
+    mcpServers: jsonb("mcp_servers").$type<string[]>(),
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -275,7 +275,7 @@ export const dailyBreakdown = pgTable(
 
     date: date("date").notNull(),
     tokens: bigint("tokens", { mode: "number" }).notNull(),
-    cost: decimal("cost", { precision: 10, scale: 4 }).notNull(),
+    cost: decimal("cost", { precision: 14, scale: 4 }).notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
     /** Unix ms timestamp of earliest message in this UTC day bucket. NULL for legacy data. */

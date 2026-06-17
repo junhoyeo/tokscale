@@ -58,25 +58,47 @@ struct Membership {
     level: Option<String>,
 }
 
-fn read_credentials() -> Result<Credentials> {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json");
-    if !path.exists() {
-        anyhow::bail!("No Kimi credentials found. Run 'kimi' to log in.");
+fn credentials_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+
+    // 1) kimi-code (supports KIMI_CODE_HOME override)
+    let kimi_code_home = std::env::var("KIMI_CODE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .map(|h| h.join(".kimi-code"))
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        });
+    paths.push(kimi_code_home.join("credentials").join("kimi-code.json"));
+
+    // 2) kimi-cli
+    if let Some(home) = dirs::home_dir() {
+        paths.push(
+            home.join(".kimi")
+                .join("credentials")
+                .join("kimi-code.json"),
+        );
     }
-    let content = std::fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&content)?)
+
+    paths
 }
 
-fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json");
+fn read_credentials() -> Result<(Credentials, std::path::PathBuf)> {
+    for path in credentials_paths() {
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            return Ok((serde_json::from_str(&content)?, path));
+        }
+    }
+    anyhow::bail!("No Kimi credentials found. Run 'kimi' to log in.")
+}
+
+fn save_credentials(
+    path: &std::path::Path,
+    access_token: &str,
+    refresh_token: &str,
+    expires_in: i64,
+) {
     let expires_at = chrono::Utc::now().timestamp() as f64 + expires_in as f64;
     let json = serde_json::json!({
         "access_token": access_token,
@@ -92,7 +114,7 @@ fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
             return;
         }
     };
-    if let Err(e) = super::helpers::atomic_write_secret(&path, content.as_bytes()) {
+    if let Err(e) = super::helpers::atomic_write_secret(path, content.as_bytes()) {
         eprintln!("warning: failed to save Kimi credentials: {e}");
     }
 }
@@ -158,15 +180,11 @@ fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> 
 }
 
 pub fn has_credentials() -> bool {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json")
-        .exists()
+    credentials_paths().iter().any(|p| p.exists())
 }
 
 pub fn fetch() -> Result<UsageOutput> {
-    let creds = read_credentials()?;
+    let (creds, creds_path) = read_credentials()?;
     let mut access_token = creds
         .access_token
         .clone()
@@ -190,7 +208,7 @@ pub fn fetch() -> Result<UsageOutput> {
                             (&refreshed.refresh_token, refreshed.expires_in)
                         {
                             stored_refresh_token = Some(new_rt.clone());
-                            save_credentials(&access_token, new_rt, expires_in);
+                            save_credentials(&creds_path, &access_token, new_rt, expires_in);
                         }
                     }
                 }
@@ -211,7 +229,7 @@ pub fn fetch() -> Result<UsageOutput> {
                 if let (Some(new_rt), Some(expires_in)) =
                     (&refreshed.refresh_token, refreshed.expires_in)
                 {
-                    save_credentials(&new, new_rt, expires_in);
+                    save_credentials(&creds_path, &new, new_rt, expires_in);
                 }
                 fetch_usage(&client, &new).await?
             }
@@ -268,6 +286,7 @@ pub fn fetch() -> Result<UsageOutput> {
 
         Ok(UsageOutput {
             provider: "Kimi".into(),
+            account: None,
             plan,
             email: None,
             metrics,

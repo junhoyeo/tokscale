@@ -1,5 +1,6 @@
 mod antigravity;
 mod auth;
+mod claude_diagnostics;
 mod commands;
 mod cursor;
 mod device;
@@ -165,7 +166,7 @@ enum Commands {
         json: bool,
         #[arg(
             long,
-            help = "Force specific provider (custom, litellm, or openrouter)"
+            help = "Force specific pricing source (custom, litellm, openrouter, or models.dev)"
         )]
         provider: Option<String>,
         #[arg(long, help = "Disable spinner")]
@@ -270,6 +271,11 @@ enum Commands {
         #[arg(long, help = "Light terminal output (no TUI)")]
         light: bool,
     },
+    #[command(about = "Codex account integration commands")]
+    Codex {
+        #[command(subcommand)]
+        subcommand: CodexSubcommand,
+    },
     #[command(about = "Cursor API cache integration commands")]
     Cursor {
         #[command(subcommand)]
@@ -365,6 +371,37 @@ enum CursorSubcommand {
     Switch {
         #[arg(help = "Account label or id")]
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CodexSubcommand {
+    #[command(about = "Import the current Codex OAuth credentials as a saved account")]
+    Import {
+        #[arg(long, help = "Label for this Codex account (e.g., work, personal)")]
+        name: Option<String>,
+    },
+    #[command(about = "List saved Codex accounts")]
+    Accounts {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Switch active Codex account and write Codex auth.json")]
+    Switch {
+        #[arg(help = "Account label or id")]
+        name: String,
+    },
+    #[command(about = "Remove a saved Codex account")]
+    Remove {
+        #[arg(help = "Account label or id")]
+        name: String,
+    },
+    #[command(about = "Check Codex subscription usage for an account")]
+    Status {
+        #[arg(long, help = "Account label or id")]
+        name: Option<String>,
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
     },
 }
 
@@ -466,30 +503,22 @@ fn main() -> Result<()> {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             });
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients, &cli.home);
             if json || light || !can_use_tui {
                 run_models_report(
                     json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &date,
                     benchmark,
                     no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                     group_by,
                     write_cache,
                     no_write_cache,
                 )
             } else {
+                let (since, until) = build_date_filter(&date);
+                let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -512,27 +541,19 @@ fn main() -> Result<()> {
             benchmark,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients, &cli.home);
             if json || light || !can_use_tui {
                 run_monthly_report(
                     json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &date,
                     benchmark,
                     no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                 )
             } else {
+                let (since, until) = build_date_filter(&date);
+                let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -555,27 +576,19 @@ fn main() -> Result<()> {
             benchmark,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
             let clients = build_client_filter(clients, &cli.home);
             if json || light || !can_use_tui {
                 run_hourly_report(
                     json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &date,
                     benchmark,
                     no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                 )
             } else {
+                let (since, until) = build_date_filter(&date);
+                let year = normalize_year_filter(&date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -623,11 +636,8 @@ fn main() -> Result<()> {
             benchmark,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
             run_graph_command(
                 output,
@@ -642,11 +652,8 @@ fn main() -> Result<()> {
         }
         Some(Commands::Tui { clients, date }) => {
             ensure_home_supported_for_tui(&cli.home)?;
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
             auto_sync_cursor_before_tui(&cli.home, &clients)?;
             tui::run(
@@ -666,11 +673,8 @@ fn main() -> Result<()> {
             dry_run,
         }) => {
             reject_unsupported_home_override(&cli.home, "submit")?;
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             // Bypass settings.json defaultClients for the submit path: we want the
             // submit-specific default_submit_clients() fallback (in run_submit_command)
             // to fire when the user passes no client flags, not the user's general
@@ -723,6 +727,10 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "usage")?;
             commands::usage::run(json, light)
         }
+        Some(Commands::Codex { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "codex")?;
+            run_codex_command(subcommand)
+        }
         Some(Commands::Trae { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "trae")?;
             run_trae_command(subcommand)
@@ -741,11 +749,8 @@ fn main() -> Result<()> {
             date,
             no_spinner,
         }) => {
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
+            let (since, until) = build_date_filter(&date);
+            let year = normalize_year_filter(&date);
             let clients = build_client_filter(clients, &cli.home);
             run_time_metrics_report(
                 json,
@@ -788,13 +793,7 @@ fn main() -> Result<()> {
             })
         }
         None => {
-            let today = cli.date.today;
-            let week = cli.date.week;
-            let month = cli.date.month;
             let clients = build_client_filter(cli.clients, &cli.home);
-            let (since, until) =
-                build_date_filter(today, week, month, cli.date.since, cli.date.until);
-            let year = normalize_year_filter(today, week, month, cli.date.year);
             let group_by: tokscale_core::GroupBy = cli.group_by.parse().unwrap_or_else(|e| {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -805,14 +804,9 @@ fn main() -> Result<()> {
                     cli.json,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &cli.date,
                     cli.benchmark,
                     cli.no_spinner || cli.json,
-                    today,
-                    week,
-                    month,
                     group_by,
                     cli.write_cache,
                     cli.no_write_cache,
@@ -822,19 +816,16 @@ fn main() -> Result<()> {
                     false,
                     cli.home.clone(),
                     clients,
-                    since,
-                    until,
-                    year,
+                    &cli.date,
                     cli.benchmark,
                     cli.no_spinner || !can_use_tui,
-                    today,
-                    week,
-                    month,
                     group_by,
                     cli.write_cache,
                     cli.no_write_cache,
                 )
             } else {
+                let (since, until) = build_date_filter(&cli.date);
+                let year = normalize_year_filter(&cli.date);
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
@@ -894,6 +885,9 @@ pub enum ClientFilter {
     #[value(name = "trae")]
     Trae,
     Warp,
+    Cline,
+    Gjc,
+    Grok,
     Synthetic,
 }
 
@@ -928,6 +922,9 @@ impl ClientFilter {
             Self::Kiro => "kiro",
             Self::Trae => "trae",
             Self::Warp => "warp",
+            Self::Cline => "cline",
+            Self::Gjc => "gjc",
+            Self::Grok => "grok",
             Self::Synthetic => "synthetic",
         }
     }
@@ -965,6 +962,9 @@ impl ClientFilter {
             Self::Kiro => Some(ClientId::Kiro),
             Self::Trae => Some(ClientId::Trae),
             Self::Warp => Some(ClientId::Warp),
+            Self::Cline => Some(ClientId::Cline),
+            Self::Gjc => Some(ClientId::Gjc),
+            Self::Grok => Some(ClientId::Grok),
             Self::Synthetic => None,
         }
     }
@@ -999,6 +999,9 @@ impl ClientFilter {
             ClientId::Kiro => Self::Kiro,
             ClientId::Trae => Self::Trae,
             ClientId::Warp => Self::Warp,
+            ClientId::Cline => Self::Cline,
+            ClientId::Gjc => Self::Gjc,
+            ClientId::Grok => Self::Grok,
         }
     }
 
@@ -1102,16 +1105,40 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub warp: bool,
     #[arg(long, hide = true)]
+    pub cline: bool,
+    #[arg(long, hide = true)]
+    pub gjc: bool,
+    #[arg(long, hide = true)]
+    pub grok: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct DateRangeFlags {
-    #[arg(long, help = "Show only today's usage")]
+    #[arg(
+        long,
+        help = "Show only today's usage",
+        conflicts_with_all = ["yesterday", "week", "month", "since", "until", "year"]
+    )]
     pub today: bool,
-    #[arg(long, help = "Show last 7 days")]
+    #[arg(
+        long,
+        help = "Show only yesterday's usage",
+        conflicts_with_all = ["week", "month", "since", "until", "year"]
+    )]
+    pub yesterday: bool,
+    #[arg(
+        long,
+        help = "Show last 7 days",
+        conflicts_with_all = ["month", "since", "until", "year"]
+    )]
     pub week: bool,
-    #[arg(long, help = "Show current month")]
+    #[arg(
+        long,
+        help = "Show current month",
+        conflicts_with_all = ["since", "until", "year"]
+    )]
     pub month: bool,
     #[arg(long, help = "Start date (YYYY-MM-DD)")]
     pub since: Option<String>,
@@ -1155,7 +1182,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 26] = [
+    let legacy: [(bool, ClientFilter); 29] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1181,6 +1208,9 @@ fn build_client_filter_with_defaults(
         (flags.kiro, ClientFilter::Kiro),
         (flags.trae, ClientFilter::Trae),
         (flags.warp, ClientFilter::Warp),
+        (flags.cline, ClientFilter::Cline),
+        (flags.gjc, ClientFilter::Gjc),
+        (flags.grok, ClientFilter::Grok),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -1509,6 +1539,36 @@ fn use_env_roots(home_dir: &Option<String>) -> bool {
     home_dir.is_none()
 }
 
+fn resolve_effective_home_dir(home_dir: &Option<String>) -> Option<PathBuf> {
+    home_dir.as_ref().map(PathBuf::from).or_else(dirs::home_dir)
+}
+
+fn model_usage_includes_client(entry: &tokscale_core::ModelUsage, client: &str) -> bool {
+    if entry.client == client {
+        return true;
+    }
+
+    entry
+        .merged_clients
+        .as_deref()
+        .is_some_and(|clients| clients.split(", ").any(|id| id == client))
+}
+
+fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientDiagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+
+    use colored::Colorize;
+    for diagnostic in diagnostics {
+        eprintln!(
+            "{}",
+            format!("  {}: {}", diagnostic.severity, diagnostic.message).yellow()
+        );
+        eprintln!("{}", format!("  {}", diagnostic.help).bright_black());
+    }
+}
+
 fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
     if home_dir.is_some() {
         return Err(anyhow::anyhow!(
@@ -1519,39 +1579,29 @@ fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn build_date_filter(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: Option<String>,
-    until: Option<String>,
-) -> (Option<String>, Option<String>) {
-    build_date_filter_for_date(
-        today,
-        week,
-        month,
-        since,
-        until,
-        chrono::Local::now().date_naive(),
-    )
+fn build_date_filter(date: &DateRangeFlags) -> (Option<String>, Option<String>) {
+    build_date_filter_for_date(date, chrono::Local::now().date_naive())
 }
 
 fn build_date_filter_for_date(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: Option<String>,
-    until: Option<String>,
+    date: &DateRangeFlags,
     current_date: chrono::NaiveDate,
 ) -> (Option<String>, Option<String>) {
     use chrono::{Datelike, Duration};
 
-    if today {
-        let date = current_date.format("%Y-%m-%d").to_string();
-        return (Some(date.clone()), Some(date));
+    if date.today {
+        let day = current_date.format("%Y-%m-%d").to_string();
+        return (Some(day.clone()), Some(day));
     }
 
-    if week {
+    if date.yesterday {
+        let day = (current_date - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        return (Some(day.clone()), Some(day));
+    }
+
+    if date.week {
         let start = current_date - Duration::days(6);
         return (
             Some(start.format("%Y-%m-%d").to_string()),
@@ -1559,7 +1609,7 @@ fn build_date_filter_for_date(
         );
     }
 
-    if month {
+    if date.month {
         let start = current_date.with_day(1).unwrap_or(current_date);
         return (
             Some(start.format("%Y-%m-%d").to_string()),
@@ -1567,67 +1617,45 @@ fn build_date_filter_for_date(
         );
     }
 
-    (since, until)
+    (date.since.clone(), date.until.clone())
 }
 
-fn normalize_year_filter(
-    today: bool,
-    week: bool,
-    month: bool,
-    year: Option<String>,
-) -> Option<String> {
-    if today || week || month {
+fn normalize_year_filter(date: &DateRangeFlags) -> Option<String> {
+    if date.today || date.yesterday || date.week || date.month {
         None
     } else {
-        year
+        date.year.clone()
     }
 }
 
-fn get_date_range_label(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: &Option<String>,
-    until: &Option<String>,
-    year: &Option<String>,
-) -> Option<String> {
-    get_date_range_label_for_date(
-        today,
-        week,
-        month,
-        since,
-        until,
-        year,
-        chrono::Local::now().date_naive(),
-    )
+fn get_date_range_label(date: &DateRangeFlags) -> Option<String> {
+    get_date_range_label_for_date(date, chrono::Local::now().date_naive())
 }
 
 fn get_date_range_label_for_date(
-    today: bool,
-    week: bool,
-    month: bool,
-    since: &Option<String>,
-    until: &Option<String>,
-    year: &Option<String>,
+    date: &DateRangeFlags,
     current_date: chrono::NaiveDate,
 ) -> Option<String> {
-    if today {
+    if date.today {
         return Some("Today".to_string());
     }
-    if week {
+    if date.yesterday {
+        return Some("Yesterday".to_string());
+    }
+    if date.week {
         return Some("Last 7 days".to_string());
     }
-    if month {
+    if date.month {
         return Some(current_date.format("%B %Y").to_string());
     }
-    if let Some(y) = year {
+    if let Some(y) = &date.year {
         return Some(y.clone());
     }
     let mut parts = Vec::new();
-    if let Some(s) = since {
+    if let Some(s) = &date.since {
         parts.push(format!("from {}", s));
     }
-    if let Some(u) = until {
+    if let Some(u) = &date.until {
         parts.push(format!("to {}", u));
     }
     if parts.is_empty() {
@@ -1754,14 +1782,9 @@ fn run_models_report(
     json: bool,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
+    date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
-    today: bool,
-    week: bool,
-    month_flag: bool,
     group_by: tokscale_core::GroupBy,
     cli_write_cache: bool,
     cli_no_write_cache: bool,
@@ -1770,7 +1793,10 @@ fn run_models_report(
     use tokio::runtime::Runtime;
     use tokscale_core::{get_model_report, GroupBy, ReportOptions};
 
-    let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let (since, until) = build_date_filter(date);
+    let year = normalize_year_filter(date);
+    let date_range = get_date_range_label(date);
+    let effective_home_dir = resolve_effective_home_dir(&home_dir);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -1809,6 +1835,22 @@ fn run_models_report(
         explicit_cursor_filter,
     );
     let processing_time_ms = start.elapsed().as_millis();
+    let claude_message_count = report
+        .entries
+        .iter()
+        .filter(|entry| model_usage_includes_client(entry, "claude"))
+        .map(|entry| entry.message_count)
+        .sum();
+    let diagnostics = effective_home_dir
+        .as_deref()
+        .map(|home| {
+            claude_diagnostics::diagnostics_for_empty_explicit_report(
+                home,
+                &clients,
+                claude_message_count,
+            )
+        })
+        .unwrap_or_default();
 
     if json {
         #[derive(serde::Serialize)]
@@ -1848,6 +1890,8 @@ fn run_models_report(
             processing_time_ms: u32,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
         }
 
         let output = ModelReportJson {
@@ -1897,10 +1941,12 @@ fn run_models_report(
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
             warnings: cursor_setup_warnings,
+            diagnostics,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
+        emit_client_diagnostics(&diagnostics);
 
         emit_cursor_setup_warnings(&cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);
@@ -2524,25 +2570,21 @@ fn run_models_report(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_monthly_report(
     json: bool,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
+    date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
-    today: bool,
-    week: bool,
-    month_flag: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
     use tokscale_core::{get_monthly_report, GroupBy, ReportOptions};
 
-    let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let (since, until) = build_date_filter(date);
+    let year = normalize_year_filter(date);
+    let date_range = get_date_range_label(date);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -2823,25 +2865,21 @@ fn run_monthly_report(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_hourly_report(
     json: bool,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
+    date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
-    today: bool,
-    week: bool,
-    month_flag: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
     use tokscale_core::{get_hourly_report, GroupBy, ReportOptions};
 
-    let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let (since, until) = build_date_filter(date);
+    let year = normalize_year_filter(date);
+    let date_range = get_date_range_label(date);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -3169,14 +3207,14 @@ fn run_pricing_lookup(
 
     let provider_normalized = provider.map(|p| p.to_lowercase());
     if let Some(ref p) = provider_normalized {
-        if p != "custom" && p != "litellm" && p != "openrouter" {
+        if p != "custom" && p != "litellm" && p != "openrouter" && p != "models.dev" {
             println!(
                 "\n  {}",
                 format!("Invalid provider: {}", provider.unwrap_or("")).red()
             );
             println!(
                 "{}\n",
-                "  Valid providers: custom, litellm, openrouter".bright_black()
+                "  Valid providers: custom, litellm, openrouter, models.dev".bright_black()
             );
             std::process::exit(1);
         }
@@ -3292,6 +3330,7 @@ fn run_pricing_lookup(
                     "custom" => "Custom",
                     "litellm" => "LiteLLM",
                     "openrouter" => "OpenRouter",
+                    "models.dev" => "Models.dev",
                     _ => pricing.source.as_str(),
                 };
                 println!("  Source: {}", source_label);
@@ -3544,7 +3583,9 @@ fn capitalize_client(client: &str) -> String {
         "hermes" => "Hermes Agent".to_string(),
         "goose" => "Goose".to_string(),
         "warp" => "Warp".to_string(),
+        "grok" => "Grok Build".to_string(),
         "pi" => "Pi".to_string(),
+        "gjc" => "Gajae-Code".to_string(),
         other => other.to_string(),
     }
 }
@@ -3608,6 +3649,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
         exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
     }
 
     #[derive(serde::Serialize)]
@@ -3741,6 +3784,12 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     },
                 ));
 
+                let diagnostics = if client == ClientId::Claude {
+                    claude_diagnostics::diagnostics_for_clients_row(&home_dir)
+                } else {
+                    Vec::new()
+                };
+
                 ClientRow {
                     client: client.as_str().to_string(),
                     label,
@@ -3756,6 +3805,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         && copilot_exporter_path.is_some())
                     .then(|| "configured".to_string()),
                     extra_paths,
+                    diagnostics,
                 }
             })
             .collect();
@@ -3891,6 +3941,14 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     "  {}",
                     format!("messages: {}", format_number(row.message_count)).bright_black()
                 );
+            }
+
+            for diagnostic in &row.diagnostics {
+                println!(
+                    "  {}",
+                    format!("{}: {}", diagnostic.severity, diagnostic.message).yellow()
+                );
+                println!("  {}", diagnostic.help.bright_black());
             }
 
             println!();
@@ -4048,6 +4106,8 @@ struct TsTokenContributionData {
     contributions: Vec<TsDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_metrics: Option<TsTimeMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_servers: Option<Vec<String>>,
 }
 
 fn to_ts_token_contribution_data(
@@ -4139,6 +4199,14 @@ fn to_ts_token_contribution_data(
             max_concurrent_sessions: tm.max_concurrent_sessions,
             session_count: tm.session_count,
         }),
+        mcp_servers: {
+            let servers = tokscale_core::mcp::discover_mcp_server_names(None);
+            if servers.is_empty() {
+                None
+            } else {
+                Some(servers)
+            }
+        },
     }
 }
 
@@ -4592,18 +4660,9 @@ fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let include_cursor = home_dir.is_none()
-        && clients
-            .as_ref()
-            .is_none_or(|s| s.iter().any(|src| src == "cursor"));
+    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
-    let has_cursor_cache = include_cursor && has_cursor_usage_cache_for_report(&home_dir);
-    let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
-
-    if include_cursor && cursor::is_cursor_logged_in() {
-        let rt_sync = tokio::runtime::Runtime::new()?;
-        cursor_sync_result = Some(rt_sync.block_on(async { cursor::sync_cursor_cache().await }));
-    }
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
 
     if show_progress {
@@ -4633,7 +4692,7 @@ fn run_graph_command(
         .map_err(|e| anyhow::anyhow!(e))?;
     emit_cursor_sync_warning(
         cursor_sync_result.as_ref(),
-        has_cursor_cache,
+        had_cursor_cache,
         explicit_cursor_filter,
     );
     emit_cursor_setup_warnings(&cursor_setup_warnings);
@@ -4684,7 +4743,7 @@ fn run_graph_command(
                         .bright_black()
                     );
                 } else if let Some(err) = sync.error {
-                    if has_cursor_cache {
+                    if had_cursor_cache {
                         eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
                     }
                 }
@@ -5352,6 +5411,18 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
     }
 }
 
+fn run_codex_command(subcommand: CodexSubcommand) -> Result<()> {
+    match subcommand {
+        CodexSubcommand::Import { name } => commands::usage::codex::run_codex_import(name),
+        CodexSubcommand::Accounts { json } => commands::usage::codex::run_codex_accounts(json),
+        CodexSubcommand::Switch { name } => commands::usage::codex::run_codex_switch(&name),
+        CodexSubcommand::Remove { name } => commands::usage::codex::run_codex_remove(&name),
+        CodexSubcommand::Status { name, json } => {
+            commands::usage::codex::run_codex_status(name, json)
+        }
+    }
+}
+
 fn run_antigravity_command(subcommand: AntigravitySubcommand) -> Result<()> {
     match subcommand {
         AntigravitySubcommand::Sync => antigravity::run_antigravity_sync(),
@@ -5526,6 +5597,96 @@ fn format_tokens_with_commas(n: i64) -> String {
     result
 }
 
+struct CaptureCommandOutcome {
+    exit_code: i32,
+    timed_out: bool,
+}
+
+fn run_capture_command(
+    command: &str,
+    args: &[String],
+    output_path: &Path,
+    timeout: Duration,
+) -> Result<CaptureCommandOutcome> {
+    use std::io::{Read, Write};
+    use std::process::Command;
+    use std::thread;
+    use std::time::Instant;
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", command, e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
+
+    let mut output_file = std::fs::File::create(output_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create output file '{}': {}",
+            output_path.display(),
+            e
+        )
+    })?;
+
+    let output_handle = thread::spawn(move || -> Result<()> {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buffer = [0; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(n) => output_file
+                    .write_all(&buffer[..n])
+                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to read from subprocess stdout: {}",
+                        e
+                    ));
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?
+        {
+            break status;
+        }
+
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child
+                .wait()
+                .map_err(|e| anyhow::anyhow!("Failed to wait for timed-out subprocess: {}", e))?;
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let output_result = output_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
+    if !timed_out {
+        output_result?;
+    }
+
+    Ok(CaptureCommandOutcome {
+        exit_code: status.code().unwrap_or(1),
+        timed_out,
+    })
+}
+
 fn run_headless_command(
     source: &str,
     args: Vec<String>,
@@ -5534,10 +5695,6 @@ fn run_headless_command(
     no_auto_flags: bool,
 ) -> Result<()> {
     use chrono::Utc;
-    use std::io::{Read, Write};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use uuid::Uuid;
 
     let source_lower = source.to_lowercase();
@@ -5608,76 +5765,10 @@ fn run_headless_command(
     );
     println!();
 
-    let mut child = Command::new(&source_lower)
-        .args(&final_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .stdin(std::process::Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", source_lower, e))?;
+    let outcome =
+        run_capture_command(&source_lower, &final_args, Path::new(&output_path), timeout)?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
-
-    let mut output_file = std::fs::File::create(&output_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create output file '{}': {}", output_path, e))?;
-
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let timed_out_clone = Arc::clone(&timed_out);
-    let child_id = child.id();
-
-    let timeout_handle = std::thread::spawn(move || {
-        std::thread::sleep(timeout);
-        if !timed_out_clone.load(Ordering::SeqCst) {
-            timed_out_clone.store(true, Ordering::SeqCst);
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(child_id.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &child_id.to_string()])
-                    .output();
-            }
-        }
-    });
-
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut buffer = [0; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                output_file
-                    .write_all(&buffer[..n])
-                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?;
-            }
-            Err(e) => {
-                if timed_out.load(Ordering::SeqCst) {
-                    break;
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to read from subprocess stdout: {}",
-                    e
-                ));
-            }
-        }
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?;
-
-    timed_out.store(true, Ordering::SeqCst);
-    let _ = timeout_handle.join();
-
-    if timed_out.load(Ordering::SeqCst) && !status.success() {
+    if outcome.timed_out {
         eprintln!(
             "{}",
             format!("\n  Subprocess timed out after {}s", timeout.as_secs()).red()
@@ -5687,16 +5778,14 @@ fn run_headless_command(
         std::process::exit(124);
     }
 
-    let exit_code = status.code().unwrap_or(1);
-
     println!(
         "{}",
         format!("✓ Saved headless output to {}", output_path).green()
     );
     println!();
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    if outcome.exit_code != 0 {
+        std::process::exit(outcome.exit_code);
     }
 
     Ok(())
@@ -5901,6 +5990,9 @@ mod tests {
             kiro: true,
             trae: true,
             warp: true,
+            cline: true,
+            gjc: true,
+            grok: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -5936,6 +6028,9 @@ mod tests {
             "kiro",
             "trae",
             "warp",
+            "cline",
+            "gjc",
+            "grok",
             "synthetic",
         ] {
             assert!(
@@ -6045,6 +6140,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_client_filter_gjc_round_trip() {
+        use tokscale_core::ClientId;
+        // gjc parses as the canonical lowercase id and round-trips through
+        // both the ClientId<->ClientFilter conversions and the id string.
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
+        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
+        assert_eq!(
+            ClientFilter::from_client_id(ClientId::Gjc),
+            ClientFilter::Gjc
+        );
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
     }
 
     #[test]
@@ -6472,20 +6581,18 @@ mod tests {
 
     #[test]
     fn test_build_date_filter_custom_range() {
-        let (since, until) = build_date_filter(
-            false,
-            false,
-            false,
-            Some("2024-01-01".to_string()),
-            Some("2024-12-31".to_string()),
-        );
+        let (since, until) = build_date_filter(&DateRangeFlags {
+            since: Some("2024-01-01".to_string()),
+            until: Some("2024-12-31".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(since, Some("2024-01-01".to_string()));
         assert_eq!(until, Some("2024-12-31".to_string()));
     }
 
     #[test]
     fn test_build_date_filter_no_filters() {
-        let (since, until) = build_date_filter(false, false, false, None, None);
+        let (since, until) = build_date_filter(&DateRangeFlags::default());
         assert_eq!(since, None);
         assert_eq!(until, None);
     }
@@ -6493,15 +6600,41 @@ mod tests {
     #[test]
     fn test_build_date_filter_today_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let (since, until) = build_date_filter_for_date(true, false, false, None, None, today);
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                today: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(since, Some("2026-03-08".to_string()));
         assert_eq!(until, Some("2026-03-08".to_string()));
     }
 
     #[test]
+    fn test_build_date_filter_yesterday_uses_provided_local_date() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                yesterday: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
+        assert_eq!(since, Some("2026-03-07".to_string()));
+        assert_eq!(until, Some("2026-03-07".to_string()));
+    }
+
+    #[test]
     fn test_build_date_filter_week_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let (since, until) = build_date_filter_for_date(false, true, false, None, None, today);
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                week: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(since, Some("2026-03-02".to_string()));
         assert_eq!(until, Some("2026-03-08".to_string()));
     }
@@ -6509,39 +6642,123 @@ mod tests {
     #[test]
     fn test_build_date_filter_month_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let (since, until) = build_date_filter_for_date(false, false, true, None, None, today);
+        let (since, until) = build_date_filter_for_date(
+            &DateRangeFlags {
+                month: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(since, Some("2026-03-01".to_string()));
         assert_eq!(until, Some("2026-03-08".to_string()));
     }
 
     #[test]
     fn test_normalize_year_filter_with_year() {
-        let year = normalize_year_filter(false, false, false, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, Some("2024".to_string()));
     }
 
     #[test]
     fn test_normalize_year_filter_with_today() {
-        let year = normalize_year_filter(true, false, false, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            today: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
+        assert_eq!(year, None);
+    }
+
+    #[test]
+    fn test_normalize_year_filter_with_yesterday() {
+        let year = normalize_year_filter(&DateRangeFlags {
+            yesterday: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, None);
     }
 
     #[test]
     fn test_normalize_year_filter_with_week() {
-        let year = normalize_year_filter(false, true, false, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            week: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, None);
     }
 
     #[test]
     fn test_normalize_year_filter_with_month() {
-        let year = normalize_year_filter(false, false, true, Some("2024".to_string()));
+        let year = normalize_year_filter(&DateRangeFlags {
+            month: true,
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(year, None);
     }
 
     #[test]
     fn test_normalize_year_filter_no_year() {
-        let year = normalize_year_filter(false, false, false, None);
+        let year = normalize_year_filter(&DateRangeFlags::default());
         assert_eq!(year, None);
+    }
+
+    /// Parses `args` expecting failure; panics if parsing unexpectedly
+    /// succeeds. Avoids `unwrap_err()` since `Cli` does not derive `Debug`.
+    fn expect_parse_error(args: &[&str]) -> clap::Error {
+        match Cli::try_parse_from(args) {
+            Ok(_) => panic!("expected `{}` to fail to parse", args.join(" ")),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn test_date_shortcut_flags_conflict() {
+        let err = expect_parse_error(&["tokscale", "--today", "--yesterday"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = expect_parse_error(&["tokscale", "--week", "--month"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_date_shortcut_conflicts_with_since_until_year() {
+        let err = expect_parse_error(&["tokscale", "--today", "--since", "2024-01-01"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = expect_parse_error(&["tokscale", "--week", "--until", "2024-12-31"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = expect_parse_error(&["tokscale", "--month", "--year", "2024"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_date_shortcut_conflict_applies_to_subcommands() {
+        let err = expect_parse_error(&["tokscale", "models", "--today", "--yesterday"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_since_until_year_still_combine() {
+        let cli = Cli::try_parse_from([
+            "tokscale",
+            "--since",
+            "2024-01-01",
+            "--until",
+            "2024-12-31",
+            "--year",
+            "2024",
+        ])
+        .unwrap();
+        assert_eq!(cli.date.since.as_deref(), Some("2024-01-01"));
+        assert_eq!(cli.date.until.as_deref(), Some("2024-12-31"));
+        assert_eq!(cli.date.year.as_deref(), Some("2024"));
     }
 
     #[test]
@@ -6662,72 +6879,84 @@ mod tests {
 
     #[test]
     fn test_get_date_range_label_today() {
-        let label = get_date_range_label(true, false, false, &None, &None, &None);
+        let label = get_date_range_label(&DateRangeFlags {
+            today: true,
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("Today".to_string()));
     }
 
     #[test]
+    fn test_get_date_range_label_yesterday() {
+        let label = get_date_range_label(&DateRangeFlags {
+            yesterday: true,
+            ..DateRangeFlags::default()
+        });
+        assert_eq!(label, Some("Yesterday".to_string()));
+    }
+
+    #[test]
     fn test_get_date_range_label_week() {
-        let label = get_date_range_label(false, true, false, &None, &None, &None);
+        let label = get_date_range_label(&DateRangeFlags {
+            week: true,
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("Last 7 days".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_month_uses_provided_local_date() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
-        let label = get_date_range_label_for_date(false, false, true, &None, &None, &None, today);
+        let label = get_date_range_label_for_date(
+            &DateRangeFlags {
+                month: true,
+                ..DateRangeFlags::default()
+            },
+            today,
+        );
         assert_eq!(label, Some("March 2026".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_year() {
-        let label =
-            get_date_range_label(false, false, false, &None, &None, &Some("2024".to_string()));
+        let label = get_date_range_label(&DateRangeFlags {
+            year: Some("2024".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("2024".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_custom_since() {
-        let label = get_date_range_label(
-            false,
-            false,
-            false,
-            &Some("2024-01-01".to_string()),
-            &None,
-            &None,
-        );
+        let label = get_date_range_label(&DateRangeFlags {
+            since: Some("2024-01-01".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("from 2024-01-01".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_custom_until() {
-        let label = get_date_range_label(
-            false,
-            false,
-            false,
-            &None,
-            &Some("2024-12-31".to_string()),
-            &None,
-        );
+        let label = get_date_range_label(&DateRangeFlags {
+            until: Some("2024-12-31".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("to 2024-12-31".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_custom_range() {
-        let label = get_date_range_label(
-            false,
-            false,
-            false,
-            &Some("2024-01-01".to_string()),
-            &Some("2024-12-31".to_string()),
-            &None,
-        );
+        let label = get_date_range_label(&DateRangeFlags {
+            since: Some("2024-01-01".to_string()),
+            until: Some("2024-12-31".to_string()),
+            ..DateRangeFlags::default()
+        });
         assert_eq!(label, Some("from 2024-01-01 to 2024-12-31".to_string()));
     }
 
     #[test]
     fn test_get_date_range_label_none() {
-        let label = get_date_range_label(false, false, false, &None, &None, &None);
+        let label = get_date_range_label(&DateRangeFlags::default());
         assert_eq!(label, None);
     }
 
@@ -7218,6 +7447,21 @@ mod tests {
     }
 
     #[test]
+    fn clap_accepts_codex_account_commands() {
+        assert!(Cli::try_parse_from(["tokscale", "codex", "import", "--name", "work"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "accounts"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "accounts", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "switch", "work"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "remove", "work"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "codex", "status", "--name", "work"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["tokscale", "codex", "status", "--name", "work", "--json"])
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn clap_accepts_warp_status_and_sync_commands() {
         assert!(Cli::try_parse_from(["tokscale", "warp", "status"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "warp", "status", "--json"]).is_ok());
@@ -7239,6 +7483,23 @@ mod tests {
         assert_eq!(
             ClientFilter::from_client_id(tokscale_core::ClientId::Warp),
             ClientFilter::Warp
+        );
+    }
+
+    #[test]
+    fn client_filter_round_trips_grok() {
+        assert_eq!(
+            ClientFilter::from_filter_str("grok"),
+            Some(ClientFilter::Grok)
+        );
+        assert_eq!(ClientFilter::Grok.as_filter_str(), "grok");
+        assert_eq!(
+            ClientFilter::Grok.to_client_id(),
+            Some(tokscale_core::ClientId::Grok)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Grok),
+            ClientFilter::Grok
         );
     }
 

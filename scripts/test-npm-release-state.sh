@@ -92,6 +92,10 @@ if [[ "${1:-}" == "view" ]]; then
     exit 1
   fi
   case "${spec}" in
+    *@3.1.0|*@3.1.0-beta.1|*@3.1.0+build-1|*@3.1.0+build-2)
+      echo "npm ERR! code E404" >&2
+      exit 1
+      ;;
     *@3.0.0)
       case "${spec}" in
         @tokscale/cli-darwin-x64@3.0.0|@tokscale/cli@3.0.0)
@@ -309,6 +313,135 @@ EOF_MANIFEST
   )
 }
 
+test_prerelease_publish_uses_prerelease_dist_tag() {
+  local work="${TMP_DIR}/publish-prerelease-tag"
+  mkdir -p "${work}/scripts" "${work}/packages/cli"
+  cp "${PUBLISH_SCRIPT}" "${work}/scripts/publish-npm-package.sh"
+  (
+    cd "${work}"
+    cat > packages/cli/package.json <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli",
+  "version": "3.1.0-beta.1"
+}
+EOF_MANIFEST
+    local fake_npm="${TMP_DIR}/fake-npm-publish-prerelease-tag"
+    write_fake_npm "${fake_npm}"
+
+    FAKE_NPM_LOG="${TMP_DIR}/publish-prerelease-tag-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/publish-prerelease-tag-publish.log" \
+      NPM_CMD="${fake_npm}" \
+      bash scripts/publish-npm-package.sh packages/cli >"${TMP_DIR}/publish-prerelease-tag-output.txt" 2>&1
+
+    grep -q '^publish --access public --tag beta$' "${TMP_DIR}/publish-prerelease-tag-npm.log"
+  )
+}
+
+test_prerelease_publish_rejects_explicit_latest_dist_tag() {
+  local work="${TMP_DIR}/publish-prerelease-latest-tag"
+  mkdir -p "${work}/scripts" "${work}/packages/cli"
+  cp "${PUBLISH_SCRIPT}" "${work}/scripts/publish-npm-package.sh"
+  (
+    cd "${work}"
+    cat > packages/cli/package.json <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli",
+  "version": "3.1.0-beta.1"
+}
+EOF_MANIFEST
+    local fake_npm="${TMP_DIR}/fake-npm-publish-prerelease-latest-tag"
+    write_fake_npm "${fake_npm}"
+
+    local output="${TMP_DIR}/publish-prerelease-latest-tag-output.txt"
+    if FAKE_NPM_LOG="${TMP_DIR}/publish-prerelease-latest-tag-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/publish-prerelease-latest-tag-publish.log" \
+      NPM_CMD="${fake_npm}" \
+      NPM_DIST_TAG="latest" \
+      bash scripts/publish-npm-package.sh packages/cli >"${output}" 2>&1; then
+      echo "Expected publish helper to reject prerelease latest dist-tag" >&2
+      return 1
+    fi
+
+    grep -q "Refusing to publish prerelease @tokscale/cli@3.1.0-beta.1 with npm dist-tag latest" "${output}"
+    if [[ -s "${TMP_DIR}/publish-prerelease-latest-tag-npm.log" ]]; then
+      ! grep -q '^publish ' "${TMP_DIR}/publish-prerelease-latest-tag-npm.log"
+    fi
+  )
+}
+
+test_stable_publish_uses_latest_dist_tag() {
+  local work="${TMP_DIR}/publish-stable-tag"
+  mkdir -p "${work}/scripts" "${work}/packages/cli"
+  cp "${PUBLISH_SCRIPT}" "${work}/scripts/publish-npm-package.sh"
+  (
+    cd "${work}"
+    cat > packages/cli/package.json <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli",
+  "version": "3.1.0"
+}
+EOF_MANIFEST
+    local fake_npm="${TMP_DIR}/fake-npm-publish-stable-tag"
+    write_fake_npm "${fake_npm}"
+
+    FAKE_NPM_LOG="${TMP_DIR}/publish-stable-tag-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/publish-stable-tag-publish.log" \
+      NPM_CMD="${fake_npm}" \
+      bash scripts/publish-npm-package.sh packages/cli >"${TMP_DIR}/publish-stable-tag-output.txt" 2>&1
+
+    grep -q '^publish --access public --tag latest$' "${TMP_DIR}/publish-stable-tag-npm.log"
+  )
+}
+
+test_stable_build_metadata_publish_uses_latest_dist_tag() {
+  local work="${TMP_DIR}/publish-stable-build-metadata-tag"
+  mkdir -p "${work}/scripts" "${work}/packages/cli"
+  cp "${PUBLISH_SCRIPT}" "${work}/scripts/publish-npm-package.sh"
+  (
+    cd "${work}"
+    cat > packages/cli/package.json <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli",
+  "version": "3.1.0+build-1"
+}
+EOF_MANIFEST
+    local fake_npm="${TMP_DIR}/fake-npm-publish-stable-build-metadata-tag"
+    write_fake_npm "${fake_npm}"
+
+    FAKE_NPM_LOG="${TMP_DIR}/publish-stable-build-metadata-tag-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/publish-stable-build-metadata-tag-publish.log" \
+      NPM_CMD="${fake_npm}" \
+      bash scripts/publish-npm-package.sh packages/cli >"${TMP_DIR}/publish-stable-build-metadata-tag-output.txt" 2>&1
+
+    grep -q '^publish --access public --tag latest$' "${TMP_DIR}/publish-stable-build-metadata-tag-npm.log"
+  )
+}
+
+test_stable_build_metadata_allows_explicit_latest_dist_tag() {
+  local work="${TMP_DIR}/publish-stable-build-metadata-explicit-latest"
+  mkdir -p "${work}/scripts" "${work}/packages/cli"
+  cp "${PUBLISH_SCRIPT}" "${work}/scripts/publish-npm-package.sh"
+  (
+    cd "${work}"
+    cat > packages/cli/package.json <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli",
+  "version": "3.1.0+build-2"
+}
+EOF_MANIFEST
+    local fake_npm="${TMP_DIR}/fake-npm-publish-stable-build-metadata-explicit-latest"
+    write_fake_npm "${fake_npm}"
+
+    FAKE_NPM_LOG="${TMP_DIR}/publish-stable-build-metadata-explicit-latest-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/publish-stable-build-metadata-explicit-latest-publish.log" \
+      NPM_CMD="${fake_npm}" \
+      NPM_DIST_TAG="latest" \
+      bash scripts/publish-npm-package.sh packages/cli >"${TMP_DIR}/publish-stable-build-metadata-explicit-latest-output.txt" 2>&1
+
+    grep -q '^publish --access public --tag latest$' "${TMP_DIR}/publish-stable-build-metadata-explicit-latest-npm.log"
+  )
+}
+
 test_refuses_repo_version_ahead_of_npm_without_recovery
 test_recovery_allows_existing_target_versions_for_partial_retry
 test_recovery_requires_base_version
@@ -316,5 +449,10 @@ test_precheck_fails_on_non_404_npm_lookup_errors
 test_publish_skips_existing_target_version_during_recovery
 test_refuses_to_publish_existing_target_without_recovery
 test_publish_fails_on_non_404_npm_lookup_errors
+test_prerelease_publish_uses_prerelease_dist_tag
+test_prerelease_publish_rejects_explicit_latest_dist_tag
+test_stable_publish_uses_latest_dist_tag
+test_stable_build_metadata_publish_uses_latest_dist_tag
+test_stable_build_metadata_allows_explicit_latest_dist_tag
 
 echo "npm release-state tests passed"

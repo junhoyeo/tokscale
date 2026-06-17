@@ -426,6 +426,8 @@ pub fn parse_claude_file_with_cache_and_home(
                         entry: &entry,
                         last_model: last_model.as_deref(),
                         last_provider_hint: last_provider_hint.as_deref(),
+                        client_id: &client_id,
+                        default_provider_hint: metadata_provider_hint,
                         session_id: &session_id,
                         fallback_timestamp,
                         workspace_key: workspace_key.clone(),
@@ -813,6 +815,8 @@ struct ClaudeToolResultContext<'a> {
     entry: &'a ClaudeEntry,
     last_model: Option<&'a str>,
     last_provider_hint: Option<&'a str>,
+    client_id: &'a str,
+    default_provider_hint: Option<&'a str>,
     session_id: &'a str,
     fallback_timestamp: i64,
     workspace_key: Option<String>,
@@ -846,7 +850,8 @@ fn extract_claude_tool_result_message(
                 .and_then(|message| message.provider_id.clone())
         })
         .or_else(|| context.entry.provider_id.clone())
-        .or_else(|| context.last_provider_hint.map(str::to_string));
+        .or_else(|| context.last_provider_hint.map(str::to_string))
+        .or_else(|| context.default_provider_hint.map(str::to_string));
 
     let provider_choice = claude_provider_choice(&raw_model, provider_hint.as_deref());
     let model = canonicalize_claude_model(&raw_model);
@@ -855,7 +860,7 @@ fn extract_claude_tool_result_message(
         .unwrap_or(context.fallback_timestamp);
 
     let mut message = UnifiedMessage::new_with_dedup(
-        "claude",
+        context.client_id,
         model,
         provider_choice.id,
         context.session_id.to_string(),
@@ -868,9 +873,12 @@ fn extract_claude_tool_result_message(
             reasoning: 0,
         },
         0.0,
-        usage
-            .dedup_key
-            .map(|key| format!("claude:tool_result:{}:{key}", context.session_id)),
+        usage.dedup_key.map(|key| {
+            format!(
+                "{}:tool_result:{}:{key}",
+                context.client_id, context.session_id
+            )
+        }),
     );
     message.message_count = 0;
     message.agent = context.sidechain_agent;
@@ -1901,6 +1909,22 @@ mod tests {
     }
 
     #[test]
+    fn test_opus_4_7_usage_is_parsed_when_usage_metadata_exists() {
+        let content = r#"{"type":"assistant","timestamp":"2026-04-16T10:00:00.000Z","requestId":"req_opus47","message":{"id":"msg_opus47","model":"claude-opus-4-7","usage":{"input_tokens":321,"output_tokens":654,"cache_read_input_tokens":987,"cache_creation_input_tokens":111}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-7");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 321);
+        assert_eq!(messages[0].tokens.output, 654);
+        assert_eq!(messages[0].tokens.cache_read, 987);
+        assert_eq!(messages[0].tokens.cache_write, 111);
+    }
+
+    #[test]
     fn test_tool_result_output_counts_as_input() {
         let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_input","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
 
@@ -1922,6 +1946,27 @@ mod tests {
             messages[0].dedup_key.as_deref(),
             Some(expected_dedup_key.as_str())
         );
+        assert_eq!(messages[0].message_count, 0);
+    }
+
+    #[test]
+    fn test_cc_mirror_tool_result_keeps_variant_client_and_provider() {
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_cc_mirror","tool_output":{"input_tokens":7,"output":"tool output"}}]}}"#;
+
+        let (_temp_dir, path) = create_cc_mirror_project_file(
+            content,
+            "zai-worker",
+            "zai",
+            "project-one",
+            "session.jsonl",
+        );
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "cc-mirror/zai-worker");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].model_id, "sonnet");
+        assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].message_count, 0);
     }
 

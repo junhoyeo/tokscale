@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { getAuthorizationUrl } from "@/lib/auth/github";
+import { sanitizeAuthReturnTo } from "@/lib/auth/returnTo";
 import { generateRandomString } from "@/lib/auth/utils";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const returnTo = searchParams.get("returnTo") || "/leaderboard";
+  const returnTo = sanitizeAuthReturnTo(searchParams.get("returnTo"));
 
   // Generate CSRF state
   const state = generateRandomString(32);

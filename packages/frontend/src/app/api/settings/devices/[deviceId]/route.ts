@@ -3,8 +3,11 @@ import { revalidateTag } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, submittedDevices } from "@/lib/db";
-import { getSession } from "@/lib/auth/session";
-import { normalizeUsernameCacheKey } from "@/lib/db/usernameLookup";
+import { getSessionFromRequest } from "@/lib/auth/requestSession";
+import {
+  normalizeUsernameCacheKey,
+  revalidateUsernamePaths,
+} from "@/lib/db/usernameLookup";
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -44,7 +47,9 @@ interface RouteParams {
  */
 export async function PATCH(request: Request, { params }: RouteParams) {
   try {
-    const session = await getSession();
+    const session = await getSessionFromRequest(request, {
+      allowAuthorizationHeader: false,
+    });
     if (!session) {
       return NextResponse.json(
         { error: "Not authenticated" },
@@ -110,6 +115,10 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       // Normalize before building the cache key, matching submit/route.ts:535-540
       // which also calls normalizeUsernameCacheKey before revalidateTag.
       revalidateTag(`user:${normalizeUsernameCacheKey(session.username)}`, "max");
+      // Also flush the ISR-cached public endpoints (notably
+      // /api/users/[username]/devices, which feeds the profile page) so a
+      // rename is visible immediately, matching the submit route idiom.
+      revalidateUsernamePaths(session.username);
     } catch (e) {
       console.error("Cache invalidation failed after device rename:", e);
     }
