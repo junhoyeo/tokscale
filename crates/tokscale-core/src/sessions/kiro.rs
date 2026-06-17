@@ -328,6 +328,23 @@ fn is_kiro_global_storage_path(path: &Path) -> bool {
     path_str.contains("globalStorage") && path_str.contains("kiro.kiroagent")
 }
 
+/// Extract the workspace folder name from a Kiro globalStorage path.
+///
+/// Snapshots live under `.../globalStorage/kiro.kiroagent/<workspace>/...`,
+/// so the workspace folder is the path segment immediately following the
+/// `kiro.kiroagent` component. Returns `None` when no such segment exists.
+fn kiro_global_storage_workspace(path: &Path) -> Option<String> {
+    let mut components = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned());
+    while let Some(component) = components.next() {
+        if component == "kiro.kiroagent" {
+            return components.next();
+        }
+    }
+    None
+}
+
 #[derive(Debug, Default)]
 struct KiroSnapshotTextCounts {
     prompt_chars: usize,
@@ -452,14 +469,24 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
-    let session_id = path
+    let file_stem = path
         .file_stem()
         .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+        .unwrap_or("unknown");
+    // Attribute the snapshot to its IDE workspace folder, mirroring how the
+    // file/sqlite Kiro paths derive workspace identity from `cwd`.
+    let workspace = kiro_global_storage_workspace(path);
+    let workspace_key = workspace
+        .as_deref()
+        .and_then(normalize_workspace_key);
+    let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+    // Namespace the session id by workspace so two workspaces that both contain
+    // e.g. `execution.chat` do not collapse into one session / dedup_key.
+    let session_id = match workspace.as_deref() {
+        Some(ws) => format!("{}/{}", ws, file_stem),
+        None => file_stem.to_string(),
+    };
     let model_id = find_kiro_snapshot_model_id(&value).unwrap_or_else(|| UNKNOWN_MODEL.to_string());
-    let workspace_key = None;
-    let workspace_label = None;
 
     let mut counts = KiroSnapshotTextCounts::default();
     collect_kiro_snapshot_text(&value, &mut counts, None);
@@ -484,6 +511,13 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
             reasoning: 0,
         },
         0.0,
+        // dedup_key is structurally disjoint from the sqlite (CLI) source: this
+        // key is `<workspace>/<file_stem>:globalstorage` (always the literal
+        // `:globalstorage` suffix), whereas `parse_kiro_sqlite` emits
+        // `<conversation_id>:<turn_index>` (always a numeric-index suffix).
+        // IDE globalStorage snapshots and the kiro-cli `data.sqlite3` are
+        // distinct surfaces, so the same conversation cannot appear in both and
+        // these keys can never collide — no cross-source dedup is needed.
         Some(format!("{}:globalstorage", session_id)),
     );
     message.message_count = 1;
@@ -779,6 +813,53 @@ not valid json at all
         assert_eq!(messages[0].model_id, "auto");
         assert!(messages[0].tokens.input > 0);
         assert!(messages[0].tokens.output > 0);
+        // (4a) Workspace attribution: the `<workspace>` segment after
+        // `kiro.kiroagent/` flows through the same workspace helpers.
+        assert_eq!(messages[0].workspace_key, Some("workspace-a".to_string()));
+        assert_eq!(messages[0].workspace_label, Some("workspace-a".to_string()));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("workspace-a/execution:globalstorage".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_kiro_global_storage_dedup_keys_differ_across_workspaces() {
+        let dir = TempDir::new().unwrap();
+        let payload = r#"{
+                "model": "auto",
+                "messages": [
+                    {"role": "user", "content": "hello world"},
+                    {"role": "assistant", "content": "response text"}
+                ]
+            }"#;
+
+        // Two `execution.chat` snapshots under DIFFERENT workspaces.
+        let path_a = dir.path().join(
+            "Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-a/execution.chat",
+        );
+        let path_b = dir.path().join(
+            "Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-b/execution.chat",
+        );
+        fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        fs::create_dir_all(path_b.parent().unwrap()).unwrap();
+        fs::write(&path_a, payload).unwrap();
+        fs::write(&path_b, payload).unwrap();
+
+        let messages_a = parse_kiro_file(&path_a);
+        let messages_b = parse_kiro_file(&path_b);
+
+        assert_eq!(messages_a.len(), 1);
+        assert_eq!(messages_b.len(), 1);
+        assert_ne!(messages_a[0].dedup_key, messages_b[0].dedup_key);
+        assert_eq!(
+            messages_a[0].dedup_key,
+            Some("workspace-a/execution:globalstorage".to_string())
+        );
+        assert_eq!(
+            messages_b[0].dedup_key,
+            Some("workspace-b/execution:globalstorage".to_string())
+        );
     }
 
     #[test]
