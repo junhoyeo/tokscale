@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 28);
+        assert_eq!(clients.len(), ClientId::COUNT);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -1366,6 +1366,7 @@ mod tests {
         assert_eq!(clients[25], ClientId::Cline);
         assert_eq!(clients[26], ClientId::Gjc);
         assert_eq!(clients[27], ClientId::Grok);
+        assert_eq!(clients[28], ClientId::Jcode);
     }
 
     #[test]
@@ -1449,6 +1450,10 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Grok),
             "Grok Build"
         );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Jcode),
+            "Jcode"
+        );
     }
 
     #[test]
@@ -1479,6 +1484,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), 'n');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gjc), 'g');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Grok), 'u');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Jcode), 'j');
     }
 
     #[test]
@@ -1566,6 +1572,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('u'),
             Some(ClientId::Grok)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('j'),
+            Some(ClientId::Jcode)
         );
     }
 
@@ -2392,6 +2402,7 @@ after"#,
     fn test_data_loader_keeps_synthetic_gateway_messages_under_original_client() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
+        let previous_xdg_data_home = env::var_os("XDG_DATA_HOME");
         let message_dir = temp_dir
             .path()
             .join(".local/share/opencode/storage/message/project-1");
@@ -2404,6 +2415,7 @@ after"#,
 
         unsafe {
             env::set_var("HOME", temp_dir.path());
+            env::remove_var("XDG_DATA_HOME");
         }
 
         let pricing = test_pricing_service();
@@ -2440,6 +2452,10 @@ after"#,
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_xdg_data_home {
+            Some(path) => unsafe { env::set_var("XDG_DATA_HOME", path) },
+            None => unsafe { env::remove_var("XDG_DATA_HOME") },
         }
     }
 
