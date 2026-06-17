@@ -907,7 +907,10 @@ mod tests {
         // The report must price exactly what PricingService yields — no
         // hardcoded flat rates, no fuzzy matching.
         assert_eq!(report_cost, canonical);
-        assert!(canonical > 0.0, "expected a positive cost for a known model");
+        assert!(
+            canonical > 0.0,
+            "expected a positive cost for a known model"
+        );
     }
 
     #[test]
