@@ -350,12 +350,18 @@ fn parse_codex_reader<R: BufRead>(
                         .filter(|id| !id.is_empty())
                         .or_else(|| forked_from_id_from_source(payload.source.as_ref()));
                     if let Some(forked_from_id) = forked_from_id {
+                        let repeated_active_child_meta = !state
+                            .forked_child_waiting_for_turn_context
+                            && payload.id.as_deref().is_some()
+                            && state.forked_child_session_id.as_deref() == payload.id.as_deref();
                         state.session_forked_from_id = Some(forked_from_id.to_string());
                         state.forked_child_session_id = payload.id.clone();
-                        state.forked_child_waiting_for_turn_context = true;
-                        state.forked_child_replay_session_id = None;
-                        state.forked_child_inherited_baseline = None;
-                        state.forked_child_inherited_reported_total = None;
+                        if !repeated_active_child_meta {
+                            state.forked_child_waiting_for_turn_context = true;
+                            state.forked_child_replay_session_id = None;
+                            state.forked_child_inherited_baseline = None;
+                            state.forked_child_inherited_reported_total = None;
+                        }
                     }
                     if let Some(ref provider) = payload.model_provider {
                         state.session_provider = Some(provider.clone());
@@ -1822,6 +1828,33 @@ mod tests {
         assert_eq!(messages[0].model_id, "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_user_forked_child_counts_own_turn_after_parent_replay() {
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-01-02T03:10:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.001Z","type":"session_meta","payload":{"id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.100Z","type":"turn_context","payload":{"turn_id":"11111111-3333-7333-8333-333333333333","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:30.100Z","type":"turn_context","payload":{"turn_id":"22222222-4444-7444-8444-444444444444","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:30.200Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:31.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1250,"cached_input_tokens":450,"output_tokens":120,"total_tokens":1370},"last_token_usage":{"input_tokens":250,"cached_input_tokens":50,"output_tokens":20,"total_tokens":270}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 200);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.output, 20);
     }
 
     #[test]

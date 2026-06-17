@@ -289,6 +289,7 @@ pub fn get_client_color(client: &str) -> Color {
         "zed" => Color::Rgb(8, 76, 207),           // #084CCF Zed blue
         "warp" => Color::Rgb(1, 155, 150),         // #019B96 Warp teal
         "gjc" => Color::Rgb(220, 38, 38),          // #DC2626 gajae-code red-claw
+        "jcode" => Color::Rgb(245, 158, 11),       // #F59E0B Jcode amber
         _ => Color::Rgb(136, 136, 136),            // #888888
     }
 }

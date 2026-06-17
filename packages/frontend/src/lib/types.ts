@@ -28,6 +28,8 @@ export const SUPPORTED_CLIENT_TYPES = [
   "synthetic",
   "gjc",
   "grok",
+  "jcode",
+  "commandcode",
   "micode",
 ] as const;
 
