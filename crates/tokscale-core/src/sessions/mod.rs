@@ -114,8 +114,9 @@ pub fn normalize_copilot_agent_name(agent: &str) -> String {
 
     // Native github.copilot.* agents: strip prefix, titlecase remainder
     const GITHUB_COPILOT_PREFIX: &str = "github.copilot.";
-    if agent.len() > GITHUB_COPILOT_PREFIX.len()
-        && agent[..GITHUB_COPILOT_PREFIX.len()].eq_ignore_ascii_case(GITHUB_COPILOT_PREFIX)
+    if agent
+        .get(..GITHUB_COPILOT_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(GITHUB_COPILOT_PREFIX))
     {
         let remainder = &agent[GITHUB_COPILOT_PREFIX.len()..];
         let hyphenated = remainder.replace('.', "-");
@@ -124,8 +125,9 @@ pub fn normalize_copilot_agent_name(agent: &str) -> String {
 
     // Plugin:team:slug format — titlecase each colon-separated part, join with ": "
     const PLUGIN_PREFIX: &str = "Plugin:";
-    if agent.len() > PLUGIN_PREFIX.len()
-        && agent[..PLUGIN_PREFIX.len()].eq_ignore_ascii_case(PLUGIN_PREFIX)
+    if agent
+        .get(..PLUGIN_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(PLUGIN_PREFIX))
     {
         let rest = &agent[PLUGIN_PREFIX.len()..];
         let parts: Vec<&str> = rest.splitn(2, ':').collect();
