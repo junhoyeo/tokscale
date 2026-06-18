@@ -106,6 +106,40 @@ pub fn normalize_opencode_agent_name(agent: &str) -> String {
     normalize_agent_name(&canonical)
 }
 
+pub fn normalize_copilot_agent_name(agent: &str) -> String {
+    // Hardcoded brand name for the default native agent
+    if agent.eq_ignore_ascii_case("github.copilot.default") {
+        return "GitHub Copilot".to_string();
+    }
+
+    // Native github.copilot.* agents: strip prefix, titlecase remainder
+    const GITHUB_COPILOT_PREFIX: &str = "github.copilot.";
+    if agent.len() > GITHUB_COPILOT_PREFIX.len()
+        && agent[..GITHUB_COPILOT_PREFIX.len()].eq_ignore_ascii_case(GITHUB_COPILOT_PREFIX)
+    {
+        let remainder = &agent[GITHUB_COPILOT_PREFIX.len()..];
+        let hyphenated = remainder.replace('.', "-");
+        return titlecase_agent(&hyphenated);
+    }
+
+    // Plugin:team:slug format — titlecase each colon-separated part, join with ": "
+    const PLUGIN_PREFIX: &str = "Plugin:";
+    if agent.len() > PLUGIN_PREFIX.len()
+        && agent[..PLUGIN_PREFIX.len()].eq_ignore_ascii_case(PLUGIN_PREFIX)
+    {
+        let rest = &agent[PLUGIN_PREFIX.len()..];
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let team = titlecase_agent(parts[0]);
+            let slug = titlecase_agent(parts[1]);
+            return format!("{}: {}", team, slug);
+        }
+        return titlecase_agent(rest);
+    }
+
+    normalize_agent_name(agent)
+}
+
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     let normalized = match agent_lower {
         // Parenthesized format and dash format
@@ -625,6 +659,35 @@ mod tests {
         assert_eq!(
             normalize_agent_name("oh-my-claudecode:code-reviewer"),
             "Code Reviewer"
+        );
+    }
+
+    #[test]
+    fn test_normalize_copilot_agent_name() {
+        assert_eq!(
+            normalize_copilot_agent_name("github.copilot.default"),
+            "GitHub Copilot"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("GITHUB.COPILOT.DEFAULT"),
+            "GitHub Copilot"
+        );
+        assert_eq!(normalize_copilot_agent_name("github.copilot.chat"), "Chat");
+        assert_eq!(
+            normalize_copilot_agent_name("Plugin:software-engineering-team:se-ux-ui-designer"),
+            "Software Engineering Team: Se UX UI Designer"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("plugin:my-team:my-agent"),
+            "My Team: My Agent"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("Plugin:code-review-team:api-reviewer"),
+            "Code Review Team: API Reviewer"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("some-custom-agent"),
+            "Some Custom Agent"
         );
         assert_eq!(normalize_agent_name("oh-my-codex:librarian"), "Librarian");
         assert_eq!(normalize_agent_name("astrape:executor"), "Executor");

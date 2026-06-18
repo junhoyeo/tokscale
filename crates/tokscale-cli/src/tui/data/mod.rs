@@ -507,6 +507,8 @@ impl DataLoader {
             if let Some(agent) = msg.agent.as_ref() {
                 let normalized_agent = if msg.client == "opencode" {
                     sessions::normalize_opencode_agent_name(agent)
+                } else if msg.client == "copilot" {
+                    sessions::normalize_copilot_agent_name(agent)
                 } else {
                     sessions::normalize_agent_name(agent)
                 };
