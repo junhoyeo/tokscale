@@ -225,6 +225,12 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
     };
 
     let mut total_summarized = 0;
+    // Count how many summaries actually came from Apple FM vs the heuristic
+    // fallback, so a silent total-fallback (e.g. FM unavailable, or every
+    // generation erroring) is visible rather than reported as plain "N
+    // summarized". Only meaningful for the apple-fm backend; CLI backends leave
+    // fm_version null by design.
+    let mut fm_generated = 0;
     for (batch_idx, chunk) in payloads.chunks(batch_size).enumerate() {
         if batch_size < payloads.len() {
             eprint!(
@@ -253,6 +259,9 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
             let description = result["description"].as_str().unwrap_or("");
             let complexity = result["complexity"].as_str().unwrap_or("moderate");
             let fm_version = result["fm_version"].as_str();
+            if fm_version == Some("apple-fm-on-device") {
+                fm_generated += 1;
+            }
 
             db.update_summary(
                 session_id,
@@ -268,11 +277,22 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
         total_summarized += results.len();
     }
 
-    eprintln!(
-        "\n  {} {} sessions summarized",
-        "✓".green(),
-        total_summarized
-    );
+    if backend == "apple-fm" {
+        let heuristic = total_summarized.saturating_sub(fm_generated);
+        eprintln!(
+            "\n  {} {} sessions summarized ({} via Apple FM, {} heuristic)",
+            "✓".green(),
+            total_summarized,
+            fm_generated,
+            heuristic
+        );
+    } else {
+        eprintln!(
+            "\n  {} {} sessions summarized",
+            "✓".green(),
+            total_summarized
+        );
+    }
 
     Ok(())
 }

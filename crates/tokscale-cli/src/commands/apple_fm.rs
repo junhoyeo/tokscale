@@ -12,6 +12,14 @@
 //!
 //! Availability gate: [`summarize`] returns `None` (never errors) when Apple
 //! Intelligence is unavailable, so the caller degrades to the heuristic.
+//!
+//! Smoke-testing note: the vendored `fm-c-example` binary's streaming path
+//! (`FMLanguageModelSessionStreamResponse`) hard-segfaults (EXC_BAD_ACCESS in
+//! `objc_retain`) on macOS 26.2, so it is NOT a valid liveness check for "is FM
+//! working on this box". This module uses only the non-streaming
+//! `FMLanguageModelSessionRespondWithSchemaFromJSON` path and is unaffected.
+//! For end-to-end verification use the `#[ignore]`d live test in this module
+//! (`live_summarize_smoke`), not the streaming example.
 
 /// Input metadata for one coding session to be summarized.
 ///
@@ -121,6 +129,13 @@ mod imp {
     /// timeout the session falls back to the heuristic.
     const FM_GENERATION_TIMEOUT: Duration = Duration::from_secs(60);
 
+    /// Upper bound on the first-user-message text appended to the prompt. The
+    /// on-device model has a small context window, so a large pasted message
+    /// (stack trace, file dump, multi-KB prompt) is truncated here. Larger than
+    /// the CLI backend's 200-char cap since the FM prompt carries only one
+    /// session at a time.
+    const MAX_FIRST_USER_MESSAGE_CHARS: usize = 1000;
+
     /// Verbatim system instructions for the classifier (matches the former
     /// Python backend exactly).
     const SYSTEM_INSTRUCTIONS: &str = "You are a coding session classifier. Given metadata about an AI coding session, produce a structured summary.\n\nRules:\n- title: 3-8 word description of what was done (imperative mood, e.g. \"Add JWT auth middleware\")\n- task_category: exactly one of: feature, bugfix, refactor, research, debug, review, docs, config, other\n- description: 1-2 sentences explaining what happened in the session\n- complexity: exactly one of: trivial, moderate, complex\n\nBase your classification on:\n- The first user message (primary signal)\n- The workspace name (project context)\n- Token count and duration (complexity signal)\n- Models used (opus = likely complex, haiku = likely trivial)\n\nRespond ONLY with valid JSON matching the schema.";
@@ -171,6 +186,13 @@ mod imp {
             callback: StructuredCallback,
         ) -> FMRef;
         fn FMGeneratedContentGetJSONString(content: FMRef) -> *mut c_char;
+        // The structured-response callback receives a `content` handle that the
+        // Swift shim hands over with a +1 retain on EVERY invocation (success
+        // AND error/cancel). `FMGeneratedContentGetJSONString` reads it with an
+        // unretained borrow, so it does NOT consume that retain — the callback
+        // owns the +1 and must `FMRelease(content)` exactly once on every path
+        // (see `structured_callback`), or one generated-content wrapper leaks
+        // per generation.
         fn FMRelease(object: FMRef);
         fn FMFreeString(s: *mut c_char);
     }
@@ -211,6 +233,14 @@ mod imp {
             }
         };
 
+        // The shim hands us a +1-retained `content` on EVERY callback path
+        // (success and error/cancel) and `FMGeneratedContentGetJSONString` only
+        // borrows it, so we own that retain and must release it here exactly
+        // once or one generated-content wrapper leaks per generation.
+        if !content.is_null() {
+            unsafe { FMRelease(content) };
+        }
+
         // Best-effort send; if the receiver is gone there is nothing to do.
         let _ = cb.tx.send(result);
     }
@@ -237,7 +267,11 @@ mod imp {
         match &input.first_user_message {
             Some(msg) if !msg.is_empty() => {
                 s.push_str("\n\nFirst user message:\n");
-                s.push_str(msg);
+                // Cap the (possibly multi-KB) pasted message: on-device FM has a
+                // small context window, so an oversized prompt risks truncation,
+                // refusal, or latency. `chars().take` is char-boundary-safe.
+                let capped: String = msg.chars().take(MAX_FIRST_USER_MESSAGE_CHARS).collect();
+                s.push_str(&capped);
             }
             _ => {
                 s.push_str("\n\nNo user message content available.");
@@ -370,7 +404,24 @@ mod imp {
 
         match received {
             Ok(Ok(json)) => parse_summary(&input.session_id, &json),
-            _ => None,
+            // Surface the failure mode so silent degradation to the heuristic is
+            // diagnosable (the FM-vs-heuristic breakdown reports the count; this
+            // names the cause). Non-success status codes flow through here.
+            Ok(Err(status)) => {
+                eprintln!(
+                    "  apple-fm: generation failed for {} (status {}); using heuristic",
+                    input.session_id, status
+                );
+                None
+            }
+            Err(_) => {
+                eprintln!(
+                    "  apple-fm: generation timed out for {} after {}s; using heuristic",
+                    input.session_id,
+                    FM_GENERATION_TIMEOUT.as_secs()
+                );
+                None
+            }
         }
     }
 
@@ -536,5 +587,46 @@ mod tests {
         // On non-macOS / feature-off this returns None; on macOS+feature it may
         // return None (unavailable) or Some. Either way it must not panic.
         let _ = summarize(&[input(1, 1, "/x/p", &["m"])]);
+    }
+
+    /// Live end-to-end check against the real on-device model. Kept `#[ignore]`d
+    /// so it never runs in CI (it requires Apple Intelligence enabled + the
+    /// on-device model READY). Run manually with:
+    ///   cargo test -p tokscale-cli --features apple-fm -- --ignored live_summarize_smoke
+    /// Documents the live path; use THIS, not the segfaulting fm-c-example
+    /// streaming binary, as the on-device smoke test on macOS 26.x.
+    #[cfg(all(target_os = "macos", feature = "apple-fm"))]
+    #[test]
+    #[ignore]
+    fn live_summarize_smoke() {
+        let sessions = vec![SessionInput {
+            session_id: "ses_live".to_string(),
+            client: "claude".to_string(),
+            workspace: "/Users/x/payments-api".to_string(),
+            first_user_message: Some(
+                "Add JWT auth middleware to the payments API and write tests.".to_string(),
+            ),
+            models_used: vec!["claude-opus-4".to_string()],
+            total_tokens: 120_000,
+            duration_minutes: 45,
+            message_count: 12,
+        }];
+
+        let out = summarize(&sessions).expect("FM should be available on this box");
+        assert_eq!(out.len(), 1);
+        let s = &out[0];
+        eprintln!(
+            "live: title={:?} category={:?} complexity={:?} fm_version={:?}\n  desc={:?}",
+            s.title, s.task_category, s.complexity, s.fm_version, s.description
+        );
+        // After a working schema/generation, the summary must be FM-produced,
+        // not the heuristic backfill.
+        assert_eq!(
+            s.fm_version.as_deref(),
+            Some("apple-fm-on-device"),
+            "expected FM-generated provenance, got heuristic fallback"
+        );
+        assert!(VALID_CATEGORIES.contains(&s.task_category.as_str()));
+        assert!(VALID_COMPLEXITIES.contains(&s.complexity.as_str()));
     }
 }
