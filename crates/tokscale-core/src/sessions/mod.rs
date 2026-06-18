@@ -20,6 +20,7 @@ pub mod goose;
 pub mod grok;
 pub mod hermes;
 pub mod jcode;
+pub mod junie;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;

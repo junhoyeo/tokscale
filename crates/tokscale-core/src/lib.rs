@@ -1229,6 +1229,32 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
     );
 
+    // Junie events carry authoritative per-call `modelUsage.cost` values.
+    // Keep this off the generic source cache because cached_messages()
+    // reprices every message unconditionally; only fill cost from pricing
+    // when Junie emitted no usable cost.
+    let mut junie_seen: HashSet<String> = HashSet::new();
+    let junie_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Junie)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::junie::parse_junie_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    if msg.cost <= 0.0 {
+                        apply_pricing_if_available(&mut msg, pricing);
+                    }
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(
+        junie_messages
+            .into_iter()
+            .filter(|message| should_keep_deduped_message(&mut junie_seen, message)),
+    );
+
     let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
@@ -2430,6 +2456,24 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let gjc_count = gjc_msgs.len() as i32;
     counts.set(ClientId::Gjc, gjc_count);
     messages.extend(gjc_msgs);
+
+    // ParsedMessage has no pricing service in scope, but Junie parser already
+    // preserves the embedded session costs for callers that need UnifiedMessage.
+    // Dedup still matters here because Junie can replay metadata events.
+    let junie_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Junie)
+        .par_iter()
+        .flat_map(|path| sessions::junie::parse_junie_file(path))
+        .collect();
+    let mut junie_seen: HashSet<String> = HashSet::new();
+    let junie_msgs: Vec<ParsedMessage> = junie_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut junie_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let junie_count = summed_parsed_message_count(&junie_msgs);
+    counts.set(ClientId::Junie, junie_count);
+    messages.extend(junie_msgs);
 
     // Parse Kimi wire.jsonl files in parallel
     let kimi_msgs: Vec<ParsedMessage> = scan_result

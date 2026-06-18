@@ -86,6 +86,7 @@
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/` (override via `GJC_CODING_AGENT_DIR`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`; `$XDG_DATA_HOME/gjc/sessions/` on Linux/macOS) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` sidecars (override via `JCODE_HOME`) | ✅ Yes |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db` (XDG data dir; SQLite) | ✅ Yes |
+| <img width="48px" src="https://github.com/JetBrains.png" alt="Junie" /> | [Junie](https://www.jetbrains.com/junie/) | `~/.junie/sessions/*/events.jsonl` | ✅ Yes |
 | <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | Re-attributed from other sources via `hf:` model prefix or `synthetic` provider (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ Yes |
 
@@ -157,7 +158,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, and Synthetic
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, and Synthetic
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -368,7 +369,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `synthetic`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `synthetic`.
 
 > **Deprecation notice**: The legacy single-client flags (`--opencode`, `--claude`, `--codex`, etc.) still work for backward compatibility but are hidden from `--help` and will be removed in the next major release. Migrate to `--client` whenever possible. Running tokscale in an interactive terminal will print a one-line warning when a legacy flag is used.
 
@@ -1296,6 +1297,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Jcode | `~/.jcode/sessions/` | `%USERPROFILE%\.jcode\sessions\` | Configurable via `JCODE_HOME` env var; parses `session_*.json` snapshots plus `session_*.journal.jsonl` sidecars |
 | MiMo Code | `~/.local/share/micode/` | `%USERPROFILE%\.local\share\micode\` | Uses XDG data directory; SQLite database `mimocode.db` |
 | Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | Configurable via `GJC_CODING_AGENT_DIR` (also `GJC_CONFIG_DIR`/`PI_CONFIG_DIR`; `$XDG_DATA_HOME/gjc/sessions/` flattens on Linux/macOS) |
+| Junie | `~/.junie/sessions/` | `%USERPROFILE%\.junie\sessions\` | Same home-relative path on all platforms; parses `events.jsonl` usage events |
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 
 > **Note**: On Windows, `~` expands to `%USERPROFILE%` (e.g., `C:\Users\YourName`). These tools intentionally use Unix-style paths (like `.local/share`) even on Windows for cross-platform consistency, rather than Windows-native paths like `%APPDATA%`.
