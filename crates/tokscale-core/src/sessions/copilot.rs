@@ -160,7 +160,7 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
         }
 
         if context.agent_id.is_none() {
-            if let Some(agent_id) = attr_str(attributes, "gen_ai.agent.id") {
+            if let Some(agent_id) = first_non_empty_attr(attributes, &["gen_ai.agent.id"]) {
                 context.agent_id = Some(agent_id.to_string());
             }
         }
