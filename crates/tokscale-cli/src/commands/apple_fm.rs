@@ -17,9 +17,11 @@
 //! (`FMLanguageModelSessionStreamResponse`) hard-segfaults (EXC_BAD_ACCESS in
 //! `objc_retain`) on macOS 26.2, so it is NOT a valid liveness check for "is FM
 //! working on this box". This module uses only the non-streaming
-//! `FMLanguageModelSessionRespondWithSchemaFromJSON` path and is unaffected.
-//! For end-to-end verification use the `#[ignore]`d live test in this module
-//! (`live_summarize_smoke`), not the streaming example.
+//! `FMLanguageModelSessionRespondWithSchema` path (a PROGRAMMATIC
+//! GenerationSchema built via [`imp::build_schema`], NOT the JSON-Schema-string
+//! `...FromJSON` variant) and is unaffected. For end-to-end verification use the
+//! `#[ignore]`d live test in this module (`live_summarize_smoke`), not the
+//! streaming example.
 
 /// Input metadata for one coding session to be summarized.
 ///
@@ -140,25 +142,6 @@ mod imp {
     /// Python backend exactly).
     const SYSTEM_INSTRUCTIONS: &str = "You are a coding session classifier. Given metadata about an AI coding session, produce a structured summary.\n\nRules:\n- title: 3-8 word description of what was done (imperative mood, e.g. \"Add JWT auth middleware\")\n- task_category: exactly one of: feature, bugfix, refactor, research, debug, review, docs, config, other\n- description: 1-2 sentences explaining what happened in the session\n- complexity: exactly one of: trivial, moderate, complex\n\nBase your classification on:\n- The first user message (primary signal)\n- The workspace name (project context)\n- Token count and duration (complexity signal)\n- Models used (opus = likely complex, haiku = likely trivial)\n\nRespond ONLY with valid JSON matching the schema.";
 
-    /// JSON-schema string passed to `RespondWithSchemaFromJSON`. A simple
-    /// object-with-properties; the result is re-validated in Rust regardless.
-    const SCHEMA_JSON: &str = r#"{
-  "type": "object",
-  "properties": {
-    "title": { "type": "string" },
-    "task_category": {
-      "type": "string",
-      "enum": ["feature", "bugfix", "refactor", "research", "debug", "review", "docs", "config", "other"]
-    },
-    "description": { "type": "string" },
-    "complexity": {
-      "type": "string",
-      "enum": ["trivial", "moderate", "complex"]
-    }
-  },
-  "required": ["title", "task_category", "description", "complexity"]
-}"#;
-
     // Opaque FoundationModels handles. All are `const void*` in the C ABI.
     type FMRef = *const c_void;
 
@@ -177,10 +160,38 @@ mod imp {
         ) -> FMRef;
         fn FMComposedPromptInitialize() -> FMRef;
         fn FMComposedPromptAddText(composed_prompt: FMRef, text: *const c_char);
-        fn FMLanguageModelSessionRespondWithSchemaFromJSON(
+        // Programmatic GenerationSchema builder. We use this (NOT the
+        // `...FromJSON` variant) because the JSON path decodes the string via
+        // `JSONDecoder().decode(GenerationSchema.self, ...)`, which expects
+        // Apple's PRIVATE serialized GenerationSchema dialect — NOT standard
+        // JSON Schema. Feeding it standard JSON Schema throws
+        // `NSCocoaErrorDomain:4865` BEFORE generation, so every call failed and
+        // silently fell back to the heuristic. The programmatic builder mirrors
+        // the path the vendor's own tests use (DynamicGenerationSchema).
+        //
+        // `FMGenerationSchemaCreate` / `...PropertyCreate` return a +1-retained
+        // ref (`Unmanaged.passRetained`), so each must be `FMRelease`d. The
+        // builder's `addProperty` copies the property into a Swift array (it
+        // holds its own strong reference), so a property ref may be released
+        // immediately after `FMGenerationSchemaAddProperty`.
+        fn FMGenerationSchemaCreate(name: *const c_char, description: *const c_char) -> FMRef;
+        fn FMGenerationSchemaPropertyCreate(
+            name: *const c_char,
+            description: *const c_char,
+            type_name: *const c_char,
+            is_optional: bool,
+        ) -> FMRef;
+        fn FMGenerationSchemaPropertyAddAnyOfGuide(
+            property: FMRef,
+            any_of: *const *const c_char,
+            choice_count: c_int,
+            wrapped: bool,
+        );
+        fn FMGenerationSchemaAddProperty(schema: FMRef, property: FMRef);
+        fn FMLanguageModelSessionRespondWithSchema(
             session: FMRef,
             composed_prompt: FMRef,
-            schema_json: *const c_char,
+            schema: FMRef,
             options_json: *const c_char,
             user_info: *mut c_void,
             callback: StructuredCallback,
@@ -332,9 +343,92 @@ mod imp {
         })
     }
 
+    /// Build the programmatic `SessionSummary` GenerationSchema once, enforcing
+    /// the category/complexity enums on-device via `anyOf` guides. Returns a
+    /// +1-retained schema ref the caller must `FMRelease` after the per-session
+    /// loop, or `None` if any CString conversion fails.
+    ///
+    /// typeName is the lowercase `"string"` literal: the shim matches it with
+    /// `case "string":` (FoundationModelsCBindings.swift) to produce a
+    /// `String`-typed property. Any other casing (e.g. "String") falls through
+    /// to the "reference to another schema" branch and fails to build. The
+    /// `anyOf` guide is added UNWRAPPED (`wrapped=false`): for a scalar String
+    /// the shim's `resolveStringGuides` handles `.anyOf` directly, whereas a
+    /// wrapped (`.element`) guide is only valid for array types and would throw
+    /// `unsupportedGuide`.
+    fn build_schema() -> Option<FMRef> {
+        // typeName literal the shim maps to a Swift `String` property.
+        let type_string = CString::new("string").ok()?;
+        let schema_name = CString::new("SessionSummary").ok()?;
+        let schema = unsafe { FMGenerationSchemaCreate(schema_name.as_ptr(), std::ptr::null()) };
+        if schema.is_null() {
+            return None;
+        }
+
+        // Helper: create a property, optionally constrain it to an enum set via
+        // an unwrapped anyOf guide, add it to the schema, then release the
+        // property's +1 retain (the builder copied it into its own array).
+        let add_prop = |name: &str, choices: Option<&[&str]>| -> Option<()> {
+            let name_c = CString::new(name).ok()?;
+            let prop = unsafe {
+                FMGenerationSchemaPropertyCreate(
+                    name_c.as_ptr(),
+                    std::ptr::null(),
+                    type_string.as_ptr(),
+                    false,
+                )
+            };
+            if prop.is_null() {
+                return None;
+            }
+            if let Some(choices) = choices {
+                // Keep the CStrings alive until after the FFI call.
+                let owned: Vec<CString> = choices
+                    .iter()
+                    .map(|c| CString::new(*c))
+                    .collect::<Result<_, _>>()
+                    .ok()?;
+                let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+                unsafe {
+                    FMGenerationSchemaPropertyAddAnyOfGuide(
+                        prop,
+                        ptrs.as_ptr(),
+                        ptrs.len() as c_int,
+                        false,
+                    );
+                }
+            }
+            unsafe {
+                FMGenerationSchemaAddProperty(schema, prop);
+                // Builder holds its own strong ref; release our creation +1.
+                FMRelease(prop);
+            }
+            Some(())
+        };
+
+        // On any property failure, release the schema and bail.
+        let built = (|| {
+            add_prop("title", None)?;
+            add_prop("description", None)?;
+            add_prop("task_category", Some(VALID_CATEGORIES))?;
+            add_prop("complexity", Some(VALID_COMPLEXITIES))?;
+            Some(())
+        })();
+        if built.is_none() {
+            unsafe { FMRelease(schema) };
+            return None;
+        }
+
+        Some(schema)
+    }
+
     /// Run a single structured generation for `input`, blocking the calling
     /// thread until the background callback fires. Returns the parsed summary,
     /// or `None` on any error (caller falls back to the heuristic).
+    ///
+    /// `schema` is the prebuilt, shared GenerationSchema ref (see
+    /// [`build_schema`]); the shim borrows it unretained per call, so it stays
+    /// owned by the caller across the loop.
     ///
     /// A FRESH `LanguageModelSession` is created per input: the session is
     /// stateful (it accumulates a transcript), so reusing one across sessions
@@ -344,7 +438,7 @@ mod imp {
     fn respond_one(
         model: FMRef,
         instructions: &CStr,
-        schema: &CStr,
+        schema: FMRef,
         input: &SessionInput,
     ) -> Option<SessionSummary> {
         let session_ref = unsafe {
@@ -380,10 +474,10 @@ mod imp {
         let user_info = Box::into_raw(cb_box) as *mut c_void;
 
         let task_ref = unsafe {
-            FMLanguageModelSessionRespondWithSchemaFromJSON(
+            FMLanguageModelSessionRespondWithSchema(
                 session_ref,
                 prompt_ref,
-                schema.as_ptr(),
+                schema,
                 std::ptr::null(),
                 user_info,
                 structured_callback,
@@ -391,8 +485,11 @@ mod imp {
         };
 
         // Block on the background callback (bounded). The callback reclaims
-        // `user_info`; on timeout the box is intentionally leaked rather than
-        // risk a use-after-free if the callback fires later.
+        // `user_info` (the boxed sender). On timeout we deliberately do NOT
+        // reclaim it here: the detached Swift task may still fire the callback
+        // later, so freeing the box now would risk a use-after-free. The box
+        // (one channel sender) is leaked instead — a bounded, rare cost paid
+        // only when a generation exceeds the 60s timeout.
         let received = rx.recv_timeout(FM_GENERATION_TIMEOUT);
 
         // Release the task handle, composed prompt, and this input's session.
@@ -451,9 +548,12 @@ mod imp {
                 return None;
             }
         };
-        let schema = match CString::new(SCHEMA_JSON) {
-            Ok(c) => c,
-            Err(_) => {
+        // Build the programmatic output schema ONCE and share it across the
+        // per-session loop (the shim borrows it unretained per call). Released
+        // after the loop. If schema construction fails, fall back entirely.
+        let schema = match build_schema() {
+            Some(s) => s,
+            None => {
                 unsafe { FMRelease(model) };
                 return None;
             }
@@ -463,13 +563,16 @@ mod imp {
         //    back to the heuristic for that single session.
         let mut results = Vec::with_capacity(sessions.len());
         for input in sessions {
-            match respond_one(model, instructions.as_c_str(), schema.as_c_str(), input) {
+            match respond_one(model, instructions.as_c_str(), schema, input) {
                 Some(summary) => results.push(summary),
                 None => results.push(heuristic_classify(input)),
             }
         }
 
-        unsafe { FMRelease(model) };
+        unsafe {
+            FMRelease(schema);
+            FMRelease(model);
+        }
 
         Some(results)
     }
@@ -599,34 +702,54 @@ mod tests {
     #[test]
     #[ignore]
     fn live_summarize_smoke() {
-        let sessions = vec![SessionInput {
-            session_id: "ses_live".to_string(),
-            client: "claude".to_string(),
-            workspace: "/Users/x/payments-api".to_string(),
-            first_user_message: Some(
-                "Add JWT auth middleware to the payments API and write tests.".to_string(),
-            ),
-            models_used: vec!["claude-opus-4".to_string()],
-            total_tokens: 120_000,
-            duration_minutes: 45,
-            message_count: 12,
-        }];
+        let sessions = vec![
+            SessionInput {
+                session_id: "ses_live_1".to_string(),
+                client: "claude".to_string(),
+                workspace: "/Users/x/payments-api".to_string(),
+                first_user_message: Some(
+                    "Add JWT auth middleware to the payments API and write tests.".to_string(),
+                ),
+                models_used: vec!["claude-opus-4".to_string()],
+                total_tokens: 120_000,
+                duration_minutes: 45,
+                message_count: 12,
+            },
+            SessionInput {
+                session_id: "ses_live_2".to_string(),
+                client: "claude".to_string(),
+                workspace: "/Users/x/dashboard".to_string(),
+                first_user_message: Some(
+                    "The settings page crashes with a null pointer when the avatar URL is empty; \
+                     find and fix the bug."
+                        .to_string(),
+                ),
+                models_used: vec!["claude-haiku-4".to_string()],
+                total_tokens: 8_000,
+                duration_minutes: 10,
+                message_count: 4,
+            },
+        ];
 
         let out = summarize(&sessions).expect("FM should be available on this box");
-        assert_eq!(out.len(), 1);
-        let s = &out[0];
-        eprintln!(
-            "live: title={:?} category={:?} complexity={:?} fm_version={:?}\n  desc={:?}",
-            s.title, s.task_category, s.complexity, s.fm_version, s.description
-        );
-        // After a working schema/generation, the summary must be FM-produced,
+        assert_eq!(out.len(), 2);
+        for s in &out {
+            eprintln!(
+                "live[{}]: title={:?} category={:?} complexity={:?} fm_version={:?}\n  desc={:?}",
+                s.session_id, s.title, s.task_category, s.complexity, s.fm_version, s.description
+            );
+        }
+        // After a working schema/generation, every summary must be FM-produced,
         // not the heuristic backfill.
-        assert_eq!(
-            s.fm_version.as_deref(),
-            Some("apple-fm-on-device"),
-            "expected FM-generated provenance, got heuristic fallback"
-        );
-        assert!(VALID_CATEGORIES.contains(&s.task_category.as_str()));
-        assert!(VALID_COMPLEXITIES.contains(&s.complexity.as_str()));
+        for s in &out {
+            assert_eq!(
+                s.fm_version.as_deref(),
+                Some("apple-fm-on-device"),
+                "expected FM-generated provenance, got heuristic fallback for {}",
+                s.session_id
+            );
+            assert!(VALID_CATEGORIES.contains(&s.task_category.as_str()));
+            assert!(VALID_COMPLEXITIES.contains(&s.complexity.as_str()));
+        }
     }
 }
