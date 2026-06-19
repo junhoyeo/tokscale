@@ -6,6 +6,7 @@ mod grok;
 pub mod helpers;
 mod kimi;
 mod minimax;
+mod minimax_tokenplan;
 mod warp;
 mod zai;
 
@@ -206,6 +207,11 @@ pub fn fetch_all() -> Vec<UsageOutput> {
             "MiniMax",
             minimax::has_credentials,
             Fetch::Single(minimax::fetch),
+        ),
+        (
+            "MiniMax Token Plan",
+            minimax_tokenplan::has_credentials,
+            Fetch::Multi(minimax_tokenplan::fetch_all),
         ),
         ("Warp/Oz", warp::has_credentials, Fetch::Single(warp::fetch)),
     ];
