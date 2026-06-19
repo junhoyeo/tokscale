@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, TimeZone, Utc};
 
 pub fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -23,11 +23,19 @@ pub fn read_keychain(service: &str) -> Result<String> {
 }
 
 pub fn format_reset_time(resets_at: &str) -> String {
-    let dt = match DateTime::parse_from_rfc3339(resets_at) {
+    format_reset_time_at(resets_at, Utc::now(), &Local)
+}
+
+fn format_reset_time_at<Tz>(resets_at: &str, now_utc: DateTime<Utc>, display_tz: &Tz) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let dt_utc = match DateTime::parse_from_rfc3339(resets_at) {
         Ok(d) => d.with_timezone(&Utc),
         Err(_) => return resets_at.into(),
     };
-    let diff = dt - Utc::now();
+    let diff = dt_utc - now_utc;
     if diff <= Duration::zero() {
         return "resets now".into();
     }
@@ -43,9 +51,11 @@ pub fn format_reset_time(resets_at: &str) -> String {
             format!("resets in {h}h")
         }
     } else if diff.num_days() < 7 {
-        format!("resets {} {}", dt.format("%a"), dt.format("%-I%P"))
+        let dt_local = dt_utc.with_timezone(display_tz);
+        format!("resets {}", dt_local.format("%a %-I:%M%P"))
     } else {
-        format!("resets {}", dt.format("%b %-d"))
+        let dt_local = dt_utc.with_timezone(display_tz);
+        format!("resets {}", dt_local.format("%b %-d %-I:%M%P"))
     }
 }
 
@@ -90,4 +100,43 @@ pub fn atomic_write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Resu
         return Err(e);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn reset_time_uses_display_timezone_not_utc() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 19, 0, 0, 0).unwrap();
+        let pacific_daylight = FixedOffset::west_opt(7 * 60 * 60).unwrap();
+
+        let shown = format_reset_time_at("2026-06-25T11:45:00Z", now, &pacific_daylight);
+
+        assert_eq!(shown, "resets Thu 4:45am");
+    }
+
+    #[test]
+    fn reset_time_keeps_minutes_for_local_absolute_times() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let pacific_daylight = FixedOffset::west_opt(7 * 60 * 60).unwrap();
+
+        let shown = format_reset_time_at("2026-06-10T18:59:00Z", now, &pacific_daylight);
+
+        assert_eq!(shown, "resets Jun 10 11:59am");
+    }
+
+    #[test]
+    fn reset_time_rolls_back_to_previous_local_day() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 19, 0, 0, 0).unwrap();
+        let pacific_daylight = FixedOffset::west_opt(7 * 60 * 60).unwrap();
+
+        // 2026-06-25 03:00 UTC -> 2026-06-24 20:00 PDT: the local day (Wed)
+        // is the day before the UTC day (Thu), so the weekday must come from
+        // the converted time, not the UTC timestamp.
+        let shown = format_reset_time_at("2026-06-25T03:00:00Z", now, &pacific_daylight);
+
+        assert_eq!(shown, "resets Wed 8:00pm");
+    }
 }
