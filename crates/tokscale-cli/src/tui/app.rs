@@ -299,6 +299,7 @@ pub struct App {
 
     pub usage_fetch_attempted: bool,
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+    usage_fetch_preserve_status: bool,
     codex_reset_rx: Option<
         std::sync::mpsc::Receiver<
             Result<crate::commands::usage::codex::RateLimitResetConsumeResult, String>,
@@ -438,6 +439,7 @@ impl App {
             codex_login_outcome: None,
             usage_fetch_attempted: false,
             usage_rx: None,
+            usage_fetch_preserve_status: false,
             codex_reset_rx: None,
             codex_login_rx: None,
             codex_login_child: None,
@@ -547,21 +549,33 @@ impl App {
         if let Some(ref rx) = self.usage_rx {
             match rx.try_recv() {
                 Ok(results) => {
+                    let preserve_status = self.usage_fetch_preserve_status;
+                    self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
                     self.subscription_usage = results;
                     if !self.subscription_usage.is_empty() {
                         crate::commands::usage::save_cache(&self.subscription_usage);
-                        self.status_message = Some("Usage data loaded".into());
+                        if !preserve_status {
+                            self.status_message = Some("Usage data loaded".into());
+                        }
                     } else {
                         crate::commands::usage::clear_cache();
-                        self.status_message = Some("No usage data available".into());
+                        if !preserve_status {
+                            self.status_message = Some("No usage data available".into());
+                        }
                     }
-                    self.status_message_time = Some(std::time::Instant::now());
+                    if !preserve_status {
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let preserve_status = self.usage_fetch_preserve_status;
+                    self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
-                    self.status_message = Some("Usage fetch failed".into());
-                    self.status_message_time = Some(std::time::Instant::now());
+                    if !preserve_status {
+                        self.status_message = Some("Usage fetch failed".into());
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -576,7 +590,7 @@ impl App {
                         codex_reset_outcome_label(&result)
                     ));
                     self.status_message_time = Some(std::time::Instant::now());
-                    self.fetch_subscription_usage();
+                    self.fetch_subscription_usage_preserving_status();
                 }
                 Ok(Err(error)) => {
                     self.codex_reset_rx = None;
@@ -820,12 +834,26 @@ impl App {
     }
 
     pub fn fetch_subscription_usage(&mut self) {
+        self.fetch_subscription_usage_with_status(false);
+    }
+
+    fn fetch_subscription_usage_preserving_status(&mut self) {
+        self.fetch_subscription_usage_with_status(true);
+    }
+
+    fn fetch_subscription_usage_with_status(&mut self, preserve_status: bool) {
         if self.usage_rx.is_some() {
+            if preserve_status {
+                self.usage_fetch_preserve_status = true;
+            }
             return; // already fetching
         }
         self.usage_fetch_attempted = true;
-        self.status_message = Some("Fetching usage data...".into());
-        self.status_message_time = Some(std::time::Instant::now());
+        self.usage_fetch_preserve_status = preserve_status;
+        if !preserve_status {
+            self.status_message = Some("Fetching usage data...".into());
+            self.status_message_time = Some(std::time::Instant::now());
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         self.usage_rx = Some(rx);
         std::thread::spawn(move || {
@@ -3552,6 +3580,43 @@ mod tests {
         assert_eq!(
             app.status_message.as_deref(),
             Some("Fetching usage data...")
+        );
+    }
+
+    #[test]
+    fn test_codex_reset_success_status_survives_follow_up_usage_refresh() {
+        let mut app = make_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.codex_reset_rx = Some(rx);
+        tx.send(Ok(
+            crate::commands::usage::codex::RateLimitResetConsumeResult {
+                code: "reset".to_string(),
+                windows_reset: Some(1),
+            },
+        ))
+        .unwrap();
+        drop(tx);
+
+        app.on_tick();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex reset credit: reset 1 window")
+        );
+        assert!(app.is_fetching_usage());
+
+        for _ in 0..20 {
+            app.on_tick();
+            if !app.is_fetching_usage() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(!app.is_fetching_usage());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex reset credit: reset 1 window")
         );
     }
 

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -735,6 +736,31 @@ async fn refresh_token(client: &reqwest::Client, rt: &str) -> Result<Refresh> {
     Ok(resp.json().await?)
 }
 
+fn parse_chatgpt_json_body<T>(body: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    if body.trim_start().starts_with('<') {
+        anyhow::bail!("NEEDS_AUTH");
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
+async fn parse_chatgpt_json_response<T>(resp: reqwest::Response, request_label: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        anyhow::bail!("NEEDS_AUTH");
+    }
+    if !status.is_success() {
+        anyhow::bail!("{request_label} failed (HTTP {status})");
+    }
+    let body = resp.text().await?;
+    parse_chatgpt_json_body(&body)
+}
+
 async fn fetch_usage(
     client: &reqwest::Client,
     token: &str,
@@ -752,18 +778,7 @@ async fn fetch_usage(
         req = req.header("ChatGPT-Account-Id", id);
     }
     let resp = req.send().await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        anyhow::bail!("NEEDS_AUTH");
-    }
-    if !status.is_success() {
-        anyhow::bail!("Codex usage request failed (HTTP {status})");
-    }
-    let body = resp.text().await?;
-    if body.trim().starts_with('<') {
-        anyhow::bail!("NEEDS_AUTH");
-    }
-    Ok(serde_json::from_str(&body)?)
+    parse_chatgpt_json_response(resp, "Codex usage request").await
 }
 
 async fn fetch_reset_credits(
@@ -783,14 +798,7 @@ async fn fetch_reset_credits(
         req = req.header("ChatGPT-Account-Id", id);
     }
     let resp = req.send().await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        anyhow::bail!("NEEDS_AUTH");
-    }
-    if !status.is_success() {
-        anyhow::bail!("Codex reset credits request failed (HTTP {status})");
-    }
-    Ok(resp.json().await?)
+    parse_chatgpt_json_response(resp, "Codex reset credits request").await
 }
 
 async fn consume_reset_credit(
@@ -815,14 +823,7 @@ async fn consume_reset_credit(
         req = req.header("ChatGPT-Account-Id", id);
     }
     let resp = req.send().await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        anyhow::bail!("NEEDS_AUTH");
-    }
-    if !status.is_success() {
-        anyhow::bail!("Codex reset request failed (HTTP {status})");
-    }
-    Ok(resp.json().await?)
+    parse_chatgpt_json_response(resp, "Codex reset request").await
 }
 
 fn metric_from_window(label: &str, window: &Window) -> UsageMetric {
@@ -1482,6 +1483,28 @@ mod tests {
 
         assert_eq!(usage.email.as_deref(), Some("plus@example.com"));
         assert!(usage.additional_rate_limits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn chatgpt_json_body_treats_html_as_auth_expiry() {
+        let error = parse_chatgpt_json_body::<ResetCreditsResponse>(
+            "<html><body>please sign in</body></html>",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "NEEDS_AUTH");
+    }
+
+    #[test]
+    fn chatgpt_json_body_parses_reset_credit_response() -> Result<()> {
+        let response: ResetCreditsResponse = parse_chatgpt_json_body(
+            r#"{"available_count":1,"credits":[{"id":"credit_1","status":"available"}]}"#,
+        )?;
+
+        assert_eq!(response.available_count, Some(1));
+        assert_eq!(response.credits.len(), 1);
+        assert_eq!(response.credits[0].id.as_deref(), Some("credit_1"));
         Ok(())
     }
 
