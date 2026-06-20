@@ -584,7 +584,7 @@ LLM 要約は**デフォルトで有効**になっています（`--no-summarize
 
 | バックエンド | コマンド | 備考 |
 |---------|---------|-------|
-| `apple-fm` | （デフォルト） | ネイティブ Rust FFI 経由でオンデバイスの Apple Foundation Models を使用します（Python 不要）。`apple-fm` Cargo フィーチャーを有効にした macOS ビルドと、Apple Intelligence が有効な環境が必要です。それ以外の場合は組み込みの Rust ヒューリスティック分類器に透過的にフォールバックするため、デフォルトはどこでも動作します。 |
+| `apple-fm` | （デフォルト） | ネイティブ Rust FFI 経由のオンデバイス Apple Foundation Models（Python 不要）。ビルド済みの Apple Silicon（macOS arm64）バイナリで有効化されており、Apple Intelligence を有効にした macOS 26 以降で動作します。それ以外（Intel Mac、それ以前の macOS、Linux、Windows）では組み込みの Rust ヒューリスティックに透過的にフォールバックするため、デフォルトはすべてのプラットフォームで動作します。 |
 | `claude` | `claude -p` | Claude Code CLI がインストールされ認証済みである必要があります。 |
 | `codex` | `codex --quiet` | Codex CLI がインストールされ認証済みである必要があります。 |
 | `gemini` | `gemini -p` | Gemini CLI がインストールされ認証済みである必要があります。 |

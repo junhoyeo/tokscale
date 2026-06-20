@@ -582,7 +582,7 @@ tokscale report --workspace my-project --client opencode
 
 | 백엔드 | 명령어 | 비고 |
 |---------|---------|-------|
-| `apple-fm` | (기본값) | 네이티브 Rust FFI를 통해 Apple Foundation Models를 온디바이스에서 사용 (Python 불필요). `apple-fm` Cargo 피처를 활성화한 macOS 빌드와 Apple Intelligence가 필요하며, 그렇지 않은 경우 내장 Rust 휴리스틱 분류기로 투명하게 폴백합니다 (기본값은 어디서나 동작). |
+| `apple-fm` | (기본값) | 네이티브 Rust FFI를 통한 온디바이스 Apple Foundation Models (Python 불필요). 사전 빌드된 Apple Silicon(macOS arm64) 바이너리에 기본 포함되어 있으며, Apple Intelligence가 켜진 macOS 26 이상에서 동작합니다. 그 외 환경(Intel Mac, 이전 macOS, Linux, Windows)에서는 내장 Rust 휴리스틱으로 투명하게 폴백하므로 기본값은 모든 플랫폼에서 동작합니다. |
 | `claude` | `claude -p` | Claude Code CLI가 설치되어 인증되어 있어야 함. |
 | `codex` | `codex --quiet` | Codex CLI가 설치되어 인증되어 있어야 함. |
 | `gemini` | `gemini -p` | Gemini CLI가 설치되어 인증되어 있어야 함. |
