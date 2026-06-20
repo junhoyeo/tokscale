@@ -2,12 +2,28 @@
 //!
 //! When (and only when) the optional `apple-fm` feature is enabled AND the
 //! target OS is macOS, this builds the vendored `foundation-models-c` SwiftPM
-//! package and links the resulting `libFoundationModels.dylib`.
+//! package as a DYNAMIC `libFoundationModels.dylib` and stages it next to the
+//! final binary.
+//!
+//! The dylib is deliberately NOT linked into `tokscale`. Apple's
+//! `FoundationModels.framework` only exists on macOS 26+, and the Swift runtime
+//! the dylib pulls in (e.g. `libswiftSynchronization`, macOS 15+) does too;
+//! hard-linking any of them would make the *whole* CLI fail to `dyld`-load on
+//! older macOS — a crash-on-launch for every command, not a feature fallback.
+//! Worse, `import FoundationModels` autolinks the framework as a NON-weak load
+//! command, so a `-weak_framework` flag can't reliably flip it.
+//!
+//! Instead the binary links nothing FM/Swift (verifiable: `otool -L tokscale`
+//! shows no FoundationModels and no libswift*), and the `apple-fm` code path
+//! `dlopen`s this dylib lazily at runtime — only on macOS 26+, where all its
+//! dependencies are present. On older macOS the `dlopen` simply fails and the
+//! caller degrades to the cross-platform Rust heuristic. This keeps a SINGLE
+//! arm64 binary safe to ship to every Apple Silicon Mac via npm.
 //!
 //! When the feature is off, or the target is not macOS, this build script is a
 //! complete no-op so that cross-platform / default builds are unaffected.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -51,14 +67,17 @@ fn build_apple_fm() {
         pkg_dir.join("Sources").display()
     );
 
-    // Build the SwiftPM package in release mode.
+    // Build the DYNAMIC `FoundationModels` product (`libFoundationModels.dylib`)
+    // in release mode. We do not build/link the static archive: the dylib is
+    // loaded at runtime via `dlopen`, so nothing FM/Swift ends up in the
+    // tokscale binary's load commands.
     let status = Command::new("swift")
         .args([
             "build",
             "-c",
             "release",
             "--product",
-            "FoundationModelsStatic",
+            "FoundationModels",
             "--package-path",
         ])
         .arg(&pkg_dir)
@@ -78,12 +97,7 @@ fn build_apple_fm() {
         );
     }
 
-    // Copy the STATIC archive into OUT_DIR and link it statically, so the final
-    // tokscale binary is self-contained — no `libFoundationModels.dylib` to ship
-    // alongside it. The archive's only remaining dependencies are Apple's system
-    // FoundationModels framework and the OS Swift runtime, both always present on
-    // macOS 26 (verified with `otool -L`: no non-system dylib references).
-    let lib_name = "libFoundationModelsStatic.a";
+    let lib_name = "libFoundationModels.dylib";
     let built_lib = pkg_dir.join(".build/release").join(lib_name);
     if !built_lib.exists() {
         panic!(
@@ -91,25 +105,45 @@ fn build_apple_fm() {
             built_lib.display()
         );
     }
-    let dest_lib = Path::new(&out_dir).join(lib_name);
-    std::fs::copy(&built_lib, &dest_lib).unwrap_or_else(|e| {
+
+    // 1) Copy into OUT_DIR and bake its absolute path into the binary as a
+    //    fallback. This is what `cargo test` / `cargo run` from arbitrary CWDs
+    //    resolve to (the test harness binary lives in target/<profile>/deps, so
+    //    a sibling-of-exe copy alone would not be found there).
+    let out_lib = Path::new(&out_dir).join(lib_name);
+    copy(&built_lib, &out_lib);
+    println!("cargo:rustc-env=TOKSCALE_FM_DYLIB={}", out_lib.display());
+
+    // 2) Stage a copy NEXT TO the final binary, so the primary runtime lookup
+    //    (`current_exe()`'s directory) succeeds for both `cargo run` and the
+    //    shipped npm package, where the dylib travels alongside `tokscale`.
+    //
+    //    OUT_DIR is `.../target/<triple?>/<profile>/build/<crate>-<hash>/out`;
+    //    ascending three parents lands on the profile dir that holds the binary.
+    if let Some(profile_dir) = profile_dir_from_out(&out_dir) {
+        let staged = profile_dir.join(lib_name);
+        copy(&built_lib, &staged);
+        // CI's release step copies this sibling dylib into the npm package's
+        // bin/ next to tokscale; surface its path for that step / debugging.
+        println!("cargo:warning=apple-fm: staged {}", staged.display());
+    }
+}
+
+/// `.../<profile>/build/<crate>-<hash>/out` -> `.../<profile>`.
+fn profile_dir_from_out(out_dir: &str) -> Option<PathBuf> {
+    Path::new(out_dir)
+        .parent() // <crate>-<hash>
+        .and_then(Path::parent) // build
+        .and_then(Path::parent) // <profile>
+        .map(Path::to_path_buf)
+}
+
+fn copy(from: &Path, to: &Path) {
+    std::fs::copy(from, to).unwrap_or_else(|e| {
         panic!(
             "apple-fm: failed to copy {} -> {}: {e}",
-            built_lib.display(),
-            dest_lib.display()
+            from.display(),
+            to.display()
         )
     });
-
-    // Statically link the bindings archive, plus the system FoundationModels
-    // framework and the OS Swift runtime search path. The archive also carries
-    // autolink hints, but these are made explicit for a deterministic link.
-    println!("cargo:rustc-link-search=native={out_dir}");
-    println!("cargo:rustc-link-lib=static=FoundationModelsStatic");
-    println!("cargo:rustc-link-lib=framework=FoundationModels");
-    println!("cargo:rustc-link-search=native=/usr/lib/swift");
-    // The Swift runtime dylibs (e.g. libswift_Concurrency.dylib) are referenced
-    // via `@rpath`. They live in /usr/lib/swift, which is part of every macOS 26
-    // install's dyld shared cache, so baking this system rpath keeps the binary
-    // self-contained (it needs only OS-provided libraries at runtime).
-    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
