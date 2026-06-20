@@ -290,4 +290,14 @@ mod tests {
         assert_eq!(metrics[0].label, "general");
         assert_eq!(metrics[0].remaining_percent, 80.0);
     }
+
+    #[test]
+    fn treats_seconds_and_millis_epochs_equivalently() {
+        // The seconds-vs-ms heuristic must scale a seconds-scale epoch up by
+        // 1000 so it matches the same instant expressed in milliseconds.
+        let seconds = epoch_ms_to_rfc3339(1_781_852_400).unwrap();
+        let millis = epoch_ms_to_rfc3339(1_781_852_400_000).unwrap();
+        assert_eq!(seconds, millis);
+        assert!(seconds.contains("2026"));
+    }
 }
