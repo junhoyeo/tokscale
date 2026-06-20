@@ -621,7 +621,12 @@ fn cluster_titles(entries: &[&WikiEntry]) -> Vec<(String, String)> {
 fn cluster_label(entries: &[&WikiEntry], members: &[usize]) -> String {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for &idx in members {
-        let title = entries[idx].title.as_deref().unwrap_or("(unsummarized)");
+        let title = entries[idx]
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or("(unsummarized)");
         *counts.entry(title).or_insert(0) += 1;
     }
     counts
