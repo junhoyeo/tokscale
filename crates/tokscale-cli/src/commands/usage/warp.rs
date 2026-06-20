@@ -48,5 +48,8 @@ pub fn fetch() -> Result<UsageOutput> {
         plan: Some("Aggregate API cache".to_string()),
         email: None,
         metrics,
+        reset_credits: None,
+        credit_status: None,
+        spend_control: None,
     })
 }

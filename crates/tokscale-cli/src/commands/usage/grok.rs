@@ -626,6 +626,9 @@ fn fetch_network_usage(credentials: &Credentials) -> Result<UsageOutput> {
         plan,
         email: credentials.email.clone(),
         metrics,
+        reset_credits: None,
+        credit_status: None,
+        spend_control: None,
     })
 }
 
@@ -640,6 +643,9 @@ fn usage_output(
         plan,
         email,
         metrics,
+        reset_credits: None,
+        credit_status: None,
+        spend_control: None,
     }
 }
 
