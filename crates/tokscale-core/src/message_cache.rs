@@ -10,10 +10,13 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+// 21: Codex fork-replay gate now disambiguates a same-millisecond turn via a
+// `task_started` turn_id, adding CodexParseState.forked_child_task_started_turn_ids
+// to the cached incremental state; older cached entries must reparse.
 // 20: Codex fork replay parsing now keeps user-fork turns after repeated child
 // session_meta rows; cached Codex entries from older parser logic can be empty.
 // (19 was the jcode parser change in #718 — bump again so those caches reparse.)
-const CACHE_SCHEMA_VERSION: u32 = 20;
+const CACHE_SCHEMA_VERSION: u32 = 21;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

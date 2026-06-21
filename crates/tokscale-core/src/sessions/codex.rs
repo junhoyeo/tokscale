@@ -186,6 +186,15 @@ pub(crate) struct CodexParseState {
     /// keeps a pending turn alive across incremental re-parses of appended chunks.
     #[serde(default)]
     pub pending_turn_start: bool,
+    /// `turn_id`s announced by a `task_started` event while a forked child is
+    /// still skipping its replayed parent history. The child's own turn is
+    /// preceded by `task_started`; replayed parent turns are not. Used only to
+    /// disambiguate a same-millisecond turn, where the UUID v7 timestamp ties
+    /// and the random tail is meaningless — there, only a task-started turn_id
+    /// ends the skip. Cleared when the skip ends or a new fork begins.
+    /// `#[serde(default)]` keeps it across incremental re-parses.
+    #[serde(default)]
+    pub forked_child_task_started_turn_ids: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -293,12 +302,25 @@ fn parse_codex_reader<R: BufRead>(
                     {
                         state.forked_child_waiting_for_turn_context = false;
                         state.forked_child_replay_session_id = None;
+                        state.forked_child_task_started_turn_ids.clear();
                         if let Some(ref id) = state.forked_child_session_id {
                             state.session_id_from_meta = Some(id.clone());
                         }
                         state.current_model = payload_model.clone();
                         handled = true;
                     } else {
+                        if entry.entry_type == "event_msg"
+                            && payload.payload_type.as_deref() == Some("task_started")
+                        {
+                            // The child's own turn is introduced by a
+                            // `task_started`; remember its turn_id so the gate can
+                            // recognize the child's own same-millisecond turn.
+                            if let Some(turn_id) = payload.turn_id.as_deref() {
+                                state
+                                    .forked_child_task_started_turn_ids
+                                    .insert(turn_id.to_string());
+                            }
+                        }
                         if entry.entry_type == "session_meta" {
                             if let Some(ref id) = payload.id {
                                 if state
@@ -361,6 +383,7 @@ fn parse_codex_reader<R: BufRead>(
                             state.forked_child_replay_session_id = None;
                             state.forked_child_inherited_baseline = None;
                             state.forked_child_inherited_reported_total = None;
+                            state.forked_child_task_started_turn_ids.clear();
                         }
                     }
                     if let Some(ref provider) = payload.model_provider {
@@ -678,15 +701,29 @@ fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option
 
     match (turn_id, codex_uuid_v7_order_key(child_session_id)) {
         (Some(turn_id), Some(child_key)) => {
+            let Some(turn_key) = codex_uuid_v7_order_key(turn_id) else {
+                return true;
+            };
             // Compare only the UUID v7 48-bit millisecond timestamp (the first
             // 12 hex of the order key), not the full id. The child's own turn is
             // minted at or after its session_meta and the replayed parent turns
-            // strictly earlier, so the millisecond prefix is the causal signal.
-            // The version nibble + random tail of two independently-minted v7
-            // UUIDs is a coin flip; comparing the full id would drop the child's
-            // own turn ~50% of the time whenever it starts within the same
-            // millisecond as the fork session_meta.
-            codex_uuid_v7_order_key(turn_id).is_none_or(|turn_key| turn_key[..12] >= child_key[..12])
+            // strictly earlier, so the millisecond prefix is the causal signal;
+            // the version nibble + random tail of two independently-minted v7
+            // UUIDs is a coin flip.
+            match turn_key[..12].cmp(&child_key[..12]) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                // Same millisecond: the timestamp ties and the random tail
+                // cannot order the child's own turn against a replayed parent
+                // turn that happens to share the fork's millisecond. The child's
+                // own turn is announced by a `task_started` event; replayed
+                // parent turns are not — so only a task-started turn_id ends the
+                // skip here, otherwise an equal-prefix replayed parent turn would
+                // be miscounted as child-local.
+                std::cmp::Ordering::Equal => {
+                    state.forked_child_task_started_turn_ids.contains(turn_id)
+                }
+            }
         }
         _ => true,
     }
@@ -1925,6 +1962,42 @@ mod tests {
             r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
             "\n",
             r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":320,"output_tokens":32,"total_tokens":352},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+            "\n"
+        ));
+
+        let child_messages = parse_codex_file(child.path());
+
+        assert_eq!(child_messages.len(), 1);
+        assert_eq!(child_messages[0].tokens.input, 20);
+        assert_eq!(child_messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_forked_child_same_millisecond_replayed_parent_turn_keeps_skipping() {
+        // A replayed parent `turn_context` can coincidentally share the child's
+        // fork millisecond (here both `019e5c03-1e99`) while NOT being preceded
+        // by a `task_started`. A millisecond-prefix-only gate would treat that
+        // equal-prefix turn as child-local, end the skip early, and count the
+        // inherited replayed row (500/50) as the child's own usage. The child's
+        // own turn is the later one announced by `task_started`; only it should
+        // end the skip, so only its 20/2 delta is counted.
+        let child = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5c03-1e99-7000-8000-0000000000ff","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            // replayed parent turn that shares the child's fork millisecond, with
+            // NO task_started — must NOT end the skip.
+            r#"{"timestamp":"2026-05-05T21:52:10.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"output_tokens":50,"total_tokens":550},"last_token_usage":{"input_tokens":500,"output_tokens":50,"total_tokens":550}}}}"#,
+            "\n",
+            // the child's real own turn, announced by task_started.
+            r#"{"timestamp":"2026-05-05T21:52:20.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-1e99-7000-8000-000000000002"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000002","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":520,"output_tokens":52,"total_tokens":572},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
             "\n"
         ));
 
