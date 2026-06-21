@@ -189,10 +189,15 @@ fn session_created_ms(blob: &[u8]) -> Option<i64> {
 
 /// Decode a protobuf `{#1: seconds, #2: nanos}` Timestamp message to epoch ms.
 /// Shared by the session-created stamp and the per-generation `#9.#4` stamp.
+///
+/// `seconds` is an unbounded wire varint, so a malformed blob can carry a value
+/// whose `* 1000` overflows `i64` and panics in debug builds. Use checked
+/// arithmetic and return `None` on overflow to keep the module's
+/// "malformed data degrades to `None`, never panics" contract.
 fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
     let seconds = varint_field(ts, 1)? as i64;
     let nanos = varint_field(ts, 2).unwrap_or(0) as i64;
-    Some(seconds * 1000 + nanos / 1_000_000)
+    seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }
 
 fn file_modified_ms(path: &Path) -> i64 {
@@ -617,6 +622,35 @@ mod tests {
         let mut outer = vec![(1u8 << 3) | 2, inner.len() as u8];
         outer.extend_from_slice(&inner);
         assert!(parse_gen_metadata(&outer, "s", 0, &mut seen).is_none());
+    }
+
+    #[test]
+    fn proto_timestamp_ms_overflow_returns_none_without_panic() {
+        // A malformed Timestamp can carry a `seconds` varint whose `* 1000`
+        // overflows i64. Debug builds (overflow-checks = on) would panic on the
+        // unchecked multiply; the decode must degrade to None instead, matching
+        // the module's malformed-data contract.
+        let mut overflow = Vec::new();
+        overflow.extend(enc_varint(1, i64::MAX as u64)); // seconds -> *1000 overflows
+        overflow.extend(enc_varint(2, 0)); // nanos
+        assert_eq!(proto_timestamp_ms(&overflow), None);
+
+        // The boundary case: largest `seconds` whose *1000 still fits i64 must
+        // decode, proving the guard rejects only genuine overflow.
+        let ok_seconds = i64::MAX / 1000;
+        let mut ok = Vec::new();
+        ok.extend(enc_varint(1, ok_seconds as u64));
+        ok.extend(enc_varint(2, 0));
+        assert_eq!(proto_timestamp_ms(&ok), Some(ok_seconds * 1000));
+
+        // A normal, in-range stamp still decodes (seconds + nanos -> ms).
+        let mut normal = Vec::new();
+        normal.extend(enc_varint(1, 1_781_000_000));
+        normal.extend(enc_varint(2, 250_000_000)); // +250ms
+        assert_eq!(
+            proto_timestamp_ms(&normal),
+            Some(1_781_000_000 * 1000 + 250)
+        );
     }
 
     #[test]
