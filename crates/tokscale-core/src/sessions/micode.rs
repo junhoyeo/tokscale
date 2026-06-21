@@ -184,6 +184,11 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let mut fingerprint_indices: HashMap<MiMoCodeSqliteFingerprint, usize> = HashMap::new();
     let mut dedup_states: Vec<MiMoCodeSqliteDedupState> = Vec::new();
 
+    // Namespace the cross-file dedup key by the database, so two independent
+    // databases that reuse a bare message/row id (e.g. both starting at 1) do
+    // not collapse each other's unrelated messages in the shared dedup set.
+    let db_namespace = db_path.to_string_lossy().to_string();
+
     for row_result in rows {
         let (row_id, session_id, data_json, row_workspace_root) = match row_result {
             Ok(r) => r,
@@ -227,7 +232,7 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let cache_read = cache.read.max(0);
         let cache_write = cache.write.max(0);
         let cost = msg.cost.unwrap_or(0.0).max(0.0);
-        let dedup_key = message_id.clone().unwrap_or(row_id);
+        let dedup_key = format!("{db_namespace}:{}", message_id.clone().unwrap_or(row_id));
         let fingerprint = MiMoCodeSqliteFingerprint {
             created_bits: msg.time.created.to_bits(),
             completed_bits: msg.time.completed.map(f64::to_bits),
@@ -383,7 +388,47 @@ mod tests {
 
         let messages = parse_micode_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key, Some("msg_assistant".to_string()));
+        // The dedup key is namespaced by the database path so identical ids in
+        // separate databases do not collide; the message-id suffix is preserved.
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":msg_assistant")));
+    }
+
+    #[test]
+    fn dedup_key_is_namespaced_by_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_a = dir.path().join("a.db");
+        let db_b = dir.path().join("b.db");
+        let msg = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 10, "output": 5 },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        for db in [&db_a, &db_b] {
+            let conn = create_micode_sqlite_db(db);
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["msg_1", "ses_1", msg],
+            )
+            .unwrap();
+            drop(conn);
+        }
+
+        let a = parse_micode_sqlite(&db_a);
+        let b = parse_micode_sqlite(&db_b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        // The same bare id "msg_1" in two databases yields distinct dedup keys,
+        // so the shared cross-file dedup set keeps both rather than dropping the
+        // second database's unrelated message.
+        assert_ne!(a[0].dedup_key, b[0].dedup_key);
+        assert!(a[0].dedup_key.as_deref().unwrap().ends_with(":msg_1"));
+        assert!(b[0].dedup_key.as_deref().unwrap().ends_with(":msg_1"));
     }
 
     #[test]
