@@ -678,7 +678,15 @@ fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option
 
     match (turn_id, codex_uuid_v7_order_key(child_session_id)) {
         (Some(turn_id), Some(child_key)) => {
-            codex_uuid_v7_order_key(turn_id).is_none_or(|turn_key| turn_key >= child_key)
+            // Compare only the UUID v7 48-bit millisecond timestamp (the first
+            // 12 hex of the order key), not the full id. The child's own turn is
+            // minted at or after its session_meta and the replayed parent turns
+            // strictly earlier, so the millisecond prefix is the causal signal.
+            // The version nibble + random tail of two independently-minted v7
+            // UUIDs is a coin flip; comparing the full id would drop the child's
+            // own turn ~50% of the time whenever it starts within the same
+            // millisecond as the fork session_meta.
+            codex_uuid_v7_order_key(turn_id).is_none_or(|turn_key| turn_key[..12] >= child_key[..12])
         }
         _ => true,
     }
@@ -1890,6 +1898,39 @@ mod tests {
         assert_eq!(parent_messages.len(), 1);
         assert_eq!(child_messages.len(), 1);
         assert_ne!(parent_messages[0].dedup_key, child_messages[0].dedup_key);
+        assert_eq!(child_messages[0].tokens.input, 20);
+        assert_eq!(child_messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_forked_child_same_millisecond_turn_starts_own_session() {
+        // Regression: the child's own first turn starts in the SAME millisecond
+        // as its fork session_meta, so both UUID v7 ids share the 48-bit ms
+        // prefix (`019e5c03-1e99`) and differ only in the random tail
+        // (`…0001` vs `…00ff`). Comparing the full id makes the gate fall through
+        // to the coin-flip tail (here `0001 < 00ff`), so the replay-skip never
+        // ends and the child's own turn is dropped. Comparing only the ms prefix
+        // keeps the child's own turn.
+        let child = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5c03-1e99-7000-8000-0000000000ff","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.100Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-1e99-7000-8000-000000000001"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":320,"output_tokens":32,"total_tokens":352},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+            "\n"
+        ));
+
+        let child_messages = parse_codex_file(child.path());
+
+        assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].tokens.input, 20);
         assert_eq!(child_messages[0].tokens.output, 2);
     }
