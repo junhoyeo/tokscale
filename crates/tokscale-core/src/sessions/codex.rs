@@ -34,6 +34,10 @@ pub struct CodexPayload {
     pub info: Option<CodexInfo>,
     pub turn_id: Option<String>,
     pub source: Option<Value>,
+    /// Thread origin from session_meta. `"user"` marks a human-initiated fork
+    /// (e.g. a VS Code "fork conversation"), which replays parent history but
+    /// never emits a `task_started` for the child's own turn.
+    pub thread_source: Option<String>,
     /// Current working directory from session_meta.
     pub cwd: Option<String>,
     /// Provider identity from session_meta (e.g. "openai", "azure")
@@ -195,6 +199,15 @@ pub(crate) struct CodexParseState {
     /// `#[serde(default)]` keeps it across incremental re-parses.
     #[serde(default)]
     pub forked_child_task_started_turn_ids: std::collections::HashSet<String>,
+    /// Set when the active forked child is a human-initiated (`thread_source:
+    /// "user"`) fork. Such forks replay parent history but never emit a
+    /// `task_started`, so the same-millisecond gate cannot lean on
+    /// `task_started` to recognize the child's own turn — there the millisecond
+    /// prefix tie is enough (a user fork's replayed parent turns carry the
+    /// parent's millisecond prefix, not the child's). `#[serde(default)]` keeps
+    /// it across incremental re-parses.
+    #[serde(default)]
+    pub forked_child_is_user_fork: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +316,7 @@ fn parse_codex_reader<R: BufRead>(
                         state.forked_child_waiting_for_turn_context = false;
                         state.forked_child_replay_session_id = None;
                         state.forked_child_task_started_turn_ids.clear();
+                        state.forked_child_is_user_fork = false;
                         if let Some(ref id) = state.forked_child_session_id {
                             state.session_id_from_meta = Some(id.clone());
                         }
@@ -384,6 +398,8 @@ fn parse_codex_reader<R: BufRead>(
                             state.forked_child_inherited_baseline = None;
                             state.forked_child_inherited_reported_total = None;
                             state.forked_child_task_started_turn_ids.clear();
+                            state.forked_child_is_user_fork =
+                                payload.thread_source.as_deref() == Some("user");
                         }
                     }
                     if let Some(ref provider) = payload.model_provider {
@@ -715,13 +731,19 @@ fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option
                 std::cmp::Ordering::Less => false,
                 // Same millisecond: the timestamp ties and the random tail
                 // cannot order the child's own turn against a replayed parent
-                // turn that happens to share the fork's millisecond. The child's
-                // own turn is announced by a `task_started` event; replayed
-                // parent turns are not — so only a task-started turn_id ends the
-                // skip here, otherwise an equal-prefix replayed parent turn would
-                // be miscounted as child-local.
+                // turn that happens to share the fork's millisecond. A subagent
+                // fork announces its own turn with a `task_started` event while
+                // replayed parent turns are not, so only a task-started turn_id
+                // ends the skip there — otherwise an equal-prefix replayed parent
+                // turn would be miscounted as child-local. A human (`thread_source:
+                // "user"`) fork never emits `task_started`, but its replayed
+                // parent turns carry the *parent's* millisecond prefix rather
+                // than the child's, so reaching this equal-prefix branch already
+                // means the turn shares the child's fork millisecond and is the
+                // child's own turn — end the skip.
                 std::cmp::Ordering::Equal => {
-                    state.forked_child_task_started_turn_ids.contains(turn_id)
+                    state.forked_child_is_user_fork
+                        || state.forked_child_task_started_turn_ids.contains(turn_id)
                 }
             }
         }
@@ -1887,6 +1909,45 @@ mod tests {
             r#"{"timestamp":"2026-01-02T03:10:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
             "\n",
             r#"{"timestamp":"2026-01-02T03:10:30.100Z","type":"turn_context","payload":{"turn_id":"22222222-4444-7444-8444-444444444444","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:30.200Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:31.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1250,"cached_input_tokens":450,"output_tokens":120,"total_tokens":1370},"last_token_usage":{"input_tokens":250,"cached_input_tokens":50,"output_tokens":20,"total_tokens":270}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 200);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.output, 20);
+    }
+
+    #[test]
+    fn test_user_forked_child_same_millisecond_own_turn_counts_without_task_started() {
+        // Human (`thread_source:"user"`) fork where the child session_meta and
+        // the child's own first turn_context are minted in the SAME millisecond,
+        // so both UUID v7 ids share the 48-bit prefix (`22222222-2222`). A user
+        // fork never emits a `task_started`, so a same-millisecond gate that
+        // requires `task_started` would keep skipping forever and drop the
+        // child's own turn (0 messages). The replayed parent turn carries the
+        // *parent's* millisecond prefix (`11111111`), so it sorts strictly
+        // earlier and is still skipped; only the child's own turn — the one that
+        // shares the child's fork millisecond — must end the skip and be counted
+        // (200/20 delta from the inherited 1000/100 baseline).
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-01-02T03:10:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.001Z","type":"session_meta","payload":{"id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.100Z","type":"turn_context","payload":{"turn_id":"11111111-3333-7333-8333-333333333333","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
+            "\n",
+            // child's own turn: turn_id shares the child session's millisecond
+            // prefix (`22222222-2222`) — same-millisecond tie with the fork.
+            r#"{"timestamp":"2026-01-02T03:10:30.100Z","type":"turn_context","payload":{"turn_id":"22222222-2222-7444-8444-444444444444","model":"gpt-5.5","cwd":"/repo"}}"#,
             "\n",
             r#"{"timestamp":"2026-01-02T03:10:30.200Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
             "\n",
