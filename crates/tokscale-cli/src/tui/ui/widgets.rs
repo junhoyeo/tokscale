@@ -375,6 +375,29 @@ pub fn get_provider_display_name(provider: &str) -> String {
     if let Some(name) = config.get_provider_display_name(provider) {
         return name.to_string();
     }
+
+    // Merged Models rows store multiple providers as a ", "-joined string
+    // (aggregate_model_usage_entries sorts + dedups + joins). Map EACH segment
+    // independently and rejoin, otherwise a prefix/brand branch below would
+    // match the whole string and silently drop the rest — e.g.
+    // "openai, openrouter" must render "OpenAI, OpenRouter", not just "OpenAI".
+    if provider.contains(", ") {
+        return provider
+            .split(", ")
+            .map(|segment| map_single_provider(segment, &config))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+
+    map_single_provider(provider, &config)
+}
+
+/// Display name for a SINGLE provider id (no comma-joined lists — the public
+/// `get_provider_display_name` splits those first).
+fn map_single_provider(provider: &str, config: &TokscaleConfig) -> String {
+    if let Some(name) = config.get_provider_display_name(provider) {
+        return name.to_string();
+    }
     let lower = provider.to_lowercase();
     match lower.as_str() {
         "anthropic" => return "Anthropic".to_string(),
@@ -386,6 +409,7 @@ pub fn get_provider_display_name(provider: &str) -> String {
         "mistral" => return "Mistral".to_string(),
         "cohere" => return "Cohere".to_string(),
         "opencode" => return "OpenCode".to_string(),
+        "openrouter" => return "OpenRouter".to_string(),
         // `canonical_provider` rewrites `google-vertex` → `google_vertex`, so
         // accept both spellings here.
         "google-vertex" | "google_vertex" => return "Google Vertex".to_string(),
@@ -637,6 +661,32 @@ mod tests {
         // Per-word acronym map applies inside the smart fallback.
         assert_eq!(get_provider_display_name("acme-ai"), "Acme AI");
         assert_eq!(get_provider_display_name("foo-api"), "Foo API");
+    }
+
+    #[test]
+    fn provider_display_name_merged_list_maps_each_segment() {
+        // Merged Models rows store providers as a ", "-joined string
+        // (aggregate_model_usage_entries). Each segment must be mapped
+        // independently — a prefix/contains-family branch on the whole string
+        // would otherwise silently drop the rest. Regression guard for that.
+        assert_eq!(
+            get_provider_display_name("openai, openrouter"),
+            "OpenAI, OpenRouter"
+        );
+        assert_eq!(
+            get_provider_display_name("kimi, anthropic"),
+            "Kimi, Anthropic"
+        );
+        // A `copilot` segment must not swallow its siblings via the contains()
+        // branch.
+        assert_eq!(
+            get_provider_display_name("anthropic, copilot"),
+            "Anthropic, GitHub Copilot"
+        );
+        assert_eq!(
+            get_provider_display_name("anthropic, openai"),
+            "Anthropic, OpenAI"
+        );
     }
 
     #[test]
