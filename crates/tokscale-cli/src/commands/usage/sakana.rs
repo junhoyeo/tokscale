@@ -212,8 +212,9 @@ fn find_used_percents(html: &str) -> Vec<f64> {
     out
 }
 
-/// Collect window labels matching `>(5-hour|Weekly)<` in document order.
-fn find_window_labels(html: &str) -> Vec<String> {
+/// Collect window label positions matching `>(5-hour|Weekly)<`, sorted by
+/// document order. Returns (byte index of the label, label).
+fn find_window_label_positions(html: &str) -> Vec<(usize, String)> {
     const LABELS: [&str; 2] = ["5-hour", "Weekly"];
     let mut found: Vec<(usize, String)> = Vec::new();
     for label in LABELS {
@@ -226,7 +227,51 @@ fn find_window_labels(html: &str) -> Vec<String> {
         }
     }
     found.sort_by_key(|(idx, _)| *idx);
-    found.into_iter().map(|(_, l)| l).collect()
+    found
+}
+
+/// Build one window per on-page label (`5-hour` / `Weekly`), binding the
+/// percentage and reset time that STRUCTURALLY belong to that label — the first
+/// of each within the label's section (from the label up to the next label) —
+/// rather than collecting every `% used` in the document.
+///
+/// This matters because the served HTML embeds each usage value MORE THAN ONCE
+/// (the rendered card markup AND serialized RSC data), so a global
+/// "collect-all-percents, pair-by-index" approach invents phantom windows and
+/// mis-pairs percentages. The window labels appear only in the rendered cards,
+/// so anchoring on them is the reliable structural key.
+fn parse_windows(html: &str) -> Vec<ParsedWindow> {
+    let labels = find_window_label_positions(html);
+    if !labels.is_empty() {
+        let mut windows = Vec::with_capacity(labels.len());
+        for (k, (pos, label)) in labels.iter().enumerate() {
+            let end = labels.get(k + 1).map(|(p, _)| *p).unwrap_or(html.len());
+            let segment = &html[*pos..end];
+            if let Some(&pct) = find_used_percents(segment).first() {
+                windows.push(ParsedWindow {
+                    label: label.clone(),
+                    used_percent: pct,
+                    resets_at: find_reset_times(segment).into_iter().next(),
+                });
+            }
+        }
+        return windows;
+    }
+
+    // Degraded fallback: no labels found at all. Emit at most the known number
+    // of windows from the leading percentages, in document order, so a label
+    // markup change still surfaces *something* without inventing phantoms.
+    const FALLBACK_LABELS: [&str; 2] = ["5-hour", "Weekly"];
+    find_used_percents(html)
+        .into_iter()
+        .take(FALLBACK_LABELS.len())
+        .enumerate()
+        .map(|(i, pct)| ParsedWindow {
+            label: FALLBACK_LABELS[i].to_string(),
+            used_percent: pct,
+            resets_at: None,
+        })
+        .collect()
 }
 
 /// Collect reset times matching
@@ -338,32 +383,11 @@ fn parse_billing(html: &str) -> Result<ParsedBilling> {
     let price_idx = price.map(|(_, i)| i);
     let plan = find_plan(html, price_idx);
 
-    let labels = find_window_labels(html);
-    let percents = find_used_percents(html);
-    let resets = find_reset_times(html);
-
-    // Pair label[i] <-> percent[i] <-> reset[i] by order. If labels are missing,
-    // synthesize from the known window order (5-hour, Weekly).
-    const FALLBACK_LABELS: [&str; 2] = ["5-hour", "Weekly"];
-    let mut windows = Vec::new();
-    for (i, &pct) in percents.iter().enumerate() {
-        let label = labels
-            .get(i)
-            .cloned()
-            .or_else(|| FALLBACK_LABELS.get(i).map(|s| s.to_string()))
-            .unwrap_or_else(|| format!("Window {}", i + 1));
-        windows.push(ParsedWindow {
-            label,
-            used_percent: pct,
-            resets_at: resets.get(i).cloned(),
-        });
-    }
-
     Ok(ParsedBilling {
         plan,
         monthly_price,
         next_renewal: find_next_renewal(html),
-        windows,
+        windows: parse_windows(html),
     })
 }
 
@@ -624,6 +648,44 @@ mod tests {
         assert_eq!(parsed.windows[1].label, "Weekly");
         assert_eq!(parsed.windows[1].used_percent, 5.0);
         assert_eq!(parsed.windows[1].resets_at, None);
+    }
+
+    // Mirrors the REAL served HTML: the usage values are ALSO embedded in
+    // serialized RSC data (extra "% used" tokens, some preceding the rendered
+    // cards, with NO window label). The parser must anchor on the labels and
+    // emit exactly 2 correctly-paired windows — not invent "Window 3/4" or
+    // mis-pair the weekly value. Regression test for the bug caught by a live run.
+    const DUPLICATED_RSC: &str = r#"
+<html><body>
+  <script>self.__next_f.push([1,"...stuff 19% used more 55% used trailing..."])</script>
+  <nav>Billing</nav>
+  <div class="plan-card"><span>Standard</span><span>$20 / mo</span></div>
+  <div class="window"><span>5-hour</span><span>55% used</span><span>Resets on June 22, 2026 at 9:58 AM</span></div>
+  <div class="window"><span>Weekly</span><span>19% used</span><span>Resets on June 29, 2026 at 12:00 AM</span></div>
+  <script>self.__next_f.push([1,"...echo 55% used and 19% used again..."])</script>
+</body></html>
+"#;
+
+    #[test]
+    fn ignores_duplicated_rsc_percentages() {
+        let parsed = parse_billing(DUPLICATED_RSC).expect("should parse");
+        assert_eq!(
+            parsed.windows.len(),
+            2,
+            "must bind to the 2 labels, not collect every % used"
+        );
+        assert_eq!(parsed.windows[0].label, "5-hour");
+        assert_eq!(parsed.windows[0].used_percent, 55.0);
+        assert_eq!(
+            parsed.windows[0].resets_at.as_deref(),
+            Some("June 22, 2026 at 9:58 AM")
+        );
+        assert_eq!(parsed.windows[1].label, "Weekly");
+        assert_eq!(parsed.windows[1].used_percent, 19.0);
+        assert_eq!(
+            parsed.windows[1].resets_at.as_deref(),
+            Some("June 29, 2026 at 12:00 AM")
+        );
     }
 
     #[test]
