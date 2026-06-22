@@ -438,7 +438,7 @@ tokscale pricing list-overrides
 
 ```json
 {
-  "$schema": "https://tokscale.dev/custom-pricing.schema.json",
+  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -503,7 +503,7 @@ tokscale submit
 TOKSCALE_API_TOKEN=tt_xxx tokscale submit
 
 # トークンの失効: リーダーボードサイトの Settings > API Tokens
-# （https://tokscale.com/settings）を開き、該当トークン行の "Revoke" をクリック。
+# （https://tokscale.ai/settings）を開き、該当トークン行の "Revoke" をクリック。
 # 失効は即座に有効になり、以降そのトークンを使ったリクエストは
 # HTTP 401 "Invalid API token" を返します。
 

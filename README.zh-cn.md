@@ -435,7 +435,7 @@ tokscale pricing list-overrides
 
 ```json
 {
-  "$schema": "https://tokscale.dev/custom-pricing.schema.json",
+  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -500,7 +500,7 @@ tokscale submit
 TOKSCALE_API_TOKEN=tt_xxx tokscale submit
 
 # 撤销 token：访问排行榜站点的 Settings > API Tokens
-#（https://tokscale.com/settings），点击对应 token 行的 "Revoke"。
+#（https://tokscale.ai/settings），点击对应 token 行的 "Revoke"。
 # 撤销立即生效 —— 之后使用该 token 的请求将收到 HTTP 401 "Invalid API token"。
 
 # 带筛选提交

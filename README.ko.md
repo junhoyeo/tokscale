@@ -434,7 +434,7 @@ tokscale pricing list-overrides
 
 ```json
 {
-  "$schema": "https://tokscale.dev/custom-pricing.schema.json",
+  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -499,7 +499,7 @@ tokscale submit
 TOKSCALE_API_TOKEN=tt_xxx tokscale submit
 
 # 토큰 폐기: 리더보드 사이트의 Settings > API Tokens
-# (https://tokscale.com/settings)를 방문해 해당 토큰 행의 "Revoke"를 클릭.
+# (https://tokscale.ai/settings)를 방문해 해당 토큰 행의 "Revoke"를 클릭.
 # 폐기는 즉시 적용됩니다 — 이후 해당 토큰을 사용한 요청은
 # HTTP 401 "Invalid API token"을 받습니다.
 
