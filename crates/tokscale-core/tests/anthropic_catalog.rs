@@ -163,6 +163,7 @@ fn load_lookup() -> Option<PricingLookup> {
         filter_litellm(litellm_data),
         openrouter_data,
         HashMap::new(),
+        HashMap::new(),
         models_dev_data,
     ))
 }
