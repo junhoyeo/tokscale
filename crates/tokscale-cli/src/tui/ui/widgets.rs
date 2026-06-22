@@ -173,6 +173,7 @@ pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
         s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
         s if s.contains("meta") || s.contains("llama") => &META_SHADES,
         s if s.contains("cursor") => &CURSOR_SHADES,
+        s if s.contains("sakana") || s.contains("fugu") => &SAKANA_SHADES,
         _ => &UNKNOWN_SHADES,
     };
 
@@ -266,6 +267,17 @@ const CURSOR_SHADES: [(u8, u8, u8); 7] = [
     (199, 177, 251), // #C7B1FB
     (215, 199, 252), // #D7C7FC
     (230, 220, 253), // #E6DCFD
+];
+
+/// Sakana (Fugu) red — the brand's "one red fish leading the school" accent.
+const SAKANA_SHADES: [(u8, u8, u8); 7] = [
+    (219, 43, 31),   // #DB2B1F
+    (223, 66, 56),   // #DF4238
+    (227, 90, 80),   // #E35A50
+    (231, 113, 105), // #E77169
+    (235, 136, 130), // #EB8882
+    (239, 162, 156), // #EFA29C
+    (243, 185, 181), // #F3B9B5
 ];
 
 /// Neutral gray ramp for providers that don't match any known palette.
