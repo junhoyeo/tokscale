@@ -190,6 +190,11 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
             }
 
             let remains = resp.model_remains.as_deref().unwrap_or(&[]);
+            let metrics = build_metrics(remains);
+            // Skip sites with no renderable windows so we don't emit a bare header row.
+            if metrics.is_empty() {
+                continue;
+            }
             outputs.push(UsageOutput {
                 provider: "MiniMax Token Plan".into(),
                 account: Some(UsageAccount {
@@ -199,7 +204,7 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
                 }),
                 plan: None,
                 email: None,
-                metrics: build_metrics(remains),
+                metrics,
                 reset_credits: None,
                 credit_status: None,
                 spend_control: None,

@@ -278,6 +278,12 @@ pub fn fetch() -> Result<UsageOutput> {
             }
         }
 
+        if metrics.is_empty() {
+            anyhow::bail!(
+                "Copilot returned no parseable usage (quota response format may have changed)"
+            );
+        }
+
         Ok(UsageOutput {
             provider: "Copilot".into(),
             account: None,
