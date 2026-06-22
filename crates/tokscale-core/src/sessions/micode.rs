@@ -505,7 +505,11 @@ mod tests {
             .chain(b)
             .filter(|m| m.dedup_key.as_ref().is_none_or(|k| seen.insert(k.clone())))
             .collect();
-        assert_eq!(kept.len(), 2, "rowid collisions across DBs must stay distinct");
+        assert_eq!(
+            kept.len(),
+            2,
+            "rowid collisions across DBs must stay distinct"
+        );
     }
 
     #[test]

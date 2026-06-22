@@ -54,10 +54,7 @@ fn session_cookie() -> Option<String> {
     }
 
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".config")
-        .join("tokscale")
-        .join("sakana-session");
+    let path = home.join(".config").join("tokscale").join("sakana-session");
     if let Ok(content) = std::fs::read_to_string(&path) {
         let trimmed = content.trim();
         if !trimmed.is_empty() {
@@ -173,7 +170,10 @@ fn find_plan(html: &str, price_idx: Option<usize>) -> Option<String> {
     }
 
     // Fallback: first tier after "Billing".
-    let start = html.find("Billing").map(|i| i + "Billing".len()).unwrap_or(0);
+    let start = html
+        .find("Billing")
+        .map(|i| i + "Billing".len())
+        .unwrap_or(0);
     let region = &html[start..];
     let mut best: Option<(usize, &str)> = None;
     for tier in TIERS {
