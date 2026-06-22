@@ -200,6 +200,9 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
                 plan: None,
                 email: None,
                 metrics: build_metrics(remains),
+                reset_credits: None,
+                credit_status: None,
+                spend_control: None,
             });
         }
 
