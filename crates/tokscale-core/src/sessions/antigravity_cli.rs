@@ -194,9 +194,17 @@ fn session_created_ms(blob: &[u8]) -> Option<i64> {
 /// whose `* 1000` overflows `i64` and panics in debug builds. Use checked
 /// arithmetic and return `None` on overflow to keep the module's
 /// "malformed data degrades to `None`, never panics" contract.
+///
+/// `nanos` is range-validated against the protobuf Timestamp spec (must be
+/// `0..=999_999_999`); an out-of-range or negative `nanos` marks the whole
+/// stamp as malformed (`None`) so the caller's `ms > 0` filter and
+/// session-timestamp fallback take over instead of producing a skewed time.
 fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
     let seconds = varint_field(ts, 1)? as i64;
-    let nanos = varint_field(ts, 2).unwrap_or(0) as i64;
+    let nanos = i64::try_from(varint_field(ts, 2).unwrap_or(0)).ok()?;
+    if !(0..=999_999_999).contains(&nanos) {
+        return None;
+    }
     seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }
 
@@ -650,6 +658,61 @@ mod tests {
         assert_eq!(
             proto_timestamp_ms(&normal),
             Some(1_781_000_000 * 1000 + 250)
+        );
+    }
+
+    #[test]
+    fn proto_timestamp_ms_rejects_out_of_range_nanos() {
+        // The protobuf Timestamp spec requires `nanos` in 0..=999_999_999.
+        // An out-of-range `nanos` marks the stamp malformed (None) rather than
+        // producing a skewed time. 1_000_000_000 (== one extra second) is the
+        // first invalid value above the inclusive upper bound.
+        let mut bad_nanos = Vec::new();
+        bad_nanos.extend(enc_varint(1, 1_781_000_000)); // valid seconds
+        bad_nanos.extend(enc_varint(2, 1_000_000_000)); // nanos out of range
+        assert_eq!(proto_timestamp_ms(&bad_nanos), None);
+
+        // A nanos varint large enough to be negative once cast to i64 is also
+        // rejected (never wraps to a bogus negative offset).
+        let mut huge_nanos = Vec::new();
+        huge_nanos.extend(enc_varint(1, 1_781_000_000));
+        huge_nanos.extend(enc_varint(2, u64::MAX));
+        assert_eq!(proto_timestamp_ms(&huge_nanos), None);
+
+        // The inclusive upper bound is accepted (999_999_999 ns -> +999 ms).
+        let mut max_nanos = Vec::new();
+        max_nanos.extend(enc_varint(1, 1_781_000_000));
+        max_nanos.extend(enc_varint(2, 999_999_999));
+        assert_eq!(
+            proto_timestamp_ms(&max_nanos),
+            Some(1_781_000_000 * 1000 + 999)
+        );
+
+        // End-to-end: a gen_metadata row whose #9.#4 carries out-of-range nanos
+        // must fall back to the session-created timestamp (the caller's invalid
+        // -> None -> session fallback path), not adopt a skewed per-turn stamp.
+        let session_fallback = 222_000_i64;
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(2, 500)); // input
+        usage.extend(enc_varint(9, 300)); // output
+        usage.extend(enc_len(11, b"bad-nanos")); // responseId
+
+        let mut gen_time = Vec::new();
+        gen_time.extend(enc_varint(1, 1_781_000_000)); // seconds
+        gen_time.extend(enc_varint(2, 1_000_000_000)); // nanos out of range
+        let gen9 = enc_len(4, &gen_time);
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(9, &gen9));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(&blob, "s", session_fallback, &mut seen).unwrap();
+        assert_eq!(
+            message.timestamp, session_fallback,
+            "out-of-range per-generation nanos must fall back to the session timestamp"
         );
     }
 
