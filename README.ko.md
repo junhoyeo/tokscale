@@ -58,6 +58,7 @@
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ 레거시: `.clawdbot`, `.moltbot`, `.moldbot`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | ✅ 지원 |
+| <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | Codex를 통해 추적 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` (폴백: `~/.hermes/state.db`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (폴백: `~/.gemini/tmp/*/chats/*.json`) | ✅ 지원 |
@@ -1463,6 +1464,8 @@ Tokscale은 [LiteLLM의 가격 데이터베이스](https://github.com/BerriAI/li
 **동적 폴백**: LiteLLM에 아직 없는 모델(예: 최근 출시된 모델)은 [OpenRouter의 엔드포인트 API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)에서 자동으로 가격을 가져옵니다.
 
 **Cursor 모델 가격**: LiteLLM과 OpenRouter 모두에 없는 최신 모델(예: `gpt-5.3-codex`)은 [Cursor 모델 문서](https://cursor.com/en-US/docs/models)에서 가져온 하드코딩 가격을 사용합니다. 이 오버라이드는 모든 업스트림 소스 다음에, 퍼지 매칭 이전에 확인되므로 실제 업스트림 가격이 사용 가능해지면 자동으로 양보합니다.
+
+**Sakana Fugu 가격**: Fugu Ultra 비용은 Sakana가 공개한 종량제(pay-as-you-go) 요율로 추정하며, `fugu` 라우터 모델은 실제로 오케스트레이션한 기반 모델의 가변 요율이 곧 그 비용이므로 의도적으로 가격을 책정하지 않습니다.
 
 **캐싱**: 가격 데이터는 1시간 TTL로 디스크에 캐시되어 빠른 시작을 보장합니다:
 - LiteLLM 캐시: `~/.config/tokscale/cache/pricing-litellm.json`
