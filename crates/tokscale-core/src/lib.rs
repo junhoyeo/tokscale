@@ -3788,6 +3788,95 @@ mod tests {
         assert!(messages[0].cost > 0.0);
     }
 
+    /// MiMo Code records carry an authoritative per-message cost. The micode
+    /// lane must NOT reprice a record that already has a cost, even when the
+    /// model has a market price that would compute a different (non-zero) value.
+    /// This must hold on the first parse AND on a subsequent cache hit, since
+    /// the previous bug repriced and persisted the inflated cost to the cache.
+    #[test]
+    #[serial_test::serial]
+    fn test_micode_authoritative_cost_is_not_repriced_on_first_parse_or_cache_hit() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let micode_dir = source_home.path().join(".local/share/micode");
+            std::fs::create_dir_all(&micode_dir).unwrap();
+            let db_path = micode_dir.join("mimocode.db");
+
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    data TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            // Authoritative cost 0.05 with 1000 input / 500 output tokens.
+            let data_json = r#"{
+                "role": "assistant",
+                "modelID": "mimo-v2.5-pro",
+                "providerID": "mimo",
+                "cost": 0.05,
+                "tokens": { "input": 1000, "output": 500, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                "time": { "created": 1700000000000.0 }
+            }"#;
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["msg_auth_cost", "ses_1", data_json],
+            )
+            .unwrap();
+            drop(conn);
+
+            // Pricing that WOULD reprice mimo-v2.5-pro to a different non-zero
+            // value (1000 * 0.001 + 500 * 0.002 = 2.0) if the guard were absent.
+            let mut litellm = HashMap::new();
+            litellm.insert(
+                "mimo-v2.5-pro".into(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    output_cost_per_token: Some(0.002),
+                    ..Default::default()
+                },
+            );
+            let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+            let first = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["micode".to_string()],
+                Some(&pricing),
+            );
+            assert_eq!(first.len(), 1);
+            assert!(
+                (first[0].cost - 0.05).abs() < 1e-9,
+                "authoritative cost must survive the first parse, got {}",
+                first[0].cost
+            );
+
+            // Second run hits the source cache; the persisted entry must still
+            // carry the authoritative cost rather than a repriced value.
+            let second = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["micode".to_string()],
+                Some(&pricing),
+            );
+            assert_eq!(second.len(), 1);
+            assert!(
+                (second[0].cost - 0.05).abs() < 1e-9,
+                "authoritative cost must survive the cache hit, got {}",
+                second[0].cost
+            );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     fn write_kimi_repeated_status_fixture(source_home: &std::path::Path) {
         let session_dir = source_home.join(".kimi/sessions/group-1/session-1");
         std::fs::create_dir_all(&session_dir).unwrap();
