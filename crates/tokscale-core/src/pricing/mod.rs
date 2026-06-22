@@ -57,6 +57,7 @@ impl PricingService {
                 litellm_data,
                 openrouter_data,
                 Self::build_cursor_overrides(),
+                Self::build_sakana_overrides(),
                 models_dev_data,
             ),
         }
@@ -124,6 +125,49 @@ impl PricingService {
                 },
             );
         }
+        overrides
+    }
+
+    // @keep: Sakana-sourced pricing for `fugu-ultra`, a model not carried by
+    // LiteLLM/OpenRouter/models.dev. Reports source label "Sakana" (NOT "Cursor")
+    // and is consulted at the same precedence as the Cursor overrides in
+    // PricingLookup — after exact/normalized/prefix upstream matches, before the
+    // fuzzy stage — so any real upstream entry always wins. The ModelPricing
+    // struct is built directly (not via the 4-tuple shorthand) so the >272K
+    // long-context tier fields can be populated; compute_cost DOES read those
+    // *_above_272k_tokens fields when input/output/cache-read token volume
+    // crosses 272K, so they are live, not inert.
+    //
+    // Rates source: https://console.sakana.ai/pricing and https://sakana.ai/fugu/
+    // (accessed 2026-06-22).
+    //   fugu-ultra base: input $5/1M, output $30/1M, cache-read $0.50/1M.
+    //   fugu-ultra >272K-context tier: input $10/1M, output $45/1M, cache-read $1/1M.
+    //
+    // NOTE: there is deliberately NO `fugu` (non-ultra) entry. `fugu` is a
+    // router/orchestrator billed at "the standard rate of the underlying
+    // top-tier model involved" (https://sakana.ai/fugu/, accessed 2026-06-22):
+    // the effective rate is variable per request and is NOT recoverable from the
+    // session log, which only records model="fugu" with no record of which
+    // underlying model actually served the request. Assigning any fixed
+    // per-token rate to bare `fugu` would therefore be incorrect, so it is left
+    // unpriced (callers fall through to the normal lookup chain / report no price).
+    fn build_sakana_overrides() -> HashMap<String, ModelPricing> {
+        let mut overrides = HashMap::with_capacity(1);
+        overrides.insert(
+            "fugu-ultra".to_string(),
+            ModelPricing {
+                // Base rates.
+                input_cost_per_token: Some(5e-6),
+                output_cost_per_token: Some(3e-5),
+                cache_read_input_token_cost: Some(5e-7),
+                cache_creation_input_token_cost: None,
+                // >272K-context tier (consumed by compute_cost's tiered walk).
+                input_cost_per_token_above_272k_tokens: Some(1e-5),
+                output_cost_per_token_above_272k_tokens: Some(4.5e-5),
+                cache_read_input_token_cost_above_272k_tokens: Some(1e-6),
+                ..Default::default()
+            },
+        );
         overrides
     }
 
@@ -817,6 +861,79 @@ mod tests {
             lower.unwrap().pricing.input_cost_per_token,
             upper.unwrap().pricing.input_cost_per_token
         );
+    }
+
+    #[test]
+    fn test_sakana_returns_pricing_for_fugu_ultra() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let result = service.lookup_with_source("fugu-ultra", None).unwrap();
+        assert_eq!(result.source, "Sakana");
+        assert_eq!(result.matched_key, "fugu-ultra");
+        assert_eq!(result.pricing.input_cost_per_token, Some(5e-6));
+        assert_eq!(result.pricing.output_cost_per_token, Some(3e-5));
+        assert_eq!(result.pricing.cache_read_input_token_cost, Some(5e-7));
+        assert_eq!(result.pricing.cache_creation_input_token_cost, None);
+        // >272K tier fields are populated (compute_cost reads them).
+        assert_eq!(
+            result.pricing.input_cost_per_token_above_272k_tokens,
+            Some(1e-5)
+        );
+        assert_eq!(
+            result.pricing.output_cost_per_token_above_272k_tokens,
+            Some(4.5e-5)
+        );
+        assert_eq!(
+            result.pricing.cache_read_input_token_cost_above_272k_tokens,
+            Some(1e-6)
+        );
+    }
+
+    #[test]
+    fn test_sakana_calculate_cost_for_fugu_ultra() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        // Stay under the 272K threshold so only base rates apply.
+        let cost = service.calculate_cost("fugu-ultra", 100_000, 10_000, 50_000, 0, 0);
+        let expected = 100_000.0 * 5e-6 + 10_000.0 * 3e-5 + 50_000.0 * 5e-7;
+        assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sakana_yields_to_litellm_exact() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "fugu-ultra".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let result = service.lookup_with_source("fugu-ultra", None).unwrap();
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.001));
+    }
+
+    #[test]
+    fn test_sakana_does_not_price_bare_fugu() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        // Bare `fugu` is a router/orchestrator — deliberately unpriced by Sakana.
+        let result = service.lookup_with_source("fugu", None);
+        assert!(
+            result.as_ref().is_none_or(|r| r.source != "Sakana"),
+            "bare `fugu` must not resolve to a Sakana price"
+        );
+    }
+
+    #[test]
+    fn test_sakana_resolves_dated_fugu_ultra_alias() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let result = service
+            .lookup_with_source("fugu-ultra-20260615", None)
+            .unwrap();
+        assert_eq!(result.source, "Sakana");
+        assert_eq!(result.matched_key, "fugu-ultra");
+        assert_eq!(result.pricing.input_cost_per_token, Some(5e-6));
     }
 
     #[test]

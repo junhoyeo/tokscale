@@ -34,6 +34,10 @@ pub struct CodexPayload {
     pub info: Option<CodexInfo>,
     pub turn_id: Option<String>,
     pub source: Option<Value>,
+    /// Thread origin from session_meta. `"user"` marks a human-initiated fork
+    /// (e.g. a VS Code "fork conversation"), which replays parent history but
+    /// never emits a `task_started` for the child's own turn.
+    pub thread_source: Option<String>,
     /// Current working directory from session_meta.
     pub cwd: Option<String>,
     /// Provider identity from session_meta (e.g. "openai", "azure")
@@ -186,6 +190,24 @@ pub(crate) struct CodexParseState {
     /// keeps a pending turn alive across incremental re-parses of appended chunks.
     #[serde(default)]
     pub pending_turn_start: bool,
+    /// `turn_id`s announced by a `task_started` event while a forked child is
+    /// still skipping its replayed parent history. The child's own turn is
+    /// preceded by `task_started`; replayed parent turns are not. Used only to
+    /// disambiguate a same-millisecond turn, where the UUID v7 timestamp ties
+    /// and the random tail is meaningless — there, only a task-started turn_id
+    /// ends the skip. Cleared when the skip ends or a new fork begins.
+    /// `#[serde(default)]` keeps it across incremental re-parses.
+    #[serde(default)]
+    pub forked_child_task_started_turn_ids: std::collections::HashSet<String>,
+    /// Set when the active forked child is a human-initiated (`thread_source:
+    /// "user"`) fork. Such forks replay parent history but never emit a
+    /// `task_started`, so the same-millisecond gate cannot lean on
+    /// `task_started` to recognize the child's own turn — there the millisecond
+    /// prefix tie is enough (a user fork's replayed parent turns carry the
+    /// parent's millisecond prefix, not the child's). `#[serde(default)]` keeps
+    /// it across incremental re-parses.
+    #[serde(default)]
+    pub forked_child_is_user_fork: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -293,12 +315,26 @@ fn parse_codex_reader<R: BufRead>(
                     {
                         state.forked_child_waiting_for_turn_context = false;
                         state.forked_child_replay_session_id = None;
+                        state.forked_child_task_started_turn_ids.clear();
+                        state.forked_child_is_user_fork = false;
                         if let Some(ref id) = state.forked_child_session_id {
                             state.session_id_from_meta = Some(id.clone());
                         }
                         state.current_model = payload_model.clone();
                         handled = true;
                     } else {
+                        if entry.entry_type == "event_msg"
+                            && payload.payload_type.as_deref() == Some("task_started")
+                        {
+                            // The child's own turn is introduced by a
+                            // `task_started`; remember its turn_id so the gate can
+                            // recognize the child's own same-millisecond turn.
+                            if let Some(turn_id) = payload.turn_id.as_deref() {
+                                state
+                                    .forked_child_task_started_turn_ids
+                                    .insert(turn_id.to_string());
+                            }
+                        }
                         if entry.entry_type == "session_meta" {
                             if let Some(ref id) = payload.id {
                                 if state
@@ -361,6 +397,9 @@ fn parse_codex_reader<R: BufRead>(
                             state.forked_child_replay_session_id = None;
                             state.forked_child_inherited_baseline = None;
                             state.forked_child_inherited_reported_total = None;
+                            state.forked_child_task_started_turn_ids.clear();
+                            state.forked_child_is_user_fork =
+                                payload.thread_source.as_deref() == Some("user");
                         }
                     }
                     if let Some(ref provider) = payload.model_provider {
@@ -678,7 +717,44 @@ fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option
 
     match (turn_id, codex_uuid_v7_order_key(child_session_id)) {
         (Some(turn_id), Some(child_key)) => {
-            codex_uuid_v7_order_key(turn_id).is_none_or(|turn_key| turn_key >= child_key)
+            let Some(turn_key) = codex_uuid_v7_order_key(turn_id) else {
+                return true;
+            };
+            // Compare only the UUID v7 48-bit millisecond timestamp (the first
+            // 12 hex of the order key), not the full id. The child's own turn is
+            // minted at or after its session_meta and the replayed parent turns
+            // strictly earlier, so the millisecond prefix is the causal signal;
+            // the version nibble + random tail of two independently-minted v7
+            // UUIDs is a coin flip.
+            match turn_key[..12].cmp(&child_key[..12]) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                // Same millisecond: the timestamp ties and the random tail
+                // cannot order the child's own turn against a replayed parent
+                // turn that happens to share the fork's millisecond. A subagent
+                // fork announces its own turn with a `task_started` event while
+                // replayed parent turns are not, so only a task-started turn_id
+                // ends the skip there — otherwise an equal-prefix replayed parent
+                // turn would be miscounted as child-local. A human (`thread_source:
+                // "user"`) fork never emits `task_started`, but its replayed
+                // parent turns carry the *parent's* millisecond prefix rather
+                // than the child's, so reaching this equal-prefix branch already
+                // means the turn shares the child's fork millisecond and is the
+                // child's own turn — end the skip.
+                //
+                // Residual (accepted): for a user fork this resolves on
+                // millisecond-prefix equality alone. If a replayed parent turn
+                // were itself minted within the exact same 1ms as the child's
+                // fork (so it shares the *child's* prefix, not the parent's),
+                // this branch would end the skip one turn early. That requires a
+                // sub-millisecond, human-paced fork coincidence and is accepted;
+                // subagent forks are hardened separately via `task_started`,
+                // which user forks do not emit.
+                std::cmp::Ordering::Equal => {
+                    state.forked_child_is_user_fork
+                        || state.forked_child_task_started_turn_ids.contains(turn_id)
+                }
+            }
         }
         _ => true,
     }
@@ -1858,6 +1934,98 @@ mod tests {
     }
 
     #[test]
+    fn test_user_forked_child_same_millisecond_own_turn_counts_without_task_started() {
+        // Human (`thread_source:"user"`) fork where the child session_meta and
+        // the child's own first turn_context are minted in the SAME millisecond,
+        // so both UUID v7 ids share the 48-bit prefix (`22222222-2222`). A user
+        // fork never emits a `task_started`, so a same-millisecond gate that
+        // requires `task_started` would keep skipping forever and drop the
+        // child's own turn (0 messages). The replayed parent turn carries the
+        // *parent's* millisecond prefix (`11111111`), so it sorts strictly
+        // earlier and is still skipped; only the child's own turn — the one that
+        // shares the child's fork millisecond — must end the skip and be counted
+        // (200/20 delta from the inherited 1000/100 baseline).
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-01-02T03:10:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.001Z","type":"session_meta","payload":{"id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.100Z","type":"turn_context","payload":{"turn_id":"11111111-3333-7333-8333-333333333333","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
+            "\n",
+            // child's own turn: turn_id shares the child session's millisecond
+            // prefix (`22222222-2222`) — same-millisecond tie with the fork.
+            r#"{"timestamp":"2026-01-02T03:10:30.100Z","type":"turn_context","payload":{"turn_id":"22222222-2222-7444-8444-444444444444","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:30.200Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:31.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1250,"cached_input_tokens":450,"output_tokens":120,"total_tokens":1370},"last_token_usage":{"input_tokens":250,"cached_input_tokens":50,"output_tokens":20,"total_tokens":270}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 200);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.output, 20);
+    }
+
+    #[test]
+    fn test_user_fork_replayed_parent_shares_child_ms_ends_skip_early() {
+        // Documents (locks) the accepted residual called out at the Equal branch:
+        // a human (`thread_source:"user"`) fork resolves a same-millisecond tie on
+        // the millisecond prefix alone, because user forks never emit a
+        // `task_started` to harden the gate. Here the *replayed parent* turn is
+        // (pathologically) minted within the exact same 1ms as the child's fork
+        // session_meta, so it shares the *child's* prefix (`22222222-2222`) rather
+        // than the parent's. Because the gate cannot distinguish it from the
+        // child's own turn, it ends the skip one turn early and counts that
+        // replayed parent row (500/50 delta off the 1000/100 baseline) as the
+        // child's first turn. This is a sub-millisecond, human-paced coincidence;
+        // the test pins the CURRENT behavior so any future change is intentional.
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-01-02T03:10:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.001Z","type":"session_meta","payload":{"id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
+            "\n",
+            // replayed parent turn whose turn_id coincidentally shares the child's
+            // fork millisecond prefix (`22222222-2222`) — equal-prefix tie. With a
+            // user fork (no task_started) this ends the skip here, one turn early.
+            r#"{"timestamp":"2026-01-02T03:10:00.200Z","type":"turn_context","payload":{"turn_id":"22222222-2222-7333-8333-333333333333","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":450,"output_tokens":150,"total_tokens":1650},"last_token_usage":{"input_tokens":500,"cached_input_tokens":50,"output_tokens":50,"total_tokens":550}}}}"#,
+            "\n",
+            // the child's actual own turn (also shares the child's prefix).
+            r#"{"timestamp":"2026-01-02T03:10:30.100Z","type":"turn_context","payload":{"turn_id":"22222222-2222-7444-8444-444444444444","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:31.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1750,"cached_input_tokens":500,"output_tokens":170,"total_tokens":1920},"last_token_usage":{"input_tokens":250,"cached_input_tokens":50,"output_tokens":20,"total_tokens":270}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        // CURRENT behavior: the skip ends one turn early at the equal-prefix
+        // replayed parent turn, so BOTH that row and the child's own turn are
+        // counted (two messages) rather than only the child's own turn. The
+        // first message is the replayed parent delta (total 1500-1000=500, of
+        // which 50 is cache_read, leaving 450 non-cached input + 50 output); the
+        // second is the child's own delta (250-50=200 input + 20 output). A
+        // future change that hardened this tie would instead yield a single
+        // message with the child's 200/20.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 450);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[1].tokens.input, 200);
+        assert_eq!(messages[1].tokens.cache_read, 50);
+        assert_eq!(messages[1].tokens.output, 20);
+    }
+
+    #[test]
     fn test_forked_child_skips_nested_parent_replay_until_own_turn() {
         let parent = create_test_file(concat!(
             r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
@@ -1890,6 +2058,75 @@ mod tests {
         assert_eq!(parent_messages.len(), 1);
         assert_eq!(child_messages.len(), 1);
         assert_ne!(parent_messages[0].dedup_key, child_messages[0].dedup_key);
+        assert_eq!(child_messages[0].tokens.input, 20);
+        assert_eq!(child_messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_forked_child_same_millisecond_turn_starts_own_session() {
+        // Regression: the child's own first turn starts in the SAME millisecond
+        // as its fork session_meta, so both UUID v7 ids share the 48-bit ms
+        // prefix (`019e5c03-1e99`) and differ only in the random tail
+        // (`…0001` vs `…00ff`). Comparing the full id makes the gate fall through
+        // to the coin-flip tail (here `0001 < 00ff`), so the replay-skip never
+        // ends and the child's own turn is dropped. Comparing only the ms prefix
+        // keeps the child's own turn.
+        let child = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5c03-1e99-7000-8000-0000000000ff","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.100Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-1e99-7000-8000-000000000001"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":320,"output_tokens":32,"total_tokens":352},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+            "\n"
+        ));
+
+        let child_messages = parse_codex_file(child.path());
+
+        assert_eq!(child_messages.len(), 1);
+        assert_eq!(child_messages[0].tokens.input, 20);
+        assert_eq!(child_messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_forked_child_same_millisecond_replayed_parent_turn_keeps_skipping() {
+        // A replayed parent `turn_context` can coincidentally share the child's
+        // fork millisecond (here both `019e5c03-1e99`) while NOT being preceded
+        // by a `task_started`. A millisecond-prefix-only gate would treat that
+        // equal-prefix turn as child-local, end the skip early, and count the
+        // inherited replayed row (500/50) as the child's own usage. The child's
+        // own turn is the later one announced by `task_started`; only it should
+        // end the skip, so only its 20/2 delta is counted.
+        let child = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5c03-1e99-7000-8000-0000000000ff","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.000Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            // replayed parent turn that shares the child's fork millisecond, with
+            // NO task_started — must NOT end the skip.
+            r#"{"timestamp":"2026-05-05T21:52:10.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"output_tokens":50,"total_tokens":550},"last_token_usage":{"input_tokens":500,"output_tokens":50,"total_tokens":550}}}}"#,
+            "\n",
+            // the child's real own turn, announced by task_started.
+            r#"{"timestamp":"2026-05-05T21:52:20.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-1e99-7000-8000-000000000002"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000002","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":520,"output_tokens":52,"total_tokens":572},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+            "\n"
+        ));
+
+        let child_messages = parse_codex_file(child.path());
+
+        assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].tokens.input, 20);
         assert_eq!(child_messages[0].tokens.output, 2);
     }

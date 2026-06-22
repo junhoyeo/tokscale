@@ -20,6 +20,7 @@
 //!
 //! - `gen_metadata.#1`            → chatModel message
 //!   - `#19` (string)            → responseModel (e.g. `gemini-3-flash-a`)
+//!   - `#9.#4` = `{#1: seconds, #2: nanos}` → per-generation wall-clock time
 //!   - `#4`                      → usage message
 //!     - `#1` (varint, const)    → fixed system-prompt tokens (≈1132)
 //!     - `#2` (varint)           → newly-processed (non-cached) input tokens
@@ -63,6 +64,8 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut messages = Vec::new();
     let mut seen_response_ids: HashSet<String> = HashSet::new();
     for blob in rows.flatten() {
+        // `timestamp` is the session-created fallback; each row prefers its own
+        // per-generation wall-clock stamp (see `parse_gen_metadata`).
         if let Some(mut message) =
             parse_gen_metadata(&blob, &session_id, timestamp, &mut seen_response_ids)
         {
@@ -79,11 +82,23 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
 fn parse_gen_metadata(
     blob: &[u8],
     session_id: &str,
-    timestamp: i64,
+    session_timestamp: i64,
     seen_response_ids: &mut HashSet<String>,
 ) -> Option<UnifiedMessage> {
     let chat_model = message_field(blob, 1)?;
     let usage = message_field(chat_model, 4)?;
+
+    // Per-generation wall-clock time: `chatModel.#9.#4` is an absolute
+    // `{#1: seconds, #2: nanos}` Timestamp for this turn (same shape as the
+    // session-created stamp), so each turn is dated when it actually happened
+    // rather than at conversation start. Fall back to the session-created
+    // `session_timestamp` when the field is absent or zero (older databases or
+    // malformed rows).
+    let timestamp = message_field(chat_model, 9)
+        .and_then(|gen| message_field(gen, 4))
+        .and_then(proto_timestamp_ms)
+        .filter(|&ms| ms > 0)
+        .unwrap_or(session_timestamp);
 
     // input = fixed system prompt (#1) + newly-processed input (#2). The
     // constant #1 is, to the best of our reverse-engineering, the agent's fixed
@@ -136,10 +151,10 @@ fn parse_gen_metadata(
 }
 
 /// Read the session-level created-at timestamp and workspace from the single
-/// `trajectory_metadata_blob` row. All usage rows in a session share this
-/// timestamp (the per-turn proto carries only relative timings); this mirrors
-/// the IDE path, which falls back to `chatStartMetadata.createdAt` for every
-/// retry. Falls back to the file mtime when the blob is absent or undecodable.
+/// `trajectory_metadata_blob` row. This timestamp dates the conversation as a
+/// whole and is the per-row fallback for any `gen_metadata` row missing its own
+/// `#9.#4` wall-clock stamp. Falls back to the file mtime when the blob is
+/// absent or undecodable.
 fn read_trajectory_meta(conn: &Connection, path: &Path) -> (i64, Option<String>, Option<String>) {
     let blob: Option<Vec<u8>> = conn
         .query_row(
@@ -169,10 +184,28 @@ fn read_trajectory_meta(conn: &Connection, path: &Path) -> (i64, Option<String>,
 }
 
 fn session_created_ms(blob: &[u8]) -> Option<i64> {
-    let created = message_field(blob, 2)?;
-    let seconds = varint_field(created, 1)? as i64;
-    let nanos = varint_field(created, 2).unwrap_or(0) as i64;
-    Some(seconds * 1000 + nanos / 1_000_000)
+    proto_timestamp_ms(message_field(blob, 2)?)
+}
+
+/// Decode a protobuf `{#1: seconds, #2: nanos}` Timestamp message to epoch ms.
+/// Shared by the session-created stamp and the per-generation `#9.#4` stamp.
+///
+/// `seconds` is an unbounded wire varint, so a malformed blob can carry a value
+/// whose `* 1000` overflows `i64` and panics in debug builds. Use checked
+/// arithmetic and return `None` on overflow to keep the module's
+/// "malformed data degrades to `None`, never panics" contract.
+///
+/// `nanos` is range-validated against the protobuf Timestamp spec (must be
+/// `0..=999_999_999`); an out-of-range or negative `nanos` marks the whole
+/// stamp as malformed (`None`) so the caller's `ms > 0` filter and
+/// session-timestamp fallback take over instead of producing a skewed time.
+fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
+    let seconds = varint_field(ts, 1)? as i64;
+    let nanos = i64::try_from(varint_field(ts, 2).unwrap_or(0)).ok()?;
+    if !(0..=999_999_999).contains(&nanos) {
+        return None;
+    }
+    seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }
 
 fn file_modified_ms(path: &Path) -> i64 {
@@ -451,6 +484,51 @@ mod tests {
     }
 
     #[test]
+    fn per_generation_timestamp_overrides_session_fallback() {
+        // chatModel.#9.#4 = {#1: seconds, #2: nanos} is the per-turn wall-clock
+        // stamp. When present it dates the row; when absent the row falls back
+        // to the session-created timestamp passed in. (Verified against real
+        // databases: every gen_metadata row carries a distinct, monotonic
+        // #9.#4 stamp >= the session-created time.)
+        let session_fallback = 111_000_i64;
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(2, 500)); // input
+        usage.extend(enc_varint(9, 300)); // output
+        usage.extend(enc_len(11, b"with-time")); // responseId
+
+        // #9 wraps a sub-message whose #4 is the {seconds, nanos} Timestamp.
+        let mut gen_time = Vec::new();
+        gen_time.extend(enc_varint(1, 1_781_000_000)); // seconds
+        gen_time.extend(enc_varint(2, 250_000_000)); // nanos -> +250ms
+        let gen9 = enc_len(4, &gen_time);
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(9, &gen9));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(&blob, "s", session_fallback, &mut seen).unwrap();
+        assert_eq!(
+            message.timestamp,
+            1_781_000_000 * 1000 + 250,
+            "per-generation #9.#4 timestamp must override the session fallback"
+        );
+
+        // The same row shape without #9 falls back to the session timestamp
+        // (build_gen_metadata carries no #9.#4).
+        let mut seen2 = HashSet::new();
+        let fallback_msg =
+            parse_gen_metadata(&build_gen_metadata(), "s", session_fallback, &mut seen2).unwrap();
+        assert_eq!(
+            fallback_msg.timestamp, session_fallback,
+            "a row without #9.#4 must use the session-created fallback"
+        );
+    }
+
+    #[test]
     fn dedupes_repeated_response_ids_and_skips_zero_usage() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dupes.db");
@@ -552,6 +630,90 @@ mod tests {
         let mut outer = vec![(1u8 << 3) | 2, inner.len() as u8];
         outer.extend_from_slice(&inner);
         assert!(parse_gen_metadata(&outer, "s", 0, &mut seen).is_none());
+    }
+
+    #[test]
+    fn proto_timestamp_ms_overflow_returns_none_without_panic() {
+        // A malformed Timestamp can carry a `seconds` varint whose `* 1000`
+        // overflows i64. Debug builds (overflow-checks = on) would panic on the
+        // unchecked multiply; the decode must degrade to None instead, matching
+        // the module's malformed-data contract.
+        let mut overflow = Vec::new();
+        overflow.extend(enc_varint(1, i64::MAX as u64)); // seconds -> *1000 overflows
+        overflow.extend(enc_varint(2, 0)); // nanos
+        assert_eq!(proto_timestamp_ms(&overflow), None);
+
+        // The boundary case: largest `seconds` whose *1000 still fits i64 must
+        // decode, proving the guard rejects only genuine overflow.
+        let ok_seconds = i64::MAX / 1000;
+        let mut ok = Vec::new();
+        ok.extend(enc_varint(1, ok_seconds as u64));
+        ok.extend(enc_varint(2, 0));
+        assert_eq!(proto_timestamp_ms(&ok), Some(ok_seconds * 1000));
+
+        // A normal, in-range stamp still decodes (seconds + nanos -> ms).
+        let mut normal = Vec::new();
+        normal.extend(enc_varint(1, 1_781_000_000));
+        normal.extend(enc_varint(2, 250_000_000)); // +250ms
+        assert_eq!(
+            proto_timestamp_ms(&normal),
+            Some(1_781_000_000 * 1000 + 250)
+        );
+    }
+
+    #[test]
+    fn proto_timestamp_ms_rejects_out_of_range_nanos() {
+        // The protobuf Timestamp spec requires `nanos` in 0..=999_999_999.
+        // An out-of-range `nanos` marks the stamp malformed (None) rather than
+        // producing a skewed time. 1_000_000_000 (== one extra second) is the
+        // first invalid value above the inclusive upper bound.
+        let mut bad_nanos = Vec::new();
+        bad_nanos.extend(enc_varint(1, 1_781_000_000)); // valid seconds
+        bad_nanos.extend(enc_varint(2, 1_000_000_000)); // nanos out of range
+        assert_eq!(proto_timestamp_ms(&bad_nanos), None);
+
+        // A nanos varint large enough to be negative once cast to i64 is also
+        // rejected (never wraps to a bogus negative offset).
+        let mut huge_nanos = Vec::new();
+        huge_nanos.extend(enc_varint(1, 1_781_000_000));
+        huge_nanos.extend(enc_varint(2, u64::MAX));
+        assert_eq!(proto_timestamp_ms(&huge_nanos), None);
+
+        // The inclusive upper bound is accepted (999_999_999 ns -> +999 ms).
+        let mut max_nanos = Vec::new();
+        max_nanos.extend(enc_varint(1, 1_781_000_000));
+        max_nanos.extend(enc_varint(2, 999_999_999));
+        assert_eq!(
+            proto_timestamp_ms(&max_nanos),
+            Some(1_781_000_000 * 1000 + 999)
+        );
+
+        // End-to-end: a gen_metadata row whose #9.#4 carries out-of-range nanos
+        // must fall back to the session-created timestamp (the caller's invalid
+        // -> None -> session fallback path), not adopt a skewed per-turn stamp.
+        let session_fallback = 222_000_i64;
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(2, 500)); // input
+        usage.extend(enc_varint(9, 300)); // output
+        usage.extend(enc_len(11, b"bad-nanos")); // responseId
+
+        let mut gen_time = Vec::new();
+        gen_time.extend(enc_varint(1, 1_781_000_000)); // seconds
+        gen_time.extend(enc_varint(2, 1_000_000_000)); // nanos out of range
+        let gen9 = enc_len(4, &gen_time);
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(9, &gen9));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(&blob, "s", session_fallback, &mut seen).unwrap();
+        assert_eq!(
+            message.timestamp, session_fallback,
+            "out-of-range per-generation nanos must fall back to the session timestamp"
+        );
     }
 
     #[test]

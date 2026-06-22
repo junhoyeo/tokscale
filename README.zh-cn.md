@@ -58,6 +58,7 @@
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ 旧版: `.clawdbot`, `.moltbot`, `.moldbot`) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | 通过 Codex 追踪 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db`（回退：`~/.hermes/state.db`） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json`（回退：`~/.gemini/tmp/*/chats/*.json`） | ✅ 支持 |
@@ -1466,6 +1467,8 @@ Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blo
 **动态回退**：对于 LiteLLM 中尚未收录的模型（例如最近发布的模型），Tokscale 会自动从 [OpenRouter 的端点 API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints) 获取定价。
 
 **Cursor 模型定价**：对于 LiteLLM 和 OpenRouter 中都尚未收录的最新模型（例如 `gpt-5.3-codex`），Tokscale 使用从 [Cursor 模型文档](https://cursor.com/en-US/docs/models)获取的硬编码定价。这些覆盖在所有上游来源之后、模糊匹配之前检查，因此当真正的上游定价可用时会自动让步。
+
+**Sakana Fugu 定价**：Fugu Ultra 的成本根据 Sakana 公布的按量付费（pay-as-you-go）费率估算；`fugu` 路由模型有意不定价，因为它的成本就是其所编排的底层模型的浮动费率。
 
 **缓存**：价格数据以 1 小时 TTL 缓存到磁盘，确保快速启动：
 - LiteLLM 缓存：`~/.config/tokscale/cache/pricing-litellm.json`
