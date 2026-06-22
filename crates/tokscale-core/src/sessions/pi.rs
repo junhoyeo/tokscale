@@ -4,6 +4,7 @@
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -128,9 +129,14 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
             None => continue,
         };
 
+        // A missing provider field is recoverable: infer it from the model name
+        // (and fall back to "pi") rather than dropping a message that carries
+        // valid tokens.
         let provider = match message.provider {
             Some(p) => p,
-            None => continue,
+            None => inferred_provider_from_model(&model)
+                .unwrap_or("pi")
+                .to_string(),
         };
 
         let timestamp = entry

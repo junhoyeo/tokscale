@@ -220,6 +220,11 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
                 }
             }
 
+            // NOTE: when explicit per-turn counts are absent (the common case —
+            // Kiro currently reports zero), input/output below are ESTIMATED, not
+            // measured: input is derived from context_usage_percentage *
+            // context_window and output from char_count / 4. Downstream must not
+            // treat these as exact token counts.
             let explicit_input = turn.input_token_count.unwrap_or(0).max(0);
             let explicit_output = turn.output_token_count.unwrap_or(0).max(0);
             let input = if explicit_input > 0 {
@@ -291,7 +296,16 @@ fn estimate_tokens(chars: usize) -> i64 {
 }
 
 fn seconds_to_millis(seconds: f64) -> i64 {
-    (seconds * 1000.0) as i64
+    // Scale fractional seconds to milliseconds (preserving sub-second
+    // precision), then clamp into i64 range. The `f64 as i64` cast saturates
+    // rather than wrapping on out-of-range/garbage timestamps, so the
+    // seconds->ms conversion cannot overflow.
+    let millis = seconds * 1000.0;
+    if millis.is_nan() {
+        0
+    } else {
+        millis.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    }
 }
 
 fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
@@ -601,6 +615,11 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 continue;
             };
 
+            // NOTE: these are ESTIMATED, not measured token counts. Kiro's
+            // conversations_v2 does not record real per-turn token usage, so
+            // input is derived from context_usage_percentage * context_window
+            // and output from response_size (char_count) / 4. Downstream must
+            // not treat these as exact.
             let ctx_pct = meta.context_usage_percentage.unwrap_or(0.0);
             let response_size = meta.response_size.unwrap_or(0);
 

@@ -8,7 +8,7 @@ use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
 };
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -227,6 +227,8 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         };
 
         let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
+        let provider_id =
+            provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
         let agent_or_mode = msg.mode.or(msg.agent);
         let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
         let input = tokens.input.max(0);

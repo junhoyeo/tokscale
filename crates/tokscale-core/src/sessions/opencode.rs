@@ -9,7 +9,7 @@ use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
 };
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 #[cfg(test)]
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -167,10 +167,13 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
             .map(|s| s.to_string())
     });
 
+    let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
+    let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
+
     let mut unified = UnifiedMessage::new_with_agent(
         "opencode",
         model_id,
-        msg.provider_id.unwrap_or_else(|| "unknown".to_string()),
+        provider_id,
         session_id,
         msg.time.created as i64,
         TokenBreakdown {
@@ -268,6 +271,8 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         };
 
         let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
+        let provider_id =
+            provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
         let agent_or_mode = msg.mode.or(msg.agent);
         let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
         let input = tokens.input.max(0);
