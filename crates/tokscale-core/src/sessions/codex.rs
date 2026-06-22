@@ -741,6 +741,15 @@ fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option
                 // than the child's, so reaching this equal-prefix branch already
                 // means the turn shares the child's fork millisecond and is the
                 // child's own turn — end the skip.
+                //
+                // Residual (accepted): for a user fork this resolves on
+                // millisecond-prefix equality alone. If a replayed parent turn
+                // were itself minted within the exact same 1ms as the child's
+                // fork (so it shares the *child's* prefix, not the parent's),
+                // this branch would end the skip one turn early. That requires a
+                // sub-millisecond, human-paced fork coincidence and is accepted;
+                // subagent forks are hardened separately via `task_started`,
+                // which user forks do not emit.
                 std::cmp::Ordering::Equal => {
                     state.forked_child_is_user_fork
                         || state.forked_child_task_started_turn_ids.contains(turn_id)
@@ -1961,6 +1970,59 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.cache_read, 50);
         assert_eq!(messages[0].tokens.output, 20);
+    }
+
+    #[test]
+    fn test_user_fork_replayed_parent_shares_child_ms_ends_skip_early() {
+        // Documents (locks) the accepted residual called out at the Equal branch:
+        // a human (`thread_source:"user"`) fork resolves a same-millisecond tie on
+        // the millisecond prefix alone, because user forks never emit a
+        // `task_started` to harden the gate. Here the *replayed parent* turn is
+        // (pathologically) minted within the exact same 1ms as the child's fork
+        // session_meta, so it shares the *child's* prefix (`22222222-2222`) rather
+        // than the parent's. Because the gate cannot distinguish it from the
+        // child's own turn, it ends the skip one turn early and counts that
+        // replayed parent row (500/50 delta off the 1000/100 baseline) as the
+        // child's first turn. This is a sub-millisecond, human-paced coincidence;
+        // the test pins the CURRENT behavior so any future change is intentional.
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-01-02T03:10:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.001Z","type":"session_meta","payload":{"id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
+            "\n",
+            // replayed parent turn whose turn_id coincidentally shares the child's
+            // fork millisecond prefix (`22222222-2222`) — equal-prefix tie. With a
+            // user fork (no task_started) this ends the skip here, one turn early.
+            r#"{"timestamp":"2026-01-02T03:10:00.200Z","type":"turn_context","payload":{"turn_id":"22222222-2222-7333-8333-333333333333","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:00.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":450,"output_tokens":150,"total_tokens":1650},"last_token_usage":{"input_tokens":500,"cached_input_tokens":50,"output_tokens":50,"total_tokens":550}}}}"#,
+            "\n",
+            // the child's actual own turn (also shares the child's prefix).
+            r#"{"timestamp":"2026-01-02T03:10:30.100Z","type":"turn_context","payload":{"turn_id":"22222222-2222-7444-8444-444444444444","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-02T03:10:31.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1750,"cached_input_tokens":500,"output_tokens":170,"total_tokens":1920},"last_token_usage":{"input_tokens":250,"cached_input_tokens":50,"output_tokens":20,"total_tokens":270}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        // CURRENT behavior: the skip ends one turn early at the equal-prefix
+        // replayed parent turn, so BOTH that row and the child's own turn are
+        // counted (two messages) rather than only the child's own turn. The
+        // first message is the replayed parent delta (total 1500-1000=500, of
+        // which 50 is cache_read, leaving 450 non-cached input + 50 output); the
+        // second is the child's own delta (250-50=200 input + 20 output). A
+        // future change that hardened this tie would instead yield a single
+        // message with the child's 200/20.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 450);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[1].tokens.input, 200);
+        assert_eq!(messages[1].tokens.cache_read, 50);
+        assert_eq!(messages[1].tokens.output, 20);
     }
 
     #[test]
