@@ -11,7 +11,7 @@ pub(crate) mod privacy;
 pub mod remote;
 pub mod settings;
 mod themes;
-mod ui;
+pub(crate) mod ui;
 
 pub use app::{App, Tab, TuiConfig};
 pub use cache::{
