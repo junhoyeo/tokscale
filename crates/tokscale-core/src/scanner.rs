@@ -88,6 +88,8 @@ pub struct ScanResult {
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
+    /// MiMo Code SQLite databases discovered under the data dir.
+    pub micode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -104,6 +106,7 @@ impl Default for ScanResult {
             zed_db: None,
             kiro_db: None,
             crush_dbs: Vec::new(),
+            micode_dbs: Vec::new(),
             opencode_json_dir: None,
         }
     }
@@ -500,6 +503,59 @@ fn is_opencode_db_filename(name: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Discover MiMo Code SQLite databases under the given data directory.
+///
+/// Matches `mimocode.db` and `mimocode-<channel>.db` (channel names
+/// sanitized with the same `[a-zA-Z0-9._-]` character class that MiMo
+/// Code's `getChannelPath` normalizes to). Ignores WAL/SHM sidecar files.
+pub(crate) fn discover_micode_dbs(data_dir: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut dbs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() && !entry.path().is_file() {
+                return None;
+            }
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if !is_micode_db_filename(name) {
+                return None;
+            }
+            Some(path)
+        })
+        .collect();
+
+    dbs.sort_unstable();
+    dbs
+}
+
+/// Returns true if `name` matches the MiMo Code db naming rule:
+/// `mimocode.db` or `mimocode-<channel>.db`.
+fn is_micode_db_filename(name: &str) -> bool {
+    let stem = match name.strip_suffix(".db") {
+        Some(stem) => stem,
+        None => return false,
+    };
+    if stem == "mimocode" {
+        return true;
+    }
+    let channel = match stem.strip_prefix("mimocode-") {
+        Some(channel) => channel,
+        None => return false,
+    };
+    if channel.is_empty() {
+        return false;
+    }
+    channel
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 fn crush_db_path(data_dir: &Path) -> Option<PathBuf> {
     let candidate = data_dir.join("crush.db");
     candidate.is_file().then_some(candidate)
@@ -780,6 +836,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Codebuff
                 | ClientId::Kimi
                 | ClientId::Gjc
+                | ClientId::MiMoCode
         ) {
             continue;
         }
@@ -851,6 +908,18 @@ fn scan_all_clients_with_env_strategy_inner(
             ClientId::OpenCode,
             opencode_path,
         );
+    }
+
+    // MiMo Code: SQLite database(s) at ~/.local/share/micode/mimocode*.db
+    if enabled.contains(&ClientId::MiMoCode) {
+        let micode_xdg_data = if use_env_roots {
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+        } else {
+            format!("{}/.local/share", home_dir)
+        };
+        let micode_data_dir = PathBuf::from(format!("{}/micode", micode_xdg_data));
+        // `discover_micode_dbs` already returns a sorted list.
+        result.micode_dbs = discover_micode_dbs(&micode_data_dir);
     }
 
     if enabled.contains(&ClientId::Kimi) {
@@ -1921,6 +1990,17 @@ mod tests {
         assert!(!is_opencode_db_filename("opencode-stable/beta.db"));
         assert!(!is_opencode_db_filename("auth.json"));
         assert!(!is_opencode_db_filename("other.db"));
+    }
+
+    #[test]
+    fn test_is_micode_db_filename_accepts_default_and_channel_rejects_sidecars() {
+        // Default and channel-suffixed db names are accepted.
+        assert!(is_micode_db_filename("mimocode.db"));
+        assert!(is_micode_db_filename("mimocode-stable.db"));
+        assert!(is_micode_db_filename("mimocode-nightly.db"));
+        // WAL/SHM sidecar files share the prefix — must be ignored.
+        assert!(!is_micode_db_filename("mimocode.db-wal"));
+        assert!(!is_micode_db_filename("mimocode.db-shm"));
     }
 
     #[test]

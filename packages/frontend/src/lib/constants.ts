@@ -58,6 +58,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   grok: "Grok Build",
   jcode: "Jcode",
   commandcode: "Command Code",
+  micode: "MiMo Code",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -95,6 +96,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   jcode: `${GITHUB_CDN_BASE}/client-jcode.png`,
   commandcode:
     "https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png",
+  micode: "https://github.com/XiaomiMiMo.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -129,6 +131,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   grok: "#171717",
   jcode: "#F59E0B",
   commandcode: "#A855F7",
+  micode: "#FF6900",
 };
 
 export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {

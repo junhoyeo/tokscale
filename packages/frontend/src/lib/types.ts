@@ -30,6 +30,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "grok",
   "jcode",
   "commandcode",
+  "micode",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;
