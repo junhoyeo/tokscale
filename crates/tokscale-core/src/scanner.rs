@@ -312,6 +312,9 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "session-*.json" => {
                     file_name.starts_with("session-") && file_name.ends_with(".json")
                 }
+                "session_*.json" => {
+                    file_name.starts_with("session_") && file_name.ends_with(".json")
+                }
                 "T-*.json" => file_name.starts_with("T-") && file_name.ends_with(".json"),
                 "*.settings.json" => file_name.ends_with(".settings.json"),
                 "sessions.json" => file_name == "sessions.json",
@@ -1599,6 +1602,13 @@ mod tests {
             .unwrap();
     }
 
+    fn setup_mock_jcode_dir(base: &std::path::Path) {
+        let jcode_sessions = base.join(".jcode/sessions");
+        fs::create_dir_all(&jcode_sessions).unwrap();
+        File::create(jcode_sessions.join("session_fixture.json")).unwrap();
+        File::create(jcode_sessions.join("not-a-session.json")).unwrap();
+    }
+
     fn setup_mock_openclaw_dir(base: &std::path::Path) {
         // Mirror real OpenClaw layout: ~/.openclaw/agents/<agentId>/sessions/*.jsonl
         let openclaw_sessions = base.join(".openclaw/agents/main/sessions");
@@ -2883,6 +2893,23 @@ mod tests {
         );
         assert_eq!(result.get(ClientId::Grok).len(), 1);
         assert!(result.get(ClientId::Grok)[0].ends_with("updates.jsonl"));
+        assert!(result.get(ClientId::OpenCode).is_empty());
+        assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_jcode() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_jcode_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["jcode".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Jcode).len(), 1);
+        assert!(result.get(ClientId::Jcode)[0].ends_with("session_fixture.json"));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }

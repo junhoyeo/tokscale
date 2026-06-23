@@ -10,9 +10,10 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-// 18: codex token_count dedup key scoped to the fork parent. Cached
-// messages store their dedup_key, so old entries must be reparsed.
-const CACHE_SCHEMA_VERSION: u32 = 18;
+// 19: jcode parser preserves input/cache_read as separate buckets and merges
+// journal sidecars. Cached messages store parsed token buckets and dedup keys,
+// so old entries must be reparsed.
+const CACHE_SCHEMA_VERSION: u32 = 19;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -132,6 +133,16 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, related_paths)
     }
 
+    /// Fingerprint for a Jcode session snapshot and its append-only journal
+    /// sidecar. Jcode persists recent changes in `session_*.journal.jsonl`
+    /// until the next checkpoint rewrites the snapshot, so the source-message
+    /// cache must invalidate when either file changes.
+    pub(crate) fn from_jcode_path(path: &Path) -> Option<Self> {
+        let related_paths =
+            std::iter::once((".journal.jsonl".to_string(), jcode_journal_path(path)));
+        Self::from_path_with_related(path, related_paths)
+    }
+
     /// Fingerprint for a Claude Code JSONL file that may have a sibling `.meta.json`
     /// sidecar. When the sidecar appears or changes (e.g. after a Claude Code upgrade),
     /// the fingerprint changes and the cache invalidates.
@@ -175,6 +186,17 @@ impl SourceFingerprint {
             related_files,
         })
     }
+}
+
+fn jcode_journal_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return append_path_suffix(path, ".journal.jsonl");
+    };
+    let journal_name = file_name
+        .strip_suffix(".json")
+        .map(|stem| format!("{stem}.journal.jsonl"))
+        .unwrap_or_else(|| format!("{file_name}.journal.jsonl"));
+    path.with_file_name(journal_name)
 }
 
 impl RelatedFileFingerprint {
@@ -837,6 +859,34 @@ mod tests {
         std::fs::write(&shm_path, b"shm-1").unwrap();
         let with_shm = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
         assert_eq!(before_shm, with_shm);
+    }
+
+    #[test]
+    fn test_jcode_fingerprint_tracks_journal_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let session_path = dir.path().join("session_fixture.json");
+        std::fs::write(&session_path, br#"{"messages":[]}"#).unwrap();
+
+        let base = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+
+        let journal_path = dir.path().join("session_fixture.journal.jsonl");
+        std::fs::write(
+            &journal_path,
+            br#"{"append_messages":[]}
+"#,
+        )
+        .unwrap();
+        let with_journal = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+        assert_ne!(base, with_journal);
+
+        std::fs::write(
+            &journal_path,
+            br#"{"append_messages":[{"id":"assistant_1"}]}
+"#,
+        )
+        .unwrap();
+        let updated_journal = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+        assert_ne!(with_journal, updated_journal);
     }
 
     #[test]

@@ -1046,6 +1046,32 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let jcode_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Jcode)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_jcode_path,
+                sessions::jcode::parse_jcode_file,
+            )
+        })
+        .collect();
+    let mut jcode_seen: HashSet<String> = HashSet::new();
+    for outcome in jcode_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut jcode_seen, message)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let amp_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Amp)
         .par_iter()
@@ -2568,6 +2594,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let grok_count = summed_parsed_message_count(&grok_msgs);
     counts.set(ClientId::Grok, grok_count);
     messages.extend(grok_msgs);
+
+    let jcode_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Jcode)
+        .par_iter()
+        .flat_map(|path| sessions::jcode::parse_jcode_file(path))
+        .collect();
+    let mut jcode_seen: HashSet<String> = HashSet::new();
+    let jcode_msgs: Vec<ParsedMessage> = jcode_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut jcode_seen, message))
+        .map(|msg| unified_to_parsed(&msg))
+        .collect();
+    let jcode_count = summed_parsed_message_count(&jcode_msgs);
+    counts.set(ClientId::Jcode, jcode_count);
+    messages.extend(jcode_msgs);
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {

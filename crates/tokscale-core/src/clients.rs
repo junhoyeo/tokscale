@@ -438,6 +438,18 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Jcode = 28 => {
+        id: "jcode",
+        root: PathRoot::EnvVar {
+            var: "JCODE_HOME",
+            fallback_relative: ".jcode",
+        },
+        relative: "sessions",
+        pattern: "session_*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -490,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 28);
+        assert_eq!(ClientId::COUNT, 29);
     }
 
     #[test]
@@ -520,6 +532,15 @@ mod tests {
         let client = ClientId::from_str("grok").expect("grok client should be registered");
         assert_eq!(client.data().relative_path, "sessions");
         assert_eq!(client.data().pattern, "updates.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+    }
+
+    #[test]
+    fn test_jcode_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("jcode").expect("jcode client should be registered");
+        assert_eq!(client.data().relative_path, "sessions");
+        assert_eq!(client.data().pattern, "session_*.json");
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
     }
