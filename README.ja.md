@@ -1292,7 +1292,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | MiMo Code | `~/.local/share/micode/` | `%USERPROFILE%\.local\share\micode\` | XDG データディレクトリを使用；SQLite データベース `mimocode.db` |
 | Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | `GJC_CODING_AGENT_DIR` で設定可能（`GJC_CONFIG_DIR`/`PI_CONFIG_DIR` も解決；Linux/macOS では `$XDG_DATA_HOME/gjc/sessions/` も対応） |
 | Junie | `~/.junie/sessions/` | `%USERPROFILE%\.junie\sessions\` | すべてのプラットフォームで同じホーム相対パス；`events.jsonl` 使用イベントを解析 |
-| ZCode | `~/.zcode/projects/` | `%USERPROFILE%.zcodeprojects` | `*.jsonl` セッショントランスクリプトを解析；Z.ai の GLM モデル向け ADE |
+| ZCode | `~/.zcode/projects/` | `%USERPROFILE%\.zcode\projects\` | `*.jsonl` セッショントランスクリプトを解析；Z.ai の GLM モデル向け ADE |
 | Synthetic | 他ソースから再帰属 | 他ソースから再帰属 | `hf:`モデル + `synthetic`プロバイダを検出 |
 
 > **注**: Windowsでは`~`は`%USERPROFILE%`に展開されます（例：`C:\Users\ユーザー名`）。これらのツールは`%APPDATA%`のようなWindowsネイティブパスではなく、クロスプラットフォームの一貫性のためにUnixスタイルのパス（`.local/share`など）を意図的に使用しています。

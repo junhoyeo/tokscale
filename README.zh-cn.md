@@ -1290,7 +1290,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | MiMo Code | `~/.local/share/micode/` | `%USERPROFILE%\.local\share\micode\` | 使用 XDG 数据目录；SQLite 数据库 `mimocode.db` |
 | Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | 可通过 `GJC_CODING_AGENT_DIR`（也可用 `GJC_CONFIG_DIR`/`PI_CONFIG_DIR`；Linux/macOS 上 `$XDG_DATA_HOME/gjc/sessions/` 亦支持）配置 |
 | Junie | `~/.junie/sessions/` | `%USERPROFILE%\.junie\sessions\` | 所有平台使用相同的 home 相对路径；解析 `events.jsonl` 使用事件 |
-| ZCode | `~/.zcode/projects/` | `%USERPROFILE%.zcodeprojects` | 解析 `*.jsonl` 会话记录；Z.ai 的 GLM 模型专用 ADE |
+| ZCode | `~/.zcode/projects/` | `%USERPROFILE%\.zcode\projects\` | 解析 `*.jsonl` 会话记录；Z.ai 的 GLM 模型专用 ADE |
 | Synthetic | 从其他来源重归属 | 从其他来源重归属 | 检测 `hf:` 模型前缀 + `synthetic` provider |
 
 > **注意**：在 Windows 上，`~` 扩展为 `%USERPROFILE%`（例如 `C:\Users\用户名`）。这些工具故意使用 Unix 风格的路径（如 `.local/share`）而不是 Windows 原生路径（如 `%APPDATA%`），以实现跨平台一致性。

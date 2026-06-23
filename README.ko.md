@@ -1298,7 +1298,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | MiMo Code | `~/.local/share/micode/` | `%USERPROFILE%\.local\share\micode\` | XDG 데이터 디렉토리 사용; SQLite 데이터베이스 `mimocode.db` |
 | Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | `GJC_CODING_AGENT_DIR`로 설정 가능 (`GJC_CONFIG_DIR`/`PI_CONFIG_DIR`도 지원; Linux/macOS에서는 `$XDG_DATA_HOME/gjc/sessions/`도 확인) |
 | Junie | `~/.junie/sessions/` | `%USERPROFILE%\.junie\sessions\` | 모든 플랫폼에서 동일한 home 상대 경로 사용; `events.jsonl` 사용 이벤트 파싱 |
-| ZCode | `~/.zcode/projects/` | `%USERPROFILE%.zcodeprojects` | `*.jsonl` 세션 트랜스크립트 파싱; Z.ai의 GLM 모델용 ADE |
+| ZCode | `~/.zcode/projects/` | `%USERPROFILE%\.zcode\projects\` | `*.jsonl` 세션 트랜스크립트 파싱; Z.ai의 GLM 모델용 ADE |
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 이러한 도구들은 `%APPDATA%`와 같은 Windows 기본 경로 대신 크로스 플랫폼 일관성을 위해 의도적으로 Unix 스타일 경로(`.local/share` 등)를 사용합니다.
