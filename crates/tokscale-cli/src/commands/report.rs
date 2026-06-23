@@ -1328,7 +1328,7 @@ mod tests {
 
     #[test]
     fn cluster_titles_merges_near_duplicates() {
-        let entries = vec![
+        let entries = [
             titled_entry("a", "Enhance API Security"),
             titled_entry("b", "Enhance API security with JWT auth middleware"),
             titled_entry("c", "Add JWT auth middleware"),
@@ -1356,7 +1356,7 @@ mod tests {
 
     #[test]
     fn cluster_titles_keeps_unrelated_apart() {
-        let entries = vec![
+        let entries = [
             titled_entry("a", "Add JWT auth middleware"),
             titled_entry("b", "Update database migration scripts"),
             titled_entry("c", "Refactor pricing service cache"),
@@ -1377,7 +1377,7 @@ mod tests {
     fn cluster_label_prefers_most_frequent_then_shortest() {
         // Two identical long titles + one shorter variant: frequency wins, so the
         // repeated long title is the label even though a shorter one exists.
-        let entries = vec![
+        let entries = [
             titled_entry("a", "Add JWT auth middleware"),
             titled_entry("b", "Add JWT auth middleware"),
             titled_entry("c", "JWT auth"),

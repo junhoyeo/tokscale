@@ -31,7 +31,9 @@ pub(crate) fn parse_timestamp_value(value: &Value) -> Option<i64> {
     if numeric >= 1_000_000_000_000 {
         Some(numeric)
     } else {
-        Some(numeric * 1000)
+        // Seconds -> milliseconds: saturating so a garbage/huge timestamp
+        // cannot overflow i64 during the conversion.
+        Some(numeric.saturating_mul(1000))
     }
 }
 
@@ -47,7 +49,9 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
         if numeric >= 1_000_000_000_000 {
             return Some(numeric);
         }
-        return Some(numeric * 1000);
+        // Seconds -> milliseconds: saturating so a garbage/huge timestamp
+        // cannot overflow i64 during the conversion.
+        return Some(numeric.saturating_mul(1000));
     }
 
     None

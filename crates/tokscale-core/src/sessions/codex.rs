@@ -7,6 +7,7 @@ use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
@@ -556,7 +557,11 @@ fn parse_codex_reader<R: BufRead>(
                         state.session_agent.clone()
                     };
 
-                    let provider = state.session_provider.as_deref().unwrap_or("openai");
+                    let provider = state
+                        .session_provider
+                        .as_deref()
+                        .or_else(|| model.as_deref().and_then(inferred_provider_from_model))
+                        .unwrap_or("openai");
 
                     let mut message = UnifiedMessage::new_with_agent(
                         "codex",
@@ -1034,7 +1039,9 @@ fn parse_codex_headless_line(
         return None;
     }
 
-    let provider = session_provider.unwrap_or("openai");
+    let provider = session_provider
+        .or_else(|| inferred_provider_from_model(&model))
+        .unwrap_or("openai");
     let agent = if session_is_headless {
         Some("headless".to_string())
     } else {

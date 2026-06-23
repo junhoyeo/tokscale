@@ -22,6 +22,7 @@
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -170,9 +171,14 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             None => continue,
         };
 
+        // A missing provider field is recoverable: infer it from the model name
+        // (and fall back to "gjc") rather than dropping a message that carries
+        // valid tokens.
         let provider = match message.provider {
             Some(p) => p,
-            None => continue,
+            None => inferred_provider_from_model(&model)
+                .unwrap_or("gjc")
+                .to_string(),
         };
 
         // Prefer unix-ms message timestamp; fall back to entry ISO timestamp,
@@ -428,7 +434,8 @@ not valid json at all
     }
 
     /// (d) Message missing model -> skipped, no panic.
-    ///     Message missing provider -> skipped, no panic.
+    ///     Message missing provider -> KEPT with an inferred/fallback provider
+    ///       (a missing provider is recoverable, not a drop condition).
     ///     Message missing usage -> skipped, no panic.
     #[test]
     fn test_adv_missing_model_provider_usage_skipped_no_panic() {
@@ -441,14 +448,19 @@ not valid json at all
             "missing model should be skipped"
         );
 
-        // missing provider
+        // missing provider: recoverable. The model "m" yields no inferred
+        // provider, so the parser falls back to "gjc" and keeps the message
+        // rather than dropping its valid tokens.
         let content_no_provider = r#"{"type":"session","id":"gjc_adv_d2","cwd":"/tmp"}
 {"type":"message","id":"no_prov","message":{"role":"assistant","model":"m","timestamp":1700000001000,"usage":{"input":1,"output":1,"cost":{"total":0.001}}}}"#;
         let file = create_test_file(content_no_provider);
-        assert!(
-            parse_gjc_file(file.path()).is_empty(),
-            "missing provider should be skipped"
+        let no_provider_messages = parse_gjc_file(file.path());
+        assert_eq!(
+            no_provider_messages.len(),
+            1,
+            "missing provider should be recovered, not dropped"
         );
+        assert_eq!(no_provider_messages[0].provider_id, "gjc");
 
         // missing usage
         let content_no_usage = r#"{"type":"session","id":"gjc_adv_d3","cwd":"/tmp"}

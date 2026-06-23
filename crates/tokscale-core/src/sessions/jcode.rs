@@ -6,7 +6,7 @@
 
 use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -54,11 +54,12 @@ struct JcodeTokenUsage {
 
 fn provider_id(provider_key: Option<&str>) -> String {
     let provider = provider_key.unwrap_or("jcode").trim();
-    if provider.is_empty() {
+    let provider = if provider.is_empty() {
         "jcode".to_string()
     } else {
         provider.to_string()
-    }
+    };
+    provider_identity::canonical_provider(&provider).unwrap_or(provider)
 }
 
 fn model_id(model: Option<&str>) -> String {
