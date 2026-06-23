@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync, execSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,9 +25,16 @@ const workspaceRoot = resolve(scopeDir, "..");
 type LibcKind = "gnu" | "musl";
 
 function detectLibcKind(): LibcKind {
+  const override = process.env.TOKSCALE_LIBC?.trim().toLowerCase();
+  if (override === "musl") return "musl";
+  if (override === "gnu" || override === "glibc") return "gnu";
+
   const report = process.report?.getReport?.() as
     | {
-        header?: { glibcVersionRuntime?: string };
+        header?: {
+          glibcVersionRuntime?: string;
+          release?: { sourceUrl?: string };
+        };
         sharedObjects?: string[];
       }
     | undefined;
@@ -43,15 +50,55 @@ function detectLibcKind(): LibcKind {
     return "musl";
   }
 
+  // Bun reports neither glibcVersionRuntime nor sharedObjects, but its
+  // release.sourceUrl names the build flavor (e.g. bun-linux-x64-musl-baseline.zip).
+  if (report?.header?.release?.sourceUrl?.toLowerCase().includes("musl")) {
+    return "musl";
+  }
+
   try {
     const output = execSync("ldd --version", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).toLowerCase();
-    return output.includes("musl") ? "musl" : "gnu";
-  } catch {
-    return "gnu";
+    if (output.includes("musl")) return "musl";
+    if (output.includes("glibc") || output.includes("gnu")) return "gnu";
+  } catch (error) {
+    // musl's ldd rejects --version: it prints "musl libc" to stderr and
+    // exits non-zero, so the answer is in the error, not the output.
+    const { stdout, stderr } = (error ?? {}) as { stdout?: unknown; stderr?: unknown };
+    const combined = `${stdout ?? ""}\n${stderr ?? ""}`.toLowerCase();
+    if (combined.includes("musl")) return "musl";
+    if (combined.includes("glibc") || combined.includes("gnu")) return "gnu";
   }
+
+  // ldd missing or inconclusive: look for dynamic loaders. Either loader
+  // can coexist with the other's libc (Debian's musl package installs
+  // ld-musl-*; Alpine's gcompat installs ld-linux-*), so when both are
+  // present, let the distro break the tie.
+  const hasGnuLoader = loaderPresent("ld-linux-");
+  const hasMuslLoader = loaderPresent("ld-musl-");
+  if (hasGnuLoader !== hasMuslLoader) return hasMuslLoader ? "musl" : "gnu";
+  if (hasGnuLoader && hasMuslLoader) {
+    return existsSync("/etc/alpine-release") ? "musl" : "gnu";
+  }
+
+  return "gnu";
+}
+
+// Glibc ships ld-linux-*.so.* in /lib64 (or /lib on some arches); musl
+// distros (Alpine, Void-musl, ...) ship /lib/ld-musl-<arch>.so.1.
+function loaderPresent(prefix: string): boolean {
+  for (const dir of ["/lib", "/lib64"]) {
+    try {
+      if (readdirSync(dir).some((entry) => entry.startsWith(prefix))) {
+        return true;
+      }
+    } catch {
+      // Directory unreadable or missing; try the next one.
+    }
+  }
+  return false;
 }
 
 function resolveTargetPackageName(): string | null {
