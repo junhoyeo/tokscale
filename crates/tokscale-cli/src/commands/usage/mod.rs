@@ -7,6 +7,7 @@ pub mod helpers;
 mod kimi;
 mod minimax;
 mod minimax_tokenplan;
+mod sakana;
 mod warp;
 mod zai;
 
@@ -263,6 +264,11 @@ pub fn fetch_all() -> Vec<UsageOutput> {
             Fetch::Multi(minimax_tokenplan::fetch_all),
         ),
         ("Warp/Oz", warp::has_credentials, Fetch::Single(warp::fetch)),
+        (
+            "Sakana",
+            sakana::has_credentials,
+            Fetch::Single(sakana::fetch),
+        ),
     ];
 
     let active: Vec<_> = providers.into_iter().filter(|(_, has, _)| has()).collect();
