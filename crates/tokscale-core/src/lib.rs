@@ -1160,15 +1160,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Kimi)
         .par_iter()
         .map(|path| {
-            if sessions::kimi::is_kimi_code_path(path) {
-                load_or_parse_source(path, &source_cache, pricing, |path| {
-                    sessions::kimi::parse_kimi_code_file(path)
-                })
+            let parse: fn(&Path) -> Vec<UnifiedMessage> = if sessions::kimi::is_kimi_code_path(path)
+            {
+                sessions::kimi::parse_kimi_code_file
             } else {
-                load_or_parse_source(path, &source_cache, pricing, |path| {
-                    sessions::kimi::parse_kimi_file(path)
-                })
-            }
+                sessions::kimi::parse_kimi_file
+            };
+            load_or_parse_source(path, &source_cache, pricing, parse)
         })
         .collect();
     for outcome in kimi_outcomes {

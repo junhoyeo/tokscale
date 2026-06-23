@@ -39,12 +39,43 @@ struct StatusPayload {
     message_id: Option<String>,
 }
 
+/// Token usage counts shared by both wire formats.
+///
+/// Legacy kimi-cli StatusUpdate payloads use snake_case field names;
+/// kimi-code usage.record lines use the camelCase aliases.
 #[derive(Debug, Deserialize)]
 struct TokenUsage {
+    #[serde(alias = "inputOther")]
     input_other: Option<i64>,
     output: Option<i64>,
+    #[serde(alias = "inputCacheRead")]
     input_cache_read: Option<i64>,
+    #[serde(alias = "inputCacheCreation")]
     input_cache_creation: Option<i64>,
+}
+
+impl TokenUsage {
+    /// Clamp negative counts to zero and build a breakdown.
+    /// Returns `None` when every count is zero so callers can skip the entry.
+    fn to_breakdown(&self) -> Option<TokenBreakdown> {
+        let input = self.input_other.unwrap_or(0).max(0);
+        let output = self.output.unwrap_or(0).max(0);
+        let cache_read = self.input_cache_read.unwrap_or(0).max(0);
+        let cache_write = self.input_cache_creation.unwrap_or(0).max(0);
+
+        if input + output + cache_read + cache_write == 0 {
+            return None;
+        }
+
+        Some(TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            // Kimi wire protocols do not expose reasoning tokens; all reasoning included in output
+            reasoning: 0,
+        })
+    }
 }
 
 /// Default model name when config.json is not available
@@ -87,24 +118,17 @@ fn extract_session_id(path: &Path) -> String {
 }
 
 /// Check whether a wire.jsonl path belongs to kimi-code.
+///
+/// kimi-code writes `<root>/sessions/WORKSPACE/SESSION/agents/AGENT/wire.jsonl`
+/// while legacy kimi-cli writes `<root>/sessions/GROUP/UUID/wire.jsonl`, so the
+/// grandparent directory component (`agents`) distinguishes the formats. The
+/// layout under the root is created by kimi-code itself, so this holds for the
+/// default `~/.kimi-code` root and custom `KIMI_CODE_HOME` roots alike.
 pub fn is_kimi_code_path(path: &Path) -> bool {
-    // 1) Default installation path contains .kimi-code segment
-    if path.components().any(|c| {
-        c.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(".kimi-code")
-    }) {
-        return true;
-    }
-
-    // 2) Custom KIMI_CODE_HOME directory
-    if let Ok(kimi_code_home) = std::env::var("KIMI_CODE_HOME") {
-        if !kimi_code_home.is_empty() && path.starts_with(&kimi_code_home) {
-            return true;
-        }
-    }
-
-    false
+    path.parent()
+        .and_then(|agent_dir| agent_dir.parent())
+        .and_then(|agents_dir| agents_dir.file_name())
+        .is_some_and(|name| name == "agents")
 }
 
 /// Extract session ID from a kimi-code wire.jsonl path.
@@ -134,21 +158,10 @@ struct KimiCodeWireLine {
     #[serde(rename = "type")]
     line_type: String,
     model: Option<String>,
-    usage: Option<KimiCodeUsage>,
+    usage: Option<TokenUsage>,
     #[serde(rename = "usageScope")]
     usage_scope: Option<String>,
     time: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KimiCodeUsage {
-    #[serde(rename = "inputOther")]
-    input_other: Option<i64>,
-    output: Option<i64>,
-    #[serde(rename = "inputCacheRead")]
-    input_cache_read: Option<i64>,
-    #[serde(rename = "inputCacheCreation")]
-    input_cache_creation: Option<i64>,
 }
 
 /// Parse a Kimi Code wire.jsonl file.
@@ -197,20 +210,10 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
-        let usage = match wire_line.usage {
-            Some(u) => u,
-            None => continue,
-        };
-
-        let input = usage.input_other.unwrap_or(0).max(0);
-        let output = usage.output.unwrap_or(0).max(0);
-        let cache_read = usage.input_cache_read.unwrap_or(0).max(0);
-        let cache_write = usage.input_cache_creation.unwrap_or(0).max(0);
-
         // Skip entries with zero tokens
-        if input + output + cache_read + cache_write == 0 {
+        let Some(tokens) = wire_line.usage.as_ref().and_then(TokenUsage::to_breakdown) else {
             continue;
-        }
+        };
 
         let model = wire_line
             .model
@@ -226,13 +229,7 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             DEFAULT_PROVIDER,
             session_id.clone(),
             timestamp_ms,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning: 0,
-            },
+            tokens,
             0.0,
         ));
     }
@@ -302,15 +299,10 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
             .map(|ts| (ts * 1000.0) as i64)
             .unwrap_or_else(|| file_modified_timestamp_ms(path));
 
-        let input = token_usage.input_other.unwrap_or(0).max(0);
-        let output = token_usage.output.unwrap_or(0).max(0);
-        let cache_read = token_usage.input_cache_read.unwrap_or(0).max(0);
-        let cache_write = token_usage.input_cache_creation.unwrap_or(0).max(0);
-
         // Skip entries with zero tokens
-        if input + output + cache_read + cache_write == 0 {
+        let Some(tokens) = token_usage.to_breakdown() else {
             continue;
-        }
+        };
 
         let dedup_key = payload.message_id;
 
@@ -320,14 +312,7 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
             DEFAULT_PROVIDER,
             session_id.clone(),
             timestamp_ms,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                // Kimi wire protocol does not expose reasoning tokens; all reasoning included in output
-                reasoning: 0,
-            },
+            tokens,
             0.0,
             dedup_key,
         );
@@ -581,8 +566,7 @@ not valid json at all
         assert_eq!(messages[0].client, "kimi");
         assert_eq!(messages[0].model_id, "kimi-for-coding");
         assert_eq!(messages[0].provider_id, "moonshot");
-        assert!(!messages[0].session_id.is_empty());
-        assert_ne!(messages[0].session_id, "unknown");
+        assert_eq!(messages[0].session_id, "sess-abc-123");
         assert_eq!(messages[0].tokens.input, 5102);
         assert_eq!(messages[0].tokens.output, 172);
         assert_eq!(messages[0].tokens.cache_read, 13312);
@@ -604,12 +588,17 @@ not valid json at all
     }
 
     #[test]
-    fn test_parse_kimi_code_model_normalization() {
-        let content = r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":1,"output":1,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377014}"#;
-        let (_dir, fake_path) = create_kimi_code_test_file(content);
-
-        let messages = parse_kimi_code_file(&fake_path);
-        assert_eq!(messages[0].model_id, "kimi-for-coding");
+    fn test_normalize_kimi_code_model() {
+        assert_eq!(
+            normalize_kimi_code_model("kimi-code/kimi-for-coding"),
+            "kimi-for-coding"
+        );
+        // No prefix: returned unchanged
+        assert_eq!(
+            normalize_kimi_code_model("kimi-for-coding"),
+            "kimi-for-coding"
+        );
+        assert_eq!(normalize_kimi_code_model(""), "");
     }
 
     #[test]
@@ -664,21 +653,14 @@ not valid json at all
         assert!(is_kimi_code_path(std::path::Path::new(
             "/home/user/.kimi-code/sessions/workspace/sess/agents/main/wire.jsonl"
         )));
-        assert!(!is_kimi_code_path(std::path::Path::new(
-            "/home/user/.kimi/sessions/group/uuid/wire.jsonl"
-        )));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_is_kimi_code_path_with_custom_home() {
-        std::env::set_var("KIMI_CODE_HOME", "/data/kimi");
+        // Custom KIMI_CODE_HOME root: kimi-code still creates the
+        // agents/<AGENT>/wire.jsonl layout underneath it.
         assert!(is_kimi_code_path(std::path::Path::new(
             "/data/kimi/sessions/ws/sess/agents/main/wire.jsonl"
         )));
         assert!(!is_kimi_code_path(std::path::Path::new(
             "/home/user/.kimi/sessions/group/uuid/wire.jsonl"
         )));
-        std::env::remove_var("KIMI_CODE_HOME");
+        assert!(!is_kimi_code_path(std::path::Path::new("wire.jsonl")));
     }
 }
