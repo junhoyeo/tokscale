@@ -122,7 +122,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(&agent.agent, 22)).style(
+                    Cell::from(truncate(&agent.agent, 32)).style(
                         Style::default()
                             .fg(app.theme.foreground)
                             .add_modifier(Modifier::BOLD),
@@ -159,7 +159,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         vec![
             Constraint::Length(3),
-            Constraint::Min(16),
+            Constraint::Min(24),
             Constraint::Length(24),
             Constraint::Length(10),
             Constraint::Length(10),

@@ -84,6 +84,7 @@ struct TraceContext {
     model: Option<String>,
     session_id: Option<String>,
     session_id_priority: SessionIdPriority,
+    agent_id: Option<String>,
 }
 
 struct CopilotUsageCandidate {
@@ -97,6 +98,7 @@ struct CopilotUsageCandidate {
     duration_ms: Option<i64>,
     tokens: TokenBreakdown,
     dedup_key: String,
+    agent: Option<String>,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -120,6 +122,7 @@ impl CopilotUsageCandidate {
             Some(self.dedup_key),
         );
         message.duration_ms = self.duration_ms;
+        message.agent = self.agent;
         message
     }
 }
@@ -142,6 +145,7 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
                 model: None,
                 session_id: None,
                 session_id_priority: SessionIdPriority::Missing,
+                agent_id: None,
             });
 
         if context.model.is_none() {
@@ -152,6 +156,12 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
             if priority > context.session_id_priority {
                 context.session_id = Some(session_id.to_string());
                 context.session_id_priority = priority;
+            }
+        }
+
+        if context.agent_id.is_none() {
+            if let Some(agent_id) = first_non_empty_attr(attributes, &["gen_ai.agent.id"]) {
+                context.agent_id = Some(agent_id.to_string());
             }
         }
     }
@@ -305,6 +315,7 @@ fn candidate_from_attributes(
         duration_ms,
         tokens,
         dedup_key,
+        agent: trace_context.and_then(|tc| tc.agent_id.clone()),
     })
 }
 
@@ -823,6 +834,32 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.cache_read, 21881);
         assert_eq!(messages[0].tokens.cache_write, 1397);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_sets_agent_from_invoke_agent_span() {
+        // invoke_agent and chat spans share a traceId; gen_ai.agent.id from
+        // invoke_agent should propagate to chat messages via TraceContext so
+        // the Agents tab is populated for Copilot CLI sessions.
+        let content = r#"{"type":"span","traceId":"trace-agent","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.conversation.id":"conv-agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default","gen_ai.agent.version":"1.0.62"}}
+{"type":"span","traceId":"trace-agent","spanId":"chat-1","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-agent","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_no_agent_when_invoke_agent_absent() {
+        let content = r#"{"type":"span","traceId":"trace-noagent","spanId":"chat-1","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-noagent","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent, None);
     }
 
     #[test]
