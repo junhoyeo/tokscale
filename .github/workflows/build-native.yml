@@ -26,9 +26,15 @@ jobs:
             build: cargo build --release -p tokscale-cli --target x86_64-apple-darwin
             strip: strip -x target/x86_64-apple-darwin/release/tokscale
             bin_name: tokscale
-          - host: macos-latest
+          # Apple Silicon: build with the `apple-fm` feature so the on-device
+          # Apple Foundation Models summarizer is available. Requires the macOS
+          # 26 SDK + Swift toolchain (Xcode 26 on the macos-26 runner) to build
+          # the vendored foundation-models-c shim; statically linked, so the
+          # artifact stays a single self-contained binary. Apple Intelligence is
+          # Apple-Silicon-only, so this is intentionally not enabled for x86_64.
+          - host: macos-26
             target: aarch64-apple-darwin
-            build: cargo build --release -p tokscale-cli --target aarch64-apple-darwin
+            build: cargo build --release -p tokscale-cli --target aarch64-apple-darwin --features apple-fm
             strip: strip -x target/aarch64-apple-darwin/release/tokscale
             bin_name: tokscale
           - host: ubuntu-latest

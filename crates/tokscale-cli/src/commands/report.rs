@@ -3,8 +3,9 @@ use chrono::{TimeZone, Utc};
 use colored::Colorize;
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+
+use super::apple_fm;
 use std::time::Duration;
 use tokscale_core::content_extractor::metadata_only_content;
 use tokscale_core::content_extractor::SessionContent;
@@ -393,29 +394,58 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
 }
 
 fn run_apple_fm_summarizer(payloads: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
-    let script_path = find_summarizer_script()?;
-    let input_json = serde_json::to_string(payloads)?;
+    // Build typed inputs from the JSON payloads.
+    let inputs: Vec<apple_fm::SessionInput> = payloads
+        .iter()
+        .map(|p| apple_fm::SessionInput {
+            session_id: p["session_id"].as_str().unwrap_or_default().to_string(),
+            client: p["client"].as_str().unwrap_or_default().to_string(),
+            workspace: p["workspace"].as_str().unwrap_or_default().to_string(),
+            first_user_message: p["first_user_message"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            models_used: p["models_used"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            total_tokens: p["total_tokens"].as_i64().unwrap_or(0),
+            duration_minutes: p["duration_minutes"].as_i64().unwrap_or(0),
+            message_count: p["message_count"].as_i64().unwrap_or(0),
+        })
+        .collect();
 
-    let mut cmd = Command::new("python3");
-    cmd.arg(&script_path);
-
-    // The helper pipes stdin and writes `input_json` before draining output,
-    // preserving the original stdin-write behavior while bounding a hang.
-    let output = match run_command_with_timeout(cmd, BACKEND_TIMEOUT, Some(input_json.as_bytes())) {
-        Ok(output) => output,
-        Err(e) => {
-            eprintln!("  {} Apple FM summarizer: {}", "⚠".yellow(), e);
-            return Ok(Vec::new());
-        }
+    // `summarize` returns `Some` only when Apple Intelligence is available and
+    // the feature is enabled on macOS. In every other case (unavailable,
+    // feature-off, or non-macOS) it returns `None` and we apply the Rust
+    // heuristic to all sessions. apple-fm therefore stays the default backend
+    // and degrades gracefully cross-platform — it never errors out the report.
+    let summaries: Vec<apple_fm::SessionSummary> = match apple_fm::summarize(&inputs) {
+        Some(v) => v,
+        None => inputs.iter().map(apple_fm::heuristic_classify).collect(),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("  {} Apple FM summarizer: {}", "⚠".yellow(), stderr.trim());
-        return Ok(Vec::new());
-    }
+    // Provenance is carried PER summary (`s.fm_version`): even when Apple FM is
+    // available, an individual generation that fails/times out is backfilled with
+    // the heuristic and must not be recorded as `apple-fm-on-device`.
+    let results = summaries
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "session_id": s.session_id,
+                "title": s.title,
+                "task_category": s.task_category,
+                "description": s.description,
+                "complexity": s.complexity,
+                "fm_version": s.fm_version,
+            })
+        })
+        .collect();
 
-    let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
     Ok(results)
 }
 
@@ -850,33 +880,6 @@ fn print_session_list(entries: &[WikiEntry]) {
 
 fn extract_content_for_session(entry: &WikiEntry) -> SessionContent {
     metadata_only_content(&entry.session_id, &entry.client)
-}
-
-fn find_summarizer_script() -> Result<PathBuf> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-
-    let candidates = [
-        exe_dir
-            .as_ref()
-            .map(|d| d.join("../scripts/wiki-summarizer.py")),
-        exe_dir
-            .as_ref()
-            .map(|d| d.join("../../scripts/wiki-summarizer.py")),
-        Some(PathBuf::from("scripts/wiki-summarizer.py")),
-        dirs::config_dir().map(|d| d.join("tokscale/wiki-summarizer.py")),
-    ];
-
-    for candidate in candidates.iter().flatten() {
-        if candidate.exists() {
-            return Ok(candidate.clone());
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "wiki-summarizer.py not found. Expected at scripts/wiki-summarizer.py or ~/.config/tokscale/wiki-summarizer.py"
-    ))
 }
 
 fn parse_date_range(since: &Option<String>, until: &Option<String>) -> (Option<i64>, Option<i64>) {

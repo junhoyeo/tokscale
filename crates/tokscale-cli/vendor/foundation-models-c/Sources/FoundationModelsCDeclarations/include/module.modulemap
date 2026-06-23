@@ -1,0 +1,5 @@
+// A placeholder target that exposes the declarations from the bindings header to the bindings library itself.
+module FoundationModelsCDeclarations {
+  header "../../FoundationModelsCBindings/include/FoundationModels.h"
+  export *
+}

@@ -11,6 +11,12 @@ description = "CLI and TUI for tokscale - AI token usage analytics"
 name = "tokscale"
 path = "src/main.rs"
 
+[features]
+# Optional: native FFI into Apple's FoundationModels (on-device Apple Intelligence)
+# for the `apple-fm` report summarizer backend. macOS-only; no-op elsewhere.
+# NOT enabled by default — the default build degrades to a Rust heuristic.
+apple-fm = []
+
 [dependencies]
 tokscale-core = { workspace = true }
 
