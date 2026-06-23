@@ -681,7 +681,7 @@ tokscale report --workspace my-project --client opencode
 
 | Backend | Command | Notes |
 |---------|---------|-------|
-| `apple-fm` | (default) | Uses Apple Foundation Models on-device via native Rust FFI (no Python). Requires a macOS build with the `apple-fm` Cargo feature and Apple Intelligence enabled; otherwise it transparently falls back to a built-in Rust heuristic classifier (so the default works everywhere). |
+| `apple-fm` | (default) | On-device Apple Foundation Models via native Rust FFI (no Python). Enabled in the prebuilt Apple Silicon (macOS arm64) binary; runs on macOS 26+ with Apple Intelligence on, and transparently falls back to a built-in Rust heuristic everywhere else (Intel Macs, older macOS, Linux, Windows) — so the default works on every platform. |
 | `claude` | `claude -p` | Requires Claude Code CLI installed and authenticated. |
 | `codex` | `codex --quiet` | Requires Codex CLI installed and authenticated. |
 | `gemini` | `gemini -p` | Requires Gemini CLI installed and authenticated. |

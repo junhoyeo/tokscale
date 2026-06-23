@@ -219,12 +219,25 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
         backend.cyan()
     );
 
+    // apple-fm runs each session as a self-contained on-device generation, so a
+    // single giant chunk would suppress the per-batch progress indicator below
+    // (it's gated on `batch_size < payloads.len()`). Use a modest batch size so
+    // the "\r  Batch i/total" line fires and 100+ sequential on-device calls
+    // show visible progress instead of hanging silent until the very end.
+    // Re-fetching the model + rebuilding the schema per small batch is cheap;
+    // the generation dominates.
     let batch_size = match backend {
-        "apple-fm" => payloads.len(),
+        "apple-fm" => 8,
         _ => 20,
     };
 
     let mut total_summarized = 0;
+    // Count how many summaries actually came from Apple FM vs the heuristic
+    // fallback, so a silent total-fallback (e.g. FM unavailable, or every
+    // generation erroring) is visible rather than reported as plain "N
+    // summarized". Only meaningful for the apple-fm backend; CLI backends leave
+    // fm_version null by design.
+    let mut fm_generated = 0;
     for (batch_idx, chunk) in payloads.chunks(batch_size).enumerate() {
         if batch_size < payloads.len() {
             eprint!(
@@ -253,6 +266,9 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
             let description = result["description"].as_str().unwrap_or("");
             let complexity = result["complexity"].as_str().unwrap_or("moderate");
             let fm_version = result["fm_version"].as_str();
+            if fm_version == Some("apple-fm-on-device") {
+                fm_generated += 1;
+            }
 
             db.update_summary(
                 session_id,
@@ -268,11 +284,22 @@ fn run_summarizer(db: &WikiDb, session_ids: &[String], backend: &str) -> Result<
         total_summarized += results.len();
     }
 
-    eprintln!(
-        "\n  {} {} sessions summarized",
-        "✓".green(),
-        total_summarized
-    );
+    if backend == "apple-fm" {
+        let heuristic = total_summarized.saturating_sub(fm_generated);
+        eprintln!(
+            "\n  {} {} sessions summarized ({} via Apple FM, {} heuristic)",
+            "✓".green(),
+            total_summarized,
+            fm_generated,
+            heuristic
+        );
+    } else {
+        eprintln!(
+            "\n  {} {} sessions summarized",
+            "✓".green(),
+            total_summarized
+        );
+    }
 
     Ok(())
 }
@@ -294,6 +321,33 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
         .collect();
 
     if summarized.is_empty() {
+        return Ok(());
+    }
+
+    // Non-CLI backends (apple-fm and any future on-device backend) have no LLM
+    // grouping path. Rather than skip — which leaves every task_group null and
+    // makes the report collapse sessions by EXACT title — cluster titles
+    // deterministically in Rust. This merges near-duplicate titles ("Enhance API
+    // Security" / "Enhance API security with JWT auth middleware") into a single
+    // labeled group while keeping unrelated titles apart.
+    if !matches!(backend, "claude" | "codex" | "gemini" | "kiro") {
+        let assignments = cluster_titles(&summarized);
+        let group_count = assignments
+            .iter()
+            .map(|(_, label)| label.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        for (session_id, label) in &assignments {
+            db.update_task_group(session_id, label).map_err(|e| {
+                anyhow::anyhow!("Failed to save task_group for {}: {}", session_id, e)
+            })?;
+        }
+        eprintln!(
+            "  {} grouped {} sessions into {} tasks",
+            "✓".green(),
+            summarized.len(),
+            group_count
+        );
         return Ok(());
     }
 
@@ -341,12 +395,9 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
                 .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt));
             c
         }
-        _ => {
-            eprintln!(
-                " skipped (task grouping requires a CLI backend: claude, codex, gemini, or kiro)"
-            );
-            return Ok(());
-        }
+        // Non-CLI backends were already handled by the title-clustering path
+        // above (which early-returns), so only the four CLI backends reach here.
+        other => unreachable!("non-CLI backend '{}' must be handled by clustering", other),
     };
 
     // A timed-out (or otherwise un-spawnable) backend must degrade gracefully:
@@ -391,6 +442,204 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
     }
 
     Ok(())
+}
+
+/// Generic verbs and stopwords stripped from titles before clustering. These
+/// carry no signal about *which* project/feature a session touched (every other
+/// session "adds" or "fixes" something), so keeping them would make unrelated
+/// titles look similar.
+const CLUSTER_STOPWORDS: &[&str] = &[
+    "add",
+    "fix",
+    "fixes",
+    "fixed",
+    "update",
+    "updates",
+    "refactor",
+    "improve",
+    "implement",
+    "enhance",
+    "create",
+    "remove",
+    "the",
+    "a",
+    "an",
+    "to",
+    "for",
+    "with",
+    "and",
+    "of",
+    "in",
+    "on",
+    "via",
+];
+
+/// Reduce a title to its set of SIGNIFICANT tokens: lowercase, strip
+/// punctuation/ellipsis, collapse whitespace, drop generic verbs/stopwords.
+/// The returned tokens are deduplicated and sorted so two titles with the same
+/// significant words (in any order) produce equal sets.
+fn significant_tokens(title: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = title
+        .chars()
+        // Map punctuation/ellipsis to spaces; keep alphanumerics. This also
+        // strips a trailing "…" or "..." that the on-device model often emits.
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .map(|t| t.to_string())
+        .filter(|t| !CLUSTER_STOPWORDS.contains(&t.as_str()))
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+/// Two token sets are considered the same task when they overlap strongly:
+/// Jaccard similarity ≥ 0.6, OR they share at least two significant tokens.
+/// The two-shared-tokens rule lets a long title ("Enhance API security with JWT
+/// auth middleware") merge with a short one ("Enhance API Security") even though
+/// the length gap drags Jaccard below 0.6.
+fn tokens_overlap(a: &[String], b: &[String]) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let shared = a.iter().filter(|t| b.contains(t)).count();
+    if shared >= 2 {
+        return true;
+    }
+    let union = a.len() + b.len() - shared;
+    union > 0 && (shared as f64 / union as f64) >= 0.6
+}
+
+/// Deterministically cluster summarized entries by title similarity and return
+/// `(session_id, group_label)` for every entry. Greedy O(n²) clustering — n is
+/// small (one report's worth of sessions). Each cluster is labeled with its most
+/// frequent original title, tie-broken by shortest, so the label is a real
+/// human-readable title rather than a synthetic key.
+fn cluster_titles(entries: &[&WikiEntry]) -> Vec<(String, String)> {
+    struct Cluster {
+        tokens: Vec<String>,
+        members: Vec<usize>,
+    }
+
+    // Precompute significant tokens once per entry.
+    let prepared: Vec<(usize, Vec<String>)> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i, significant_tokens(e.title.as_deref().unwrap_or(""))))
+        .collect();
+
+    let mut clusters: Vec<Cluster> = Vec::new();
+    for (idx, tokens) in &prepared {
+        // Find the first existing cluster this entry overlaps strongly with.
+        // An entry with no significant tokens (all stopwords) only matches a
+        // cluster that is itself token-empty, so generic titles still group.
+        let mut placed = false;
+        for cluster in clusters.iter_mut() {
+            let matches = if tokens.is_empty() {
+                cluster.tokens.is_empty()
+            } else {
+                tokens_overlap(tokens, &cluster.tokens)
+            };
+            if matches {
+                cluster.members.push(*idx);
+                // Grow the cluster signature with this entry's tokens so later
+                // entries can match on the union of what's been seen.
+                for t in tokens {
+                    if !cluster.tokens.contains(t) {
+                        cluster.tokens.push(t.clone());
+                    }
+                }
+                cluster.tokens.sort();
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            clusters.push(Cluster {
+                tokens: tokens.clone(),
+                members: vec![*idx],
+            });
+        }
+    }
+
+    // Consolidation pass: the single greedy pass above is order-dependent — an
+    // entry compared before a cluster grew its signature can land in its own
+    // cluster even though it overlaps the grown signature. Repeatedly merge any
+    // two clusters whose signatures overlap until a fixpoint, making the final
+    // grouping independent of input order. n is small, so the O(n²)-per-round
+    // loop is cheap.
+    loop {
+        let mut merged_any = false;
+        'outer: for i in 0..clusters.len() {
+            for j in (i + 1)..clusters.len() {
+                let overlap = if clusters[i].tokens.is_empty() || clusters[j].tokens.is_empty() {
+                    // Token-empty clusters (all-stopword titles) only merge with
+                    // each other, never with a tokened cluster.
+                    clusters[i].tokens.is_empty() && clusters[j].tokens.is_empty()
+                } else {
+                    tokens_overlap(&clusters[i].tokens, &clusters[j].tokens)
+                };
+                if overlap {
+                    let other = clusters.remove(j);
+                    clusters[i].members.extend(other.members);
+                    for t in other.tokens {
+                        if !clusters[i].tokens.contains(&t) {
+                            clusters[i].tokens.push(t);
+                        }
+                    }
+                    clusters[i].tokens.sort();
+                    merged_any = true;
+                    break 'outer;
+                }
+            }
+        }
+        if !merged_any {
+            break;
+        }
+    }
+
+    let mut assignments = Vec::new();
+    for cluster in &clusters {
+        let label = cluster_label(entries, &cluster.members);
+        for &idx in &cluster.members {
+            assignments.push((entries[idx].session_id.clone(), label.clone()));
+        }
+    }
+    assignments
+}
+
+/// Pick a human-readable label for a cluster: the most frequent original title,
+/// tie-broken by shortest (char count), then lexicographically for full
+/// determinism.
+fn cluster_label(entries: &[&WikiEntry], members: &[usize]) -> String {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for &idx in members {
+        let title = entries[idx]
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or("(unsummarized)");
+        *counts.entry(title).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .max_by(|(at, ac), (bt, bc)| {
+            ac.cmp(bc)
+                // Higher frequency wins; on a tie prefer the SHORTER title, then
+                // lexicographically smaller, so the label is stable run-to-run.
+                .then_with(|| bt.chars().count().cmp(&at.chars().count()))
+                .then_with(|| bt.cmp(at))
+        })
+        .map(|(title, _)| title.to_string())
+        .unwrap_or_else(|| "(unsummarized)".to_string())
 }
 
 fn run_apple_fm_summarizer(payloads: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
@@ -1031,5 +1280,126 @@ mod tests {
     fn compute_msg_cost_without_pricing_is_zero() {
         let msg = parsed_message("claude-haiku-4");
         assert_eq!(compute_msg_cost(&msg, None), 0.0);
+    }
+
+    fn titled_entry(session_id: &str, title: &str) -> WikiEntry {
+        WikiEntry {
+            session_id: session_id.to_string(),
+            client: "apple-fm".to_string(),
+            workspace: None,
+            workspace_label: None,
+            created_at: 0,
+            last_active: 0,
+            title: Some(title.to_string()),
+            task_category: None,
+            description: None,
+            complexity: None,
+            task_group: None,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read: 0,
+            total_cost: 0.0,
+            models_used: Vec::new(),
+            message_count: 0,
+            duration_minutes: 0,
+            summarized_at: None,
+            fm_version: None,
+        }
+    }
+
+    #[test]
+    fn significant_tokens_normalizes_and_strips_stopwords() {
+        // Lowercase, punctuation/ellipsis stripped, generic verbs dropped,
+        // result sorted + deduped.
+        assert_eq!(
+            significant_tokens("Add JWT auth middleware…"),
+            vec!["auth", "jwt", "middleware"]
+        );
+        assert_eq!(
+            significant_tokens("Enhance API Security"),
+            vec!["api", "security"]
+        );
+        // Trailing "..." and mixed case collapse to the same key.
+        assert_eq!(
+            significant_tokens("Fix the API Security..."),
+            vec!["api", "security"]
+        );
+    }
+
+    #[test]
+    fn cluster_titles_merges_near_duplicates() {
+        let entries = vec![
+            titled_entry("a", "Enhance API Security"),
+            titled_entry("b", "Enhance API security with JWT auth middleware"),
+            titled_entry("c", "Add JWT auth middleware"),
+        ];
+        let refs: Vec<&WikiEntry> = entries.iter().collect();
+        let assignments = cluster_titles(&refs);
+
+        let label_of = |sid: &str| {
+            assignments
+                .iter()
+                .find(|(s, _)| s == sid)
+                .map(|(_, l)| l.clone())
+                .unwrap()
+        };
+
+        // a & b share "api" + "security" → same cluster.
+        assert_eq!(label_of("a"), label_of("b"));
+        // b & c share "auth" + "jwt" + "middleware" → all three collapse via b.
+        assert_eq!(label_of("b"), label_of("c"));
+
+        let distinct: std::collections::HashSet<_> =
+            assignments.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(distinct.len(), 1, "all three should merge into one task");
+    }
+
+    #[test]
+    fn cluster_titles_keeps_unrelated_apart() {
+        let entries = vec![
+            titled_entry("a", "Add JWT auth middleware"),
+            titled_entry("b", "Update database migration scripts"),
+            titled_entry("c", "Refactor pricing service cache"),
+        ];
+        let refs: Vec<&WikiEntry> = entries.iter().collect();
+        let assignments = cluster_titles(&refs);
+
+        let distinct: std::collections::HashSet<_> =
+            assignments.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "unrelated titles must stay in separate groups"
+        );
+    }
+
+    #[test]
+    fn cluster_label_prefers_most_frequent_then_shortest() {
+        // Two identical long titles + one shorter variant: frequency wins, so the
+        // repeated long title is the label even though a shorter one exists.
+        let entries = vec![
+            titled_entry("a", "Add JWT auth middleware"),
+            titled_entry("b", "Add JWT auth middleware"),
+            titled_entry("c", "JWT auth"),
+        ];
+        let refs: Vec<&WikiEntry> = entries.iter().collect();
+        let assignments = cluster_titles(&refs);
+        let label = &assignments[0].1;
+        assert_eq!(label, "Add JWT auth middleware");
+    }
+
+    #[test]
+    fn cluster_titles_groups_exact_duplicates() {
+        // The degenerate case from the report: many identical titles must
+        // collapse into exactly one group.
+        let entries: Vec<WikiEntry> = (0..51)
+            .map(|i| titled_entry(&format!("s{i}"), "Add JWT auth middleware"))
+            .collect();
+        let refs: Vec<&WikiEntry> = entries.iter().collect();
+        let assignments = cluster_titles(&refs);
+        let distinct: std::collections::HashSet<_> =
+            assignments.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(distinct.len(), 1);
+        assert_eq!(assignments.len(), 51);
     }
 }

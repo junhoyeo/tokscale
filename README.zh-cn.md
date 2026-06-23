@@ -588,7 +588,7 @@ tokscale report --workspace my-project --client opencode
 
 | 后端 | 命令 | 说明 |
 |---------|---------|-------|
-| `apple-fm` | （默认） | 通过原生 Rust FFI 在本地使用 Apple Foundation Models（无需 Python）。需要启用 `apple-fm` Cargo 特性的 macOS 构建，且须开启 Apple Intelligence；否则将透明回退至内置 Rust 启发式分类器（因此默认配置可在所有平台正常使用）。 |
+| `apple-fm` | （默认） | 通过原生 Rust FFI 在本地使用 Apple Foundation Models（无需 Python）。已在预构建的 Apple Silicon（macOS arm64）二进制中启用，在开启 Apple Intelligence 的 macOS 26 及以上系统运行；在其他环境（Intel Mac、更旧的 macOS、Linux、Windows）则透明回退至内置 Rust 启发式分类器，因此默认配置可在所有平台正常使用。 |
 | `claude` | `claude -p` | 需要已安装并已认证的 Claude Code CLI。 |
 | `codex` | `codex --quiet` | 需要已安装并已认证的 Codex CLI。 |
 | `gemini` | `gemini -p` | 需要已安装并已认证的 Gemini CLI。 |
