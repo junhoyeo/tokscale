@@ -1275,6 +1275,23 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .filter(|message| should_keep_deduped_message(&mut junie_seen, message)),
     );
 
+    // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
+    // from the API response; otherwise estimated from content.
+    let zcode_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Zcode)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::zcode::parse_zcode_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(zcode_messages);
+
     let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
@@ -2511,6 +2528,17 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let junie_count = summed_parsed_message_count(&junie_msgs);
     counts.set(ClientId::Junie, junie_count);
     messages.extend(junie_msgs);
+
+    // ZCode (Z.ai GLM-5.2 ADE) session transcripts
+    let zcode_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Zcode)
+        .par_iter()
+        .flat_map(|path| sessions::zcode::parse_zcode_file(path))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let zcode_count = summed_parsed_message_count(&zcode_msgs);
+    counts.set(ClientId::Zcode, zcode_count);
+    messages.extend(zcode_msgs);
 
     // Parse Kimi wire.jsonl files in parallel
     let kimi_msgs: Vec<ParsedMessage> = scan_result

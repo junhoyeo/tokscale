@@ -495,6 +495,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Zcode = 33 => {
+        id: "zcode",
+        root: PathRoot::Home,
+        relative: ".zcode/projects",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -547,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 33);
+        assert_eq!(ClientId::COUNT, 34);
     }
 
     #[test]
