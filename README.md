@@ -692,7 +692,8 @@ tokscale codex accounts --json
 # Switch the active Codex account and write Codex auth.json
 tokscale codex switch work
 
-# Remove a saved Codex account
+# Stop tracking a saved Codex account (removes it from Tokscale's store
+# only — the codex CLI's own auth.json/login is never touched)
 tokscale codex remove personal
 
 # Check subscription usage for the active or a named account

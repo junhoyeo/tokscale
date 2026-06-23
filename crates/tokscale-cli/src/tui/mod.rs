@@ -214,6 +214,10 @@ pub fn run(
         &sigcont_flag,
     );
 
+    // Don't orphan a `codex login` child (it would keep holding the OAuth
+    // port after the TUI exits).
+    app.kill_codex_login_child();
+
     restore_terminal(&mut terminal);
 
     result

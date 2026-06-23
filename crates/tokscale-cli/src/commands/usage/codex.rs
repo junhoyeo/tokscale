@@ -192,29 +192,6 @@ fn save_auth_tokens(path: &Path, tokens: &Tokens) -> Result<()> {
         .with_context(|| format!("Failed to write Codex auth to {}", path.display()))
 }
 
-fn remove_auth_file_if_account_matches(
-    path: &Path,
-    account_id: &str,
-    account_tokens: &Tokens,
-) -> Result<()> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Ok(());
-    };
-    let Ok(auth) = serde_json::from_str::<Auth>(&content) else {
-        return Ok(());
-    };
-    let Some(tokens) = auth.tokens else {
-        return Ok(());
-    };
-
-    if derive_account_id(&tokens) == account_id || same_token_identity(&tokens, account_tokens) {
-        std::fs::remove_file(path)
-            .with_context(|| format!("Failed to remove Codex auth at {}", path.display()))?;
-    }
-
-    Ok(())
-}
-
 fn persist_tokens(source: &CredentialSource, tokens: &Tokens) {
     match source {
         CredentialSource::File(path) => {
@@ -348,11 +325,24 @@ fn load_credentials_store_from_home(home_dir: &Path) -> Option<CodexCredentialsS
 }
 
 fn load_credentials_store_from_path(path: &Path) -> Option<CodexCredentialsStore> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let mut store = serde_json::from_str::<CodexCredentialsStore>(&content).ok()?;
+    load_credentials_store_for_update(path).ok().flatten()
+}
 
-    if store.version != 1 || store.accounts.is_empty() {
-        return None;
+/// Loads the store while distinguishing "no usable store" (`Ok(None)`) from a
+/// store written by a newer tokscale (`Err`). Write paths must propagate the
+/// error instead of silently clobbering a future-version store; read paths can
+/// treat both as "nothing usable".
+fn load_credentials_store_for_update(path: &Path) -> Result<Option<CodexCredentialsStore>> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    bail_on_unknown_store_version(path, &content)?;
+    let Ok(mut store) = serde_json::from_str::<CodexCredentialsStore>(&content) else {
+        return Ok(None);
+    };
+
+    if store.accounts.is_empty() {
+        return Ok(None);
     }
 
     if !store.accounts.contains_key(&store.active_account_id) {
@@ -362,7 +352,25 @@ fn load_credentials_store_from_path(path: &Path) -> Option<CodexCredentialsStore
         }
     }
 
-    Some(store)
+    Ok(Some(store))
+}
+
+/// A future-version store may not even deserialize into the current struct, so
+/// the version is checked on the raw JSON before the typed parse.
+fn bail_on_unknown_store_version(path: &Path, content: &str) -> Result<()> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Ok(());
+    };
+    let Some(version) = value.get("version").and_then(serde_json::Value::as_i64) else {
+        return Ok(());
+    };
+    if version != 1 {
+        anyhow::bail!(
+            "Unsupported Codex account store version {version} at {} (this tokscale supports version 1); refusing to modify it",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn save_credentials_store(store: &CodexCredentialsStore) -> Result<()> {
@@ -434,16 +442,10 @@ fn first_account_id(store: &CodexCredentialsStore) -> Option<String> {
         .map(|(id, _)| id.clone())
 }
 
-struct RemovedCodexAccount {
-    info: CodexAccountInfo,
-    tokens: Tokens,
-    next_active_tokens: Option<Tokens>,
-}
-
 fn remove_account_from_store(
     store: &mut CodexCredentialsStore,
     name_or_id: &str,
-) -> Result<RemovedCodexAccount> {
+) -> Result<CodexAccountInfo> {
     let resolved = resolve_account_id(store, name_or_id)
         .ok_or_else(|| anyhow::anyhow!("Codex account not found: {name_or_id}"))?;
     let removed_was_active = store.active_account_id == resolved;
@@ -451,7 +453,6 @@ fn remove_account_from_store(
         .accounts
         .remove(&resolved)
         .ok_or_else(|| anyhow::anyhow!("Codex account not found: {resolved}"))?;
-    let removed_tokens = account.tokens.clone();
     let removed = CodexAccountInfo {
         id: resolved,
         label: account.label,
@@ -460,23 +461,15 @@ fn remove_account_from_store(
         is_active: removed_was_active,
     };
 
-    let next_active_tokens = if removed_was_active {
+    if removed_was_active {
         if let Some(next_id) = first_account_id(store) {
-            store.active_account_id = next_id.clone();
-            store.accounts.get(&next_id).map(|a| a.tokens.clone())
+            store.active_account_id = next_id;
         } else {
             store.active_account_id.clear();
-            None
         }
-    } else {
-        None
-    };
+    }
 
-    Ok(RemovedCodexAccount {
-        info: removed,
-        tokens: removed_tokens,
-        next_active_tokens,
-    })
+    Ok(removed)
 }
 
 pub fn list_accounts() -> Vec<CodexAccountInfo> {
@@ -556,36 +549,39 @@ fn save_account_from_auth_at_path(
 
     let base_account_id = derive_account_id(&tokens);
     let mut store =
-        load_credentials_store_from_path(store_path).unwrap_or_else(|| CodexCredentialsStore {
+        load_credentials_store_for_update(store_path)?.unwrap_or_else(|| CodexCredentialsStore {
             version: 1,
             active_account_id: base_account_id.clone(),
             accounts: HashMap::new(),
         });
 
-    let existing_same_identity = store
+    // Scan every stored account (not just the base-id key) so an account that
+    // was stored under a collision-suffixed id (e.g. `acct_x-2`) is updated in
+    // place instead of re-importing as `acct_x-3`, `acct_x-4`, ...
+    let existing_identity_id = store
         .accounts
-        .get(&base_account_id)
-        .map(|existing| same_token_identity(&existing.tokens, &tokens))
-        .unwrap_or(false);
+        .iter()
+        .find(|(_, existing)| same_token_identity(&existing.tokens, &tokens))
+        .map(|(id, _)| id.clone());
 
-    if existing_same_identity {
-        validate_label_available(&store, &base_account_id, label)?;
-        if let Some(existing) = store.accounts.get_mut(&base_account_id) {
+    if let Some(existing_id) = existing_identity_id {
+        validate_label_available(&store, &existing_id, label)?;
+        if let Some(existing) = store.accounts.get_mut(&existing_id) {
             existing.tokens = tokens;
             if let Some(label) = label.map(str::trim).filter(|s| !s.is_empty()) {
                 existing.label = Some(label.to_string());
             }
         }
         if make_active {
-            store.active_account_id = base_account_id.clone();
+            store.active_account_id = existing_id.clone();
         }
         save_credentials_store_at_path(store_path, &store)?;
 
         let account = store
             .accounts
-            .get(&base_account_id)
+            .get(&existing_id)
             .ok_or_else(|| anyhow::anyhow!("Failed to save Codex account"))?;
-        return Ok(account_info(&store, &base_account_id, account));
+        return Ok(account_info(&store, &existing_id, account));
     }
 
     let account_id = if store.accounts.contains_key(&base_account_id) {
@@ -932,21 +928,15 @@ pub fn switch_active_account(name_or_id: &str) -> Result<CodexAccountInfo> {
     Ok(account_info(&store, &resolved, &account))
 }
 
+/// Removes an account from tokscale's store only. The codex CLI's own
+/// `auth.json` is intentionally left untouched: rewriting it would silently
+/// re-log the codex CLI into a different account (or log it out entirely).
 pub fn remove_account(name_or_id: &str) -> Result<CodexAccountInfo> {
     let mut store =
         load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Codex accounts"))?;
-    let removal = remove_account_from_store(&mut store, name_or_id)?;
-
-    if let Some(tokens) = removal.next_active_tokens {
-        let path = auth_write_path()?;
-        save_auth_tokens(&path, &tokens)?;
-    } else if removal.info.is_active {
-        let path = auth_write_path()?;
-        remove_auth_file_if_account_matches(&path, &removal.info.id, &removal.tokens)?;
-    }
-
+    let removed = remove_account_from_store(&mut store, name_or_id)?;
     save_credentials_store(&store)?;
-    Ok(removal.info)
+    Ok(removed)
 }
 
 pub fn run_codex_import(name: Option<String>) -> Result<()> {
@@ -1031,8 +1021,12 @@ pub fn run_codex_remove(name: &str) -> Result<()> {
     let display = info.label.as_deref().unwrap_or(&info.id);
 
     println!(
-        "\n  {}\n",
-        format!("Removed Codex account {}", display.bold()).green()
+        "\n  {}",
+        format!("Stopped tracking Codex account {}", display.bold()).green()
+    );
+    println!(
+        "{}\n",
+        "  The codex CLI login was not changed.".bright_black()
     );
 
     Ok(())
@@ -1343,43 +1337,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_auth_file_if_account_matches_deletes_matching_auth() -> Result<()> {
-        let tmp = TempDir::new()?;
-        let path = tmp.path().join("auth.json");
-        save_auth_tokens(&path, &tokens("access-a", Some("acct_a")))?;
-
-        remove_auth_file_if_account_matches(&path, "acct_a", &tokens("access-a", Some("acct_a")))?;
-
-        assert!(!path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn remove_auth_file_if_account_matches_keeps_other_auth() -> Result<()> {
-        let tmp = TempDir::new()?;
-        let path = tmp.path().join("auth.json");
-        save_auth_tokens(&path, &tokens("access-b", Some("acct_b")))?;
-
-        remove_auth_file_if_account_matches(&path, "acct_a", &tokens("access-a", Some("acct_a")))?;
-
-        assert!(path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn remove_auth_file_if_account_matches_deletes_collision_suffixed_account() -> Result<()> {
-        let tmp = TempDir::new()?;
-        let path = tmp.path().join("auth.json");
-        let account_tokens = tokens("access-a", Some("acct_a"));
-        save_auth_tokens(&path, &account_tokens)?;
-
-        remove_auth_file_if_account_matches(&path, "acct_a-2", &account_tokens)?;
-
-        assert!(!path.exists());
-        Ok(())
-    }
-
-    #[test]
     fn remove_account_from_store_keeps_active_when_removing_inactive() -> Result<()> {
         let mut accounts = HashMap::new();
         accounts.insert(
@@ -1404,12 +1361,10 @@ mod tests {
             accounts,
         };
 
-        let removal = remove_account_from_store(&mut store, "personal")?;
+        let removed = remove_account_from_store(&mut store, "personal")?;
 
-        assert_eq!(removal.info.id, "acct_b");
-        assert_eq!(removal.tokens.access_token.as_deref(), Some("access-b"));
-        assert!(!removal.info.is_active);
-        assert!(removal.next_active_tokens.is_none());
+        assert_eq!(removed.id, "acct_b");
+        assert!(!removed.is_active);
         assert_eq!(store.active_account_id, "acct_a");
         assert!(!store.accounts.contains_key("acct_b"));
         Ok(())
@@ -1440,19 +1395,121 @@ mod tests {
             accounts,
         };
 
-        let removal = remove_account_from_store(&mut store, "work")?;
+        let removed = remove_account_from_store(&mut store, "work")?;
 
-        assert_eq!(removal.info.id, "acct_a");
-        assert_eq!(removal.tokens.access_token.as_deref(), Some("access-a"));
-        assert!(removal.info.is_active);
+        assert_eq!(removed.id, "acct_a");
+        assert!(removed.is_active);
         assert_eq!(store.active_account_id, "acct_b");
-        assert_eq!(
-            removal
-                .next_active_tokens
-                .and_then(|tokens| tokens.access_token)
-                .as_deref(),
-            Some("access-b")
+        Ok(())
+    }
+
+    #[test]
+    fn remove_account_from_store_clears_active_when_last_account_removed() -> Result<()> {
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "acct_a".to_string(),
+            CodexAccount {
+                tokens: tokens("access-a", Some("acct_a")),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                label: Some("Work".to_string()),
+            },
         );
+        let mut store = CodexCredentialsStore {
+            version: 1,
+            active_account_id: "acct_a".to_string(),
+            accounts,
+        };
+
+        let removed = remove_account_from_store(&mut store, "acct_a")?;
+
+        assert_eq!(removed.id, "acct_a");
+        assert!(removed.is_active);
+        assert!(store.accounts.is_empty());
+        assert!(store.active_account_id.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn save_account_from_auth_reuses_suffixed_account_with_same_identity() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let store_path = tmp.path().join("codex-credentials.json");
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "acct_shared".to_string(),
+            CodexAccount {
+                tokens: tokens_with_id_token("access-a", Some("acct_other"), "id-token-a"),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "acct_shared-2".to_string(),
+            CodexAccount {
+                tokens: tokens_with_id_token("access-b", Some("acct_shared"), "id-token-b"),
+                created_at: "2026-01-02T00:00:00Z".to_string(),
+                label: Some("personal".to_string()),
+            },
+        );
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: "acct_shared".to_string(),
+                accounts,
+            },
+        )?;
+
+        let info = save_account_from_auth_at_path(
+            &store_path,
+            Auth {
+                tokens: Some(tokens_with_id_token(
+                    "access-c",
+                    Some("acct_shared"),
+                    "id-token-c",
+                )),
+            },
+            None,
+            true,
+        )?;
+
+        assert_eq!(info.id, "acct_shared-2");
+
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        assert_eq!(loaded.accounts.len(), 2);
+        assert!(!loaded.accounts.contains_key("acct_shared-3"));
+        assert_eq!(
+            loaded
+                .accounts
+                .get("acct_shared-2")
+                .and_then(|account| account.tokens.access_token.as_deref()),
+            Some("access-c")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn save_account_from_auth_refuses_to_overwrite_future_store_version() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let store_path = tmp.path().join("codex-credentials.json");
+        let future_store =
+            r#"{"version":2,"vaults":[{"id":"acct_a","sealed":"0xdeadbeef"}],"accounts":{}}"#;
+        std::fs::write(&store_path, future_store)?;
+
+        let result = save_account_from_auth_at_path(
+            &store_path,
+            Auth {
+                tokens: Some(tokens("access-a", Some("acct_a"))),
+            },
+            None,
+            true,
+        );
+
+        let error = result.expect_err("future-version store must not be overwritten");
+        assert!(
+            error.to_string().contains("version 2"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(std::fs::read_to_string(&store_path)?, future_store);
         Ok(())
     }
 }

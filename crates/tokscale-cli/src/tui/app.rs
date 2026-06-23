@@ -188,6 +188,11 @@ enum CodexLoginEvent {
     Finished(CodexLoginOutcome),
 }
 
+/// Shared handle to the spawned `codex login` child process. The login worker
+/// polls it via `try_wait`; the TUI takes the child out of the slot to kill it
+/// on dismiss or exit (an emptied slot tells the worker it was cancelled).
+type CodexLoginChildSlot = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>;
+
 struct MinutelySortCache {
     sort_field: SortField,
     sort_direction: SortDirection,
@@ -263,6 +268,7 @@ pub struct App {
     #[cfg(test)]
     usage_fetcher: UsageFetcher,
     codex_login_rx: Option<std::sync::mpsc::Receiver<CodexLoginEvent>>,
+    codex_login_child: Option<CodexLoginChildSlot>,
 
     data_version: u64,
     minutely_sort_cache: RefCell<Option<MinutelySortCache>>,
@@ -383,6 +389,7 @@ impl App {
             #[cfg(test)]
             usage_fetcher: test_usage_fetcher,
             codex_login_rx: None,
+            codex_login_child: None,
             data_version: 0,
             minutely_sort_cache: RefCell::new(None),
         };
@@ -562,6 +569,7 @@ impl App {
 
         if finished {
             self.codex_login_rx = None;
+            self.codex_login_child = None;
             if matches!(
                 self.codex_login_outcome,
                 Some(CodexLoginOutcome::Imported(_))
@@ -680,7 +688,7 @@ impl App {
                 self.open_group_by_picker();
             }
             KeyCode::Char('u') if self.current_tab == Tab::Usage => {
-                self.fetch_subscription_usage();
+                self.refresh_usage();
             }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
@@ -794,15 +802,37 @@ impl App {
 
         let (tx, rx) = std::sync::mpsc::channel();
         self.codex_login_rx = Some(rx);
+        let child_slot = CodexLoginChildSlot::default();
+        self.codex_login_child = Some(std::sync::Arc::clone(&child_slot));
         self.set_status("Starting Codex login...");
-        std::thread::spawn(move || run_codex_login_worker(tx));
+        std::thread::spawn(move || run_codex_login_worker(tx, child_slot));
     }
 
     fn dismiss_codex_login(&mut self) {
-        if self.codex_login_rx.is_none() {
+        if self.codex_login_rx.is_some() {
+            self.kill_codex_login_child();
+            self.codex_login_rx = None;
             self.codex_login_lines.clear();
             self.codex_login_outcome = None;
-            self.set_status("Codex login panel dismissed");
+            self.set_status("Codex login cancelled");
+            return;
+        }
+
+        self.codex_login_lines.clear();
+        self.codex_login_outcome = None;
+        self.set_status("Codex login panel dismissed");
+    }
+
+    /// Kills any in-flight `codex login` child process. Called on dismiss and
+    /// on TUI exit so a dangling login can't keep holding the OAuth port.
+    pub fn kill_codex_login_child(&mut self) {
+        let Some(slot) = self.codex_login_child.take() else {
+            return;
+        };
+        let child = slot.lock().ok().and_then(|mut child| child.take());
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -844,7 +874,9 @@ impl App {
                 }
                 self.persist_subscription_usage_cache();
                 let display = info.label.as_deref().unwrap_or(&info.id);
-                self.set_status(&format!("Removed Codex account: {display}"));
+                self.set_status(&format!(
+                    "Stopped tracking Codex account: {display} (codex CLI login unchanged)"
+                ));
             }
             Err(e) => {
                 self.set_status(&format!("Codex account removal failed: {e}"));
@@ -1741,8 +1773,11 @@ impl App {
     }
 }
 
-fn run_codex_login_worker(tx: std::sync::mpsc::Sender<CodexLoginEvent>) {
-    let result = run_codex_login_worker_inner(tx.clone());
+fn run_codex_login_worker(
+    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    child_slot: CodexLoginChildSlot,
+) {
+    let result = run_codex_login_worker_inner(tx.clone(), child_slot);
     let outcome = match result {
         Ok(info) => CodexLoginOutcome::Imported(info),
         Err(e) => CodexLoginOutcome::Failed(e.to_string()),
@@ -1752,13 +1787,14 @@ fn run_codex_login_worker(tx: std::sync::mpsc::Sender<CodexLoginEvent>) {
 
 fn run_codex_login_worker_inner(
     tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    child_slot: CodexLoginChildSlot,
 ) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
     let codex_home =
         std::env::temp_dir().join(format!("tokscale-codex-login-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&codex_home)
         .map_err(|e| anyhow::anyhow!("failed to create temporary Codex home: {e}"))?;
 
-    let result = run_codex_login_in_home(&codex_home, tx);
+    let result = run_codex_login_in_home(&codex_home, tx, child_slot);
     let _ = std::fs::remove_dir_all(&codex_home);
     result
 }
@@ -1766,6 +1802,7 @@ fn run_codex_login_worker_inner(
 fn run_codex_login_in_home(
     codex_home: &std::path::Path,
     tx: std::sync::mpsc::Sender<CodexLoginEvent>,
+    child_slot: CodexLoginChildSlot,
 ) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
     let _ = tx.send(CodexLoginEvent::Output(
         "Starting Codex browser login".to_string(),
@@ -1797,12 +1834,20 @@ fn run_codex_login_in_home(
         ));
     }
 
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("failed to wait for codex login: {e}"))?;
+    if let Ok(mut slot) = child_slot.lock() {
+        *slot = Some(child);
+    } else {
+        anyhow::bail!("codex login state lock poisoned");
+    }
+
+    let status = wait_for_codex_login_child(&child_slot);
     for reader in readers {
         let _ = reader.join();
     }
+    let Some(status) = status? else {
+        // The TUI emptied the slot: the login was dismissed or the app exited.
+        anyhow::bail!("Codex login cancelled");
+    };
 
     if !status.success() {
         let output_lines = output_lines
@@ -1815,6 +1860,35 @@ fn run_codex_login_in_home(
     let auth_path = codex_home.join("auth.json");
     let _ = crate::commands::usage::codex::save_current_account_as_active(None);
     crate::commands::usage::codex::import_auth_file_without_activating(&auth_path, None)
+}
+
+/// Polls the login child until it exits. Returns `Ok(None)` when the TUI took
+/// the child out of the slot to kill it (dismiss or app exit).
+fn wait_for_codex_login_child(
+    child_slot: &CodexLoginChildSlot,
+) -> Result<Option<std::process::ExitStatus>> {
+    loop {
+        {
+            let mut slot = child_slot
+                .lock()
+                .map_err(|_| anyhow::anyhow!("codex login state lock poisoned"))?;
+            let Some(child) = slot.as_mut() else {
+                return Ok(None);
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    *slot = None;
+                    return Ok(Some(status));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    *slot = None;
+                    return Err(anyhow::anyhow!("failed to wait for codex login: {e}"));
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
 }
 
 fn spawn_codex_login_output_reader<R>(
@@ -3422,6 +3496,70 @@ mod tests {
         assert!(app.codex_login_lines.is_empty());
         assert!(app.codex_login_outcome.is_none());
         assert!(!app.should_show_codex_login_panel());
+    }
+
+    #[test]
+    fn test_wait_for_codex_login_child_returns_none_when_cancelled() {
+        let slot = CodexLoginChildSlot::default();
+        let status = wait_for_codex_login_child(&slot).unwrap();
+        assert!(status.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wait_for_codex_login_child_reports_exit_status() {
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let slot = CodexLoginChildSlot::default();
+        *slot.lock().unwrap() = Some(child);
+
+        let status = wait_for_codex_login_child(&slot).unwrap();
+
+        assert!(status.unwrap().success());
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dismiss_codex_login_while_running_kills_child() {
+        let mut app = make_app();
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.codex_login_rx = Some(rx);
+        app.codex_login_lines.push("waiting".to_string());
+        let slot = CodexLoginChildSlot::default();
+        *slot.lock().unwrap() = Some(child);
+        app.codex_login_child = Some(std::sync::Arc::clone(&slot));
+
+        app.dismiss_codex_login();
+
+        assert!(app.codex_login_rx.is_none());
+        assert!(app.codex_login_child.is_none());
+        assert!(app.codex_login_lines.is_empty());
+        assert!(app.codex_login_outcome.is_none());
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "child must be taken and killed on dismiss"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Codex login cancelled"));
+    }
+
+    #[test]
+    fn test_dismiss_codex_login_when_idle_clears_panel() {
+        let mut app = make_app();
+        app.codex_login_lines.push("stale".to_string());
+        app.codex_login_outcome = Some(CodexLoginOutcome::Failed("expired".to_string()));
+
+        app.dismiss_codex_login();
+
+        assert!(app.codex_login_lines.is_empty());
+        assert!(app.codex_login_outcome.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex login panel dismissed")
+        );
     }
 
     #[test]

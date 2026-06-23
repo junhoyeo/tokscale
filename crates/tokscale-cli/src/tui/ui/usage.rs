@@ -86,6 +86,7 @@ fn render_action_bar(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
 
     let mut spans = vec![Span::raw(" ")];
     let right_edge = area.x.saturating_add(area.width);
+    let bottom_edge = area.y.saturating_add(area.height);
     push_click_buttons(
         &mut spans,
         app,
@@ -93,6 +94,7 @@ fn render_action_bar(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
         area.x.saturating_add(1),
         area.y,
         right_edge,
+        bottom_edge,
     );
 
     frame.render_widget(
@@ -126,6 +128,7 @@ fn push_click_buttons(
     start_x: u16,
     y: u16,
     right_edge: u16,
+    bottom_edge: u16,
 ) {
     let mut x = start_x;
     for (index, button) in buttons.into_iter().enumerate() {
@@ -138,7 +141,9 @@ fn push_click_buttons(
         let width = rendered.chars().count() as u16;
         spans.push(Span::styled(rendered, button.style));
 
-        if x < right_edge {
+        // Rows past the panel bottom are clipped by the renderer, so a click
+        // area there would be an invisible button hovering over the footer.
+        if x < right_edge && y < bottom_edge {
             app.add_click_area(Rect::new(x, y, width.min(right_edge - x), 1), button.action);
         }
         x = x.saturating_add(width);
@@ -441,7 +446,8 @@ fn push_account_header(lines: &mut Vec<Line>, app: &mut App, output: &UsageOutpu
             .saturating_add(left_width as u16)
             .saturating_add(padding as u16);
         let right_edge = area.x.saturating_add(area.width);
-        push_click_buttons(&mut spans, app, buttons, x, y, right_edge);
+        let bottom_edge = area.y.saturating_add(area.height);
+        push_click_buttons(&mut spans, app, buttons, x, y, right_edge, bottom_edge);
     }
 
     lines.push(Line::from(spans));
@@ -776,6 +782,55 @@ mod tests {
             .click_areas
             .iter()
             .any(|area| matches!(area.action, ClickAction::CodexDismissLogin)));
+    }
+
+    #[test]
+    fn account_button_click_areas_stay_inside_short_panel() {
+        let mut app = make_app();
+        // Enough accounts that later rows fall below the panel on a short
+        // terminal (where the footer would sit in a real layout).
+        app.subscription_usage = (0..8)
+            .map(|index| {
+                output(
+                    "Codex",
+                    Some(UsageAccount {
+                        id: format!("acct_{index}"),
+                        label: Some(format!("account-{index}")),
+                        is_active: index == 0,
+                    }),
+                )
+            })
+            .collect();
+
+        let height = 9u16;
+        let body = render_body(&mut app, 100, height);
+        assert!(body.contains("[Remove]"), "remove button missing\n{body}");
+
+        // The panel border occupies the last row; inner content ends above it.
+        let inner_bottom = height - 1;
+        for area in &app.click_areas {
+            if matches!(
+                area.action,
+                ClickAction::CodexUseAccount { .. } | ClickAction::CodexRemoveAccount { .. }
+            ) {
+                assert!(
+                    area.rect.y < inner_bottom,
+                    "click area for off-screen button leaked below panel: {:?}",
+                    area.rect
+                );
+            }
+        }
+
+        let remove_areas = app
+            .click_areas
+            .iter()
+            .filter(|area| matches!(area.action, ClickAction::CodexRemoveAccount { .. }))
+            .count();
+        assert!(
+            remove_areas < 8,
+            "expected off-screen remove buttons to be skipped, got {remove_areas}"
+        );
+        assert!(remove_areas > 0, "visible remove buttons must register");
     }
 
     #[test]
