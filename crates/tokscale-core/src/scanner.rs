@@ -333,6 +333,10 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "chat-messages.json" => file_name == "chat-messages.json",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                // Antigravity CLI conversation databases. `ends_with(".db")`
+                // naturally rejects the `.db-wal`/`.db-shm`/`.db-journal`
+                // sidecars SQLite writes alongside the main file.
+                "*.db" => file_name.ends_with(".db"),
                 _ => false,
             }
         })

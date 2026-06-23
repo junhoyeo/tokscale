@@ -468,6 +468,24 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Antigravity CLI stores each conversation as a SQLite `.db` under
+    // `~/.gemini/antigravity-cli/conversations/`. Unlike the IDE-backed
+    // `Antigravity` client (which pulls usage from a running language server
+    // over RPC and caches JSONL under the config dir), the CLI usage sits on
+    // disk and is read directly — no RPC, no `antigravity sync` needed. Honors
+    // `GEMINI_CLI_HOME` so a relocated Gemini home is picked up.
+    AntigravityCli = 31 => {
+        id: "antigravity-cli",
+        root: PathRoot::EnvVar {
+            var: "GEMINI_CLI_HOME",
+            fallback_relative: ".gemini",
+        },
+        relative: "antigravity-cli/conversations",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -520,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 31);
+        assert_eq!(ClientId::COUNT, 32);
     }
 
     #[test]

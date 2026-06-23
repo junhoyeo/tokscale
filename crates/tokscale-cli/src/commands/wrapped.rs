@@ -1451,6 +1451,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "crush" => Some("Crush"),
         "goose" => Some("Goose"),
         "antigravity" => Some("Antigravity"),
+        "antigravity-cli" => Some("Antigravity CLI"),
         "zed" => Some("Zed Agent"),
         "warp" => Some("Warp"),
         "cline" => Some("Cline"),
@@ -1491,7 +1492,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Goose" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
         ),
-        "Antigravity" => Some(
+        "Antigravity" | "Antigravity CLI" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
         ),
         "Zed Agent" => Some(

@@ -1426,6 +1426,21 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .collect();
     all_messages.extend(antigravity_messages);
 
+    let antigravity_cli_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::AntigravityCli)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::antigravity_cli::parse_antigravity_cli_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(antigravity_cli_messages);
+
     // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
     let trae_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Trae)
@@ -2608,6 +2623,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let antigravity_count = antigravity_msgs.len() as i32;
     counts.set(ClientId::Antigravity, antigravity_count);
     messages.extend(antigravity_msgs);
+
+    let antigravity_cli_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::AntigravityCli)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::antigravity_cli::parse_antigravity_cli_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let antigravity_cli_count = antigravity_cli_msgs.len() as i32;
+    counts.set(ClientId::AntigravityCli, antigravity_cli_count);
+    messages.extend(antigravity_cli_msgs);
 
     let trae_msgs: Vec<ParsedMessage> = {
         let unique_trae_messages = dedupe_latest_trae_messages(
