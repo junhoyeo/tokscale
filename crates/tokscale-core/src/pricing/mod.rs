@@ -749,6 +749,24 @@ mod tests {
     }
 
     #[test]
+    fn test_grok_composer_2_5_fast_uses_composer_2_5_fast_override() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+        let result = service
+            .lookup_with_source("grok-composer-2.5-fast", None)
+            .unwrap();
+        assert_eq!(result.source, "Cursor");
+        assert_eq!(result.matched_key, "composer-2.5-fast");
+        assert_eq!(result.pricing.input_cost_per_token, Some(1.5e-6));
+        assert_eq!(result.pricing.output_cost_per_token, Some(7.5e-6));
+        assert_eq!(result.pricing.cache_read_input_token_cost, Some(3.5e-7));
+
+        let cost =
+            service.calculate_cost("grok-composer-2.5-fast", 1_000_000, 100_000, 50_000, 0, 0);
+        let expected = 1_000_000.0 * 1.5e-6 + 100_000.0 * 7.5e-6 + 50_000.0 * 3.5e-7;
+        assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
     fn test_cursor_calculate_cost_for_composer_2_5() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         let cost = service.calculate_cost("composer-2.5", 1_000_000, 100_000, 50_000, 0, 0);

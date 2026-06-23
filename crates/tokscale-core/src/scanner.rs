@@ -316,6 +316,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.settings.json" => file_name.ends_with(".settings.json"),
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
+                "updates.jsonl" => file_name == "updates.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
@@ -1356,6 +1357,22 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_directory_updates_jsonl_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+        let session_dir = path.join("workspace/session-1");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        File::create(session_dir.join("updates.jsonl")).unwrap();
+        File::create(session_dir.join("events.jsonl")).unwrap();
+        File::create(session_dir.join("updates.json")).unwrap();
+
+        let updates_files = scan_directory(path.to_str().unwrap(), "updates.jsonl");
+        assert_eq!(updates_files.len(), 1);
+        assert!(updates_files[0].ends_with("updates.jsonl"));
+    }
+
+    #[test]
     fn test_scan_directory_session_pattern() {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
@@ -1571,6 +1588,14 @@ mod tests {
         fs::create_dir_all(&kimi_session).unwrap();
         let mut file = File::create(kimi_session.join("wire.jsonl")).unwrap();
         file.write_all(b"{\"type\": \"metadata\", \"protocol_version\": \"1.3\"}\n")
+            .unwrap();
+    }
+
+    fn setup_mock_grok_dir(base: &std::path::Path) {
+        let grok_session = base.join(".grok/sessions/%2Ftmp%2Fproject/session-uuid-1");
+        fs::create_dir_all(&grok_session).unwrap();
+        let mut file = File::create(grok_session.join("updates.jsonl")).unwrap();
+        file.write_all(b"{\"method\":\"session/update\"}\n")
             .unwrap();
     }
 
@@ -2841,6 +2866,23 @@ mod tests {
         let result = scan_all_clients(home.to_str().unwrap(), &["kimi".to_string()]);
         assert_eq!(result.get(ClientId::Kimi).len(), 1);
         assert!(result.get(ClientId::Kimi)[0].ends_with("wire.jsonl"));
+        assert!(result.get(ClientId::OpenCode).is_empty());
+        assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_grok() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_grok_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["grok".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Grok).len(), 1);
+        assert!(result.get(ClientId::Grok)[0].ends_with("updates.jsonl"));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }

@@ -2,6 +2,7 @@ mod amp;
 mod claude;
 pub mod codex;
 mod copilot;
+mod grok;
 pub mod helpers;
 mod kimi;
 mod minimax;
@@ -173,6 +174,10 @@ fn fetch_copilot() -> Result<Vec<UsageOutput>> {
     copilot::fetch().map(|output| vec![output])
 }
 
+fn fetch_grok() -> Result<Vec<UsageOutput>> {
+    grok::fetch().map(|output| vec![output])
+}
+
 fn fetch_kimi() -> Result<Vec<UsageOutput>> {
     kimi::fetch().map(|output| vec![output])
 }
@@ -196,6 +201,7 @@ pub fn fetch_all() -> Vec<UsageOutput> {
         ("Z.ai", zai::has_credentials, fetch_zai),
         ("Amp", amp::has_credentials, fetch_amp),
         ("Copilot", copilot::has_credentials, fetch_copilot),
+        ("Grok Build", grok::has_credentials, fetch_grok),
         ("Kimi", kimi::has_credentials, fetch_kimi),
         ("MiniMax", minimax::has_credentials, fetch_minimax),
         ("Warp/Oz", warp::has_credentials, fetch_warp),

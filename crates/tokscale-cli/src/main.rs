@@ -913,6 +913,7 @@ pub enum ClientFilter {
     Warp,
     Cline,
     Gjc,
+    Grok,
     Synthetic,
 }
 
@@ -949,6 +950,7 @@ impl ClientFilter {
             Self::Warp => "warp",
             Self::Cline => "cline",
             Self::Gjc => "gjc",
+            Self::Grok => "grok",
             Self::Synthetic => "synthetic",
         }
     }
@@ -988,6 +990,7 @@ impl ClientFilter {
             Self::Warp => Some(ClientId::Warp),
             Self::Cline => Some(ClientId::Cline),
             Self::Gjc => Some(ClientId::Gjc),
+            Self::Grok => Some(ClientId::Grok),
             Self::Synthetic => None,
         }
     }
@@ -1024,6 +1027,7 @@ impl ClientFilter {
             ClientId::Warp => Self::Warp,
             ClientId::Cline => Self::Cline,
             ClientId::Gjc => Self::Gjc,
+            ClientId::Grok => Self::Grok,
         }
     }
 
@@ -1131,6 +1135,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub gjc: bool,
     #[arg(long, hide = true)]
+    pub grok: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -1186,7 +1192,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 28] = [
+    let legacy: [(bool, ClientFilter); 29] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1214,6 +1220,7 @@ fn build_client_filter_with_defaults(
         (flags.warp, ClientFilter::Warp),
         (flags.cline, ClientFilter::Cline),
         (flags.gjc, ClientFilter::Gjc),
+        (flags.grok, ClientFilter::Grok),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -3653,6 +3660,7 @@ fn capitalize_client(client: &str) -> String {
         "hermes" => "Hermes Agent".to_string(),
         "goose" => "Goose".to_string(),
         "warp" => "Warp".to_string(),
+        "grok" => "Grok Build".to_string(),
         "pi" => "Pi".to_string(),
         "gjc" => "Gajae-Code".to_string(),
         other => other.to_string(),
@@ -6061,6 +6069,7 @@ mod tests {
             warp: true,
             cline: true,
             gjc: true,
+            grok: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -6098,6 +6107,7 @@ mod tests {
             "warp",
             "cline",
             "gjc",
+            "grok",
             "synthetic",
         ] {
             assert!(
@@ -7466,6 +7476,23 @@ mod tests {
         assert_eq!(
             ClientFilter::from_client_id(tokscale_core::ClientId::Warp),
             ClientFilter::Warp
+        );
+    }
+
+    #[test]
+    fn client_filter_round_trips_grok() {
+        assert_eq!(
+            ClientFilter::from_filter_str("grok"),
+            Some(ClientFilter::Grok)
+        );
+        assert_eq!(ClientFilter::Grok.as_filter_str(), "grok");
+        assert_eq!(
+            ClientFilter::Grok.to_client_id(),
+            Some(tokscale_core::ClientId::Grok)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Grok),
+            ClientFilter::Grok
         );
     }
 
