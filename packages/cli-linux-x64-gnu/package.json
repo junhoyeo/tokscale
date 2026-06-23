@@ -1,6 +1,6 @@
 {
   "name": "@tokscale/cli-linux-x64-gnu",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "tokscale CLI binary for linux x64 gnu",
   "license": "MIT",
   "type": "module",
