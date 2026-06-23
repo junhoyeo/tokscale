@@ -83,7 +83,7 @@ pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
     }
 }
 
-pub fn scrollbar_state(
+pub fn viewport_scrollbar_state(
     content_len: usize,
     scroll_offset: usize,
     viewport_len: usize,
@@ -342,38 +342,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scrollbar_state_maps_bottom_offset_to_last_position() {
+    fn scrollbar_position_maps_bottom_offset_to_last_position() {
         assert_eq!(scrollbar_position(15, 20, 5), 19);
     }
 
     #[test]
-    fn scrollbar_state_keeps_top_at_zero() {
+    fn scrollbar_position_keeps_top_at_zero() {
         assert_eq!(scrollbar_position(0, 20, 5), 0);
     }
 
     #[test]
-    fn scrollbar_state_clamps_overscroll_to_bottom() {
+    fn scrollbar_position_clamps_overscroll_to_bottom() {
         assert_eq!(scrollbar_position(999, 20, 5), 19);
     }
 
     #[test]
-    fn scrollbar_state_single_page_stays_at_zero() {
+    fn scrollbar_position_single_page_stays_at_zero() {
         assert_eq!(scrollbar_position(0, 5, 10), 0);
     }
 
     #[test]
-    fn scrollbar_state_uses_wide_math_for_large_lengths() {
+    fn scrollbar_position_uses_wide_math_for_large_lengths() {
+        // With usize math, max_scroll * (content_len - 1) would overflow and
+        // panic (debug) or wrap (release). These would fail either way.
         let content_len = usize::MAX;
         let viewport_len = 2;
-        let scroll_offset = content_len / 2;
-        let max_scroll = content_len.saturating_sub(viewport_len);
-        let expected = ((scroll_offset.min(max_scroll) as u128)
-            * (content_len.saturating_sub(1) as u128)
-            / (max_scroll as u128)) as usize;
+        let max_scroll = content_len - viewport_len; // usize::MAX - 2
 
+        // Top of the scroll range maps to position 0.
+        assert_eq!(scrollbar_position(0, content_len, viewport_len), 0);
+        // Bottom of the scroll range maps to the last position:
+        // max_scroll * (content_len - 1) / max_scroll == content_len - 1.
         assert_eq!(
-            scrollbar_position(scroll_offset, content_len, viewport_len),
-            expected
+            scrollbar_position(max_scroll, content_len, viewport_len),
+            usize::MAX - 1
+        );
+        // Overscroll past max_scroll clamps to the same last position.
+        assert_eq!(
+            scrollbar_position(usize::MAX, content_len, viewport_len),
+            usize::MAX - 1
+        );
+    }
+
+    #[test]
+    fn viewport_scrollbar_state_handles_zero_viewport() {
+        // The helper clamps viewport_len to 1, so a zero-height viewport must
+        // not panic and must still produce a usable state.
+        let state = viewport_scrollbar_state(20, 5, 0);
+        assert_eq!(
+            state,
+            ScrollbarState::new(20)
+                .position(5)
+                .viewport_content_length(1)
         );
     }
 

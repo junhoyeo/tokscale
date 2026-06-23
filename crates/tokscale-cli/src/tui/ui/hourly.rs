@@ -6,7 +6,8 @@ use ratatui::widgets::{
 
 use super::hourly_profile;
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, scrollbar_state,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
@@ -339,7 +340,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             .end_symbol(Some("▼"));
 
         let mut scrollbar_state =
-            scrollbar_state(hourly_len, scroll_offset, data_rows_shown.max(1));
+            viewport_scrollbar_state(hourly_len, scroll_offset, data_rows_shown);
 
         frame.render_stateful_widget(
             scrollbar,

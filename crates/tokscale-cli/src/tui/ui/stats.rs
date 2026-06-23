@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
 use super::widgets::{
-    format_cost, format_tokens, get_client_color, get_client_display_name, scrollbar_state,
+    format_cost, format_tokens, get_client_color, get_client_display_name, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, ClickAction};
 
@@ -641,7 +641,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = scrollbar_state(
+        let mut scrollbar_state = viewport_scrollbar_state(
             app.stats_breakdown_total_lines,
             app.scroll_offset,
             visible_height,
