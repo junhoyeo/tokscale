@@ -10,10 +10,10 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-// 19: jcode parser preserves input/cache_read as separate buckets and merges
-// journal sidecars. Cached messages store parsed token buckets and dedup keys,
-// so old entries must be reparsed.
-const CACHE_SCHEMA_VERSION: u32 = 19;
+// 20: Codex fork replay parsing now keeps user-fork turns after repeated child
+// session_meta rows; cached Codex entries from older parser logic can be empty.
+// (19 was the jcode parser change in #718 — bump again so those caches reparse.)
+const CACHE_SCHEMA_VERSION: u32 = 20;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
