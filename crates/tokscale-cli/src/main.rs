@@ -6057,7 +6057,6 @@ mod tests {
             "crush",
             "goose",
             "antigravity",
-            "antigravity-cli",
             "zed",
             "kiro",
             "trae",
