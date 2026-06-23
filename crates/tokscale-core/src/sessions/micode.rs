@@ -184,6 +184,15 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let mut fingerprint_indices: HashMap<MiMoCodeSqliteFingerprint, usize> = HashMap::new();
     let mut dedup_states: Vec<MiMoCodeSqliteDedupState> = Vec::new();
 
+    // Namespace ONLY the row-id fallback by the database. MiMo Code uses
+    // channel-suffixed databases (mimocode.db and mimocode-<channel>.db), and a
+    // mid-session channel switch can write the SAME message to both files. The
+    // embedded message id is globally unique, so it must stay un-namespaced to
+    // collapse those duplicates across files. SQLite rowids, by contrast, are
+    // per-database and not globally unique, so the fallback path namespaces them
+    // to avoid falsely merging two different messages that share a rowid.
+    let db_namespace = db_path.to_string_lossy().to_string();
+
     for row_result in rows {
         let (row_id, session_id, data_json, row_workspace_root) = match row_result {
             Ok(r) => r,
@@ -227,7 +236,13 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let cache_read = cache.read.max(0);
         let cache_write = cache.write.max(0);
         let cost = msg.cost.unwrap_or(0.0).max(0.0);
-        let dedup_key = message_id.clone().unwrap_or(row_id);
+        let dedup_key = match message_id.clone() {
+            // Embedded ids are globally unique: keep them un-namespaced so the
+            // same message in mimocode.db and mimocode-<channel>.db collapses.
+            Some(id) => id,
+            // Rowids are per-database: namespace to avoid false cross-DB merges.
+            None => format!("{db_namespace}:{row_id}"),
+        };
         let fingerprint = MiMoCodeSqliteFingerprint {
             created_bits: msg.time.created.to_bits(),
             completed_bits: msg.time.completed.map(f64::to_bits),
@@ -383,7 +398,114 @@ mod tests {
 
         let messages = parse_micode_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key, Some("msg_assistant".to_string()));
+        // This message carries no embedded JSON id, so the dedup key falls back
+        // to the SQLite row id and is namespaced by the database path.
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":msg_assistant")));
+    }
+
+    /// Regression: MiMo Code uses channel-suffixed databases (mimocode.db and
+    /// mimocode-<channel>.db). A mid-session channel switch can write the SAME
+    /// message (same embedded id) to both files. The embedded id must NOT be
+    /// namespaced by the database, otherwise the cross-file dedup set produces
+    /// two distinct keys and the message's cost + tokens get counted twice.
+    #[test]
+    fn embedded_message_id_is_not_namespaced_by_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_a = dir.path().join("mimocode.db");
+        let db_b = dir.path().join("mimocode-beta.db");
+        // Embedded JSON "id" is the globally unique message id.
+        let msg = r#"{
+            "id": "msg_shared",
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 10, "output": 5 },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        // Different SQLite row ids prove the collapse is driven by the embedded
+        // id (not the row id), exactly as a mid-session channel switch records.
+        for (db, row_id) in [(&db_a, "row_a"), (&db_b, "row_b")] {
+            let conn = create_micode_sqlite_db(db);
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, "ses_1", msg],
+            )
+            .unwrap();
+            drop(conn);
+        }
+
+        let a = parse_micode_sqlite(&db_a);
+        let b = parse_micode_sqlite(&db_b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        // Same embedded id across both channel databases yields IDENTICAL,
+        // un-namespaced dedup keys, so a shared dedup set collapses the
+        // duplicate to a single count.
+        assert_eq!(a[0].dedup_key, Some("msg_shared".to_string()));
+        assert_eq!(b[0].dedup_key, Some("msg_shared".to_string()));
+
+        // Prove the collapse end-to-end with the same HashSet logic used by the
+        // cross-file aggregation in lib.rs.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let kept: Vec<_> = a
+            .into_iter()
+            .chain(b)
+            .filter(|m| m.dedup_key.as_ref().is_none_or(|k| seen.insert(k.clone())))
+            .collect();
+        assert_eq!(kept.len(), 1, "shared embedded id must be counted once");
+    }
+
+    /// Two DIFFERENT messages that happen to share a SQLite rowid across two
+    /// databases (rowids are per-database, not globally unique) must NOT be
+    /// collapsed by the cross-file dedup set. The row-id fallback path is
+    /// namespaced by database precisely to keep them distinct.
+    #[test]
+    fn rowid_fallback_is_namespaced_by_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_a = dir.path().join("a.db");
+        let db_b = dir.path().join("b.db");
+        // No embedded "id" field -> the parser falls back to the SQLite rowid.
+        let msg = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 10, "output": 5 },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        for db in [&db_a, &db_b] {
+            let conn = create_micode_sqlite_db(db);
+            // Same SQLite row id ("id" column) in both databases. With no
+            // embedded JSON id, the parser falls back to this row id.
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["row_shared", "ses_1", msg],
+            )
+            .unwrap();
+            drop(conn);
+        }
+
+        let a = parse_micode_sqlite(&db_a);
+        let b = parse_micode_sqlite(&db_b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        // Same row id ("row_shared") in two databases must yield DISTINCT,
+        // db-namespaced keys so the two unrelated messages are not merged.
+        assert_ne!(a[0].dedup_key, b[0].dedup_key);
+        assert!(a[0].dedup_key.as_deref().unwrap().ends_with(":row_shared"));
+        assert!(b[0].dedup_key.as_deref().unwrap().ends_with(":row_shared"));
+
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let kept: Vec<_> = a
+            .into_iter()
+            .chain(b)
+            .filter(|m| m.dedup_key.as_ref().is_none_or(|k| seen.insert(k.clone())))
+            .collect();
+        assert_eq!(kept.len(), 2, "rowid collisions across DBs must stay distinct");
     }
 
     #[test]
