@@ -24,6 +24,49 @@ pub struct UsageMetric {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UsageResetCredits {
+    pub available_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credits: Vec<UsageResetCredit>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UsageResetCredit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UsageCreditStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_credits: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlimited: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overage_limit_reached: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UsageSpendControl {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub individual_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reached: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UsageOutput {
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,6 +74,12 @@ pub struct UsageOutput {
     pub plan: Option<String>,
     pub email: Option<String>,
     pub metrics: Vec<UsageMetric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<UsageResetCredits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_status: Option<UsageCreditStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_control: Option<UsageSpendControl>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -283,6 +332,14 @@ fn render_light(output: &UsageOutput) {
         let plan = truncate(plan, CARD_WIDTH - 11);
         println!("│ {:<10}{:<width$}│", "Plan", plan, width = CARD_WIDTH - 11);
     }
+    if let Some(ref credits) = output.reset_credits {
+        println!(
+            "│ {:<10}{:<width$}│",
+            "Resets",
+            format!("{} available", credits.available_count),
+            width = CARD_WIDTH - 11
+        );
+    }
     println!("╰{}╯", "─".repeat(CARD_WIDTH));
 }
 
@@ -314,6 +371,9 @@ mod tests {
             plan: None,
             email: None,
             metrics: Vec::new(),
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         };
 
         assert_eq!(output.display_name(), "Codex (work)");
@@ -331,6 +391,9 @@ mod tests {
             plan: None,
             email: Some("user@example.com".to_string()),
             metrics: Vec::new(),
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         };
 
         assert_eq!(output.display_name(), "Codex (user@example.com)");
@@ -348,6 +411,9 @@ mod tests {
             plan: None,
             email: None,
             metrics: Vec::new(),
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         };
 
         assert_eq!(output.display_name(), "Codex (Account 123e45...4000)");

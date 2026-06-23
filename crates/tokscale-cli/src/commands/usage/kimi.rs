@@ -290,6 +290,9 @@ pub fn fetch() -> Result<UsageOutput> {
             plan,
             email: None,
             metrics,
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         })
     })
 }

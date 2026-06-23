@@ -104,6 +104,54 @@ fn scrollbar_position(scroll_offset: usize, content_len: usize, viewport_len: us
     }
 }
 
+pub(crate) fn light_ratio_bar_spans(
+    ratio: f64,
+    width: usize,
+    fill_style: Style,
+    empty_style: Style,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let ratio = ratio.clamp(0.0, 1.0);
+    let scaled = ratio * width as f64;
+    let trace = ratio > 0.0 && ratio < 0.01 && scaled < 1.0;
+    let filled = if ratio > 0.0 && !trace {
+        (scaled.round() as usize).clamp(1, width)
+    } else {
+        0
+    };
+    let empty = width.saturating_sub(filled + usize::from(trace));
+
+    let mut spans = Vec::with_capacity(3);
+    if filled > 0 {
+        spans.push(Span::styled("█".repeat(filled), fill_style));
+    }
+    if trace {
+        spans.push(Span::styled("▏", fill_style));
+    }
+    if empty > 0 {
+        spans.push(Span::styled("·".repeat(empty), empty_style));
+    }
+    spans
+}
+
+pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else if max_chars == 1 {
+        "…".to_string()
+    } else {
+        let head: String = s.chars().take(max_chars - 1).collect();
+        format!("{head}…")
+    }
+}
+
 pub fn get_model_color(model: &str) -> Color {
     get_provider_shade(get_provider_from_model(model), 0)
 }

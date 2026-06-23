@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::helpers::capitalize;
-use super::{UsageAccount, UsageMetric, UsageOutput};
+use super::{
+    UsageAccount, UsageCreditStatus, UsageMetric, UsageOutput, UsageResetCredit, UsageResetCredits,
+    UsageSpendControl,
+};
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
@@ -33,6 +37,11 @@ struct Usage {
     email: Option<String>,
     plan_type: Option<String>,
     rate_limit: Option<RateLimit>,
+    #[serde(default, deserialize_with = "deserialize_null_default_vec")]
+    additional_rate_limits: Vec<AdditionalRateLimit>,
+    rate_limit_reset_credits: Option<ResetCreditsSummary>,
+    credits: Option<Credits>,
+    spend_control: Option<SpendControl>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,8 +54,74 @@ struct RateLimit {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct Window {
-    used_percent: Option<i64>,
+    used_percent: Option<f64>,
+    #[serde(alias = "resets_at")]
     reset_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct AdditionalRateLimit {
+    metered_feature: Option<String>,
+    limit_name: Option<String>,
+    rate_limit: Option<RateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ResetCreditsSummary {
+    available_count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ResetCreditsResponse {
+    available_count: Option<u32>,
+    #[serde(default)]
+    credits: Vec<ResetCredit>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ResetCredit {
+    id: Option<String>,
+    status: Option<String>,
+    reset_type: Option<String>,
+    expires_at: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct Credits {
+    balance: Option<serde_json::Value>,
+    has_credits: Option<bool>,
+    unlimited: Option<bool>,
+    overage_limit_reached: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct SpendControl {
+    individual_limit: Option<serde_json::Value>,
+    reached: Option<bool>,
+}
+
+fn deserialize_null_default_vec<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RateLimitResetConsumeResult {
+    #[serde(default)]
+    pub code: String,
+    pub windows_reset: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,7 +392,9 @@ fn load_credentials_store_for_update(path: &Path) -> Result<Option<CodexCredenti
         return Ok(None);
     }
 
-    if !store.accounts.contains_key(&store.active_account_id) {
+    if !store.active_account_id.trim().is_empty()
+        && !store.accounts.contains_key(&store.active_account_id)
+    {
         if let Some(first_id) = first_account_id(&store) {
             store.active_account_id = first_id;
             let _ = save_credentials_store_at_path(path, &store);
@@ -435,11 +512,7 @@ fn remove_account_from_store(
     };
 
     if removed_was_active {
-        if let Some(next_id) = first_account_id(store) {
-            store.active_account_id = next_id;
-        } else {
-            store.active_account_id.clear();
-        }
+        store.active_account_id.clear();
     }
 
     Ok(removed)
@@ -494,7 +567,11 @@ fn save_account_from_auth_at_path(
     let mut store =
         load_credentials_store_for_update(store_path)?.unwrap_or_else(|| CodexCredentialsStore {
             version: 1,
-            active_account_id: base_account_id.clone(),
+            active_account_id: if make_active {
+                base_account_id.clone()
+            } else {
+                String::new()
+            },
             accounts: HashMap::new(),
         });
 
@@ -545,7 +622,7 @@ fn save_account_from_auth_at_path(
     };
 
     store.accounts.insert(account_id.clone(), account);
-    if make_active || store.active_account_id.trim().is_empty() {
+    if make_active {
         store.active_account_id = account_id.clone();
     }
     save_credentials_store_at_path(store_path, &store)?;
@@ -612,6 +689,9 @@ fn load_account(name_or_id: Option<&str>) -> Result<(String, CodexAccount, Codex
     let resolved = match name_or_id {
         Some(name) => resolve_account_id(&store, name)
             .ok_or_else(|| anyhow::anyhow!("Codex account not found: {name}"))?,
+        None if store.active_account_id.trim().is_empty() => {
+            anyhow::bail!("No active Codex account; pass an account name or switch to one first")
+        }
         None => store.active_account_id.clone(),
     };
     let account = store
@@ -656,6 +736,31 @@ async fn refresh_token(client: &reqwest::Client, rt: &str) -> Result<Refresh> {
     Ok(resp.json().await?)
 }
 
+fn parse_chatgpt_json_body<T>(body: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    if body.trim_start().starts_with('<') {
+        anyhow::bail!("NEEDS_AUTH");
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
+async fn parse_chatgpt_json_response<T>(resp: reqwest::Response, request_label: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        anyhow::bail!("NEEDS_AUTH");
+    }
+    if !status.is_success() {
+        anyhow::bail!("{request_label} failed (HTTP {status})");
+    }
+    let body = resp.text().await?;
+    parse_chatgpt_json_body(&body)
+}
+
 async fn fetch_usage(
     client: &reqwest::Client,
     token: &str,
@@ -673,22 +778,56 @@ async fn fetch_usage(
         req = req.header("ChatGPT-Account-Id", id);
     }
     let resp = req.send().await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        anyhow::bail!("NEEDS_AUTH");
+    parse_chatgpt_json_response(resp, "Codex usage request").await
+}
+
+async fn fetch_reset_credits(
+    client: &reqwest::Client,
+    token: &str,
+    account_id: Option<&str>,
+) -> Result<ResetCreditsResponse> {
+    let mut req = client
+        .get("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        );
+    if let Some(id) = account_id {
+        req = req.header("ChatGPT-Account-Id", id);
     }
-    if !status.is_success() {
-        anyhow::bail!("Codex usage request failed (HTTP {status})");
+    let resp = req.send().await?;
+    parse_chatgpt_json_response(resp, "Codex reset credits request").await
+}
+
+async fn consume_reset_credit(
+    client: &reqwest::Client,
+    token: &str,
+    account_id: Option<&str>,
+    redeem_request_id: &str,
+) -> Result<RateLimitResetConsumeResult> {
+    let mut req = client
+        .post("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        )
+        .json(&serde_json::json!({
+            "redeem_request_id": redeem_request_id,
+        }));
+    if let Some(id) = account_id {
+        req = req.header("ChatGPT-Account-Id", id);
     }
-    let body = resp.text().await?;
-    if body.trim().starts_with('<') {
-        anyhow::bail!("NEEDS_AUTH");
-    }
-    Ok(serde_json::from_str(&body)?)
+    let resp = req.send().await?;
+    parse_chatgpt_json_response(resp, "Codex reset request").await
 }
 
 fn metric_from_window(label: &str, window: &Window) -> UsageMetric {
-    let pct = window.used_percent.unwrap_or(0).clamp(0, 100) as f64;
+    let pct = window.used_percent.unwrap_or(0.0).clamp(0.0, 100.0);
     UsageMetric {
         label: label.into(),
         used_percent: pct,
@@ -698,6 +837,67 @@ fn metric_from_window(label: &str, window: &Window) -> UsageMetric {
             .reset_at
             .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
             .map(|dt| dt.to_rfc3339()),
+    }
+}
+
+fn push_rate_limit_metrics(
+    metrics: &mut Vec<UsageMetric>,
+    prefix: Option<&str>,
+    rate_limit: &RateLimit,
+) {
+    let label_prefix = prefix.map(str::trim).filter(|label| !label.is_empty());
+    if let Some(ref w) = rate_limit.primary_window {
+        let label = label_prefix
+            .map(|prefix| format!("{prefix} 5h"))
+            .unwrap_or_else(|| "5h".to_string());
+        metrics.push(metric_from_window(&label, w));
+    }
+    if let Some(ref w) = rate_limit.secondary_window {
+        let label = label_prefix
+            .map(|prefix| format!("{prefix} week"))
+            .unwrap_or_else(|| "Weekly".to_string());
+        metrics.push(metric_from_window(&label, w));
+    }
+}
+
+fn reset_credits_from_summary(summary: Option<&ResetCreditsSummary>) -> Option<UsageResetCredits> {
+    summary.and_then(|summary| {
+        summary
+            .available_count
+            .map(|available_count| UsageResetCredits {
+                available_count,
+                credits: Vec::new(),
+            })
+    })
+}
+
+fn reset_credits_from_response(response: ResetCreditsResponse) -> Option<UsageResetCredits> {
+    response
+        .available_count
+        .map(|available_count| UsageResetCredits {
+            available_count,
+            credits: response
+                .credits
+                .into_iter()
+                .map(|credit| UsageResetCredit {
+                    id: credit.id,
+                    status: credit.status,
+                    reset_type: credit.reset_type,
+                    expires_at: credit.expires_at,
+                    title: credit.title,
+                    description: credit.description,
+                })
+                .collect(),
+        })
+}
+
+fn json_scalar_string(value: Option<serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) => Some(value),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
     }
 }
 
@@ -716,6 +916,8 @@ async fn fetch_with_auth_async(
         .ok_or_else(|| anyhow::anyhow!("No Codex access token."))?;
 
     let client = reqwest::Client::new();
+    let mut effective_tokens = tokens.clone();
+    let mut effective_access_token = access_token.clone();
     let resp = match fetch_usage(&client, &access_token, tokens.account_id.as_deref()).await {
         Ok(r) => r,
         Err(e) if e.to_string().contains("NEEDS_AUTH") => {
@@ -735,6 +937,8 @@ async fn fetch_with_auth_async(
                 updated_tokens.refresh_token = Some(new_rt);
             }
             persist_tokens(&source, &updated_tokens);
+            effective_access_token = new.clone();
+            effective_tokens = updated_tokens.clone();
 
             fetch_usage(&client, &new, updated_tokens.account_id.as_deref()).await?
         }
@@ -744,13 +948,46 @@ async fn fetch_with_auth_async(
     let plan = resp.plan_type.as_deref().map(capitalize);
     let mut metrics = Vec::new();
     if let Some(ref rl) = resp.rate_limit {
-        if let Some(ref w) = rl.primary_window {
-            metrics.push(metric_from_window("Session", w));
-        }
-        if let Some(ref w) = rl.secondary_window {
-            metrics.push(metric_from_window("Weekly", w));
+        push_rate_limit_metrics(&mut metrics, None, rl);
+    }
+    for limit in &resp.additional_rate_limits {
+        if let Some(rate_limit) = &limit.rate_limit {
+            let label = limit
+                .limit_name
+                .as_deref()
+                .or(limit.metered_feature.as_deref())
+                .map(capitalize);
+            push_rate_limit_metrics(&mut metrics, label.as_deref(), rate_limit);
         }
     }
+
+    let mut reset_credits = reset_credits_from_summary(resp.rate_limit_reset_credits.as_ref());
+    let should_fetch_reset_details = reset_credits
+        .as_ref()
+        .map(|credits| credits.available_count > 0)
+        .unwrap_or(true);
+    if should_fetch_reset_details {
+        if let Ok(details) = fetch_reset_credits(
+            &client,
+            &effective_access_token,
+            effective_tokens.account_id.as_deref(),
+        )
+        .await
+        {
+            reset_credits = reset_credits_from_response(details);
+        }
+    }
+
+    let credit_status = resp.credits.map(|credits| UsageCreditStatus {
+        balance: json_scalar_string(credits.balance),
+        has_credits: credits.has_credits,
+        unlimited: credits.unlimited,
+        overage_limit_reached: credits.overage_limit_reached,
+    });
+    let spend_control = resp.spend_control.map(|control| UsageSpendControl {
+        individual_limit: json_scalar_string(control.individual_limit),
+        reached: control.reached,
+    });
 
     Ok(UsageOutput {
         provider: provider_name,
@@ -758,6 +995,9 @@ async fn fetch_with_auth_async(
         plan,
         email: resp.email,
         metrics,
+        reset_credits,
+        credit_status,
+        spend_control,
     })
 }
 
@@ -779,19 +1019,68 @@ pub fn fetch() -> Result<UsageOutput> {
 }
 
 fn usage_account_from_saved(
-    store: &CodexCredentialsStore,
     account_id: &str,
     account: &CodexAccount,
+    active_account_id: Option<&str>,
 ) -> UsageAccount {
     UsageAccount {
         id: account_id.to_string(),
         label: account.label.clone(),
-        is_active: account_id == store.active_account_id,
+        is_active: active_account_id == Some(account_id),
     }
 }
 
+fn matching_account_id_for_tokens(
+    store: &CodexCredentialsStore,
+    tokens: &Tokens,
+) -> Option<String> {
+    let derived = derive_account_id(tokens);
+    if store
+        .accounts
+        .get(&derived)
+        .is_some_and(|account| same_token_identity(tokens, &account.tokens))
+    {
+        return Some(derived);
+    }
+
+    store
+        .accounts
+        .iter()
+        .find(|(_, account)| same_token_identity(tokens, &account.tokens))
+        .map(|(account_id, _)| account_id.clone())
+        .or_else(|| store.accounts.contains_key(&derived).then_some(derived))
+}
+
+fn current_auth_account_id_in_store(store: &CodexCredentialsStore) -> Option<String> {
+    let (auth, _) = read_current_credentials().ok()?;
+    let tokens = auth.tokens.as_ref()?;
+    matching_account_id_for_tokens(store, tokens)
+}
+
+fn active_account_id_for_usage(store: &mut CodexCredentialsStore) -> Option<String> {
+    let active_account_id = current_auth_account_id_in_store(store).or_else(|| {
+        (!store.active_account_id.trim().is_empty()
+            && store.accounts.contains_key(&store.active_account_id))
+        .then(|| store.active_account_id.clone())
+    });
+
+    match active_account_id.as_ref() {
+        Some(active_account_id) if store.active_account_id != *active_account_id => {
+            store.active_account_id = active_account_id.clone();
+            let _ = save_credentials_store(store);
+        }
+        None if !store.active_account_id.trim().is_empty() => {
+            store.active_account_id.clear();
+            let _ = save_credentials_store(store);
+        }
+        _ => {}
+    }
+
+    active_account_id
+}
+
 pub fn fetch_all() -> Result<Vec<UsageOutput>> {
-    let Some(store) = load_credentials_store() else {
+    let Some(mut store) = load_credentials_store() else {
         return fetch().map(|output| vec![output]);
     };
 
@@ -799,18 +1088,28 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
         return fetch().map(|output| vec![output]);
     }
 
+    let active_account_id = active_account_id_for_usage(&mut store);
     let mut account_ids: Vec<_> = store.accounts.keys().cloned().collect();
-    account_ids.sort_by_key(|id| {
-        (
-            id != &store.active_account_id,
-            account_sort_key(
-                store
-                    .accounts
-                    .get(id)
-                    .and_then(|account| account.label.as_deref()),
-                id,
-            ),
-        )
+    account_ids.sort_by(|a, b| {
+        if active_account_id.as_deref() == Some(a.as_str()) {
+            std::cmp::Ordering::Less
+        } else if active_account_id.as_deref() == Some(b.as_str()) {
+            std::cmp::Ordering::Greater
+        } else {
+            let la = store
+                .accounts
+                .get(a)
+                .and_then(|account| account.label.as_deref())
+                .map(|label| account_sort_key(Some(label), a))
+                .unwrap_or_else(|| account_sort_key(None, a));
+            let lb = store
+                .accounts
+                .get(b)
+                .and_then(|account| account.label.as_deref())
+                .map(|label| account_sort_key(Some(label), b))
+                .unwrap_or_else(|| account_sort_key(None, b));
+            la.cmp(&lb).then_with(|| a.cmp(b))
+        }
     });
 
     let mut outputs = Vec::new();
@@ -819,7 +1118,8 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
         let Some(account) = store.accounts.get(&account_id) else {
             continue;
         };
-        let usage_account = usage_account_from_saved(&store, &account_id, account);
+        let usage_account =
+            usage_account_from_saved(&account_id, account, active_account_id.as_deref());
         match fetch_with_auth(
             auth_from_account(account),
             CredentialSource::Store(account_id.clone()),
@@ -841,6 +1141,79 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
     } else {
         Ok(outputs)
     }
+}
+
+async fn consume_reset_credit_with_auth_async(
+    auth: Auth,
+    source: CredentialSource,
+) -> Result<RateLimitResetConsumeResult> {
+    let tokens = auth
+        .tokens
+        .ok_or_else(|| anyhow::anyhow!("No Codex tokens."))?;
+    let access_token = tokens
+        .access_token
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("No Codex access token."))?;
+    let client = reqwest::Client::new();
+    let redeem_request_id = uuid::Uuid::new_v4().to_string();
+
+    match consume_reset_credit(
+        &client,
+        &access_token,
+        tokens.account_id.as_deref(),
+        &redeem_request_id,
+    )
+    .await
+    {
+        Ok(result) => Ok(result),
+        Err(e) if e.to_string().contains("NEEDS_AUTH") => {
+            let rt_str = tokens
+                .refresh_token
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No refresh token."))?;
+            let refreshed = refresh_token(&client, rt_str).await?;
+            let new = refreshed
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Refresh returned no token."))?;
+
+            let mut updated_tokens = tokens.clone();
+            updated_tokens.access_token = Some(new.clone());
+            if let Some(new_rt) = refreshed.refresh_token {
+                updated_tokens.refresh_token = Some(new_rt);
+            }
+            persist_tokens(&source, &updated_tokens);
+
+            consume_reset_credit(
+                &client,
+                &new,
+                updated_tokens.account_id.as_deref(),
+                &redeem_request_id,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn consume_rate_limit_reset_credit(name_or_id: &str) -> Result<RateLimitResetConsumeResult> {
+    let store =
+        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Codex accounts"))?;
+    let resolved = resolve_account_id(&store, name_or_id)
+        .ok_or_else(|| anyhow::anyhow!("Codex account not found: {name_or_id}"))?;
+    let account = store
+        .accounts
+        .get(&resolved)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Codex account not found: {resolved}"))?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(consume_reset_credit_with_auth_async(
+        auth_from_account(&account),
+        CredentialSource::Store(resolved),
+    ))
 }
 
 fn fetch_saved_account(name_or_id: Option<&str>) -> Result<(CodexAccountInfo, UsageOutput)> {
@@ -1091,6 +1464,51 @@ mod tests {
     }
 
     #[test]
+    fn usage_response_treats_null_additional_rate_limits_as_empty() -> Result<()> {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "email": "plus@example.com",
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 1,
+                    "reset_at": 1781929382
+                },
+                "secondary_window": {
+                    "used_percent": 16,
+                    "reset_at": 1782413780
+                }
+            },
+            "additional_rate_limits": null
+        }))?;
+
+        assert_eq!(usage.email.as_deref(), Some("plus@example.com"));
+        assert!(usage.additional_rate_limits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn chatgpt_json_body_treats_html_as_auth_expiry() {
+        let error = parse_chatgpt_json_body::<ResetCreditsResponse>(
+            "<html><body>please sign in</body></html>",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "NEEDS_AUTH");
+    }
+
+    #[test]
+    fn chatgpt_json_body_parses_reset_credit_response() -> Result<()> {
+        let response: ResetCreditsResponse = parse_chatgpt_json_body(
+            r#"{"available_count":1,"credits":[{"id":"credit_1","status":"available"}]}"#,
+        )?;
+
+        assert_eq!(response.available_count, Some(1));
+        assert_eq!(response.credits.len(), 1);
+        assert_eq!(response.credits[0].id.as_deref(), Some("credit_1"));
+        Ok(())
+    }
+
+    #[test]
     fn derive_account_id_prefers_account_id() {
         let tokens = tokens("access-token", Some("acct_work"));
         assert_eq!(derive_account_id(&tokens), "acct_work");
@@ -1109,6 +1527,74 @@ mod tests {
         let b = tokens_with_id_token("access-b", Some("acct_shared"), "id-token-b");
 
         assert!(same_token_identity(&a, &b));
+    }
+
+    #[test]
+    fn usage_active_account_matches_current_token_identity() {
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "acct_a".to_string(),
+            CodexAccount {
+                tokens: tokens("access-a", Some("acct_a")),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                label: Some("work".to_string()),
+            },
+        );
+        accounts.insert(
+            "acct_b".to_string(),
+            CodexAccount {
+                tokens: tokens("access-b", Some("acct_b")),
+                created_at: "2026-01-02T00:00:00Z".to_string(),
+                label: Some("personal".to_string()),
+            },
+        );
+        let store = CodexCredentialsStore {
+            version: 1,
+            active_account_id: "acct_a".to_string(),
+            accounts,
+        };
+
+        let current_tokens = tokens("rotated-access-b", Some("acct_b"));
+        let active_id = matching_account_id_for_tokens(&store, &current_tokens);
+        assert_eq!(active_id.as_deref(), Some("acct_b"));
+
+        let account_a = store.accounts.get("acct_a").unwrap();
+        let account_b = store.accounts.get("acct_b").unwrap();
+        assert!(!usage_account_from_saved("acct_a", account_a, active_id.as_deref()).is_active);
+        assert!(usage_account_from_saved("acct_b", account_b, active_id.as_deref()).is_active);
+    }
+
+    #[test]
+    fn usage_active_account_handles_collision_suffixed_account_ids() {
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "acct_shared".to_string(),
+            CodexAccount {
+                tokens: tokens_with_id_token("access-a", Some("acct_other"), "id-token-a"),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                label: Some("old".to_string()),
+            },
+        );
+        accounts.insert(
+            "acct_shared-2".to_string(),
+            CodexAccount {
+                tokens: tokens_with_id_token("access-b", Some("acct_shared"), "id-token-b"),
+                created_at: "2026-01-02T00:00:00Z".to_string(),
+                label: Some("current".to_string()),
+            },
+        );
+        let store = CodexCredentialsStore {
+            version: 1,
+            active_account_id: "acct_shared".to_string(),
+            accounts,
+        };
+
+        let current_tokens =
+            tokens_with_id_token("rotated-access", Some("acct_shared"), "id-token-b");
+        assert_eq!(
+            matching_account_id_for_tokens(&store, &current_tokens).as_deref(),
+            Some("acct_shared-2")
+        );
     }
 
     #[test]
@@ -1141,6 +1627,33 @@ mod tests {
 
         let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.active_account_id, "acct_b");
+        Ok(())
+    }
+
+    #[test]
+    fn load_credentials_store_preserves_empty_active_account() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "acct_a".to_string(),
+            CodexAccount {
+                tokens: tokens("access-a", Some("acct_a")),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                label: Some("work".to_string()),
+            },
+        );
+        let store = CodexCredentialsStore {
+            version: 1,
+            active_account_id: String::new(),
+            accounts,
+        };
+        let store_path = test_store_path(&tmp);
+        save_credentials_store_at_path(&store_path, &store)?;
+
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        assert!(loaded.active_account_id.is_empty());
+        let account = loaded.accounts.get("acct_a").unwrap();
+        assert!(!account_info(&loaded, "acct_a", account).is_active);
         Ok(())
     }
 
@@ -1341,7 +1854,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_account_from_store_selects_next_active_when_removing_active() -> Result<()> {
+    fn remove_account_from_store_clears_active_when_removing_active() -> Result<()> {
         let mut accounts = HashMap::new();
         accounts.insert(
             "acct_a".to_string(),
@@ -1369,7 +1882,9 @@ mod tests {
 
         assert_eq!(removed.id, "acct_a");
         assert!(removed.is_active);
-        assert_eq!(store.active_account_id, "acct_b");
+        assert!(store.active_account_id.is_empty());
+        let account_b = store.accounts.get("acct_b").unwrap();
+        assert!(!usage_account_from_saved("acct_b", account_b, None).is_active);
         Ok(())
     }
 
