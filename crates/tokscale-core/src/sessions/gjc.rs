@@ -195,7 +195,22 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
 
         let cost = embedded_cost(&usage);
 
-        let session = session_id.clone().unwrap_or_else(|| "unknown".to_string());
+        // No `{"type":"session",...}` header in this file: fall back to the file
+        // name rather than a shared `"unknown"`, so two independent header-less
+        // files do not collide on the same session in the cross-file dedup set.
+        //
+        // Caveat: a header-less depth-2 replay keys off its own (per-pass) file
+        // stem, so it will NOT collapse against a header-less depth-1 parent the
+        // way a shared session id would. The documented depth-1/depth-2
+        // replay-collapse guarantee (see module doc above and lib.rs dispatch)
+        // therefore holds for HEADERED files only — the realistic case, since
+        // real gjc sessions always carry a `{"type":"session"}` header.
+        let session = session_id.clone().unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| "unknown".to_string())
+        });
         let dedup_key = match entry.id.filter(|s| !s.is_empty()) {
             Some(msg_id) => format!("{session}:{msg_id}"),
             None => derive_dedup_key(&session, timestamp, &model, &tokens, ordinal),
@@ -274,6 +289,51 @@ not valid json at all
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn test_parse_gjc_headerless_files_get_distinct_sessions_from_filename() {
+        // Two independent files with no `{"type":"session"}` header, each with
+        // the same message id. The session falls back to the file name, so they
+        // get distinct sessions and dedup keys instead of colliding on
+        // "unknown:msg_1".
+        let dir = tempfile::tempdir().unwrap();
+        let line = r#"{"type":"message","id":"msg_1","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1767225601000,"usage":{"input":1,"output":1,"cost":{"total":0.01}}}}"#;
+        let path_a = dir.path().join("session_a.jsonl");
+        let path_b = dir.path().join("session_b.jsonl");
+        std::fs::write(&path_a, line).unwrap();
+        std::fs::write(&path_b, line).unwrap();
+
+        let a = parse_gjc_file(&path_a);
+        let b = parse_gjc_file(&path_b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].session_id, "session_a");
+        assert_eq!(b[0].session_id, "session_b");
+        assert_ne!(a[0].dedup_key, b[0].dedup_key);
+    }
+
+    #[test]
+    fn test_parse_gjc_header_session_id_wins_over_file_stem() {
+        // The file HAS a `{"type":"session"}` header whose id deliberately
+        // differs from the file stem. The file-stem fallback must apply only
+        // when no header is present, so the session id is taken from the header
+        // and the (colliding-looking) stem is ignored.
+        let dir = tempfile::tempdir().unwrap();
+        let content = r#"{"type":"session","id":"gjc_ses_header","cwd":"/tmp"}
+{"type":"message","id":"msg_1","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1767225601000,"usage":{"input":1,"output":1,"cost":{"total":0.01}}}}"#;
+        // Stem is "unknown" on purpose: if the fallback ever leaked past a
+        // present header, the session id would read "unknown" and this fails.
+        let path = dir.path().join("unknown.jsonl");
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_gjc_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "gjc_ses_header");
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("gjc_ses_header:msg_1".to_string())
+        );
     }
 
     #[test]
