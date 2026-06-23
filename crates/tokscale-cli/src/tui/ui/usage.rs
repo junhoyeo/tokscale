@@ -37,8 +37,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if app.subscription_usage.iter().all(|o| o.metrics.is_empty()) {
         render_empty(frame, app, content);
     } else {
-        let outputs = app.subscription_usage.clone();
+        // Take the outputs out so render_loaded can borrow `app` mutably for
+        // click-area registration without cloning every frame.
+        let outputs = std::mem::take(&mut app.subscription_usage);
         render_loaded(frame, app, content, &outputs);
+        app.subscription_usage = outputs;
     }
 }
 

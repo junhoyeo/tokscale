@@ -160,51 +160,54 @@ pub fn load_cache() -> Option<Vec<UsageOutput>> {
 
 // ── Public API ──
 
-type UsageProvider = (&'static str, fn() -> bool, fn() -> Result<Vec<UsageOutput>>);
-
-fn fetch_amp() -> Result<Vec<UsageOutput>> {
-    amp::fetch().map(|output| vec![output])
+#[derive(Clone, Copy)]
+enum Fetch {
+    Single(fn() -> Result<UsageOutput>),
+    Multi(fn() -> Result<Vec<UsageOutput>>),
 }
 
-fn fetch_claude() -> Result<Vec<UsageOutput>> {
-    claude::fetch().map(|output| vec![output])
+impl Fetch {
+    fn call(self) -> Result<Vec<UsageOutput>> {
+        match self {
+            Fetch::Single(fetch) => fetch().map(|output| vec![output]),
+            Fetch::Multi(fetch) => fetch(),
+        }
+    }
 }
 
-fn fetch_copilot() -> Result<Vec<UsageOutput>> {
-    copilot::fetch().map(|output| vec![output])
-}
-
-fn fetch_grok() -> Result<Vec<UsageOutput>> {
-    grok::fetch().map(|output| vec![output])
-}
-
-fn fetch_kimi() -> Result<Vec<UsageOutput>> {
-    kimi::fetch().map(|output| vec![output])
-}
-
-fn fetch_minimax() -> Result<Vec<UsageOutput>> {
-    minimax::fetch().map(|output| vec![output])
-}
-
-fn fetch_warp() -> Result<Vec<UsageOutput>> {
-    warp::fetch().map(|output| vec![output])
-}
-
-fn fetch_zai() -> Result<Vec<UsageOutput>> {
-    zai::fetch().map(|output| vec![output])
-}
+type UsageProvider = (&'static str, fn() -> bool, Fetch);
 
 pub fn fetch_all() -> Vec<UsageOutput> {
     let providers: Vec<UsageProvider> = vec![
-        ("Claude", claude::has_credentials, fetch_claude),
-        ("Codex", codex::has_credentials, codex::fetch_all),
-        ("Z.ai", zai::has_credentials, fetch_zai),
-        ("Amp", amp::has_credentials, fetch_amp),
-        ("Copilot", copilot::has_credentials, fetch_copilot),
-        ("Grok Build", grok::has_credentials, fetch_grok),
-        ("Kimi", kimi::has_credentials, fetch_kimi),
-        ("MiniMax", minimax::has_credentials, fetch_minimax),
-        ("Warp/Oz", warp::has_credentials, fetch_warp),
+        (
+            "Claude",
+            claude::has_credentials,
+            Fetch::Single(claude::fetch),
+        ),
+        (
+            "Codex",
+            codex::has_credentials,
+            Fetch::Multi(codex::fetch_all),
+        ),
+        ("Z.ai", zai::has_credentials, Fetch::Single(zai::fetch)),
+        ("Amp", amp::has_credentials, Fetch::Single(amp::fetch)),
+        (
+            "Copilot",
+            copilot::has_credentials,
+            Fetch::Single(copilot::fetch),
+        ),
+        (
+            "Grok Build",
+            grok::has_credentials,
+            Fetch::Single(grok::fetch),
+        ),
+        ("Kimi", kimi::has_credentials, Fetch::Single(kimi::fetch)),
+        (
+            "MiniMax",
+            minimax::has_credentials,
+            Fetch::Single(minimax::fetch),
+        ),
+        ("Warp/Oz", warp::has_credentials, Fetch::Single(warp::fetch)),
     ];
 
     let active: Vec<_> = providers.into_iter().filter(|(_, has, _)| has()).collect();
@@ -216,7 +219,7 @@ pub fn fetch_all() -> Vec<UsageOutput> {
     std::thread::scope(|s| {
         active
             .into_iter()
-            .map(|(_, _, fetch)| s.spawn(move || fetch().ok()))
+            .map(|(_, _, fetch)| s.spawn(move || fetch.call().ok()))
             .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|h| h.join().ok().flatten())

@@ -174,14 +174,6 @@ pub enum CodexLoginOutcome {
     Failed(String),
 }
 
-#[cfg(test)]
-type UsageFetcher = fn() -> Vec<crate::commands::usage::UsageOutput>;
-
-#[cfg(test)]
-fn test_usage_fetcher() -> Vec<crate::commands::usage::UsageOutput> {
-    Vec::new()
-}
-
 #[derive(Debug, Clone)]
 enum CodexLoginEvent {
     Output(String),
@@ -265,8 +257,6 @@ pub struct App {
 
     pub usage_fetch_attempted: bool,
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
-    #[cfg(test)]
-    usage_fetcher: UsageFetcher,
     codex_login_rx: Option<std::sync::mpsc::Receiver<CodexLoginEvent>>,
     codex_login_child: Option<CodexLoginChildSlot>,
 
@@ -386,8 +376,6 @@ impl App {
             codex_login_outcome: None,
             usage_fetch_attempted: false,
             usage_rx: None,
-            #[cfg(test)]
-            usage_fetcher: test_usage_fetcher,
             codex_login_rx: None,
             codex_login_child: None,
             data_version: 0,
@@ -721,11 +709,10 @@ impl App {
         self.status_message_time = Some(std::time::Instant::now());
         let (tx, rx) = std::sync::mpsc::channel();
         self.usage_rx = Some(rx);
-        #[cfg(test)]
-        let usage_fetcher = self.usage_fetcher;
         std::thread::spawn(move || {
+            // Tests must not hit real provider endpoints or credentials.
             #[cfg(test)]
-            let results = usage_fetcher();
+            let results = Vec::new();
             #[cfg(not(test))]
             let results = crate::commands::usage::fetch_all();
             let _ = tx.send(results);
@@ -1858,8 +1845,11 @@ fn run_codex_login_in_home(
     }
 
     let auth_path = codex_home.join("auth.json");
-    let _ = crate::commands::usage::codex::save_current_account_as_active(None);
-    crate::commands::usage::codex::import_auth_file_without_activating(&auth_path, None)
+    let import = crate::commands::usage::codex::import_login_auth_file(&auth_path)?;
+    if let Some(warning) = import.warning {
+        let _ = tx.send(CodexLoginEvent::Output(warning));
+    }
+    Ok(import.info)
 }
 
 /// Polls the login child until it exits. Returns `Ok(None)` when the TUI took

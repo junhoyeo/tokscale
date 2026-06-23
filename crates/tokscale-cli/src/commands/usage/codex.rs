@@ -94,20 +94,8 @@ enum CredentialSource {
     Store(String),
 }
 
-fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().context("Could not determine home directory")
-}
-
 fn codex_store_path() -> PathBuf {
     crate::paths::get_config_dir().join("codex-credentials.json")
-}
-
-#[cfg(test)]
-fn codex_store_path_in_home(home_dir: &Path) -> PathBuf {
-    home_dir
-        .join(".config")
-        .join("tokscale")
-        .join("codex-credentials.json")
 }
 
 fn current_auth_paths() -> Vec<PathBuf> {
@@ -125,25 +113,26 @@ fn current_auth_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Where `switch` writes the codex CLI auth. Derived from
+/// [`current_auth_paths`]: an explicit `CODEX_HOME` always wins (even if no
+/// auth.json exists there yet); otherwise the first existing path, falling
+/// back to the modern config location.
 fn auth_write_path() -> Result<PathBuf> {
-    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        if !codex_home.trim().is_empty() {
-            return Ok(PathBuf::from(codex_home).join("auth.json"));
+    let paths = current_auth_paths();
+    let has_codex_home = std::env::var("CODEX_HOME")
+        .map(|home| !home.trim().is_empty())
+        .unwrap_or(false);
+
+    if !has_codex_home {
+        if let Some(existing) = paths.iter().find(|path| path.exists()) {
+            return Ok(existing.clone());
         }
     }
 
-    let home = home_dir()?;
-    let config_path = home.join(".config").join("codex").join("auth.json");
-    if config_path.exists() {
-        return Ok(config_path);
-    }
-
-    let legacy_path = home.join(".codex").join("auth.json");
-    if legacy_path.exists() {
-        return Ok(legacy_path);
-    }
-
-    Ok(config_path)
+    paths
+        .into_iter()
+        .next()
+        .context("Could not determine Codex auth path")
 }
 
 fn read_current_credentials() -> Result<(Auth, CredentialSource)> {
@@ -243,32 +232,20 @@ fn normalized_token_field(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// Compares one identity field; `None` means the field is not present on both
+/// sides and the next field should decide.
+fn field_identity(a: Option<&str>, b: Option<&str>) -> Option<bool> {
+    match (normalized_token_field(a), normalized_token_field(b)) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    }
+}
+
 fn same_token_identity(a: &Tokens, b: &Tokens) -> bool {
-    match (
-        normalized_token_field(a.account_id.as_deref()),
-        normalized_token_field(b.account_id.as_deref()),
-    ) {
-        (Some(a_id), Some(b_id)) => return a_id == b_id,
-        (Some(_), None) | (None, Some(_)) => {}
-        (None, None) => {}
-    }
-
-    match (
-        normalized_token_field(a.id_token.as_deref()),
-        normalized_token_field(b.id_token.as_deref()),
-    ) {
-        (Some(a_id), Some(b_id)) => return a_id == b_id,
-        (Some(_), None) | (None, Some(_)) => {}
-        (None, None) => {}
-    }
-
-    match (
-        normalized_token_field(a.access_token.as_deref()),
-        normalized_token_field(b.access_token.as_deref()),
-    ) {
-        (Some(a_token), Some(b_token)) => a_token == b_token,
-        _ => false,
-    }
+    field_identity(a.account_id.as_deref(), b.account_id.as_deref())
+        .or_else(|| field_identity(a.id_token.as_deref(), b.id_token.as_deref()))
+        .or_else(|| field_identity(a.access_token.as_deref(), b.access_token.as_deref()))
+        .unwrap_or(false)
 }
 
 fn next_available_account_id(store: &CodexCredentialsStore, base_id: &str) -> String {
@@ -317,11 +294,6 @@ fn validate_label_available(
 
 pub fn load_credentials_store() -> Option<CodexCredentialsStore> {
     load_credentials_store_from_path(&codex_store_path())
-}
-
-#[cfg(test)]
-fn load_credentials_store_from_home(home_dir: &Path) -> Option<CodexCredentialsStore> {
-    load_credentials_store_from_path(&codex_store_path_in_home(home_dir))
 }
 
 fn load_credentials_store_from_path(path: &Path) -> Option<CodexCredentialsStore> {
@@ -377,12 +349,6 @@ fn save_credentials_store(store: &CodexCredentialsStore) -> Result<()> {
     save_credentials_store_at_path(&codex_store_path(), store)
 }
 
-#[cfg(test)]
-fn save_credentials_store_in_home(home_dir: &Path, store: &CodexCredentialsStore) -> Result<()> {
-    let path = codex_store_path_in_home(home_dir);
-    save_credentials_store_at_path(&path, store)
-}
-
 fn save_credentials_store_at_path(path: &Path, store: &CodexCredentialsStore) -> Result<()> {
     let json = serde_json::to_string_pretty(store)?;
     super::helpers::atomic_write_secret(path, json.as_bytes())
@@ -430,14 +396,21 @@ fn account_info(
     }
 }
 
+/// Case-insensitive sort key shared by every place that orders accounts:
+/// the label when present, falling back to the account id.
+fn account_sort_key(label: Option<&str>, id: &str) -> String {
+    label.unwrap_or(id).to_lowercase()
+}
+
 fn first_account_id(store: &CodexCredentialsStore) -> Option<String> {
     store
         .accounts
         .iter()
-        .min_by(|(a_id, a), (b_id, b)| {
-            let a_name = a.label.as_deref().unwrap_or(a_id).to_lowercase();
-            let b_name = b.label.as_deref().unwrap_or(b_id).to_lowercase();
-            a_name.cmp(&b_name).then_with(|| a_id.cmp(b_id))
+        .min_by_key(|(id, account)| {
+            (
+                account_sort_key(account.label.as_deref(), id),
+                (*id).clone(),
+            )
         })
         .map(|(id, _)| id.clone())
 }
@@ -484,17 +457,11 @@ pub fn list_accounts() -> Vec<CodexAccountInfo> {
         .map(|(id, account)| account_info(&store, id, account))
         .collect();
 
-    accounts.sort_by(|a, b| {
-        if a.is_active != b.is_active {
-            return if a.is_active {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            };
-        }
-        let la = a.label.as_deref().unwrap_or(&a.id).to_lowercase();
-        let lb = b.label.as_deref().unwrap_or(&b.id).to_lowercase();
-        la.cmp(&lb)
+    accounts.sort_by_key(|account| {
+        (
+            !account.is_active,
+            account_sort_key(account.label.as_deref(), &account.id),
+        )
     });
 
     accounts
@@ -502,30 +469,6 @@ pub fn list_accounts() -> Vec<CodexAccountInfo> {
 
 fn save_account_from_auth(auth: Auth, label: Option<&str>) -> Result<CodexAccountInfo> {
     save_account_from_auth_at_path(&codex_store_path(), auth, label, true)
-}
-
-#[cfg(test)]
-fn save_account_from_auth_in_home(
-    home_dir: &Path,
-    auth: Auth,
-    label: Option<&str>,
-) -> Result<CodexAccountInfo> {
-    save_account_from_auth_at_path(&codex_store_path_in_home(home_dir), auth, label, true)
-}
-
-#[cfg(test)]
-fn save_account_from_auth_in_home_with_active(
-    home_dir: &Path,
-    auth: Auth,
-    label: Option<&str>,
-    make_active: bool,
-) -> Result<CodexAccountInfo> {
-    save_account_from_auth_at_path(
-        &codex_store_path_in_home(home_dir),
-        auth,
-        label,
-        make_active,
-    )
 }
 
 fn save_account_from_auth_at_path(
@@ -614,15 +557,42 @@ fn save_account_from_auth_at_path(
     Ok(account_info(&store, &account_id, account))
 }
 
-pub fn import_auth_file_without_activating(
-    path: &Path,
-    label: Option<&str>,
-) -> Result<CodexAccountInfo> {
+pub struct CodexLoginImport {
+    pub info: CodexAccountInfo,
+    /// Non-fatal problem while snapshotting the current codex CLI login into
+    /// the store; surfaced in the TUI login panel.
+    pub warning: Option<String>,
+}
+
+/// Imports a freshly logged-in `auth.json` (from the TUI's temporary
+/// `CODEX_HOME`) into the store without activating it.
+///
+/// Before importing, the codex CLI's current login is snapshotted into the
+/// store as the active account so it stays tracked alongside the new one.
+/// Snapshot failure is deliberately non-fatal — the new login is the primary
+/// operation — but it is reported as a warning instead of being swallowed,
+/// because without the snapshot the imported account may become the store's
+/// active account while the codex CLI stays logged into another.
+pub fn import_login_auth_file(path: &Path) -> Result<CodexLoginImport> {
+    let store_path = codex_store_path();
+
+    let warning = match read_current_credentials() {
+        Ok((current_auth, _)) => {
+            save_account_from_auth_at_path(&store_path, current_auth, None, true)
+                .err()
+                .map(|e| format!("warning: failed to save current Codex login: {e}"))
+        }
+        // No current codex CLI login — nothing to snapshot.
+        Err(_) => None,
+    };
+
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read Codex auth from {}", path.display()))?;
     let auth = serde_json::from_str::<Auth>(&content)
         .with_context(|| format!("Failed to parse Codex auth from {}", path.display()))?;
-    save_account_from_auth_at_path(&codex_store_path(), auth, label, false)
+    let info = save_account_from_auth_at_path(&store_path, auth, None, false)?;
+
+    Ok(CodexLoginImport { info, warning })
 }
 
 fn update_account_tokens(account_id: &str, tokens: Tokens) -> Result<()> {
@@ -830,26 +800,17 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
     }
 
     let mut account_ids: Vec<_> = store.accounts.keys().cloned().collect();
-    account_ids.sort_by(|a, b| {
-        if a == &store.active_account_id {
-            std::cmp::Ordering::Less
-        } else if b == &store.active_account_id {
-            std::cmp::Ordering::Greater
-        } else {
-            let la = store
-                .accounts
-                .get(a)
-                .and_then(|account| account.label.as_deref())
-                .unwrap_or(a)
-                .to_lowercase();
-            let lb = store
-                .accounts
-                .get(b)
-                .and_then(|account| account.label.as_deref())
-                .unwrap_or(b)
-                .to_lowercase();
-            la.cmp(&lb)
-        }
+    account_ids.sort_by_key(|id| {
+        (
+            id != &store.active_account_id,
+            account_sort_key(
+                store
+                    .accounts
+                    .get(id)
+                    .and_then(|account| account.label.as_deref()),
+                id,
+            ),
+        )
     });
 
     let mut outputs = Vec::new();
@@ -899,11 +860,6 @@ fn fetch_saved_account(name_or_id: Option<&str>) -> Result<(CodexAccountInfo, Us
 }
 
 pub fn import_current_account(label: Option<&str>) -> Result<CodexAccountInfo> {
-    let (auth, _) = read_current_credentials()?;
-    save_account_from_auth(auth, label)
-}
-
-pub fn save_current_account_as_active(label: Option<&str>) -> Result<CodexAccountInfo> {
     let (auth, _) = read_current_credentials()?;
     save_account_from_auth(auth, label)
 }
@@ -1112,6 +1068,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn test_store_path(tmp: &TempDir) -> PathBuf {
+        tmp.path().join("codex-credentials.json")
+    }
+
     fn tokens(access: &str, account_id: Option<&str>) -> Tokens {
         Tokens {
             access_token: Some(access.to_string()),
@@ -1176,9 +1136,10 @@ mod tests {
             active_account_id: "missing".to_string(),
             accounts,
         };
-        save_credentials_store_in_home(tmp.path(), &store)?;
+        let store_path = test_store_path(&tmp);
+        save_credentials_store_at_path(&store_path, &store)?;
 
-        let loaded = load_credentials_store_from_home(tmp.path()).unwrap();
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.active_account_id, "acct_b");
         Ok(())
     }
@@ -1207,49 +1168,54 @@ mod tests {
     }
 
     #[test]
-    fn save_account_from_auth_in_home_imports_tokens_without_touching_real_home() -> Result<()> {
+    fn save_account_from_auth_at_path_imports_tokens_without_touching_real_home() -> Result<()> {
         let tmp = TempDir::new()?;
-        let info = save_account_from_auth_in_home(
-            tmp.path(),
+        let store_path = test_store_path(&tmp);
+        let info = save_account_from_auth_at_path(
+            &store_path,
             Auth {
                 tokens: Some(tokens("access-a", Some("acct_a"))),
             },
             Some("work"),
+            true,
         )?;
 
         assert_eq!(info.id, "acct_a");
         assert_eq!(info.label.as_deref(), Some("work"));
         assert!(info.is_active);
 
-        let loaded = load_credentials_store_from_home(tmp.path()).unwrap();
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.active_account_id, "acct_a");
         assert!(loaded.accounts.contains_key("acct_a"));
         Ok(())
     }
 
     #[test]
-    fn save_account_from_auth_in_home_preserves_label_when_updating_same_account() -> Result<()> {
+    fn save_account_from_auth_at_path_preserves_label_when_updating_same_account() -> Result<()> {
         let tmp = TempDir::new()?;
-        save_account_from_auth_in_home(
-            tmp.path(),
+        let store_path = test_store_path(&tmp);
+        save_account_from_auth_at_path(
+            &store_path,
             Auth {
                 tokens: Some(tokens("access-a", Some("acct_a"))),
             },
             Some("work"),
+            true,
         )?;
 
-        let info = save_account_from_auth_in_home(
-            tmp.path(),
+        let info = save_account_from_auth_at_path(
+            &store_path,
             Auth {
                 tokens: Some(tokens("access-b", Some("acct_a"))),
             },
             None,
+            true,
         )?;
 
         assert_eq!(info.id, "acct_a");
         assert_eq!(info.label.as_deref(), Some("work"));
 
-        let loaded = load_credentials_store_from_home(tmp.path()).unwrap();
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.accounts.len(), 1);
         let account = loaded.accounts.get("acct_a").unwrap();
         assert_eq!(account.label.as_deref(), Some("work"));
@@ -1258,8 +1224,9 @@ mod tests {
     }
 
     #[test]
-    fn save_account_from_auth_in_home_keeps_existing_account_on_identity_collision() -> Result<()> {
+    fn save_account_from_auth_at_path_keeps_existing_account_on_identity_collision() -> Result<()> {
         let tmp = TempDir::new()?;
+        let store_path = test_store_path(&tmp);
         let mut accounts = HashMap::new();
         accounts.insert(
             "acct_shared".to_string(),
@@ -1269,8 +1236,8 @@ mod tests {
                 label: Some("work".to_string()),
             },
         );
-        save_credentials_store_in_home(
-            tmp.path(),
+        save_credentials_store_at_path(
+            &store_path,
             &CodexCredentialsStore {
                 version: 1,
                 active_account_id: "acct_shared".to_string(),
@@ -1278,8 +1245,8 @@ mod tests {
             },
         )?;
 
-        let info = save_account_from_auth_in_home(
-            tmp.path(),
+        let info = save_account_from_auth_at_path(
+            &store_path,
             Auth {
                 tokens: Some(tokens_with_id_token(
                     "access-b",
@@ -1288,11 +1255,12 @@ mod tests {
                 )),
             },
             None,
+            true,
         )?;
 
         assert_eq!(info.id, "acct_shared-2");
 
-        let loaded = load_credentials_store_from_home(tmp.path()).unwrap();
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.accounts.len(), 2);
         assert_eq!(loaded.active_account_id, "acct_shared-2");
         assert_eq!(
@@ -1307,18 +1275,20 @@ mod tests {
     }
 
     #[test]
-    fn save_account_from_auth_in_home_can_add_without_changing_active_account() -> Result<()> {
+    fn save_account_from_auth_at_path_can_add_without_changing_active_account() -> Result<()> {
         let tmp = TempDir::new()?;
-        save_account_from_auth_in_home(
-            tmp.path(),
+        let store_path = test_store_path(&tmp);
+        save_account_from_auth_at_path(
+            &store_path,
             Auth {
                 tokens: Some(tokens("access-a", Some("acct_a"))),
             },
             Some("work"),
+            true,
         )?;
 
-        let info = save_account_from_auth_in_home_with_active(
-            tmp.path(),
+        let info = save_account_from_auth_at_path(
+            &store_path,
             Auth {
                 tokens: Some(tokens("access-b", Some("acct_b"))),
             },
@@ -1329,7 +1299,7 @@ mod tests {
         assert_eq!(info.id, "acct_b");
         assert!(!info.is_active);
 
-        let loaded = load_credentials_store_from_home(tmp.path()).unwrap();
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.active_account_id, "acct_a");
         assert!(loaded.accounts.contains_key("acct_a"));
         assert!(loaded.accounts.contains_key("acct_b"));
