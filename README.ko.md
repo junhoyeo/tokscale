@@ -75,13 +75,17 @@
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json` (프로젝트 레지스트리, 기본값: `~/.local/share/crush/projects.json`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support, 레거시 Block/goose 경로; `GOOSE_PATH_ROOT`로 오버라이드 가능) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | `tokscale antigravity sync`로 `~/.config/tokscale/antigravity-cache/sessions/*.jsonl`에 캐싱 (로컬 언어 서버 RPC 사용) | ✅ 지원 |
+| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity CLI" /> | [Antigravity CLI](https://antigravity.google/) | `~/.gemini/antigravity-cli/conversations/*.db` (`GEMINI_CLI_HOME`로 Gemini 홈 경로 오버라이드 가능; 로컬 SQLite를 직접 읽으므로 `antigravity sync`가 필요 없음) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-trae.png" alt="Trae" /> | [Trae IDE](https://www.trae.ai/) / [Trae Solo](https://www.trae.ai/solo) (국제판) | `tokscale trae sync`로 `~/.config/tokscale/trae-cache/sessions/*.json`에 캐싱 (공식 API의 계정 단위 사용량) | ✅ 지원 |
-| Grok Build | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl` (폴백: `~/.grok/sessions/*/*/updates.jsonl`) | ✅ 지원 |
+| <img width="48px" src="https://github.com/warpdotdev.png" alt="Warp" /> | [Warp](https://www.warp.dev/) / Oz | `tokscale warp sync`로 `~/.config/tokscale/warp-cache/usage.json`에 캐싱 (집계된 요청 수 및 비용만; 토큰 트랜스크립트 없음) | ✅ 지원 |
+| <img width="48px" src="https://github.com/xai-org.png" alt="Grok Build" /> | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl` (폴백: `~/.grok/sessions/*/*/updates.jsonl`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; 호스팅된 Zed 모델 전용, 외부 ACP 에이전트 제외) | ✅ 지원 |
-| <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`) 및 `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`) | ✅ 지원 |
+| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage tasks (Linux: `~/.config/Code/...`; macOS: `~/Library/Application Support/Code/...`; Windows: `%APPDATA%\Code\...`; server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`) | ✅ 지원 |
+| <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`), `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`), 그리고 Kiro IDE globalStorage 스냅샷 (`Kiro/User/globalStorage/kiro.kiroagent`; macOS Application Support, Linux `~/.config/Kiro`, Windows `%APPDATA%\Kiro`) | ✅ 지원 |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/` (`GJC_CODING_AGENT_DIR`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`로 오버라이드 가능; Linux/macOS에서는 `$XDG_DATA_HOME/gjc/sessions/`도 확인) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` 사이드카 (`JCODE_HOME`으로 재정의 가능) | ✅ 지원 |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db` (XDG 데이터 디렉토리; SQLite) | ✅ 지원 |
+| <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ 지원 |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
@@ -112,6 +116,8 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - [Cursor IDE 명령어](#cursor-ide-명령어)
   - [Antigravity 명령어](#antigravity-명령어)
   - [Trae 명령어](#trae-명령어)
+  - [Warp/Oz 명령어](#warpoz-명령어)
+  - [작업 기반 리포트](#작업-기반-리포트)
   - [예시 출력](#예시-출력---light-버전)
   - [설정](#설정)
   - [환경 변수](#환경-변수)
@@ -149,12 +155,13 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 9가지 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Gajae-Code, Grok Build, Jcode, MiMo Code, Synthetic 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Synthetic 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
 - **웹 시각화** - 2D 및 3D 뷰의 인터랙티브 기여 그래프
 - **유연한 필터링** - 플랫폼, 날짜 범위 또는 연도별 필터링
+- **작업 기반 리포트** - LLM 기반 세션 요약 및 작업 그룹화, 여러 백엔드 지원 (Apple FM, Claude, Codex, Gemini, Kiro)
 - **JSON 내보내기** - 외부 시각화 도구/자동화용 데이터 생성
 - **소셜 플랫폼** - 사용량 공유, 리더보드 경쟁, 공개 프로필 조회
 
@@ -327,7 +334,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `synthetic`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `synthetic`.
 
 > **Deprecation 안내**: 기존 단일 클라이언트 플래그 (`--opencode`, `--claude`, `--codex` 등)는 하위 호환성을 위해 여전히 동작하지만 `--help`에서 숨겨졌으며 다음 메이저 릴리스에서 제거됩니다. 가능한 한 `--client`로 마이그레이션하세요. 인터랙티브 터미널에서 레거시 플래그를 사용하면 한 줄 경고가 출력됩니다.
 
@@ -517,6 +524,95 @@ tokscale trae logout --variant solo
 
 > **중국판**: 중국판(`trae.com.cn`)은 의도적으로 지원하지 않습니다. CN 백엔드는 세션 단위 사용량 조회 API를 공개하지 않습니다. 공식 엔드포인트가 제공되면 지원을 추가할 예정입니다.
 
+### Warp/Oz 명령어
+
+Warp/Oz는 로컬 토큰 트랜스크립트를 제공하지 않습니다. Tokscale은 Warp의 GraphQL API가 반환하는 집계 요청 수와 비용 카운터만 동기화하며, 이를 토큰 버킷이 0인 `warp` / `aggregate-requests` 행으로 표시합니다.
+
+```bash
+# 인증된 Warp 요청에서 복사한 bearer 토큰 또는 Cookie 헤더 저장
+tokscale warp login
+
+# 자격 증명/캐시 상태 및 진단 확인
+tokscale warp status
+
+# 집계된 요청 수와 비용을 tokscale 로컬 캐시에 동기화
+tokscale warp sync
+
+# 저장된 자격 증명 삭제; --purge-cache를 추가하면 동기화된 사용량도 삭제
+tokscale warp logout --purge-cache
+```
+
+**캐시 위치**: `~/.config/tokscale/warp-cache/usage.json`
+
+**동작 방식**: `tokscale warp sync`는 Warp의 인증된 GraphQL API를 호출하여 계정 및 워크스페이스 집계 카운터를 가져옵니다. Tokscale은 요청 수를 메시지 카운트로, 벤더가 보고한 비용을 그대로 보존하지만, 요청 수를 합성 토큰으로 변환하지는 않습니다. Warp는 공개 리더보드가 토큰 기반 사용량만 수용하므로 기본 `submit` 데이터에서 제외됩니다.
+
+### 작업 기반 리포트
+
+`report` 명령어는 작업 기반 사용량 분석을 생성합니다. LLM을 사용해 각 세션을 짧은 제목과 카테고리로 요약한 뒤, 관련 세션들을 상위 수준의 작업 클러스터로 묶어 토큰이 어디에 쓰였는지 한눈에 볼 수 있게 해 줍니다.
+
+```bash
+# 기본 리포트 (오늘, 기본 Apple FM 요약기)
+tokscale report
+
+# 최근 7일
+tokscale report --week
+
+# Claude Code를 요약 백엔드로 사용
+tokscale report --week --summarizer claude
+
+# Codex, Gemini 또는 Kiro 사용
+tokscale report --summarizer codex
+tokscale report --summarizer gemini
+tokscale report --summarizer kiro
+
+# LLM 요약 건너뛰기 (원본 데이터만 표시)
+tokscale report --no-summarize
+
+# 처음부터 다시 요약 (범위 내 캐시된 요약 초기화)
+tokscale report --week --rebuild
+
+# JSON으로 출력
+tokscale report --week --json
+
+# 워크스페이스 또는 클라이언트로 필터
+tokscale report --workspace my-project --client opencode
+```
+
+**요약 백엔드:**
+
+| 백엔드 | 명령어 | 비고 |
+|---------|---------|-------|
+| `apple-fm` | (기본값) | 네이티브 Rust FFI를 통해 Apple Foundation Models를 온디바이스에서 사용 (Python 불필요). `apple-fm` Cargo 피처를 활성화한 macOS 빌드와 Apple Intelligence가 필요하며, 그렇지 않은 경우 내장 Rust 휴리스틱 분류기로 투명하게 폴백합니다 (기본값은 어디서나 동작). |
+| `claude` | `claude -p` | Claude Code CLI가 설치되어 인증되어 있어야 함. |
+| `codex` | `codex --quiet` | Codex CLI가 설치되어 인증되어 있어야 함. |
+| `gemini` | `gemini -p` | Gemini CLI가 설치되어 인증되어 있어야 함. |
+| `kiro` | `kiro --non-interactive` | Kiro CLI가 설치되어 인증되어 있어야 함. |
+
+**동작 방식:**
+
+1. 세션을 스캔하여 로컬 SQLite 위키 데이터베이스(`wiki.db`, 플랫폼 설정 디렉터리 — Linux: `~/.config/tokscale/`, macOS: `~/Library/Application Support/tokscale/`)에 삽입합니다
+2. 요약되지 않은 세션을 선택한 LLM 백엔드에 배치 단위로 보내면, 각 세션에 대해 제목, 카테고리, 설명, 복잡도를 반환합니다
+3. 두 번째 LLM 패스에서 제목이 붙은 모든 세션을 3~8개의 상위 수준 작업 클러스터로 묶습니다 (예: "Kiro Auth", "Tokscale Report", "System Config")
+4. 결과는 위키 DB에 캐시되며, 이후 실행 시 이미 요약된 세션은 건너뜁니다
+
+요약은 기본적으로 활성화되어 있으며 기본 백엔드는 `apple-fm`(네이티브 Rust를 통한 Apple Foundation Models 온디바이스 추론, Python 불필요)입니다. `--no-summarize`로 요약을 끌 수 있습니다.
+
+**예시 출력:**
+
+```
+  Task Group                                  Sess     Tokens     Cost
+  ───────────────────────────────────────────────────────────────────────
+  Tokscale Development                          19      4.2B    $22.66
+    Add task-attributed report command
+    Implement wiki DB schema
+    Fix pricing lookup for new models
+  System Config                                 28      2.1B    $10.06
+    Configure OpenCode workspace settings
+    Update shell aliases
+  Kiro Auth                                      4    890.5M     $3.10
+    Implement JWT refresh flow
+```
+
 ### 예시 출력 (`--light` 버전)
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -660,7 +756,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Zed, Kiro, Trae, Gajae-Code, Grok Build, Jcode, MiMo Code, Synthetic)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Synthetic)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 

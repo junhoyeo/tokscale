@@ -75,13 +75,17 @@
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json`（项目注册表；回退路径：`~/.local/share/crush/projects.json`） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db`（+ macOS Application Support、旧版 Block/goose 路径；可通过 `GOOSE_PATH_ROOT` 覆盖） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | 通过 `tokscale antigravity sync` 缓存到 `~/.config/tokscale/antigravity-cache/sessions/*.jsonl`（使用本地语言服务器 RPC） | ✅ 支持 |
+| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity CLI" /> | [Antigravity CLI](https://antigravity.google/) | `~/.gemini/antigravity-cli/conversations/*.db`（可通过 `GEMINI_CLI_HOME` 覆盖 Gemini 主目录；本地 SQLite，直接读取 — 无需 `antigravity sync`） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-trae.png" alt="Trae" /> | [Trae IDE](https://www.trae.ai/) / [Trae Solo](https://www.trae.ai/solo)（国际版） | 通过 `tokscale trae sync` 缓存到 `~/.config/tokscale/trae-cache/sessions/*.json`（来自官方 API 的账号级使用量） | ✅ 支持 |
-| Grok Build | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl`（回退：`~/.grok/sessions/*/*/updates.jsonl`） | ✅ 支持 |
+| <img width="48px" src="https://github.com/warpdotdev.png" alt="Warp" /> | [Warp](https://www.warp.dev/) / Oz | 通过 `tokscale warp sync` 缓存到 `~/.config/tokscale/warp-cache/usage.json`（仅汇总请求数和消费金额，不含 token 转录） | ✅ 支持 |
+| <img width="48px" src="https://github.com/xai-org.png" alt="Grok Build" /> | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl`（回退：`~/.grok/sessions/*/*/updates.jsonl`） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db`（macOS: `~/Library/Application Support/Zed/threads/threads.db`；Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`；仅限托管 Zed 模型，不含外部 ACP 代理） | ✅ 支持 |
-| <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json`（+ `*.jsonl`）和 `~/.local/share/kiro-cli/data.sqlite3`（macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`） | ✅ 支持 |
+| <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json`（+ `*.jsonl`）、`~/.local/share/kiro-cli/data.sqlite3`（macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`），以及 Kiro IDE globalStorage 快照（`Kiro/User/globalStorage/kiro.kiroagent`；macOS Application Support、Linux `~/.config/Kiro`、Windows `%APPDATA%\Kiro`） | ✅ 支持 |
+| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage 任务（Linux: `~/.config/Code/...`；macOS: `~/Library/Application Support/Code/...`；Windows: `%APPDATA%\Code\...`；server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`） | ✅ 支持 |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/`（可通过 `GJC_CODING_AGENT_DIR`、`GJC_CONFIG_DIR`、`PI_CONFIG_DIR` 覆盖；Linux/macOS 上 `$XDG_DATA_HOME/gjc/sessions/` 亦支持） | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` sidecar（可通过 `JCODE_HOME` 覆盖） | ✅ 支持 |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db`（XDG 数据目录；SQLite） | ✅ 支持 |
+| <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` | ✅ 支持 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | 通过 `hf:` 模型前缀或 `synthetic` provider 从其他来源重归属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） | ✅ 支持 |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
@@ -112,6 +116,8 @@
   - [Cursor IDE 命令](#cursor-ide-命令)
   - [Antigravity 命令](#antigravity-命令)
   - [Trae 命令](#trae-命令)
+  - [Warp/Oz 命令](#warpoz-命令)
+  - [任务归因报告](#任务归因报告)
   - [示例输出](#示例输出--light-版本)
   - [配置](#配置)
   - [环境变量](#环境变量)
@@ -149,12 +155,13 @@
   - 9 种颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Zed、Kiro、Trae、Gajae-Code、Grok Build、Jcode、MiMo Code 和 Synthetic 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code 和 Synthetic 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
 - **Web 可视化** - 带 2D 和 3D 视图的交互式贡献图
 - **灵活筛选** - 按平台、日期范围或年份筛选
+- **任务归因报告** - 由 LLM 驱动的会话摘要与任务分组，支持多种后端（Apple FM、Claude、Codex、Gemini、Kiro）
 - **导出为 JSON** - 为外部可视化工具生成数据
 - **社交平台** - 分享使用情况、排行榜竞争、查看公开个人资料
 
@@ -328,7 +335,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`synthetic`。
+可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`commandcode`、`synthetic`。
 
 > **弃用通知**：旧的单客户端选项（`--opencode`、`--claude`、`--codex` 等）出于向后兼容仍然可用，但已从 `--help` 中隐藏，将在下一个主要版本中移除。请尽量迁移到 `--client`。在交互式终端中使用旧选项时会输出一行警告。
 
@@ -523,6 +530,93 @@ tokscale trae logout --variant solo
 
 > **中国区版本**：中国区版本（`trae.com.cn`）目前有意不支持。CN 后端暂未暴露按会话查询使用量的官方 API；如果上游提供正式端点，再加入支持。
 
+### Warp/Oz 命令
+
+Warp/Oz 不提供本地 token 转录。Tokscale 仅同步 Warp GraphQL API 返回的汇总请求数和消费计数器，并将其以 `warp` / `aggregate-requests` 行（token 字段均为零）的形式上报。
+
+```bash
+# 保存从已认证的 Warp 请求中复制的 bearer token 或 Cookie 头
+tokscale warp login
+
+# 检查凭据/缓存状态和诊断信息
+tokscale warp status
+
+# 将汇总请求数和消费同步到 tokscale 本地缓存
+tokscale warp sync
+
+# 移除已保存的凭据；添加 --purge-cache 可同时删除已同步的使用数据
+tokscale warp logout --purge-cache
+```
+
+**缓存位置**：`~/.config/tokscale/warp-cache/usage.json`
+
+**工作原理**：`tokscale warp sync` 调用 Warp 已认证的 GraphQL API，获取账号和工作区的汇总计数器。Tokscale 将请求数保留为消息计数，将供应商上报的消费金额保留为成本，但不会将请求数转换为合成 token。由于公开排行榜只接受基于 token 归因的使用量，Warp 数据默认不包含在 `submit` 提交内容中。
+
+### 任务归因报告
+
+`report` 命令会生成按任务归因的使用量分解。它使用 LLM 将每个会话总结为一个简短的标题和类别，然后将相关会话归并为高层级的任务集群，从而鸟瞰你的 Token 都花在了哪里。
+
+```bash
+# 基本报告（今天，默认使用 Apple FM 摘要器）。LLM 摘要默认开启。
+tokscale report
+
+# 最近 7 天
+tokscale report --week
+
+# 使用 Claude Code 作为摘要器后端
+tokscale report --week --summarizer claude
+
+# 使用 Codex、Gemini 或 Kiro
+tokscale report --summarizer codex
+tokscale report --summarizer gemini
+tokscale report --summarizer kiro
+
+# 跳过 LLM 摘要（仅显示原始数据）；这是退出（opt-out）选项
+tokscale report --no-summarize
+
+# 从头重新摘要（重置范围内已缓存的摘要）
+tokscale report --week --rebuild
+
+# 以 JSON 输出
+tokscale report --week --json
+
+# 按工作区或客户端筛选
+tokscale report --workspace my-project --client opencode
+```
+
+**摘要器后端：**
+
+| 后端 | 命令 | 说明 |
+|---------|---------|-------|
+| `apple-fm` | （默认） | 通过原生 Rust FFI 在本地使用 Apple Foundation Models（无需 Python）。需要启用 `apple-fm` Cargo 特性的 macOS 构建，且须开启 Apple Intelligence；否则将透明回退至内置 Rust 启发式分类器（因此默认配置可在所有平台正常使用）。 |
+| `claude` | `claude -p` | 需要已安装并已认证的 Claude Code CLI。 |
+| `codex` | `codex --quiet` | 需要已安装并已认证的 Codex CLI。 |
+| `gemini` | `gemini -p` | 需要已安装并已认证的 Gemini CLI。 |
+| `kiro` | `kiro --non-interactive` | 需要已安装并已认证的 Kiro CLI。 |
+
+**工作原理：**
+
+1. 扫描会话并将其插入本地 SQLite wiki 数据库（`wiki.db`，位于平台配置目录——Linux 上为 `~/.config/tokscale/`，macOS 上为 `~/Library/Application Support/tokscale/`）
+2. 未摘要的会话分批发送到选定的 LLM 后端，后端为每个会话返回标题、类别、描述和复杂度
+3. 第二轮 LLM 处理将所有已加标题的会话归并为 3–8 个高层级任务集群（例如 "Kiro Auth"、"Tokscale Report"、"System Config"）
+4. 结果缓存在 wiki 数据库中 —— 后续运行会跳过已摘要的会话
+
+**示例输出：**
+
+```
+  Task Group                                  Sess     Tokens     Cost
+  ───────────────────────────────────────────────────────────────────────
+  Tokscale Development                          19      4.2B    $22.66
+    Add task-attributed report command
+    Implement wiki DB schema
+    Fix pricing lookup for new models
+  System Config                                 28      2.1B    $10.06
+    Configure OpenCode workspace settings
+    Update shell aliases
+  Kiro Auth                                      4    890.5M     $3.10
+    Implement JWT refresh flow
+```
+
 ### 示例输出（`--light` 版本）
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -666,7 +760,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Zed、Kiro、Trae、Gajae-Code、Grok Build、Jcode、MiMo Code、Synthetic）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Synthetic）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 

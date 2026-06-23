@@ -75,13 +75,17 @@
 | <img width="48px" src=".github/assets/client-crush.png" alt="Crush" /> | [Crush](https://crush.ai/) | `$XDG_DATA_HOME/crush/projects.json`（プロジェクトレジストリ。フォールバック: `~/.local/share/crush/projects.json`） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support、レガシー Block/goose パス; `GOOSE_PATH_ROOT` でオーバーライド可能) | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | `tokscale antigravity sync` で `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` にキャッシュ（ローカル言語サーバ RPC を使用） | ✅ 対応 |
+| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity CLI" /> | [Antigravity CLI](https://antigravity.google/) | `~/.gemini/antigravity-cli/conversations/*.db`（Gemini ホームは `GEMINI_CLI_HOME` でオーバーライド可能；ローカル SQLite を直接読み取るため `antigravity sync` は不要） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-trae.png" alt="Trae" /> | [Trae IDE](https://www.trae.ai/) / [Trae Solo](https://www.trae.ai/solo)（国際版） | `tokscale trae sync` で `~/.config/tokscale/trae-cache/sessions/*.json` にキャッシュ（公式 API のアカウント単位使用量） | ✅ 対応 |
-| Grok Build | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl`（フォールバック: `~/.grok/sessions/*/*/updates.jsonl`） | ✅ 対応 |
+| <img width="48px" src="https://github.com/warpdotdev.png" alt="Warp" /> | [Warp](https://www.warp.dev/) / Oz | `tokscale warp sync` で `~/.config/tokscale/warp-cache/usage.json` にキャッシュ（集計リクエスト数と使用金額のみ。トークントランスクリプトは含まない） | ✅ 対応 |
+| <img width="48px" src="https://github.com/xai-org.png" alt="Grok Build" /> | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl`（フォールバック: `~/.grok/sessions/*/*/updates.jsonl`） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db`（macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; ホスティング済み Zed モデル専用、外部 ACP エージェントは対象外） | ✅ 対応 |
-| <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json`（+ `*.jsonl`）と `~/.local/share/kiro-cli/data.sqlite3`（macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`） | ✅ 対応 |
+| <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json`（+ `*.jsonl`）、`~/.local/share/kiro-cli/data.sqlite3`（macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`）、および Kiro IDE の globalStorage スナップショット（`Kiro/User/globalStorage/kiro.kiroagent`; macOS は Application Support、Linux は `~/.config/Kiro`、Windows は `%APPDATA%\Kiro`） | ✅ 対応 |
+| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage のタスクディレクトリ（Linux: `~/.config/Code/...`; macOS: `~/Library/Application Support/Code/...`; Windows: `%APPDATA%\Code\...`; サーバー: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`） | ✅ 対応 |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/`（`GJC_CODING_AGENT_DIR`、`GJC_CONFIG_DIR`、`PI_CONFIG_DIR` でオーバーライド可能；Linux/macOS では `$XDG_DATA_HOME/gjc/sessions/` も解決） | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` サイドカー（`JCODE_HOME` で上書き可） | ✅ 対応 |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db`（XDG データディレクトリ；SQLite） | ✅ 対応 |
+| <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` | ✅ 対応 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:`モデルや`synthetic`プロバイダを検出して他ソースから再帰属（+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`） | ✅ 対応 |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
@@ -112,6 +116,8 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - [Cursor IDEコマンド](#cursor-ideコマンド)
   - [Antigravity コマンド](#antigravity-コマンド)
   - [Trae コマンド](#trae-コマンド)
+  - [Warp/Oz コマンド](#warpoz-コマンド)
+  - [タスク別レポート](#タスク別レポート)
   - [出力例](#出力例--lightバージョン)
   - [設定](#設定)
   - [環境変数](#環境変数)
@@ -149,7 +155,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - 9色テーマのGitHubスタイル貢献グラフ
   - リアルタイムフィルタリングとソート
   - ゼロフリッカーレンダリング
-- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Zed、Kiro、Trae、Gajae-Code、Grok Build、Jcode、MiMo Code、Synthetic全体の使用量追跡
+- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Synthetic全体の使用量追跡
 - **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得；OpenRouter自動フォールバックと新規モデル向けCursor価格サポート
 - **詳細な内訳** - 入力、出力、キャッシュ読み書き、推論トークン追跡
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
@@ -328,7 +334,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `synthetic`。
+利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `synthetic`。
 
 > **非推奨のお知らせ**: 既存の単一クライアントフラグ（`--opencode`、`--claude`、`--codex` など）は後方互換性のため引き続き動作しますが、`--help` から非表示となり、次のメジャーリリースで削除予定です。可能な限り `--client` への移行を推奨します。インタラクティブな端末で旧フラグを使用すると 1 行の警告が表示されます。
 
@@ -518,6 +524,95 @@ tokscale trae logout --variant solo
 
 > **中国版**: 中国版（`trae.com.cn`）は意図的に未対応です。CN バックエンドはセッション単位の使用量クエリ API を公開していません。上流で公式エンドポイントが提供された場合に追加します。
 
+### Warp/Oz コマンド
+
+Warp/Oz はローカルのトークントランスクリプトを公開していません。Tokscale は Warp の GraphQL API が返す集計リクエスト数と使用金額カウンターのみを同期し、トークンバケットがゼロの `warp` / `aggregate-requests` 行としてレポートします。
+
+```bash
+# 認証済み Warp リクエストからコピーした Bearer トークンまたは Cookie ヘッダーを保存
+tokscale warp login
+
+# 認証情報・キャッシュの状態と診断情報を確認
+tokscale warp status
+
+# 集計リクエスト数と使用金額を tokscale のローカルキャッシュに同期
+tokscale warp sync
+
+# 保存済み認証情報を削除。--purge-cache を付けると同期済み使用量も削除
+tokscale warp logout --purge-cache
+```
+
+**キャッシュ場所**: `~/.config/tokscale/warp-cache/usage.json`
+
+**仕組み**: `tokscale warp sync` は Warp の認証済み GraphQL API を呼び出し、アカウントおよびワークスペースの集計カウンターを取得します。Tokscale はリクエスト数をメッセージ数として、ベンダー報告の使用金額をコストとして保持しますが、リクエストを合成トークンに変換することはありません。Warp はトークン単位の使用量ではなく集計リクエストカウンターのみを持つため、公開リーダーボード向けの `submit` データからは除外されます。
+
+### タスク別レポート
+
+`report` コマンドは、タスク単位の使用量内訳を生成します。LLM を使って各セッションを短いタイトルとカテゴリに要約し、関連するセッションを高レベルのタスククラスタにまとめることで、トークンがどこに使われたかを俯瞰できます。
+
+```bash
+# 基本レポート（今日、デフォルトの Apple FM サマライザー）
+tokscale report
+
+# 過去7日間
+tokscale report --week
+
+# Claude Code をサマライザーバックエンドとして使用
+tokscale report --week --summarizer claude
+
+# Codex、Gemini、Kiro を使用
+tokscale report --summarizer codex
+tokscale report --summarizer gemini
+tokscale report --summarizer kiro
+
+# LLM 要約をスキップ（生データのみ表示）
+tokscale report --no-summarize
+
+# 一から再要約（範囲内のキャッシュ済み要約をリセット）
+tokscale report --week --rebuild
+
+# JSON として出力
+tokscale report --week --json
+
+# ワークスペースやクライアントでフィルター
+tokscale report --workspace my-project --client opencode
+```
+
+LLM 要約は**デフォルトで有効**になっています（`--no-summarize` でオプトアウト可能）。
+
+**サマライザーバックエンド:**
+
+| バックエンド | コマンド | 備考 |
+|---------|---------|-------|
+| `apple-fm` | （デフォルト） | ネイティブ Rust FFI 経由でオンデバイスの Apple Foundation Models を使用します（Python 不要）。`apple-fm` Cargo フィーチャーを有効にした macOS ビルドと、Apple Intelligence が有効な環境が必要です。それ以外の場合は組み込みの Rust ヒューリスティック分類器に透過的にフォールバックするため、デフォルトはどこでも動作します。 |
+| `claude` | `claude -p` | Claude Code CLI がインストールされ認証済みである必要があります。 |
+| `codex` | `codex --quiet` | Codex CLI がインストールされ認証済みである必要があります。 |
+| `gemini` | `gemini -p` | Gemini CLI がインストールされ認証済みである必要があります。 |
+| `kiro` | `kiro --non-interactive` | Kiro CLI がインストールされ認証済みである必要があります。 |
+
+**仕組み:**
+
+1. セッションがスキャンされ、プラットフォームの設定ディレクトリにあるローカルの SQLite wiki データベース（`wiki.db`）に挿入されます（Linux では `~/.config/tokscale/`、macOS では `~/Library/Application Support/tokscale/`）
+2. 未要約のセッションがバッチで選択した LLM バックエンドに送られ、それぞれにタイトル・カテゴリ・説明・複雑度が返されます
+3. 2 回目の LLM パスで、タイトル付けされたすべてのセッションを 3〜8 個の高レベルなタスククラスタにまとめます（例: "Kiro Auth"、"Tokscale Report"、"System Config"）
+4. 結果は wiki DB にキャッシュされ、以降の実行では要約済みのセッションをスキップします
+
+**出力例:**
+
+```
+  Task Group                                  Sess     Tokens     Cost
+  ───────────────────────────────────────────────────────────────────────
+  Tokscale Development                          19      4.2B    $22.66
+    Add task-attributed report command
+    Implement wiki DB schema
+    Fix pricing lookup for new models
+  System Config                                 28      2.1B    $10.06
+    Configure OpenCode workspace settings
+    Update shell aliases
+  Kiro Auth                                      4    890.5M     $3.10
+    Implement JWT refresh flow
+```
+
 ### 出力例（`--light`バージョン）
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -661,7 +756,7 @@ tokscale sources --json
 - **インタラクティブツールチップ**: ホバーで詳細な日別内訳を表示
 - **日別内訳パネル**: クリックでソース別、モデル別の詳細を確認
 - **年別フィルタリング**: 年間を移動
-- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Zed、Kiro、Trae、Gajae-Code、Grok Build、Jcode、MiMo Code、Synthetic）
+- **ソースフィルタリング**: プラットフォーム別フィルター（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Synthetic）
 - **統計パネル**: 総コスト、トークン、活動日数、連続記録
 - **FOUC防止**: Reactハイドレーション前にテーマを適用（フラッシュなし）
 
