@@ -450,6 +450,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    CommandCode = 29 => {
+        id: "commandcode",
+        root: PathRoot::Home,
+        relative: ".commandcode/projects",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -502,7 +511,21 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 29);
+        assert_eq!(ClientId::COUNT, 30);
+    }
+
+    #[test]
+    fn test_commandcode_client_registered_as_local_session_source() {
+        let client =
+            ClientId::from_str("commandcode").expect("commandcode client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/tmp/home/.commandcode/projects"
+        );
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
     }
 
     #[test]

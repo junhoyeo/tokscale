@@ -839,6 +839,7 @@ pub enum ClientFilter {
     Gjc,
     Grok,
     Jcode,
+    Commandcode,
     Synthetic,
 }
 
@@ -877,6 +878,7 @@ impl ClientFilter {
             Self::Gjc => "gjc",
             Self::Grok => "grok",
             Self::Jcode => "jcode",
+            Self::Commandcode => "commandcode",
             Self::Synthetic => "synthetic",
         }
     }
@@ -918,6 +920,7 @@ impl ClientFilter {
             Self::Gjc => Some(ClientId::Gjc),
             Self::Grok => Some(ClientId::Grok),
             Self::Jcode => Some(ClientId::Jcode),
+            Self::Commandcode => Some(ClientId::CommandCode),
             Self::Synthetic => None,
         }
     }
@@ -956,6 +959,7 @@ impl ClientFilter {
             ClientId::Gjc => Self::Gjc,
             ClientId::Grok => Self::Grok,
             ClientId::Jcode => Self::Jcode,
+            ClientId::CommandCode => Self::Commandcode,
         }
     }
 
@@ -1067,6 +1071,8 @@ pub struct ClientFlags {
     #[arg(long, hide = true)]
     pub jcode: bool,
     #[arg(long, hide = true)]
+    pub commandcode: bool,
+    #[arg(long, hide = true)]
     pub synthetic: bool,
 }
 
@@ -1138,7 +1144,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 30] = [
+    let legacy: [(bool, ClientFilter); 31] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1168,6 +1174,7 @@ fn build_client_filter_with_defaults(
         (flags.gjc, ClientFilter::Gjc),
         (flags.grok, ClientFilter::Grok),
         (flags.jcode, ClientFilter::Jcode),
+        (flags.commandcode, ClientFilter::Commandcode),
         (flags.synthetic, ClientFilter::Synthetic),
     ];
 
@@ -3544,6 +3551,7 @@ fn capitalize_client(client: &str) -> String {
         "pi" => "Pi".to_string(),
         "gjc" => "Gajae-Code".to_string(),
         "jcode" => "Jcode".to_string(),
+        "commandcode" => "Command Code".to_string(),
         other => other.to_string(),
     }
 }
@@ -5952,6 +5960,7 @@ mod tests {
             gjc: true,
             grok: true,
             jcode: true,
+            commandcode: true,
             synthetic: true,
             ..ClientFlags::default()
         };
@@ -5991,6 +6000,7 @@ mod tests {
             "gjc",
             "grok",
             "jcode",
+            "commandcode",
             "synthetic",
         ] {
             assert!(

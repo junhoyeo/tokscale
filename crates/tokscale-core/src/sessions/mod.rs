@@ -8,6 +8,7 @@ pub mod claudecode;
 pub mod cline;
 pub mod codebuff;
 pub mod codex;
+pub mod commandcode;
 pub mod copilot;
 pub mod crush;
 pub mod cursor;

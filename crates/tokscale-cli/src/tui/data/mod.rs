@@ -1367,6 +1367,7 @@ mod tests {
         assert_eq!(clients[26], ClientId::Gjc);
         assert_eq!(clients[27], ClientId::Grok);
         assert_eq!(clients[28], ClientId::Jcode);
+        assert_eq!(clients[29], ClientId::CommandCode);
     }
 
     #[test]
