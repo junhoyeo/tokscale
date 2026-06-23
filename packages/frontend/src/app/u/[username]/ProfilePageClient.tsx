@@ -12,6 +12,8 @@ import {
   ProfileActivity,
   ProfileEmptyActivity,
   ProfileStats,
+  ProfileDevices,
+  type ProfileDevice,
   type ProfileUser,
   type ProfileStatsData,
   type ProfileTab,
@@ -54,10 +56,11 @@ interface ProfileData {
 
 interface ProfilePageClientProps {
   initialData: ProfileData;
+  initialDevices?: ProfileDevice[];
   username: string;
 }
 
-export default function ProfilePageClient({ initialData, username }: ProfilePageClientProps) {
+export default function ProfilePageClient({ initialData, initialDevices, username }: ProfilePageClientProps) {
   const [activeTab, setActiveTab] = useState<ProfileTab>("activity");
   const data = initialData;
 
@@ -145,7 +148,7 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
   const showResubmitBanner = EARLY_ADOPTERS.includes(data.user.username) && data.stats.submissionCount === 1;
 
   return (
-    <PageContainer style={{ backgroundColor: "#10121C" }}>
+    <PageContainer style={{ backgroundColor: "var(--color-bg-default)" }}>
       <Navigation />
 
       {showResubmitBanner && (
@@ -213,6 +216,8 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
               <ProfileModels models={data.models} modelUsage={data.modelUsage} />
             </div>
           )}
+
+          <ProfileDevices devices={initialDevices ?? []} />
         </ContentWrapper>
       </MainContent>
 

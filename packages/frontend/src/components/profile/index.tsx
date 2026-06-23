@@ -9,6 +9,10 @@ import type { TokenContributionData } from "@/lib/types";
 import { formatNumber, formatCurrency, formatDuration } from "@/lib/utils";
 import { legacy } from "@/lib/responsive";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
+import { ListCard, ListHeader, ListMetricCell, ListRow } from "./listStyles";
+
+export { ProfileDevices } from "./ProfileDevices";
+export type { ProfileDevice } from "./ProfileDevices";
 
 export interface ProfileUser {
   username: string;
@@ -925,63 +929,11 @@ export interface ProfileModelsProps {
   modelUsage?: ModelUsage[];
 }
 
-const ModelsListContainer = styled.div`
-  border-radius: 1rem;
-  border-width: 1px;
-  border-style: solid;
-  overflow: hidden;
-`;
-
-const ModelsListHeader = styled.div`
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 0.75rem;
-  padding-left: 0.75rem;
-  padding-right: 0.75rem;
-  padding-top: 0.75rem;
-  padding-bottom: 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-bottom-width: 1px;
-  border-bottom-style: solid;
-
-  @media (min-width: 480px) {
-    grid-template-columns: 1fr auto auto auto;
-    gap: 1rem;
-    padding-left: 1rem;
-    padding-right: 1rem;
-  }
-
-  @media (min-width: 640px) {
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
-  }
-`;
-
-const ModelsListRow = styled.div`
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 0.75rem;
-  padding-left: 0.75rem;
-  padding-right: 0.75rem;
-  padding-top: 0.75rem;
-  padding-bottom: 0.75rem;
-  align-items: center;
-
-  @media (min-width: 480px) {
-    grid-template-columns: 1fr auto auto auto;
-    gap: 1rem;
-    padding-left: 1rem;
-    padding-right: 1rem;
-  }
-
-  @media (min-width: 640px) {
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
-  }
-`;
+// Card/header/row/metric-cell primitives are shared with ProfileDevices via
+// ./listStyles so the two profile tables stay visually in sync.
+const ModelsListContainer = ListCard;
+const ModelsListHeader = ListHeader;
+const ModelsListRow = ListRow;
 
 const ModelNameCell = styled.div`
   display: flex;
@@ -1013,20 +965,7 @@ const ModelNameText = styled.span`
   }
 `;
 
-const ModelMetricCell = styled.div<{ $width: string; $smWidth: string; $hideOnMobile?: boolean }>`
-  text-align: right;
-  width: ${props => props.$width};
-
-  ${props => props.$hideOnMobile && css`
-    @media (max-width: 479px) {
-      display: none;
-    }
-  `}
-
-  @media (min-width: 640px) {
-    width: ${props => props.$smWidth};
-  }
-`;
+const ModelMetricCell = ListMetricCell;
 
 const MetricText = styled.span`
   font-size: 0.8125rem;
