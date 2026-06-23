@@ -6057,6 +6057,7 @@ mod tests {
             "crush",
             "goose",
             "antigravity",
+            "antigravity-cli",
             "zed",
             "kiro",
             "trae",
@@ -6065,6 +6066,7 @@ mod tests {
             "gjc",
             "grok",
             "jcode",
+            "micode",
             "commandcode",
             "synthetic",
         ];
