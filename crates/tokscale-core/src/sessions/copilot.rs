@@ -233,12 +233,20 @@ fn candidate_from_attributes(
 ) -> Option<CopilotUsageCandidate> {
     let input = attr_i64_first(attributes, &["gen_ai.usage.input_tokens"]);
     let output = attr_i64_first(attributes, &["gen_ai.usage.output_tokens"]);
-    let cache_read = attr_i64_first(attributes, &["gen_ai.usage.cache_read.input_tokens"]);
+    let cache_read = attr_i64_first(
+        attributes,
+        &[
+            "gen_ai.usage.cache_read.input_tokens",
+            "gen_ai.usage.cache_read_input_tokens",
+        ],
+    );
     let cache_write = attr_i64_first(
         attributes,
         &[
             "gen_ai.usage.cache_write.input_tokens",
             "gen_ai.usage.cache_creation.input_tokens",
+            "gen_ai.usage.cache_write_input_tokens",
+            "gen_ai.usage.cache_creation_input_tokens",
         ],
     );
     let reasoning = attr_i64_first(
@@ -789,6 +797,32 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 0);
         assert_eq!(messages[0].tokens.cache_read, 50);
         assert_eq!(messages[0].tokens.cache_write, 0);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_underscore_cache_attributes() {
+        // Copilot CLI OTEL emits cache fields with underscores instead of dots:
+        // gen_ai.usage.cache_read_input_tokens / gen_ai.usage.cache_creation_input_tokens
+        let content = r#"{"type":"span","traceId":"trace-cli","spanId":"span-cli","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"resource":{"attributes":{"service.name":"github-copilot","service.version":"1.0.62"}},"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.usage.input_tokens":21884,"gen_ai.usage.output_tokens":80,"gen_ai.usage.cache_creation_input_tokens":21881}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 21881);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_underscore_cache_read_and_creation() {
+        let content = r#"{"type":"span","traceId":"trace-cli2","spanId":"span-cli2","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"resource":{"attributes":{"service.name":"github-copilot"}},"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.usage.input_tokens":23000,"gen_ai.usage.output_tokens":120,"gen_ai.usage.cache_read_input_tokens":21881,"gen_ai.usage.cache_creation_input_tokens":1397}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_read, 21881);
+        assert_eq!(messages[0].tokens.cache_write, 1397);
     }
 
     #[test]
