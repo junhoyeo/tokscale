@@ -1,0 +1,1 @@
+# packages/cli is a plain wrapper entrypoint and does not require Bun preloads.

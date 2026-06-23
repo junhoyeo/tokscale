@@ -1,0 +1,14 @@
+-- Schema-drift safety net.
+--
+-- `submissions.submit_count` is referenced by schema.ts and by every call to
+-- /api/submit (`COALESCE(submit_count, 0) + 1`), but no earlier .sql migration
+-- file actually adds the column. Production has it because somebody once ran
+-- `drizzle-kit push` against the live DB; any fresh `drizzle-kit migrate` run
+-- (CI, staging, a new local dev DB) ends up without the column and breaks
+-- `/api/submit` on the very first submission. Verified locally on
+-- 2026-05-25 against `postgres:16`.
+--
+-- Using `ADD COLUMN IF NOT EXISTS` so this migration is a no-op on prod (and
+-- on any environment that already received the column out-of-band) but
+-- repairs every other environment in a single step.
+ALTER TABLE "submissions" ADD COLUMN IF NOT EXISTS "submit_count" integer DEFAULT 1 NOT NULL;

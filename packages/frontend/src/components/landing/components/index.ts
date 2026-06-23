@@ -1,0 +1,1 @@
+export { SquircleBorder } from "./SquircleBorder";

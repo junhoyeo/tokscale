@@ -1,0 +1,30 @@
+# Cargo Tarpaulin Configuration
+# https://github.com/xd009642/tarpaulin
+
+[tarpaulin]
+# Workspace configuration
+workspace = true
+all-features = true
+
+# Coverage threshold - CI fails if below this percentage
+# Current baseline: 22.11% - Set to 20% to prevent regression
+fail-under = 20.0
+
+# Timeout for test execution (5 minutes)
+timeout = "300s"
+
+# Verbose output for debugging
+verbose = true
+
+# Exclusions - don't measure coverage for these
+exclude-files = [
+    "target/*",
+    "*/tests/*",
+    "*/benches/*",
+    "*/examples/*",
+]
+
+[report]
+# Generate multiple output formats
+out = ["Html", "Xml", "Lcov"]
+output-dir = "target/coverage"

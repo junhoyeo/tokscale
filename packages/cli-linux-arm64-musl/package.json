@@ -1,0 +1,29 @@
+{
+  "name": "@tokscale/cli-linux-arm64-musl",
+  "version": "3.1.0",
+  "description": "tokscale CLI binary for linux arm64 musl",
+  "license": "MIT",
+  "type": "module",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "musl"
+  ],
+  "main": "bin/tokscale",
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junhoyeo/tokscale.git",
+    "directory": "packages/cli-linux-arm64-musl"
+  }
+}

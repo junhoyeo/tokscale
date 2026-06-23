@@ -1,0 +1,14 @@
+{
+  "name": "@tokscale/benchmarks",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Benchmark scripts for tokscale CLI",
+  "type": "module",
+  "scripts": {
+    "generate": "bun generate.ts",
+    "run": "bun runner.ts",
+    "run:synthetic": "bun runner.ts --synthetic --iterations 5 --warmup 1",
+    "run:rust": "bun runner.ts --implementation rust",
+    "run:rust:synthetic": "bun runner.ts --implementation rust --synthetic --iterations 5 --warmup 1"
+  }
+}

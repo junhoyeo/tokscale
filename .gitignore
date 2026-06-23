@@ -1,0 +1,36 @@
+.DS_Store
+node_modules
+dist/
+
+# Benchmark results (except .gitkeep)
+packages/benchmarks/results/*
+!packages/benchmarks/results/.gitkeep
+packages/benchmarks/synthetic-data/
+coverage/
+
+# Legacy paths (keep for safety)
+benchmarks/results/*
+!benchmarks/results/.gitkeep
+benchmarks/synthetic-data/
+
+target/
+*.node
+
+# Debug logs
+*.log
+ffi_otui_debug_*.log
+
+# Temporary files and archives
+opencodetmp/
+*.zip
+.turbo
+notepad.md
+ai-todolist.md
+*.tgz
+.sisyphus
+crates/tokscale-cli/tokscale-export-*.json
+self-host/tokscale-key.pem
+self-host/
+.next/
+.vercel
+.env*.local

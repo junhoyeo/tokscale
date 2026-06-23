@@ -1,0 +1,24 @@
+{
+  "name": "tokscale-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Token Usage Leaderboard - The Kardashev Scale for AI Devs",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "cargo build --release -p tokscale-cli && bun run build:cli",
+    "build:cli": "bun run --cwd packages/cli build",
+    "build:core": "cargo build --release -p tokscale-cli",
+    "cli": "./scripts/cli.sh",
+    "dev:frontend": "bun run --cwd packages/frontend dev",
+    "dev:benchmarks": "bun run --cwd packages/benchmarks run",
+    "test:launchers": "bash scripts/test-package-launchers.sh"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

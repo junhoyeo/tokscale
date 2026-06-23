@@ -1,0 +1,41 @@
+{
+  "openai": {
+    "id": "openai",
+    "name": "OpenAI",
+    "models": {
+      "gpt-fixture-model": {
+        "id": "gpt-fixture-model",
+        "name": "GPT Fixture Model",
+        "cost": {
+          "input": 1.25,
+          "output": 10.0,
+          "cache_read": 0.125,
+          "cache_write": 1.875
+        }
+      },
+      "missing-output-price": {
+        "id": "missing-output-price",
+        "name": "Missing Output Price",
+        "cost": {
+          "input": 1.0
+        }
+      }
+    }
+  },
+  "anthropic": {
+    "id": "anthropic",
+    "name": "Anthropic",
+    "models": {
+      "claude-fixture-sonnet": {
+        "id": "claude-fixture-sonnet",
+        "name": "Claude Fixture Sonnet",
+        "cost": {
+          "input": 3.0,
+          "output": 15.0,
+          "cache_read": 0.3,
+          "cache_write": 3.75
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@tokscale/cli-win32-x64-msvc",
+  "version": "3.1.0",
+  "description": "tokscale CLI binary for win32 x64 msvc",
+  "license": "MIT",
+  "type": "module",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "bin/tokscale.exe",
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junhoyeo/tokscale.git",
+    "directory": "packages/cli-win32-x64-msvc"
+  }
+}

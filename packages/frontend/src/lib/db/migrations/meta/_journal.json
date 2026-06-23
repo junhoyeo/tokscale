@@ -1,0 +1,111 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1766348213015,
+      "tag": "0000_add_user_id_unique_constraint",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1766393285170,
+      "tag": "0001_youthful_snowbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1766443511550,
+      "tag": "0002_square_lyja",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1766443600000,
+      "tag": "0003_add_leaderboard_composite_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1771322400000,
+      "tag": "0004_add_timestamp_and_schema_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1777404000000,
+      "tag": "0005_add_case_insensitive_username_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1778025600000,
+      "tag": "0006_rehash_plaintext_personal_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1778025601000,
+      "tag": "0007_add_submitted_devices",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1778112000000,
+      "tag": "0008_add_time_metrics_to_submissions",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1778198400000,
+      "tag": "0009_add_groups",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1780000000000,
+      "tag": "0010_submit_count_safety",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1780086400000,
+      "tag": "0011_drop_dead_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1780150000000,
+      "tag": "0012_hash_browser_session_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1780172800000,
+      "tag": "0013_add_mcp_servers",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1780915651573,
+      "tag": "0014_widen_cost_columns",
+      "breakpoints": true
+    }
+  ]
+}

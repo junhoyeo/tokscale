@@ -1,0 +1,54 @@
+{
+  "name": "@tokscale/cli",
+  "version": "3.1.0",
+  "description": "A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "tokscale": "./bin.js"
+  },
+  "files": [
+    "bin.js",
+    "dist/**/*"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junhoyeo/tokscale.git",
+    "directory": "packages/cli"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "bun src/index.ts",
+    "start": "node dist/index.js",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {},
+  "optionalDependencies": {
+    "@tokscale/cli-darwin-arm64": "3.1.0",
+    "@tokscale/cli-darwin-x64": "3.1.0",
+    "@tokscale/cli-linux-x64-gnu": "3.1.0",
+    "@tokscale/cli-linux-x64-musl": "3.1.0",
+    "@tokscale/cli-linux-arm64-gnu": "3.1.0",
+    "@tokscale/cli-linux-arm64-musl": "3.1.0",
+    "@tokscale/cli-win32-x64-msvc": "3.1.0",
+    "@tokscale/cli-win32-arm64-msvc": "3.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "tokscale",
+    "opencode",
+    "claude-code",
+    "cursor",
+    "gemini",
+    "codex",
+    "cli"
+  ]
+}

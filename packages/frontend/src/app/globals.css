@@ -1,0 +1,104 @@
+:root {
+  --color-bg-darkest: #111113;
+  --color-bg-default: #10121C;
+  --color-bg-elevated: #1A212A;
+  --color-bg-button: #202932;
+  --color-bg-subtle: #1E2733;
+  --color-bg-active: #0073FF;
+
+  --color-text-primary: #FFFFFF;
+  --color-text-muted: #4B6486;
+
+  --color-primary: #53d1f3;
+  --color-primary-hover: #3bc4e8;
+  --color-primary-active: #2ab8dc;
+
+  --color-accent-blue: #85CAFF;
+  --color-accent-link: #169AFF;
+
+  --color-graph-empty: #1A212A;
+  --color-graph-canvas: #10121C;
+
+  --color-canvas-default: #10121C;
+  --color-canvas-subtle: #1A212A;
+  --color-canvas-inset: #111113;
+  --color-fg-default: #FFFFFF;
+  --color-fg-muted: #7691b7;
+  --color-fg-subtle: #4B6486;
+  --color-border-default: #1E2733;
+  --color-border-muted: #1E2733;
+  --color-border-subtle: rgba(255, 255, 255, 0.1);
+  --color-accent-fg: #85CAFF;
+  --color-accent-emphasis: #169AFF;
+  --color-card-bg: #1A212A;
+  --color-card-border: #1E2733;
+  --color-btn-bg: #202932;
+  --color-btn-border: #1E2733;
+  --color-btn-hover-bg: #2C2C2F;
+  --color-btn-active-bg: #2C2C2F;
+  --color-btn-selected-bg: #111113;
+  --color-badge-bg: rgba(133, 202, 255, 0.15);
+  --color-badge-text: #85CAFF;
+  --background: #000;
+  --foreground: #FFFFFF;
+}
+
+* {
+  font-family: var(--font-figtree), system-ui, -apple-system, sans-serif !important;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-figtree), system-ui, -apple-system, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code, pre, .font-mono {
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, "SF Mono", 
+    Menlo, Consolas, "Liberation Mono", monospace !important;
+}
+
+button {
+  cursor: pointer;
+}
+
+a:hover {
+  text-decoration: none !important;
+}
+
+.bg-canvas { background-color: var(--color-canvas-default); }
+.bg-canvas-subtle { background-color: var(--color-canvas-subtle); }
+.bg-card { background-color: var(--color-card-bg); }
+.text-fg { color: var(--color-fg-default); }
+.text-fg-muted { color: var(--color-fg-muted); }
+.border-default { border-color: var(--color-border-default); }
+.border-subtle { border-color: var(--color-border-subtle); }
+
+
+.main-container {
+  flex: 1;
+  max-width: 1280px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 24px;
+  padding-right: 24px;
+  padding-bottom: 40px;
+  width: 100%;
+}
+
+@media (max-width: 560px) {
+  .main-container {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+@media (max-width: 400px) {
+  .main-container {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+}
