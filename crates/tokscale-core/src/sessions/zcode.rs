@@ -62,7 +62,7 @@ impl ZcodeUsage {
         let cache_write = self.cache_write.unwrap_or(0).max(0);
         let reasoning = self.reasoning.unwrap_or(0).max(0);
 
-        if input + output + cache_read + cache_write == 0 {
+        if input + output + cache_read + cache_write + reasoning == 0 {
             return None;
         }
 

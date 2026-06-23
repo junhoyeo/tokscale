@@ -88,6 +88,7 @@
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db` (XDG 데이터 디렉토리; SQLite) | ✅ 지원 |
 | <img width="48px" src="https://github.com/JetBrains.png" alt="Junie" /> | [Junie](https://www.jetbrains.com/junie/) | `~/.junie/sessions/*/events.jsonl` | ✅ 지원 |
 | <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` | ✅ 지원 |
+| <img width="48px" src="https://github.com/zai-org.png" alt="ZCode" /> | [ZCode](https://zcode.z.ai/) | `~/.zcode/projects/**/*.jsonl` | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | `hf:` 모델/`synthetic` provider 감지로 다른 소스에서 재귀속 (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ 지원 |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
@@ -157,7 +158,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 9가지 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, Synthetic 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, Synthetic 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -336,7 +337,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `synthetic`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `synthetic`.
 
 > **Deprecation 안내**: 기존 단일 클라이언트 플래그 (`--opencode`, `--claude`, `--codex` 등)는 하위 호환성을 위해 여전히 동작하지만 `--help`에서 숨겨졌으며 다음 메이저 릴리스에서 제거됩니다. 가능한 한 `--client`로 마이그레이션하세요. 인터랙티브 터미널에서 레거시 플래그를 사용하면 한 줄 경고가 출력됩니다.
 
@@ -758,7 +759,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Synthetic)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, ZCode, Synthetic)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -1074,6 +1075,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | MiMo Code | `~/.local/share/micode/` | `%USERPROFILE%\.local\share\micode\` | XDG 데이터 디렉토리 사용; SQLite 데이터베이스 `mimocode.db` |
 | Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | `GJC_CODING_AGENT_DIR`로 설정 가능 (`GJC_CONFIG_DIR`/`PI_CONFIG_DIR`도 지원; Linux/macOS에서는 `$XDG_DATA_HOME/gjc/sessions/`도 확인) |
 | Junie | `~/.junie/sessions/` | `%USERPROFILE%\.junie\sessions\` | 모든 플랫폼에서 동일한 home 상대 경로 사용; `events.jsonl` 사용 이벤트 파싱 |
+| ZCode | `~/.zcode/projects/` | `%USERPROFILE%\.zcode\projects\` | `*.jsonl` 세션 트랜스크립트 파싱; Z.ai의 GLM 모델용 ADE |
 | Synthetic | 다른 소스에서 재귀속 | 다른 소스에서 재귀속 | `hf:` 모델 접두사 + `synthetic` provider 감지 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 이러한 도구들은 `%APPDATA%`와 같은 Windows 기본 경로 대신 크로스 플랫폼 일관성을 위해 의도적으로 Unix 스타일 경로(`.local/share` 등)를 사용합니다.
