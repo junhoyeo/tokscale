@@ -893,6 +893,7 @@ pub enum ClientFilter {
     Micode,
     #[value(name = "antigravity-cli")]
     AntigravityCli,
+    Junie,
     Synthetic,
 }
 
@@ -934,6 +935,7 @@ impl ClientFilter {
             Self::Commandcode => "commandcode",
             Self::Micode => "micode",
             Self::AntigravityCli => "antigravity-cli",
+            Self::Junie => "junie",
             Self::Synthetic => "synthetic",
         }
     }
@@ -978,6 +980,7 @@ impl ClientFilter {
             Self::Commandcode => Some(ClientId::CommandCode),
             Self::Micode => Some(ClientId::MiMoCode),
             Self::AntigravityCli => Some(ClientId::AntigravityCli),
+            Self::Junie => Some(ClientId::Junie),
             Self::Synthetic => None,
         }
     }
@@ -1019,6 +1022,7 @@ impl ClientFilter {
             ClientId::CommandCode => Self::Commandcode,
             ClientId::MiMoCode => Self::Micode,
             ClientId::AntigravityCli => Self::AntigravityCli,
+            ClientId::Junie => Self::Junie,
         }
     }
 
@@ -3614,6 +3618,7 @@ fn capitalize_client(client: &str) -> String {
         "gjc" => "Gajae-Code".to_string(),
         "jcode" => "Jcode".to_string(),
         "commandcode" => "Command Code".to_string(),
+        "junie" => "Junie".to_string(),
         other => other.to_string(),
     }
 }

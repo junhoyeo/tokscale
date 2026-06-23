@@ -1457,6 +1457,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "cline" => Some("Cline"),
         "gjc" => Some("Gajae-Code"),
         "jcode" => Some("Jcode"),
+        "junie" => Some("Junie"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -1499,6 +1500,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
         ),
         "Jcode" => Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),
+        "Junie" => Some("https://github.com/JetBrains.png"),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
     }
@@ -2456,6 +2458,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_junie() {
+        assert_eq!(client_display_name("junie"), Some("Junie"));
+    }
+
+    #[test]
     fn test_client_display_name_unknown() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
@@ -2635,6 +2642,14 @@ mod tests {
         assert_eq!(
             client_logo_url("Jcode"),
             Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_junie() {
+        assert_eq!(
+            client_logo_url("Junie"),
+            Some("https://github.com/JetBrains.png")
         );
     }
 

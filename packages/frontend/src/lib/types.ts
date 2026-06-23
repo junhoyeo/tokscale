@@ -32,6 +32,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "commandcode",
   "micode",
   "antigravity-cli",
+  "junie",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;
