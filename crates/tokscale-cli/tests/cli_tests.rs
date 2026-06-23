@@ -3086,3 +3086,34 @@ fn test_client_filter_gjc_isolation() {
         );
     }
 }
+
+#[test]
+fn report_no_summarize_json_empty_home_emits_valid_json_without_panic() {
+    // Smoke test for the non-LLM `report` path: against an empty home it must
+    // exit 0, never panic (UTF-8 truncation / NaN sort / div-by-zero guards),
+    // and emit a parseable JSON array of entries.
+    let tmp = create_empty_fixture_dir();
+
+    let output = cmd_with_home(tmp.path())
+        .arg("report")
+        .arg("--no-summarize")
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "report --no-summarize --json failed against empty home; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("report --json must emit valid JSON");
+    let entries = json
+        .as_array()
+        .expect("report --json output must be a JSON array of entries");
+    assert!(
+        entries.is_empty(),
+        "expected zero entries for empty home, got: {entries:?}"
+    );
+}

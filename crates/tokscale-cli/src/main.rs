@@ -313,6 +313,27 @@ enum Commands {
     },
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
+    #[command(about = "Task-attributed usage report")]
+    Report {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+        #[arg(long, help = "Filter by workspace path")]
+        workspace: Option<String>,
+        #[arg(long, help = "Filter by client (opencode, claude, codex, etc.)")]
+        client: Option<String>,
+        #[command(flatten)]
+        date: DateRangeFlags,
+        #[arg(long, help = "Skip LLM summarization (show raw data only)")]
+        no_summarize: bool,
+        #[arg(
+            long,
+            default_value = "apple-fm",
+            help = "Summarizer backend: apple-fm, claude, codex, gemini, kiro"
+        )]
+        summarizer: String,
+        #[arg(long, help = "Reset all summaries and re-summarize from scratch")]
+        rebuild: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -742,6 +763,35 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::WarmTuiCache) => run_warm_tui_cache(),
+        Some(Commands::Report {
+            json,
+            workspace,
+            client,
+            date,
+            no_summarize,
+            summarizer,
+            rebuild,
+        }) => {
+            let today = date.today;
+            let week = date.week;
+            let month = date.month;
+            let (since, until) = build_date_filter(&date);
+            commands::report::run_report(commands::report::ReportOptions {
+                json,
+                since,
+                until,
+                workspace,
+                client,
+                no_summarize,
+                summarizer,
+                rebuild,
+                home_dir: cli.home.clone(),
+                scanner_settings: tui::settings::load_scanner_settings(),
+                today,
+                week,
+                month,
+            })
+        }
         None => {
             let clients = build_client_filter(cli.clients, &cli.home);
             let group_by: tokscale_core::GroupBy = cli.group_by.parse().unwrap_or_else(|e| {
