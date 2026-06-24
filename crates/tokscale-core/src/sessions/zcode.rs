@@ -213,6 +213,7 @@ fn canonicalize_model(model: &str) -> String {
 fn content_chars(content: &serde_json::Value) -> usize {
     match content {
         serde_json::Value::Null => 0,
+        serde_json::Value::String(s) if s.is_empty() => 0,
         serde_json::Value::Array(items) if items.is_empty() => 0,
         serde_json::Value::Object(map) if map.is_empty() => 0,
         _ => serde_json::to_string(content)
@@ -326,6 +327,35 @@ mod tests {
         assert_eq!(canonicalize_model("GLM-5.2"), "glm-5.2");
         assert_eq!(canonicalize_model("GLM-5-Turbo"), "glm-5-turbo");
         assert_eq!(canonicalize_model("glm-5.2"), "glm-5.2");
+    }
+
+    #[test]
+    fn test_content_chars_treats_empty_string_as_empty() {
+        // Empty string content must count as 0 chars, consistent with null,
+        // empty array, and empty object — otherwise serializing `""` yields 2
+        // chars and produces a spurious estimated token.
+        assert_eq!(content_chars(&json!("")), 0);
+        assert_eq!(content_chars(&serde_json::Value::Null), 0);
+        assert_eq!(content_chars(&json!([])), 0);
+        assert_eq!(content_chars(&json!({})), 0);
+        assert!(content_chars(&json!("abcd")) > 0);
+    }
+
+    #[test]
+    fn test_empty_string_assistant_content_emits_no_message() {
+        // An assistant entry with empty-string content and no token usage has
+        // nothing to estimate, so it must take the zero-token continue path
+        // instead of emitting a fake 1-token message.
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": ""}),
+            json!({"role": "assistant", "sessionId": "s", "content": ""}),
+        );
+        let path = write_session(&dir, "proj", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert!(messages.is_empty());
     }
 
     #[test]

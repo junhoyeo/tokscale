@@ -121,6 +121,14 @@ fn run_codex_login_in_home(
         anyhow::bail!("{}", codex_login_failure_message(&status, &output_lines));
     }
 
+    // `wait_for_codex_login_child` only observes cancellation while the child
+    // is still running. If the child exited successfully in the same tick the
+    // user dismissed, re-check the flag before importing — otherwise a
+    // cancelled login would still persist the account to the credentials store.
+    if login_was_cancelled(&child_slot) {
+        anyhow::bail!("Codex login cancelled");
+    }
+
     let auth_path = codex_home.join("auth.json");
     let import = crate::commands::usage::codex::import_login_auth_file(&auth_path)?;
     if let Some(warning) = import.warning {
@@ -142,6 +150,16 @@ fn put_codex_login_child(
         state.child = Some(child);
         Ok(None)
     }
+}
+
+/// Returns whether the login was cancelled (the TUI dismissed the panel or the
+/// app exited). A poisoned lock is treated as cancelled so the worker errs on
+/// the side of not committing a side effect.
+fn login_was_cancelled(child_slot: &CodexLoginChildSlot) -> bool {
+    child_slot
+        .lock()
+        .map(|state| state.cancelled)
+        .unwrap_or(true)
 }
 
 /// Polls the login child until it exits. Returns `Ok(None)` when the TUI
@@ -287,6 +305,17 @@ mod tests {
         cancel_codex_login_child(&slot);
         let status = wait_for_codex_login_child(&slot).unwrap();
         assert!(status.is_none());
+    }
+
+    #[test]
+    fn login_was_cancelled_tracks_cancellation() {
+        let slot = CodexLoginChildSlot::default();
+        // A fresh slot is not cancelled, so the import side effect may proceed.
+        assert!(!login_was_cancelled(&slot));
+        // After a dismiss/exit, the barrier reports cancelled so the worker
+        // bails before importing the account.
+        cancel_codex_login_child(&slot);
+        assert!(login_was_cancelled(&slot));
     }
 
     #[cfg(unix)]
