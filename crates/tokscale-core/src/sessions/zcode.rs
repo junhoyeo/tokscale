@@ -117,29 +117,39 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
             }
         }
 
-        if model_id.is_none() {
-            if let Some(m) = entry.model.as_deref().filter(|m| !m.is_empty()) {
-                model_id = Some(canonicalize_model(m));
-            }
+        // Track the most-recently-seen model so per-entry pricing reflects the
+        // model in effect at that point in the transcript. When the user
+        // switches models mid-session, later messages must not be priced under
+        // the first model.
+        if let Some(m) = entry.model.as_deref().filter(|m| !m.is_empty()) {
+            model_id = Some(canonicalize_model(m));
         }
 
         let resolved_model = model_id.as_deref().unwrap_or(UNKNOWN_MODEL).to_string();
         let chars = entry.content.as_ref().map(content_chars).unwrap_or(0);
 
-        // Prefer authoritative token usage from the API.
-        let usage = entry.usage.as_ref().or(entry.token_usage.as_ref());
+        // Prefer authoritative token usage from the API. Choose the first block
+        // that actually yields a breakdown, so an empty `usage` does not shadow
+        // a populated `token_usage`.
+        let breakdown_from_usage = entry
+            .usage
+            .as_ref()
+            .and_then(|u| u.to_breakdown())
+            .or_else(|| entry.token_usage.as_ref().and_then(|u| u.to_breakdown()));
 
         match entry.role.as_deref() {
             Some("assistant") => {
-                let breakdown = if let Some(u) = usage.and_then(|u| u.to_breakdown()) {
+                let breakdown = if let Some(u) = breakdown_from_usage {
                     u
                 } else {
                     // Estimate from content.
                     let input = estimate_tokens(context_chars);
                     let output = estimate_tokens(chars);
                     if input + output == 0 {
+                        // Do not consume pending_turn_start here: no message is
+                        // emitted, so the next real assistant message in this
+                        // turn must keep its is_turn_start marker.
                         context_chars += chars;
-                        pending_turn_start = false;
                         continue;
                     }
                     TokenBreakdown {
@@ -359,5 +369,74 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert!(messages[1].tokens.input > messages[0].tokens.input);
+    }
+
+    #[test]
+    fn test_model_switch_mid_session() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "model": "GLM-5.2",
+                "content": "first",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+            json!({"role": "user", "sessionId": "s", "content": "switch"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "model": "glm-5-turbo",
+                "content": "second",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+            json!({"role": "user", "sessionId": "s", "content": "again"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "content": "third",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+        );
+        let path = write_session(&dir, "proj", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 3);
+        // Each assistant message reflects the model in effect at that point.
+        assert_eq!(messages[0].model_id, "glm-5.2");
+        assert_eq!(messages[1].model_id, "glm-5-turbo");
+        assert_ne!(messages[0].model_id, messages[1].model_id);
+        // An entry with no `model` field inherits the most-recently-seen model.
+        assert_eq!(messages[2].model_id, "glm-5-turbo");
+    }
+
+    #[test]
+    fn test_empty_usage_falls_back_to_token_usage() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "content": "bye",
+                "usage": {},
+                "token_usage": {
+                    "input_tokens": 321,
+                    "output_tokens": 123,
+                    "input_cache_read": 7
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        // Authoritative token_usage counts are used, NOT estimated.
+        assert_eq!(messages[0].tokens.input, 321);
+        assert_eq!(messages[0].tokens.output, 123);
+        assert_eq!(messages[0].tokens.cache_read, 7);
     }
 }
