@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
+use crate::commands::usage::UsageOutput;
 use crate::ClientFilter;
 
 use ratatui::style::Color;
@@ -216,6 +217,45 @@ fn short_account_id(account_id: &str) -> String {
     format!("Account {head}...{tail}")
 }
 
+fn compare_codex_usage_outputs(a: &UsageOutput, b: &UsageOutput) -> std::cmp::Ordering {
+    let active_order = codex_usage_is_active(b).cmp(&codex_usage_is_active(a));
+    if active_order != std::cmp::Ordering::Equal {
+        return active_order;
+    }
+
+    codex_usage_sort_key(a)
+        .cmp(&codex_usage_sort_key(b))
+        .then_with(|| codex_usage_account_id(a).cmp(codex_usage_account_id(b)))
+}
+
+fn codex_usage_is_active(output: &UsageOutput) -> bool {
+    output
+        .account
+        .as_ref()
+        .is_some_and(|account| account.is_active)
+}
+
+fn codex_usage_sort_key(output: &UsageOutput) -> String {
+    output
+        .account
+        .as_ref()
+        .map(|account| {
+            account
+                .label_name()
+                .unwrap_or(account.id.as_str())
+                .to_lowercase()
+        })
+        .unwrap_or_else(|| output.display_name().to_lowercase())
+}
+
+fn codex_usage_account_id(output: &UsageOutput) -> &str {
+    output
+        .account
+        .as_ref()
+        .map(|account| account.id.as_str())
+        .unwrap_or_default()
+}
+
 struct MinutelySortCache {
     sort_field: SortField,
     sort_direction: SortDirection,
@@ -257,6 +297,7 @@ pub struct App {
 
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
+    pub last_auto_refresh: Instant,
     pub last_refresh: Instant,
 
     pub status_message: Option<String>,
@@ -396,6 +437,7 @@ impl App {
             stats_breakdown_total_lines: 0,
             auto_refresh,
             auto_refresh_interval,
+            last_auto_refresh: Instant::now(),
             last_refresh: Instant::now(),
             status_message: if has_data {
                 Some("Loaded from cache".to_string())
@@ -525,11 +567,14 @@ impl App {
             }
         }
 
-        if self.auto_refresh
-            && !self.background_loading
-            && self.last_refresh.elapsed() >= self.auto_refresh_interval
-        {
-            self.needs_reload = true;
+        if self.auto_refresh && self.last_auto_refresh.elapsed() >= self.auto_refresh_interval {
+            if self.current_tab == Tab::Usage {
+                self.last_auto_refresh = Instant::now();
+                self.fetch_subscription_usage();
+            } else if !self.background_loading {
+                self.last_auto_refresh = Instant::now();
+                self.needs_reload = true;
+            }
         }
 
         if *self.dialog_needs_reload.borrow() {
@@ -749,6 +794,7 @@ impl App {
                 self.cycle_theme();
             }
             KeyCode::Char('r') => {
+                self.last_auto_refresh = Instant::now();
                 if self.current_tab == Tab::Usage {
                     self.refresh_usage();
                 } else if self.background_loading {
@@ -799,9 +845,6 @@ impl App {
             }
             KeyCode::Char('x') if self.current_tab == Tab::Usage => {
                 self.confirm_selected_codex_rate_limit_reset();
-            }
-            KeyCode::Char('u') if self.current_tab == Tab::Usage => {
-                self.refresh_usage();
             }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
@@ -976,6 +1019,7 @@ impl App {
                 self.scroll_offset = 0;
             }
             ClickAction::UsageRefresh => {
+                self.last_auto_refresh = Instant::now();
                 self.refresh_usage();
             }
             ClickAction::CodexStartLogin => {
@@ -1130,6 +1174,7 @@ impl App {
         match crate::commands::usage::codex::switch_active_account(account_id) {
             Ok(info) => {
                 self.mark_active_codex_account(&info.id);
+                self.sort_codex_subscription_usage();
                 if let Some(index) = self.subscription_usage.iter().position(|usage| {
                     usage
                         .account
@@ -1268,6 +1313,7 @@ impl App {
                     .find(|account| account.is_active)
                 {
                     self.mark_active_codex_account(&active.id);
+                    self.sort_codex_subscription_usage();
                 } else {
                     self.clear_active_codex_accounts();
                 }
@@ -1306,6 +1352,28 @@ impl App {
             if usage.provider == "Codex" {
                 if let Some(account) = &mut usage.account {
                     account.is_active = false;
+                }
+            }
+        }
+    }
+
+    fn sort_codex_subscription_usage(&mut self) {
+        let mut codex_outputs = self
+            .subscription_usage
+            .iter()
+            .filter(|usage| usage.provider == "Codex")
+            .cloned()
+            .collect::<Vec<_>>();
+        if codex_outputs.len() < 2 {
+            return;
+        }
+
+        codex_outputs.sort_by(compare_codex_usage_outputs);
+        let mut sorted = codex_outputs.into_iter();
+        for usage in &mut self.subscription_usage {
+            if usage.provider == "Codex" {
+                if let Some(next) = sorted.next() {
+                    *usage = next;
                 }
             }
         }
@@ -1759,6 +1827,9 @@ impl App {
 
     fn toggle_auto_refresh(&mut self) {
         self.auto_refresh = !self.auto_refresh;
+        if self.auto_refresh {
+            self.last_auto_refresh = Instant::now();
+        }
         self.settings.auto_refresh_enabled = self.auto_refresh;
         let save_result = self.settings.save();
         let msg = if self.auto_refresh {
@@ -2186,6 +2257,7 @@ impl App {
 mod tests {
     use super::super::ui::widgets::get_provider_shade;
     use super::*;
+    use crate::commands::usage::{UsageAccount, UsageMetric, UsageOutput};
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
     use chrono::{NaiveDate, NaiveDateTime};
     use std::collections::{BTreeMap, BTreeSet};
@@ -2478,6 +2550,67 @@ mod tests {
             initial_tab: None,
         };
         App::new_with_cached_data(config, None).unwrap()
+    }
+
+    fn usage_output(provider: &str, account: Option<UsageAccount>) -> UsageOutput {
+        UsageOutput {
+            provider: provider.to_string(),
+            account,
+            plan: Some("Pro".to_string()),
+            email: None,
+            metrics: vec![UsageMetric {
+                label: "Session".to_string(),
+                used_percent: 20.0,
+                remaining_percent: 80.0,
+                remaining_label: Some("80% left".to_string()),
+                resets_at: None,
+            }],
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
+        }
+    }
+
+    #[test]
+    fn test_codex_usage_sort_moves_active_account_to_first_codex_row() {
+        let mut app = make_app();
+        app.subscription_usage = vec![
+            usage_output("Claude", None),
+            usage_output(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_work".to_string(),
+                    label: Some("work".to_string()),
+                    is_active: true,
+                }),
+            ),
+            usage_output("Warp/Oz", None),
+            usage_output(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_personal".to_string(),
+                    label: Some("personal".to_string()),
+                    is_active: false,
+                }),
+            ),
+        ];
+
+        app.mark_active_codex_account("acct_personal");
+        app.sort_codex_subscription_usage();
+
+        assert_eq!(app.subscription_usage[0].provider, "Claude");
+        assert_eq!(app.subscription_usage[2].provider, "Warp/Oz");
+        let codex_ids = app
+            .subscription_usage
+            .iter()
+            .filter(|usage| usage.provider == "Codex")
+            .filter_map(|usage| usage.account.as_ref().map(|account| account.id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(codex_ids, vec!["acct_personal", "acct_work"]);
+        assert!(app.subscription_usage[1]
+            .account
+            .as_ref()
+            .is_some_and(|account| account.is_active));
     }
 
     #[test]
@@ -3366,6 +3499,64 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_key_u_on_usage_is_unassigned() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('u')));
+
+        assert!(!app.needs_reload);
+        assert!(!app.is_fetching_usage());
+        assert!(!app.usage_fetch_attempted);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_refreshes_usage_only() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+
+        app.on_tick();
+
+        assert!(!app.needs_reload);
+        assert!(app.usage_fetch_attempted);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_while_fetching_preserves_status() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.usage_rx = Some(rx);
+        app.status_message = Some("Existing status".into());
+
+        app.on_tick();
+
+        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(!app.needs_reload);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_overview_refreshes_token_data_only() {
+        let mut app = make_app();
+        app.current_tab = Tab::Overview;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+
+        app.on_tick();
+
+        assert!(app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
     fn test_codex_reset_success_status_survives_follow_up_usage_refresh() {
         let mut app = make_app();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3437,6 +3628,21 @@ mod tests {
         let initial = app.auto_refresh;
         app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
         assert_ne!(app.auto_refresh, initial);
+    }
+
+    #[test]
+    fn test_enabling_auto_refresh_waits_for_next_interval() {
+        let mut app = make_app();
+        app.auto_refresh = false;
+        app.auto_refresh_interval = Duration::from_secs(60);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(120);
+
+        app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
+        app.on_tick();
+
+        assert!(app.auto_refresh);
+        assert!(!app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
     }
 
     #[test]
