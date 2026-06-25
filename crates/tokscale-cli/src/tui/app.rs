@@ -570,7 +570,10 @@ impl App {
         if self.auto_refresh && self.last_auto_refresh.elapsed() >= self.auto_refresh_interval {
             if self.current_tab == Tab::Usage {
                 self.last_auto_refresh = Instant::now();
-                self.fetch_subscription_usage();
+                // Auto-refresh is a silent background poll, not a user action,
+                // so it must not overwrite the current status message (e.g. a
+                // Codex reset result) with "Fetching usage data...".
+                self.fetch_subscription_usage_preserving_status();
             } else if !self.background_loading {
                 self.last_auto_refresh = Instant::now();
                 self.needs_reload = true;
@@ -3538,6 +3541,28 @@ mod tests {
         app.on_tick();
 
         assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(!app.needs_reload);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_when_idle_preserves_status() {
+        // The while-fetching case above hits the early return in
+        // fetch_subscription_usage_with_status. This covers the idle case
+        // (no fetch in flight), where a non-preserving fetch would overwrite
+        // the status with "Fetching usage data...". Auto-refresh must keep the
+        // existing message and start a silent background fetch.
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        app.status_message = Some("Existing status".into());
+        assert!(app.usage_rx.is_none());
+
+        app.on_tick();
+
+        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(app.usage_fetch_attempted);
         assert!(!app.needs_reload);
     }
 
