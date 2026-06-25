@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, Utc};
 
 pub fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -27,7 +27,18 @@ pub fn format_reset_time(resets_at: &str) -> String {
         Ok(d) => d.with_timezone(&Utc),
         Err(_) => return resets_at.into(),
     };
-    let diff = dt - Utc::now();
+    let local_dt = dt.with_timezone(&Local);
+    let now = Utc::now();
+    let display_time = compact_reset_time(local_dt, now.with_timezone(&Local), dt - now);
+    format_reset_time_with_now(dt, now, &display_time)
+}
+
+fn format_reset_time_with_now(
+    reset_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    display_time: &str,
+) -> String {
+    let diff = reset_at - now;
     if diff <= Duration::zero() {
         return "resets now".into();
     }
@@ -42,10 +53,18 @@ pub fn format_reset_time(resets_at: &str) -> String {
         } else {
             format!("resets in {h}h")
         }
-    } else if diff.num_days() < 7 {
-        format!("resets {} {}", dt.format("%a"), dt.format("%-I%P"))
     } else {
-        format!("resets {}", dt.format("%b %-d"))
+        format!("resets {display_time}")
+    }
+}
+
+fn compact_reset_time(reset_at: DateTime<Local>, now: DateTime<Local>, diff: Duration) -> String {
+    if reset_at.year() != now.year() {
+        reset_at.format("%Y-%m-%d %H:%M").to_string()
+    } else if diff.num_days() < 7 {
+        reset_at.format("%a %b %-d %H:%M").to_string()
+    } else {
+        reset_at.format("%b %-d %H:%M").to_string()
     }
 }
 
@@ -90,4 +109,48 @@ pub fn atomic_write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Resu
         return Err(e);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn reset_time_keeps_short_windows_relative() {
+        let label = format_reset_time_with_now(
+            utc("2026-06-25T02:45:00Z"),
+            utc("2026-06-25T01:30:00Z"),
+            "2026-06-25 10:45 +08:00",
+        );
+
+        assert_eq!(label, "resets in 1h 15m");
+    }
+
+    #[test]
+    fn reset_time_shows_absolute_local_time_for_daily_or_longer_windows() {
+        let label = format_reset_time_with_now(
+            utc("2026-06-27T01:30:00Z"),
+            utc("2026-06-25T01:30:00Z"),
+            "Sat Jun 27 09:30",
+        );
+
+        assert_eq!(label, "resets Sat Jun 27 09:30");
+    }
+
+    #[test]
+    fn reset_time_omits_weekday_for_long_windows() {
+        let label = format_reset_time_with_now(
+            utc("2026-07-18T00:43:00Z"),
+            utc("2026-06-25T01:30:00Z"),
+            "Jul 18 08:43",
+        );
+
+        assert_eq!(label, "resets Jul 18 08:43");
+    }
 }

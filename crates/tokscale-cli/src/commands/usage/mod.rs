@@ -349,7 +349,12 @@ fn partition_results(
 // ── Light-mode rendering ──
 
 const BAR_WIDTH: usize = 12;
-const CARD_WIDTH: usize = 62;
+const METRIC_LABEL_WIDTH: usize = 14;
+const METRIC_REMAINING_WIDTH: usize = 11;
+const METRIC_BAR_WIDTH: usize = BAR_WIDTH + 2;
+const METRIC_RESET_WIDTH: usize = 24;
+const CARD_WIDTH: usize =
+    1 + METRIC_LABEL_WIDTH + METRIC_REMAINING_WIDTH + METRIC_BAR_WIDTH + METRIC_RESET_WIDTH;
 
 fn truncate(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
@@ -379,8 +384,19 @@ fn render_light(output: &UsageOutput) {
             .as_ref()
             .map(|r| helpers::format_reset_time(r))
             .unwrap_or_default();
-        let label = truncate(&m.label, 14);
-        println!("│ {:<14}{:<11}{:<14}{:<22}│", label, rem, bar, reset);
+        let reset = truncate(&reset, METRIC_RESET_WIDTH);
+        let label = truncate(&m.label, METRIC_LABEL_WIDTH);
+        println!(
+            "│ {:<label_width$}{:<remaining_width$}{:<bar_width$}{:<reset_width$}│",
+            label,
+            rem,
+            bar,
+            reset,
+            label_width = METRIC_LABEL_WIDTH,
+            remaining_width = METRIC_REMAINING_WIDTH,
+            bar_width = METRIC_BAR_WIDTH,
+            reset_width = METRIC_RESET_WIDTH,
+        );
     }
     if let Some(ref email) = output.email {
         let email = truncate(email, CARD_WIDTH - 11);

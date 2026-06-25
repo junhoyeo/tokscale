@@ -1299,7 +1299,10 @@ fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'stat
 fn metric_detail_line(app: &App, metric: &UsageMetric, width: usize) -> Line<'static> {
     let remaining = remaining_label(metric);
     let label_width = metric_label_width(width);
-    let bar_width = width.saturating_sub(label_width + 25).clamp(10, 34);
+    let target_reset_width = width.saturating_sub(label_width + 12).min(24);
+    let bar_width = width
+        .saturating_sub(label_width + target_reset_width + 14)
+        .clamp(10, 34);
     let reset_width = width.saturating_sub(label_width + bar_width + 14);
     let reset = metric
         .resets_at
@@ -1491,7 +1494,7 @@ fn account_table_widths(width: u16) -> [Constraint; 8] {
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Min(30),
-            Constraint::Length(22),
+            Constraint::Length(24),
         ]
     } else {
         [
@@ -1502,7 +1505,7 @@ fn account_table_widths(width: u16) -> [Constraint; 8] {
             Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Min(24),
-            Constraint::Length(16),
+            Constraint::Length(24),
         ]
     }
 }
@@ -1523,7 +1526,8 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     } else {
         0usize
     };
-    let left_width = width.saturating_sub(4 + state_width);
+    let state_right_padding = usize::from(state_width > 0) * 2;
+    let left_width = width.saturating_sub(4 + state_width + state_right_padding);
     let left = format!("{} {}", output.provider, row.account_summary);
     let mut first = vec![
         styled(
@@ -1543,8 +1547,17 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     ];
     if state_width > 0 {
         first.push(styled(
-            truncate_string(&state, state_width),
+            format!(
+                "{:>width$}",
+                truncate_string(&state, state_width),
+                width = state_width
+            ),
             Style::default().fg(readiness_color(app, row.readiness)),
+            selected,
+        ));
+        first.push(styled(
+            " ".repeat(state_right_padding),
+            Style::default(),
             selected,
         ));
     }
@@ -2900,6 +2913,33 @@ mod tests {
         assert!(body.contains("work"), "{body}");
         assert!(body.contains("personal"), "{body}");
         assert!(body.contains(" Remove "), "{body}");
+    }
+
+    #[test]
+    fn narrow_usage_account_status_keeps_right_padding() {
+        let mut app = make_app();
+        app.subscription_usage = vec![output(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
+        )];
+
+        let body = render_body(&mut app, 90, 24);
+        let row = body
+            .lines()
+            .find(|line| {
+                line.contains("Codex") && line.contains("Active") && line.contains("Ready")
+            })
+            .expect("missing active narrow account row");
+        let ready_end = row.rfind("Ready").expect(row) + "Ready".len();
+
+        assert!(
+            row[ready_end..].starts_with("  "),
+            "expected right padding after Ready: {row:?}"
+        );
     }
 
     #[test]
