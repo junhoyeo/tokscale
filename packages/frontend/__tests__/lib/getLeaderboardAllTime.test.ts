@@ -501,4 +501,18 @@ describe("all-time leaderboard freshness queries", () => {
     );
     expect(mockState.limitCalls[0]).toBe(2);
   });
+
+  it("casts all-time cost at the full numeric(18,4) column precision so large totals don't overflow", async () => {
+    // Regression: total_cost is numeric(18,4) (migration 0014); every cost cast must stay >= 18 wide or costs >= 1e8 overflow.
+    // Width-based (not literal) so it also catches a re-narrowing to any precision below the column, e.g. DECIMAL(15,4).
+    await getLeaderboardData("all", 1, 50, "cost");
+    const sqlTexts = serializeSqlCalls();
+
+    const costCastWidths = sqlTexts
+      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
+      .flatMap((text) => [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1])));
+
+    expect(costCastWidths.length).toBeGreaterThan(0);
+    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+  });
 });

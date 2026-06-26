@@ -53,7 +53,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       db
         .select({
           totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)`,
-          totalCost: sql<number>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4))), 0)`,
+          totalCost: sql<number>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4))), 0)`,
           inputTokens: sql<number>`COALESCE(SUM(${submissions.inputTokens}), 0)`,
           outputTokens: sql<number>`COALESCE(SUM(${submissions.outputTokens}), 0)`,
           cacheReadTokens: sql<number>`COALESCE(SUM(${submissions.cacheReadTokens}), 0)`,

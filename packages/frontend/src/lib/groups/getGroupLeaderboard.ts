@@ -259,11 +259,11 @@ async function fetchPeriodRows(
 
 async function fetchAllTimeRows(groupId: string, sortBy: SortBy): Promise<GroupLeaderboardUser[]> {
   const primaryOrderByColumn = sortBy === "cost"
-    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`
     : sql`SUM(${submissions.totalTokens})`;
   const secondaryOrderByColumn = sortBy === "cost"
     ? sql`SUM(${submissions.totalTokens})`
-    : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`;
+    : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`;
 
   const rows = await db
     .select({
@@ -273,7 +273,7 @@ async function fetchAllTimeRows(groupId: string, sortBy: SortBy): Promise<GroupL
       avatarUrl: users.avatarUrl,
       role: groupMembers.role,
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
-      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
       submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
       lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
       cliVersion: sql<string | null>`(

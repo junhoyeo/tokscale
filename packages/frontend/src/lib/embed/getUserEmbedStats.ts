@@ -43,7 +43,7 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
       displayName: users.displayName,
       avatarUrl: users.avatarUrl,
       totalTokens: sql<number>`COALESCE(${submissions.totalTokens}, 0)`,
-      totalCost: sql<number>`COALESCE(CAST(${submissions.totalCost} AS DECIMAL(12,4)), 0)`,
+      totalCost: sql<number>`COALESCE(CAST(${submissions.totalCost} AS DECIMAL(18,4)), 0)`,
       submissionCount: sql<number>`COALESCE(${submissions.submitCount}, 0)`,
       updatedAt: submissions.updatedAt,
     })
@@ -70,7 +70,7 @@ async function fetchUserEmbedStats(username: string, sortBy: EmbedSortBy): Promi
           RANK() OVER (
             ORDER BY
               ${sortBy === "cost"
-                ? sql`CAST(total_cost AS DECIMAL(12,4)) DESC`
+                ? sql`CAST(total_cost AS DECIMAL(18,4)) DESC`
                 : sql`total_tokens DESC`}
           ) AS rank
         FROM submissions
