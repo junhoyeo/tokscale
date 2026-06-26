@@ -504,6 +504,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    OpenCodeReview = 34 => {
+        id: "opencodereview",
+        root: PathRoot::Home,
+        relative: ".opencodereview/sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -556,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 34);
+        assert_eq!(ClientId::COUNT, 35);
     }
 
     #[test]

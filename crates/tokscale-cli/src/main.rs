@@ -895,6 +895,7 @@ pub enum ClientFilter {
     AntigravityCli,
     Junie,
     Zcode,
+    Opencodereview,
     Synthetic,
 }
 
@@ -938,6 +939,7 @@ impl ClientFilter {
             Self::AntigravityCli => "antigravity-cli",
             Self::Junie => "junie",
             Self::Zcode => "zcode",
+            Self::Opencodereview => "opencodereview",
             Self::Synthetic => "synthetic",
         }
     }
@@ -984,6 +986,7 @@ impl ClientFilter {
             Self::AntigravityCli => Some(ClientId::AntigravityCli),
             Self::Junie => Some(ClientId::Junie),
             Self::Zcode => Some(ClientId::Zcode),
+            Self::Opencodereview => Some(ClientId::OpenCodeReview),
             Self::Synthetic => None,
         }
     }
@@ -1027,6 +1030,7 @@ impl ClientFilter {
             ClientId::AntigravityCli => Self::AntigravityCli,
             ClientId::Junie => Self::Junie,
             ClientId::Zcode => Self::Zcode,
+            ClientId::OpenCodeReview => Self::Opencodereview,
         }
     }
 

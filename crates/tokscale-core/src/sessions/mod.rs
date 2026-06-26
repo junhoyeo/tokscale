@@ -29,6 +29,7 @@ pub mod micode;
 pub mod mux;
 pub mod openclaw;
 pub mod opencode;
+pub mod opencodereview;
 pub mod pi;
 pub mod qwen;
 pub mod roocode;
