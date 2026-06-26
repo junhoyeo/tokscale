@@ -502,3 +502,65 @@ describe("all-time leaderboard freshness queries", () => {
     expect(mockState.limitCalls[0]).toBe(2);
   });
 });
+
+describe("all-time cost aggregation precision (numeric overflow regression)", () => {
+  // The submissions.total_cost column is decimal(18,4). Casting it to a
+  // narrower DECIMAL(12,4) (max 99,999,999.9999) overflows the moment any row
+  // reports a cost >= $100,000,000, which throws "numeric field overflow" and
+  // takes down every all-time leaderboard query. Casts must match the column.
+  function expectNoNarrowedCostCast(sqlTexts: string[]): void {
+    const costCastWidths = sqlTexts
+      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
+      .flatMap((text) =>
+        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
+      );
+    expect(costCastWidths.length).toBeGreaterThan(0);
+    // total_cost is decimal(18,4); any narrower precision overflows on big costs.
+    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+  }
+
+  it("casts total_cost at full column precision in the all-time list", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([
+      { totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 },
+    ]);
+
+    await getLeaderboardData("all", 1, 50, "cost");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+
+  it("casts total_cost at full column precision in the all-time search list", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([
+      { totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 },
+    ]);
+
+    await getLeaderboardData("all", 1, 50, "cost", "ali");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+
+  it("casts total_cost at full column precision for all-time user rank", async () => {
+    mockState.pushAwaitedResult([
+      { id: "user-alice", username: "alice", displayName: "Alice", avatarUrl: null },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 3000,
+        totalCost: 40,
+        totalActiveTimeMs: 0,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T09:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+
+    await getUserRank("alice", "all", "cost");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+});

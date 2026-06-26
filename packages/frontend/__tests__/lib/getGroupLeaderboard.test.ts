@@ -295,4 +295,30 @@ describe("group leaderboard data", () => {
     );
     expect(leaderboard.users.map((user) => user.username)).toEqual(["alice", "bob"]);
   });
+
+  // submissions.total_cost is decimal(18,4); narrowing the cast to DECIMAL(12,4)
+  // (max 99,999,999.9999) overflows for any row >= $100,000,000 and crashes the
+  // all-time group leaderboard exactly like the global leaderboard.
+  it("casts total_cost at full column precision for the all-time group leaderboard", async () => {
+    mockState.setAllTimeRows([]);
+
+    await getGroupLeaderboardData("group-1", "all", 1, 50, "cost");
+
+    const sqlTexts = mockState.sql.mock.calls.map((call) => {
+      const [strings, ...values] = call as [TemplateStringsArray, ...unknown[]];
+      return Array.from(strings).reduce((text, part, index) => {
+        const nextValue = index < values.length ? String(values[index]) : "";
+        return `${text}${part}${nextValue}`;
+      }, "");
+    });
+
+    const costCastWidths = sqlTexts
+      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
+      .flatMap((text) =>
+        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
+      );
+    expect(costCastWidths.length).toBeGreaterThan(0);
+    // total_cost is decimal(18,4); any narrower precision overflows on big costs.
+    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+  });
 });
