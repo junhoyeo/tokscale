@@ -151,6 +151,7 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
 fn current_count_label(app: &App) -> String {
     match app.current_tab {
         Tab::Overview | Tab::Models => format!(" ({} models)", app.data.models.len()),
+        Tab::Providers => format!(" ({} providers)", app.get_sorted_providers().len()),
         Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
         Tab::Daily if app.is_daily_detail_active() => {
             format!(" ({} models)", app.get_sorted_daily_detail_rows().len())
@@ -399,6 +400,10 @@ mod tests {
         assert_eq!(
             current_count_label(&make_app_on(Tab::Models)),
             " (0 models)"
+        );
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Providers)),
+            " (0 providers)"
         );
         assert_eq!(
             current_count_label(&make_app_on(Tab::Agents)),

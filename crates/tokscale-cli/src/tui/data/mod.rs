@@ -68,6 +68,23 @@ pub struct AgentUsage {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProviderModelUsage {
+    pub model: String,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub session_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderUsage {
+    pub provider: String,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub session_count: u32,
+    pub models: Vec<ProviderModelUsage>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DailyModelInfo {
     /// API provider identifier (e.g. "anthropic", "openai").
     ///

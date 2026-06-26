@@ -9,6 +9,7 @@ mod hourly_profile;
 mod minutely;
 mod models;
 mod overview;
+mod providers;
 pub mod spinner;
 mod stats;
 mod usage;
@@ -47,6 +48,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         match app.current_tab {
             Tab::Overview => overview::render(frame, app, chunks[1]),
             Tab::Models => models::render(frame, app, chunks[1]),
+            Tab::Providers => providers::render(frame, app, chunks[1]),
             Tab::Agents => agents::render(frame, app, chunks[1]),
             Tab::Daily => daily::render(frame, app, chunks[1]),
             Tab::Hourly => hourly::render(frame, app, chunks[1]),

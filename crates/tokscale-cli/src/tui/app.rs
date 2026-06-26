@@ -19,8 +19,8 @@ use super::codex_login::{
     CodexLoginOutcome,
 };
 use super::data::{
-    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, TokenBreakdown,
-    UsageData,
+    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage,
+    ProviderModelUsage, ProviderUsage, TokenBreakdown, UsageData,
 };
 use super::privacy::looks_like_email;
 use super::settings::Settings;
@@ -45,6 +45,7 @@ pub enum Tab {
     Overview,
     Usage,
     Models,
+    Providers,
     Daily,
     Hourly,
     Minutely,
@@ -58,6 +59,7 @@ impl Tab {
             Tab::Overview,
             Tab::Usage,
             Tab::Models,
+            Tab::Providers,
             Tab::Daily,
             Tab::Hourly,
             Tab::Minutely,
@@ -71,6 +73,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Usage => "Usage",
             Tab::Models => "Models",
+            Tab::Providers => "Providers",
             Tab::Daily => "Daily",
             Tab::Hourly => "Hourly",
             Tab::Minutely => "Minutely",
@@ -84,6 +87,7 @@ impl Tab {
             Tab::Overview => "Ovw",
             Tab::Usage => "Use",
             Tab::Models => "Mod",
+            Tab::Providers => "Pro",
             Tab::Daily => "Day",
             Tab::Hourly => "Hr",
             Tab::Minutely => "Min",
@@ -96,7 +100,8 @@ impl Tab {
         match self {
             Tab::Overview => Tab::Usage,
             Tab::Usage => Tab::Models,
-            Tab::Models => Tab::Daily,
+            Tab::Models => Tab::Providers,
+            Tab::Providers => Tab::Daily,
             Tab::Daily => Tab::Hourly,
             Tab::Hourly => Tab::Minutely,
             Tab::Minutely => Tab::Stats,
@@ -110,7 +115,8 @@ impl Tab {
             Tab::Overview => Tab::Agents,
             Tab::Usage => Tab::Overview,
             Tab::Models => Tab::Usage,
-            Tab::Daily => Tab::Models,
+            Tab::Providers => Tab::Models,
+            Tab::Daily => Tab::Providers,
             Tab::Hourly => Tab::Daily,
             Tab::Minutely => Tab::Hourly,
             Tab::Stats => Tab::Minutely,
@@ -160,6 +166,15 @@ pub struct DailyDetailRow<'a> {
     pub tokens: &'a TokenBreakdown,
     pub cost: f64,
     pub messages: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProviderRow {
+    Provider(ProviderUsage),
+    Model {
+        provider: String,
+        model: ProviderModelUsage,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -291,6 +306,7 @@ pub struct App {
     pub selected_daily_detail_date: Option<NaiveDate>,
     daily_list_selected_index: usize,
     daily_list_scroll_offset: usize,
+    pub expanded_providers: HashSet<String>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
@@ -433,6 +449,7 @@ impl App {
             selected_daily_detail_date: None,
             daily_list_selected_index: 0,
             daily_list_scroll_offset: 0,
+            expanded_providers: HashSet::new(),
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -848,6 +865,9 @@ impl App {
             }
             KeyCode::Char('x') if self.current_tab == Tab::Usage => {
                 self.confirm_selected_codex_rate_limit_reset();
+            }
+            KeyCode::Enter if self.current_tab == Tab::Providers => {
+                self.toggle_selected_provider();
             }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
@@ -1640,6 +1660,7 @@ impl App {
     fn get_current_list_len(&self) -> usize {
         match self.current_tab {
             Tab::Overview | Tab::Models => self.data.models.len(),
+            Tab::Providers => self.get_provider_rows().len(),
             Tab::Agents => self.data.agents.len(),
             Tab::Daily if self.is_daily_detail_active() => {
                 self.get_sorted_daily_detail_rows().len()
@@ -1884,6 +1905,24 @@ impl App {
                 .get_sorted_models()
                 .get(self.selected_index)
                 .map(|m| format!("{}: {} tokens, ${:.4}", m.model, m.tokens.total(), m.cost)),
+            Tab::Providers => self
+                .get_provider_rows()
+                .get(self.selected_index)
+                .map(|row| match row {
+                    ProviderRow::Provider(provider) => format!(
+                        "{}: {} tokens, ${:.4}",
+                        provider.provider,
+                        provider.tokens.total(),
+                        provider.cost
+                    ),
+                    ProviderRow::Model { provider, model } => format!(
+                        "{} / {}: {} tokens, ${:.4}",
+                        provider,
+                        model.model,
+                        model.tokens.total(),
+                        model.cost
+                    ),
+                }),
             Tab::Agents => self
                 .get_sorted_agents()
                 .get(self.selected_index)
@@ -2033,6 +2072,100 @@ impl App {
         }
 
         agents
+    }
+
+    pub fn get_sorted_providers(&self) -> Vec<ProviderUsage> {
+        let mut by_provider: HashMap<String, ProviderUsage> = HashMap::new();
+
+        for model in &self.data.models {
+            let provider = model.provider.clone();
+            let entry = by_provider.entry(provider.clone()).or_insert_with(|| ProviderUsage {
+                provider: provider.clone(),
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                session_count: 0,
+                models: Vec::new(),
+            });
+
+            add_tokens(&mut entry.tokens, &model.tokens);
+            entry.cost += model.cost;
+            entry.session_count = entry.session_count.saturating_add(model.session_count);
+
+            if let Some(existing) = entry.models.iter_mut().find(|m| m.model == model.model) {
+                add_tokens(&mut existing.tokens, &model.tokens);
+                existing.cost += model.cost;
+                existing.session_count = existing.session_count.saturating_add(model.session_count);
+            } else {
+                entry.models.push(ProviderModelUsage {
+                    model: model.model.clone(),
+                    tokens: model.tokens.clone(),
+                    cost: model.cost,
+                    session_count: model.session_count,
+                });
+            }
+        }
+
+        let mut providers: Vec<ProviderUsage> = by_provider.into_values().collect();
+        for provider in &mut providers {
+            sort_provider_models(provider, self.sort_field, self.sort_direction);
+        }
+
+        let tie_breaker = |a: &ProviderUsage, b: &ProviderUsage| a.provider.cmp(&b.provider);
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => {
+                providers.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Cost, SortDirection::Ascending) => {
+                providers.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Tokens, SortDirection::Descending) => providers.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => providers.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Date, _) => providers.sort_by(tie_breaker),
+        }
+
+        providers
+    }
+
+    pub fn get_provider_rows(&self) -> Vec<ProviderRow> {
+        let mut rows = Vec::new();
+        for provider in self.get_sorted_providers() {
+            rows.push(ProviderRow::Provider(provider.clone()));
+            if self.expanded_providers.contains(&provider.provider) {
+                for model in &provider.models {
+                    rows.push(ProviderRow::Model {
+                        provider: provider.provider.clone(),
+                        model: model.clone(),
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    fn toggle_selected_provider(&mut self) {
+        let provider = match self.get_provider_rows().get(self.selected_index) {
+            Some(ProviderRow::Provider(provider)) => provider.provider.clone(),
+            Some(ProviderRow::Model { provider, .. }) => provider.clone(),
+            None => return,
+        };
+
+        if !self.expanded_providers.remove(&provider) {
+            self.expanded_providers.insert(provider.clone());
+            self.set_status(&format!("Expanded {provider}"));
+        } else {
+            self.set_status(&format!("Collapsed {provider}"));
+        }
+        self.clamp_selection();
     }
 
     pub fn get_sorted_daily(&self) -> Vec<&DailyUsage> {
@@ -2256,6 +2389,43 @@ impl App {
     }
 }
 
+fn add_tokens(total: &mut TokenBreakdown, tokens: &TokenBreakdown) {
+    total.input = total.input.saturating_add(tokens.input);
+    total.output = total.output.saturating_add(tokens.output);
+    total.cache_read = total.cache_read.saturating_add(tokens.cache_read);
+    total.cache_write = total.cache_write.saturating_add(tokens.cache_write);
+    total.reasoning = total.reasoning.saturating_add(tokens.reasoning);
+}
+
+fn sort_provider_models(
+    provider: &mut ProviderUsage,
+    sort_field: SortField,
+    sort_direction: SortDirection,
+) {
+    let tie_breaker = |a: &ProviderModelUsage, b: &ProviderModelUsage| a.model.cmp(&b.model);
+    match (sort_field, sort_direction) {
+        (SortField::Cost, SortDirection::Descending) => provider
+            .models
+            .sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b))),
+        (SortField::Cost, SortDirection::Ascending) => provider
+            .models
+            .sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b))),
+        (SortField::Tokens, SortDirection::Descending) => provider.models.sort_by(|a, b| {
+            b.tokens
+                .total()
+                .cmp(&a.tokens.total())
+                .then_with(|| tie_breaker(a, b))
+        }),
+        (SortField::Tokens, SortDirection::Ascending) => provider.models.sort_by(|a, b| {
+            a.tokens
+                .total()
+                .cmp(&b.tokens.total())
+                .then_with(|| tie_breaker(a, b))
+        }),
+        (SortField::Date, _) => provider.models.sort_by(tie_breaker),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ui::widgets::get_provider_shade;
@@ -2268,22 +2438,24 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 8);
+        assert_eq!(tabs.len(), 9);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Usage);
         assert_eq!(tabs[2], Tab::Models);
-        assert_eq!(tabs[3], Tab::Daily);
-        assert_eq!(tabs[4], Tab::Hourly);
-        assert_eq!(tabs[5], Tab::Minutely);
-        assert_eq!(tabs[6], Tab::Stats);
-        assert_eq!(tabs[7], Tab::Agents);
+        assert_eq!(tabs[3], Tab::Providers);
+        assert_eq!(tabs[4], Tab::Daily);
+        assert_eq!(tabs[5], Tab::Hourly);
+        assert_eq!(tabs[6], Tab::Minutely);
+        assert_eq!(tabs[7], Tab::Stats);
+        assert_eq!(tabs[8], Tab::Agents);
     }
 
     #[test]
     fn test_tab_next() {
         assert_eq!(Tab::Overview.next(), Tab::Usage);
         assert_eq!(Tab::Usage.next(), Tab::Models);
-        assert_eq!(Tab::Models.next(), Tab::Daily);
+        assert_eq!(Tab::Models.next(), Tab::Providers);
+        assert_eq!(Tab::Providers.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
         assert_eq!(Tab::Hourly.next(), Tab::Minutely);
         assert_eq!(Tab::Minutely.next(), Tab::Stats);
@@ -2296,7 +2468,8 @@ mod tests {
         assert_eq!(Tab::Overview.prev(), Tab::Agents);
         assert_eq!(Tab::Usage.prev(), Tab::Overview);
         assert_eq!(Tab::Models.prev(), Tab::Usage);
-        assert_eq!(Tab::Daily.prev(), Tab::Models);
+        assert_eq!(Tab::Providers.prev(), Tab::Models);
+        assert_eq!(Tab::Daily.prev(), Tab::Providers);
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
         assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
         assert_eq!(Tab::Stats.prev(), Tab::Minutely);
@@ -2307,6 +2480,7 @@ mod tests {
     fn test_tab_as_str() {
         assert_eq!(Tab::Overview.as_str(), "Overview");
         assert_eq!(Tab::Models.as_str(), "Models");
+        assert_eq!(Tab::Providers.as_str(), "Providers");
         assert_eq!(Tab::Agents.as_str(), "Agents");
         assert_eq!(Tab::Daily.as_str(), "Daily");
         assert_eq!(Tab::Hourly.as_str(), "Hourly");
@@ -2318,6 +2492,7 @@ mod tests {
     fn test_tab_short_name() {
         assert_eq!(Tab::Overview.short_name(), "Ovw");
         assert_eq!(Tab::Models.short_name(), "Mod");
+        assert_eq!(Tab::Providers.short_name(), "Pro");
         assert_eq!(Tab::Agents.short_name(), "Agt");
         assert_eq!(Tab::Daily.short_name(), "Day");
         assert_eq!(Tab::Hourly.short_name(), "Hr");
@@ -2862,6 +3037,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Providers);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Daily);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -2895,6 +3073,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Daily);
 
         app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Providers);
+
+        app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::BackTab));
@@ -2913,6 +3094,7 @@ mod tests {
         for expected in [
             Tab::Usage,
             Tab::Models,
+            Tab::Providers,
             Tab::Daily,
             Tab::Hourly,
             Tab::Minutely,
