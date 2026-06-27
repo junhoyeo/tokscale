@@ -3446,6 +3446,7 @@ dependencies = [
  "crossterm 0.28.1",
  "csv",
  "dirs",
+ "fs2",
  "hostname",
  "image",
  "imageproc",

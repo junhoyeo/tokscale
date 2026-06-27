@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(dead_code))]
+
 mod amp;
 mod claude;
 pub mod codex;
@@ -130,6 +132,117 @@ impl UsageAccount {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UsageFetchDiagnostic {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<UsageAccount>,
+    #[serde(default)]
+    pub kind: UsageFetchDiagnosticKind,
+    #[serde(default)]
+    pub severity: UsageFetchDiagnosticSeverity,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageFetchDiagnosticKind {
+    #[default]
+    FetchFailed,
+    ImportCurrentLoginFailed,
+    ProviderPanicked,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageFetchDiagnosticSeverity {
+    Info,
+    Warning,
+    #[default]
+    Error,
+}
+
+impl UsageFetchDiagnostic {
+    pub fn new(
+        provider: impl Into<String>,
+        account: Option<UsageAccount>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::with_kind(
+            provider,
+            account,
+            UsageFetchDiagnosticKind::FetchFailed,
+            UsageFetchDiagnosticSeverity::Error,
+            message,
+        )
+    }
+
+    pub fn with_kind(
+        provider: impl Into<String>,
+        account: Option<UsageAccount>,
+        kind: UsageFetchDiagnosticKind,
+        severity: UsageFetchDiagnosticSeverity,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            account,
+            kind,
+            severity,
+            message: message.into(),
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        match &self.account {
+            Some(account) => format!("{} ({})", self.provider, account.display_name()),
+            None => self.provider.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageFetchReport {
+    pub outputs: Vec<UsageOutput>,
+    pub diagnostics: Vec<UsageFetchDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageFetchIntent {
+    #[allow(dead_code)]
+    CliReadOnly,
+    TuiSurface,
+}
+
+impl UsageFetchReport {
+    fn from_outputs(outputs: Vec<UsageOutput>) -> Self {
+        Self {
+            outputs,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn from_error(
+        provider: &'static str,
+        account: Option<UsageAccount>,
+        error: anyhow::Error,
+    ) -> Self {
+        Self {
+            outputs: Vec::new(),
+            diagnostics: vec![UsageFetchDiagnostic::new(
+                provider,
+                account,
+                error.to_string(),
+            )],
+        }
+    }
+
+    fn extend(&mut self, other: UsageFetchReport) {
+        self.outputs.extend(other.outputs);
+        self.diagnostics.extend(other.diagnostics);
+    }
+}
+
 impl UsageOutput {
     pub fn account_display_name(&self) -> Option<String> {
         let account = self.account.as_ref()?;
@@ -245,7 +358,7 @@ pub struct ProviderError {
 ///
 /// Used by the TUI dashboard (non-test builds only); the TUI test build stubs
 /// the fetch out, so allow it to be unused there.
-#[cfg_attr(test, allow(dead_code))]
+#[allow(dead_code)]
 pub fn fetch_all() -> Vec<UsageOutput> {
     fetch_all_with_errors().0
 }
@@ -258,17 +371,42 @@ pub fn fetch_all() -> Vec<UsageOutput> {
 /// the provider as active, yet it just vanished from the output. This collects
 /// those errors so the caller can surface them to the user instead.
 pub fn fetch_all_with_errors() -> (Vec<UsageOutput>, Vec<ProviderError>) {
-    let providers: Vec<UsageProvider> = vec![
+    let active: Vec<_> = usage_providers(Fetch::Multi(codex::fetch_all))
+        .into_iter()
+        .filter(|(_, has, _)| has())
+        .collect();
+
+    if active.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    let results = std::thread::scope(|s| {
+        let handles: Vec<_> = active
+            .into_iter()
+            .map(|(name, _, fetch)| s.spawn(move || (name, fetch.call())))
+            .collect();
+
+        handles
+            .into_iter()
+            .filter_map(|handle| {
+                // A panicked provider thread should not take down the whole
+                // command; skip it (a join error has no message to surface).
+                handle.join().ok()
+            })
+            .collect::<Vec<_>>()
+    });
+
+    partition_results(results)
+}
+
+fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
+    vec![
         (
             "Claude",
             claude::has_credentials,
             Fetch::Single(claude::fetch),
         ),
-        (
-            "Codex",
-            codex::has_credentials,
-            Fetch::Multi(codex::fetch_all),
-        ),
+        ("Codex", codex::has_credentials, codex_fetch),
         ("Z.ai", zai::has_credentials, Fetch::Single(zai::fetch)),
         ("Amp", amp::has_credentials, Fetch::Single(amp::fetch)),
         (
@@ -298,31 +436,65 @@ pub fn fetch_all_with_errors() -> (Vec<UsageOutput>, Vec<ProviderError>) {
             sakana::has_credentials,
             Fetch::Single(sakana::fetch),
         ),
-    ];
+    ]
+}
 
-    let active: Vec<_> = providers.into_iter().filter(|(_, has, _)| has()).collect();
+fn fetch_provider_report(
+    provider: &'static str,
+    result: Result<Vec<UsageOutput>>,
+) -> UsageFetchReport {
+    match result {
+        Ok(outputs) => UsageFetchReport::from_outputs(outputs),
+        Err(error) => UsageFetchReport::from_error(provider, None, error),
+    }
+}
+
+pub fn fetch_all_report_with_intent(intent: UsageFetchIntent) -> UsageFetchReport {
+    let codex_fetch = match intent {
+        UsageFetchIntent::CliReadOnly => codex::fetch_all_report,
+        UsageFetchIntent::TuiSurface => codex::fetch_all_report_importing_current_auth,
+    };
+    fetch_all_report_with_codex(codex_fetch)
+}
+
+fn fetch_all_report_with_codex(codex_fetch: fn() -> UsageFetchReport) -> UsageFetchReport {
+    let active: Vec<_> = usage_providers(Fetch::Multi(codex::fetch_all))
+        .into_iter()
+        .filter(|(_, has, _)| has())
+        .collect();
 
     if active.is_empty() {
-        return (vec![], vec![]);
+        return UsageFetchReport::default();
     }
 
-    let results = std::thread::scope(|s| {
-        let handles: Vec<_> = active
+    std::thread::scope(|scope| {
+        let handles = active
             .into_iter()
-            .map(|(name, _, fetch)| s.spawn(move || (name, fetch.call())))
-            .collect();
-
-        handles
-            .into_iter()
-            .filter_map(|handle| {
-                // A panicked provider thread should not take down the whole
-                // command; skip it (a join error has no message to surface).
-                handle.join().ok()
+            .map(|(provider, _, fetch)| {
+                let handle = if provider == "Codex" {
+                    scope.spawn(codex_fetch)
+                } else {
+                    scope.spawn(move || fetch_provider_report(provider, fetch.call()))
+                };
+                (provider, handle)
             })
-            .collect::<Vec<_>>()
-    });
+            .collect::<Vec<_>>();
 
-    partition_results(results)
+        let mut report = UsageFetchReport::default();
+        for (provider, handle) in handles {
+            match handle.join() {
+                Ok(provider_report) => report.extend(provider_report),
+                Err(_) => report.diagnostics.push(UsageFetchDiagnostic::with_kind(
+                    provider,
+                    None,
+                    UsageFetchDiagnosticKind::ProviderPanicked,
+                    UsageFetchDiagnosticSeverity::Error,
+                    "usage fetch worker panicked",
+                )),
+            }
+        }
+        report
+    })
 }
 
 /// Split per-provider fetch results into (successful outputs, errors).

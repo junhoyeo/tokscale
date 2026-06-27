@@ -2,7 +2,9 @@ use ratatui::layout::Flex;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, TableState};
 
-use crate::commands::usage::{helpers, UsageMetric, UsageOutput};
+use crate::commands::usage::{
+    helpers, UsageFetchDiagnostic, UsageFetchDiagnosticSeverity, UsageMetric, UsageOutput,
+};
 use crate::tui::app::{App, ClickAction};
 use crate::tui::codex_login::CodexLoginOutcome;
 use crate::tui::privacy::looks_like_email;
@@ -100,14 +102,25 @@ fn status_label(app: &App) -> String {
     let inventory = usage_inventory(&app.subscription_usage);
 
     if inventory.providers == 0 && app.usage_fetch_attempted {
-        "No data".to_string()
+        if app.usage_fetch_diagnostics.is_empty() {
+            "No data".to_string()
+        } else {
+            usage_issue_count_label(app.usage_fetch_diagnostics.len())
+        }
     } else if inventory.providers == 0 {
         "Not loaded".to_string()
-    } else {
+    } else if app.usage_fetch_diagnostics.is_empty() {
         format!(
             "{} providers · {}",
             inventory.providers,
             identity_count_label(inventory.saved, inventory.managed)
+        )
+    } else {
+        format!(
+            "{} providers · {} · {}",
+            inventory.providers,
+            identity_count_label(inventory.saved, inventory.managed),
+            usage_issue_count_label(app.usage_fetch_diagnostics.len())
         )
     }
 }
@@ -135,6 +148,13 @@ fn identity_count_label(saved: usize, managed: usize) -> String {
         (saved, 0) => format!("{saved} saved"),
         (0, managed) => format!("{managed} managed"),
         (saved, managed) => format!("{saved} saved · {managed} managed"),
+    }
+}
+
+fn usage_issue_count_label(count: usize) -> String {
+    match count {
+        1 => "1 issue".to_string(),
+        count => format!("{count} issues"),
     }
 }
 
@@ -435,15 +455,49 @@ fn render_ready(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
-    let center = centered_rect(area, 3);
-    let message = if area.width < 40 {
-        "No usage data"
+    let center = centered_rect(area, 4);
+    let lines = if let Some(diagnostic) = app.usage_fetch_diagnostics.first() {
+        if area.width < 40 {
+            vec![
+                Line::from(Span::styled(
+                    "Usage fetch failed",
+                    Style::default().fg(app.theme.muted),
+                )),
+                Line::from(Span::styled(
+                    truncate_string(&diagnostic.display_name(), area.width as usize),
+                    Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    "Usage fetch failed",
+                    Style::default()
+                        .fg(app.theme.foreground)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    truncate_string(&diagnostic.display_name(), area.width as usize),
+                    Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
+                )),
+                Line::from(Span::styled(
+                    truncate_string(&diagnostic.message, area.width as usize),
+                    Style::default().fg(app.theme.muted),
+                )),
+            ]
+        }
+    } else if area.width < 40 {
+        vec![Line::from(Span::styled(
+            "No usage data",
+            Style::default().fg(app.theme.muted),
+        ))]
     } else {
-        "No subscription data available"
+        vec![Line::from(Span::styled(
+            "No subscription data available",
+            Style::default().fg(app.theme.muted),
+        ))]
     };
-    let paragraph = Paragraph::new(message)
-        .style(Style::default().fg(app.theme.muted))
-        .alignment(Alignment::Center);
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(paragraph, center);
 }
 
@@ -554,8 +608,10 @@ fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[
         return;
     }
 
-    let mut lines =
-        usage_status_summary_lines(app, outputs, inner.width as usize, inner.height as usize);
+    let diagnostic_reserve = diagnostic_line_reserve(app, inner.height as usize);
+    let summary_height = (inner.height as usize).saturating_sub(diagnostic_reserve);
+    let mut lines = usage_status_summary_lines(app, outputs, inner.width as usize, summary_height);
+    append_usage_diagnostic_lines(&mut lines, app, inner.width as usize, inner.height as usize);
 
     push_section_spacing(&mut lines, inner.height as usize);
     append_credit_bank_summary_lines(
@@ -761,6 +817,115 @@ fn usage_status_summary_lines(
         }
     }
     lines
+}
+
+fn diagnostic_line_reserve(app: &App, max_lines: usize) -> usize {
+    if app.usage_fetch_diagnostics.is_empty() {
+        0
+    } else if max_lines >= 7 {
+        3
+    } else {
+        2.min(max_lines.saturating_sub(1))
+    }
+}
+
+fn append_usage_diagnostic_lines(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    width: usize,
+    max_lines: usize,
+) {
+    if app.usage_fetch_diagnostics.is_empty() || lines.len() >= max_lines {
+        return;
+    }
+
+    let remaining = max_lines.saturating_sub(lines.len());
+    if remaining < 2 {
+        return;
+    }
+    if !lines.is_empty() && remaining >= 3 {
+        lines.push(Line::from(""));
+    }
+    if max_lines.saturating_sub(lines.len()) < 2 {
+        return;
+    }
+
+    lines.push(section_heading("Diagnostics", app));
+    let available = max_lines.saturating_sub(lines.len());
+    if available == 0 {
+        return;
+    }
+
+    let visible_count = if app.usage_fetch_diagnostics.len() > available && available > 1 {
+        available - 1
+    } else {
+        app.usage_fetch_diagnostics.len().min(available)
+    };
+    for diagnostic in visible_usage_diagnostics(&app.usage_fetch_diagnostics, visible_count) {
+        lines.push(usage_diagnostic_line(diagnostic, width));
+    }
+
+    let hidden_count = app
+        .usage_fetch_diagnostics
+        .len()
+        .saturating_sub(visible_count);
+    if hidden_count > 0 && lines.len() < max_lines {
+        lines.push(Line::from(Span::styled(
+            truncate_string(
+                &format!(
+                    "  +{} more issue{}",
+                    hidden_count,
+                    if hidden_count == 1 { "" } else { "s" }
+                ),
+                width,
+            ),
+            app.theme.subtle_text_style(),
+        )));
+    }
+}
+
+fn visible_usage_diagnostics(
+    diagnostics: &[UsageFetchDiagnostic],
+    visible_count: usize,
+) -> Vec<&UsageFetchDiagnostic> {
+    let visible_count = visible_count.min(diagnostics.len());
+    if visible_count >= diagnostics.len() {
+        return diagnostics.iter().collect();
+    }
+
+    let mut indexed: Vec<_> = diagnostics.iter().enumerate().collect();
+    indexed
+        .sort_by_key(|(index, diagnostic)| (diagnostic_severity_rank(diagnostic.severity), *index));
+    indexed.truncate(visible_count);
+    indexed
+        .into_iter()
+        .map(|(_, diagnostic)| diagnostic)
+        .collect()
+}
+
+fn diagnostic_severity_rank(severity: UsageFetchDiagnosticSeverity) -> u8 {
+    match severity {
+        UsageFetchDiagnosticSeverity::Error => 0,
+        UsageFetchDiagnosticSeverity::Warning => 1,
+        UsageFetchDiagnosticSeverity::Info => 2,
+    }
+}
+
+fn usage_diagnostic_line(diagnostic: &UsageFetchDiagnostic, width: usize) -> Line<'static> {
+    let label = diagnostic.display_name();
+    let text = format!("  {label}: {}", diagnostic.message);
+    Line::from(Span::styled(
+        truncate_string(&text, width),
+        Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
+    ))
+}
+
+fn diagnostic_severity_color(severity: UsageFetchDiagnosticSeverity) -> Color {
+    match severity {
+        UsageFetchDiagnosticSeverity::Info => Color::Cyan,
+        UsageFetchDiagnosticSeverity::Warning => Color::Yellow,
+        UsageFetchDiagnosticSeverity::Error => Color::Red,
+    }
 }
 
 fn push_section_spacing(lines: &mut Vec<Line<'static>>, max_lines: usize) {
@@ -1006,7 +1171,7 @@ fn render_selected_account(
                 app,
                 "Credential",
                 if account.is_active {
-                    "saved store, active auth.json"
+                    "saved store, current Codex login"
                 } else {
                     "saved store"
                 },
@@ -1235,7 +1400,6 @@ fn selected_account_actions_line(
             let x = area
                 .x
                 .saturating_add(Line::from(spans.clone()).width() as u16);
-            buttons.push(remove_account_button(&account.id));
             push_click_buttons(&mut spans, app, buttons, x, y, area.right());
         } else {
             spans.push(Span::raw("  "));
@@ -2198,7 +2362,8 @@ fn styled<T: Into<String>>(text: T, style: Style, selected: bool) -> Span<'stati
 mod tests {
     use super::*;
     use crate::commands::usage::{
-        UsageAccount, UsageCreditStatus, UsageResetCredit, UsageResetCredits, UsageSpendControl,
+        UsageAccount, UsageCreditStatus, UsageFetchDiagnostic, UsageFetchDiagnosticKind,
+        UsageFetchDiagnosticSeverity, UsageResetCredit, UsageResetCredits, UsageSpendControl,
     };
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::UsageData;
@@ -2485,6 +2650,7 @@ mod tests {
     #[test]
     fn renders_usage_workspace_sections_and_codex_actions() {
         let mut app = make_app();
+        app.selected_index = 1;
         app.subscription_usage = vec![
             output(
                 "Codex",
@@ -2516,6 +2682,120 @@ mod tests {
         assert!(body.contains("personal"), "{body}");
         assert!(body.contains(" Remove "), "{body}");
         assert!(body.contains("Show Emails"), "{body}");
+    }
+
+    #[test]
+    fn usage_summary_reserves_space_for_diagnostics() {
+        let mut app = make_app();
+        app.usage_fetch_diagnostics = vec![UsageFetchDiagnostic::new(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_personal".to_string(),
+                label: Some("personal".to_string()),
+                is_active: false,
+            }),
+            "usage endpoint rejected credentials",
+        )];
+        let outputs = vec![output(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
+        )];
+        let max_lines = 6;
+        let reserve = diagnostic_line_reserve(&app, max_lines);
+        let mut lines = usage_status_summary_lines(&app, &outputs, 80, max_lines - reserve);
+        append_usage_diagnostic_lines(&mut lines, &app, 80, max_lines);
+        let rendered = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Diagnostics"), "{rendered}");
+        assert!(rendered.contains("usage endpoint rejected"), "{rendered}");
+    }
+
+    #[test]
+    fn usage_summary_reserve_keeps_space_at_tiny_heights() {
+        let mut app = make_app();
+        app.usage_fetch_diagnostics = vec![UsageFetchDiagnostic::new(
+            "Codex",
+            None,
+            "usage endpoint failed",
+        )];
+
+        assert_eq!(diagnostic_line_reserve(&app, 0), 0);
+        assert_eq!(diagnostic_line_reserve(&app, 1), 0);
+        assert_eq!(diagnostic_line_reserve(&app, 2), 1);
+        assert_eq!(diagnostic_line_reserve(&app, 6), 2);
+    }
+
+    #[test]
+    fn usage_summary_compacts_hidden_diagnostics() {
+        let mut app = make_app();
+        app.usage_fetch_diagnostics = vec![
+            UsageFetchDiagnostic::new("Codex", None, "first issue"),
+            UsageFetchDiagnostic::new("Claude", None, "second issue"),
+            UsageFetchDiagnostic::new("Amp", None, "third issue"),
+        ];
+        let mut lines = Vec::new();
+
+        append_usage_diagnostic_lines(&mut lines, &app, 80, 3);
+        let rendered = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Diagnostics"), "{rendered}");
+        assert!(rendered.contains("first issue"), "{rendered}");
+        assert!(rendered.contains("+2 more issues"), "{rendered}");
+        assert!(!rendered.contains("second issue"), "{rendered}");
+    }
+
+    #[test]
+    fn usage_summary_prioritizes_error_diagnostics_when_compacted() {
+        let mut app = make_app();
+        app.usage_fetch_diagnostics = vec![
+            UsageFetchDiagnostic::with_kind(
+                "Claude",
+                None,
+                UsageFetchDiagnosticKind::FetchFailed,
+                UsageFetchDiagnosticSeverity::Info,
+                "low priority issue",
+            ),
+            UsageFetchDiagnostic::with_kind(
+                "Amp",
+                None,
+                UsageFetchDiagnosticKind::FetchFailed,
+                UsageFetchDiagnosticSeverity::Warning,
+                "medium priority issue",
+            ),
+            UsageFetchDiagnostic::with_kind(
+                "Codex",
+                None,
+                UsageFetchDiagnosticKind::FetchFailed,
+                UsageFetchDiagnosticSeverity::Error,
+                "high priority issue",
+            ),
+        ];
+        let mut lines = Vec::new();
+
+        append_usage_diagnostic_lines(&mut lines, &app, 80, 3);
+        let rendered = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Diagnostics"), "{rendered}");
+        assert!(rendered.contains("high priority issue"), "{rendered}");
+        assert!(rendered.contains("+2 more issues"), "{rendered}");
+        assert!(!rendered.contains("low priority issue"), "{rendered}");
+        assert!(!rendered.contains("medium priority issue"), "{rendered}");
     }
 
     #[test]
@@ -2687,6 +2967,7 @@ mod tests {
         )];
 
         let body = render_body(&mut app, 180, 32);
+        assert!(body.contains("current Codex login"), "{body}");
         let status_line = body
             .lines()
             .find(|line| line.contains("Status") && line.contains("Ready"))
@@ -2714,6 +2995,7 @@ mod tests {
         assert_eq!(selected_col, visual_col(metric_line, "5h"));
         assert_eq!(selected_col, visual_col(actions_line, "Actions"));
         assert_eq!(selected_col, visual_col(current_line, "Current account"));
+        assert!(!current_line.contains("Remove"), "{current_line}");
     }
 
     #[test]
@@ -2889,6 +3171,7 @@ mod tests {
     #[test]
     fn narrow_usage_keeps_account_actions_visible() {
         let mut app = make_app();
+        app.selected_index = 1;
         app.subscription_usage = vec![
             output(
                 "Codex",

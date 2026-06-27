@@ -37,6 +37,7 @@ dirs = { workspace = true }
 rayon = { workspace = true }
 arboard = { workspace = true }
 reqwest = { workspace = true }
+fs2 = { workspace = true }
 image = "0.25"
 imageproc = "0.25"
 ab_glyph = "0.2"
