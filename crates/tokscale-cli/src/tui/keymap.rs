@@ -42,10 +42,16 @@
 use crossterm::event::KeyCode;
 
 /// Cyrillic ЙЦУКЕН base layout. Shared by Russian, Ukrainian, Belarusian,
-/// Bulgarian (phonetic aside), Kazakh, Tatar, Bashkir, Kyrgyz and other
-/// languages that extend it — their extra glyphs sit on the number row, not on
-/// the letter keys, so the letter positions below cover them all. The lone
-/// non-Russian entry is Ukrainian `і`, which replaces `ы` on the `S` key.
+/// Kazakh, Tatar, Bashkir, Kyrgyz and other languages that extend it — their
+/// extra glyphs sit on the number row, not on the letter keys, so the letter
+/// positions below cover them all. The lone non-Russian entry is Ukrainian
+/// `і`, which replaces `ы` on the `S` key.
+///
+/// Bulgarian is intentionally excluded: its BDS and phonetic layouts place the
+/// *same* Cyrillic letters on *different* keys, and a character-based map can
+/// encode only one position per glyph (e.g. `я` is `Z` here but `S` on BDS).
+/// Supporting it would require knowing the active layout, which the terminal
+/// never reports — so it cannot share this table without misfiring hotkeys.
 const CYRILLIC: &[(char, char)] = &[
     ('й', 'q'), ('ц', 'w'), ('у', 'e'), ('к', 'r'), ('е', 't'), ('н', 'y'),
     ('г', 'u'), ('ш', 'i'), ('щ', 'o'), ('з', 'p'),
