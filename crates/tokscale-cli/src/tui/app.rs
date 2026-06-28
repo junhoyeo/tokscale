@@ -745,7 +745,14 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Remap the produced character to its US-QWERTY physical position so
+        // single-letter hotkeys keep working under non-Latin layouts (Russian,
+        // Greek, …). Modifiers and non-char keys are unaffected. Dialogs still
+        // receive the raw `key.code` and normalize per-field, since some of
+        // them (e.g. the picker filter) accept literal text input.
+        let code = crate::tui::keymap::normalize_hotkey(key.code);
+
+        if code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return true;
         }
@@ -756,7 +763,7 @@ impl App {
             return false;
         }
 
-        if key.code == KeyCode::Esc
+        if code == KeyCode::Esc
             && self.current_tab == Tab::Usage
             && self.should_show_codex_login_panel()
         {
@@ -764,7 +771,7 @@ impl App {
             return false;
         }
 
-        match key.code {
+        match code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
                 return true;
@@ -2967,6 +2974,24 @@ mod tests {
     fn test_handle_key_quit_ctrl_c() {
         let mut app = make_app();
         let quit = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(quit);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_handle_key_quit_q_russian_layout() {
+        // Physical `Q` on a Russian layout produces 'й'; it must still quit.
+        let mut app = make_app();
+        let quit = app.handle_key_event(key(KeyCode::Char('й')));
+        assert!(quit);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_handle_key_quit_ctrl_c_russian_layout() {
+        // Physical `C` on a Russian layout produces 'с'; Ctrl+С must still quit.
+        let mut app = make_app();
+        let quit = app.handle_key_event(key_with_mod(KeyCode::Char('с'), KeyModifiers::CONTROL));
         assert!(quit);
         assert!(app.should_quit);
     }

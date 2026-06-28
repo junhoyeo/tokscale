@@ -263,6 +263,8 @@ impl DialogContent for ConfirmDialog {
     }
 
     fn handle_key(&mut self, key: KeyCode) -> DialogResult {
+        // y/n are commands, not text, so remap them for non-Latin layouts.
+        let key = crate::tui::keymap::normalize_hotkey(key);
         match key {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.confirm();
