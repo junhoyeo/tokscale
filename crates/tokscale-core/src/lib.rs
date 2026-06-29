@@ -1275,6 +1275,21 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .filter(|message| should_keep_deduped_message(&mut junie_seen, message)),
     );
 
+    // ZCode v2 CLI stores authoritative model usage in SQLite.
+    if let Some(db_path) = &scan_result.zcode_db {
+        let CachedParseOutcome {
+            messages,
+            cache_entry,
+            ..
+        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+            sessions::zcode::parse_zcode_sqlite(path)
+        });
+        all_messages.extend(messages);
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     // ZCode (Z.ai GLM-5.2 ADE) JSONL sessions. Token usage may be embedded
     // from the API response; otherwise estimated from content.
     let zcode_messages: Vec<UnifiedMessage> = scan_result
@@ -2529,13 +2544,25 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Junie, junie_count);
     messages.extend(junie_msgs);
 
-    // ZCode (Z.ai GLM-5.2 ADE) session transcripts
-    let zcode_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Zcode)
-        .par_iter()
-        .flat_map(|path| sessions::zcode::parse_zcode_file(path))
-        .map(|message| unified_to_parsed(&message))
-        .collect();
+    // ZCode v2 CLI SQLite usage plus legacy JSONL session transcripts.
+    let mut zcode_msgs: Vec<ParsedMessage> = scan_result
+        .zcode_db
+        .as_ref()
+        .map(|db_path| {
+            sessions::zcode::parse_zcode_sqlite(db_path)
+                .into_iter()
+                .map(|message| unified_to_parsed(&message))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    zcode_msgs.extend(
+        scan_result
+            .get(ClientId::Zcode)
+            .par_iter()
+            .flat_map(|path| sessions::zcode::parse_zcode_file(path))
+            .map(|message| unified_to_parsed(&message))
+            .collect::<Vec<_>>(),
+    );
     let zcode_count = summed_parsed_message_count(&zcode_msgs);
     counts.set(ClientId::Zcode, zcode_count);
     messages.extend(zcode_msgs);

@@ -88,6 +88,8 @@ pub struct ScanResult {
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
+    /// ZCode v2 CLI usage database at `~/.zcode/cli/db/db.sqlite`.
+    pub zcode_db: Option<PathBuf>,
     /// MiMo Code SQLite databases discovered under the data dir.
     pub micode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
@@ -106,6 +108,7 @@ impl Default for ScanResult {
             zed_db: None,
             kiro_db: None,
             crush_dbs: Vec::new(),
+            zcode_db: None,
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
         }
@@ -1207,6 +1210,13 @@ fn scan_all_clients_with_env_strategy_inner(
         result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
     }
 
+    if enabled.contains(&ClientId::Zcode) {
+        let zcode_db_path = PathBuf::from(format!("{}/.zcode/cli/db/db.sqlite", home_dir));
+        if zcode_db_path.is_file() {
+            result.zcode_db = Some(zcode_db_path);
+        }
+    }
+
     if enabled.contains(&ClientId::Kiro) {
         let kiro_cli_path = ClientId::Kiro
             .data()
@@ -1650,6 +1660,23 @@ mod tests {
     fn test_scan_directory_nonexistent() {
         let files = scan_directory("/nonexistent/path/that/does/not/exist", "*.json");
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_zcode_v2_sqlite() {
+        let dir = TempDir::new().unwrap();
+        let db_dir = dir.path().join(".zcode/cli/db");
+        fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("db.sqlite");
+        File::create(&db_path).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            dir.path().to_str().unwrap(),
+            &["zcode".to_string()],
+            false,
+        );
+
+        assert_eq!(result.zcode_db.as_deref(), Some(db_path.as_path()));
     }
 
     #[test]

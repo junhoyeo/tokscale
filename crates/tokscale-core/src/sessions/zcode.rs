@@ -13,10 +13,11 @@
 //! counts are used. When absent, tokens are estimated at ~4 chars/token,
 //! consistent with tokscale's other estimated sources (see CommandCode, Kiro).
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -202,6 +203,180 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
     messages
 }
 
+pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
+    let Some(conn) = open_readonly_sqlite(db_path) else {
+        return Vec::new();
+    };
+
+    let fallback_timestamp = file_modified_timestamp_ms(db_path);
+    let modern_query = r#"
+        SELECT
+            mu.id,
+            NULLIF(mu.session_id, ''),
+            NULLIF(mu.turn_id, ''),
+            NULLIF(mu.model_id, ''),
+            mu.started_at,
+            mu.completed_at,
+            mu.duration_ms,
+            mu.input_tokens,
+            mu.output_tokens,
+            mu.reasoning_tokens,
+            mu.cache_read_input_tokens,
+            mu.cache_creation_input_tokens,
+            NULLIF(mu.agent, ''),
+            NULLIF(mu.mode, ''),
+            NULLIF(s.directory, ''),
+            NULLIF(s.path, '')
+        FROM model_usage mu
+        LEFT JOIN session s ON s.id = mu.session_id
+        WHERE COALESCE(mu.input_tokens, 0)
+            + COALESCE(mu.output_tokens, 0)
+            + COALESCE(mu.reasoning_tokens, 0)
+            + COALESCE(mu.cache_read_input_tokens, 0)
+            + COALESCE(mu.cache_creation_input_tokens, 0) > 0
+        ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
+    "#;
+    let legacy_query = r#"
+        SELECT
+            mu.id,
+            NULLIF(mu.session_id, ''),
+            NULLIF(mu.turn_id, ''),
+            NULLIF(mu.model_id, ''),
+            mu.started_at,
+            mu.completed_at,
+            mu.duration_ms,
+            mu.input_tokens,
+            mu.output_tokens,
+            mu.reasoning_tokens,
+            mu.cache_read_input_tokens,
+            mu.cache_creation_input_tokens,
+            NULLIF(mu.agent, ''),
+            NULLIF(mu.mode, ''),
+            NULL,
+            NULL
+        FROM model_usage mu
+        WHERE COALESCE(mu.input_tokens, 0)
+            + COALESCE(mu.output_tokens, 0)
+            + COALESCE(mu.reasoning_tokens, 0)
+            + COALESCE(mu.cache_read_input_tokens, 0)
+            + COALESCE(mu.cache_creation_input_tokens, 0) > 0
+        ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
+    "#;
+
+    let mut stmt = match conn
+        .prepare(modern_query)
+        .or_else(|_| conn.prepare(legacy_query))
+    {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        Ok(ZcodeUsageRow {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            turn_id: row.get(2)?,
+            model_id: row.get(3)?,
+            started_at: row.get(4)?,
+            completed_at: row.get(5)?,
+            duration_ms: row.get(6)?,
+            input_tokens: row.get(7)?,
+            output_tokens: row.get(8)?,
+            reasoning_tokens: row.get(9)?,
+            cache_read_input_tokens: row.get(10)?,
+            cache_creation_input_tokens: row.get(11)?,
+            agent: row.get(12)?,
+            mode: row.get(13)?,
+            session_directory: row.get(14)?,
+            session_path: row.get(15)?,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut messages = Vec::new();
+    let mut seen_turns: HashSet<String> = HashSet::new();
+
+    for row_result in rows {
+        let row = match row_result {
+            Ok(row) => row,
+            Err(_) => continue,
+        };
+
+        let session_id = row.session_id.unwrap_or_else(|| "unknown".to_string());
+        let model_id = row
+            .model_id
+            .as_deref()
+            .map(canonicalize_model)
+            .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+        let timestamp = row
+            .completed_at
+            .or(row.started_at)
+            .unwrap_or(fallback_timestamp);
+        let tokens = TokenBreakdown {
+            input: row.input_tokens.unwrap_or(0).max(0),
+            output: row.output_tokens.unwrap_or(0).max(0),
+            cache_read: row.cache_read_input_tokens.unwrap_or(0).max(0),
+            cache_write: row.cache_creation_input_tokens.unwrap_or(0).max(0),
+            reasoning: row.reasoning_tokens.unwrap_or(0).max(0),
+        };
+
+        if tokens.total() == 0 {
+            continue;
+        }
+
+        let agent = row
+            .agent
+            .as_deref()
+            .or(row.mode.as_deref())
+            .map(str::to_string);
+        let mut message = UnifiedMessage::new_with_agent(
+            CLIENT_ID,
+            model_id,
+            PROVIDER_ID,
+            session_id,
+            timestamp,
+            tokens,
+            0.0,
+            agent,
+        );
+        message.dedup_key = Some(format!("zcode-sqlite:{}", row.id));
+        message.duration_ms = row.duration_ms.filter(|duration| *duration > 0);
+        if let Some(turn_id) = row.turn_id.as_deref().filter(|id| !id.is_empty()) {
+            message.is_turn_start = seen_turns.insert(turn_id.to_string());
+        }
+
+        let workspace_root = row.session_directory.or(row.session_path);
+        let workspace_key = workspace_root.as_deref().and_then(normalize_workspace_key);
+        let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+        message.set_workspace(workspace_key, workspace_label);
+
+        messages.push(message);
+    }
+
+    messages
+}
+
+struct ZcodeUsageRow {
+    id: String,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    model_id: Option<String>,
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
+    duration_ms: Option<i64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    reasoning_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+    agent: Option<String>,
+    mode: Option<String>,
+    session_directory: Option<String>,
+    session_path: Option<String>,
+}
+
 /// Canonicalize ZCode model ids. ZCode reports GLM model names in various
 /// forms (e.g. "glm-5.2", "GLM-5.2", "glm-5-turbo"); normalize to lowercase
 /// canonical form for pricing lookup.
@@ -249,6 +424,7 @@ fn workspace_key_from_path(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::{params, Connection};
     use serde_json::json;
     use std::io::Write;
     use tempfile::TempDir;
@@ -260,6 +436,38 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(jsonl.as_bytes()).unwrap();
         path
+    }
+
+    fn create_zcode_sqlite_db(dir: &TempDir) -> std::path::PathBuf {
+        let db_path = dir.path().join("db.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE model_usage (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                model_id TEXT,
+                started_at INTEGER,
+                completed_at INTEGER,
+                duration_ms INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                cache_read_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER,
+                agent TEXT,
+                mode TEXT
+            );
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                path TEXT
+            );
+            "#,
+        )
+        .unwrap();
+        db_path
     }
 
     #[test]
@@ -468,5 +676,97 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 321);
         assert_eq!(messages[0].tokens.output, 123);
         assert_eq!(messages[0].tokens.cache_read, 7);
+    }
+
+    #[test]
+    fn test_parse_zcode_sqlite_model_usage() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, path) VALUES (?1, ?2, ?3)",
+            params!["sess_1", "/Users/alice/work/demo", "/Users/alice/work/demo"],
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, turn_id, model_id, started_at, completed_at,
+                duration_ms, input_tokens, output_tokens, reasoning_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens, agent, mode
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                "usage_1",
+                "sess_1",
+                "turn_1",
+                "GLM-5.2",
+                1_782_718_000_000_i64,
+                1_782_718_001_000_i64,
+                1000_i64,
+                100_i64,
+                20_i64,
+                5_i64,
+                7_i64,
+                3_i64,
+                "zcode-agent",
+                "yolo",
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.client, "zcode");
+        assert_eq!(msg.provider_id, "zhipu");
+        assert_eq!(msg.model_id, "glm-5.2");
+        assert_eq!(msg.session_id, "sess_1");
+        assert_eq!(msg.timestamp, 1_782_718_001_000_i64);
+        assert_eq!(msg.duration_ms, Some(1000));
+        assert_eq!(msg.tokens.input, 100);
+        assert_eq!(msg.tokens.output, 20);
+        assert_eq!(msg.tokens.reasoning, 5);
+        assert_eq!(msg.tokens.cache_read, 7);
+        assert_eq!(msg.tokens.cache_write, 3);
+        assert_eq!(msg.agent.as_deref(), Some("zcode-agent"));
+        assert_eq!(msg.workspace_key.as_deref(), Some("/Users/alice/work/demo"));
+        assert_eq!(msg.workspace_label.as_deref(), Some("demo"));
+        assert!(msg.is_turn_start);
+        assert_eq!(msg.dedup_key.as_deref(), Some("zcode-sqlite:usage_1"));
+    }
+
+    #[test]
+    fn test_parse_zcode_sqlite_marks_only_first_request_per_turn() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        for (id, completed_at) in [("usage_1", 1_000_i64), ("usage_2", 2_000_i64)] {
+            conn.execute(
+                r#"
+                INSERT INTO model_usage (
+                    id, session_id, turn_id, model_id, completed_at,
+                    input_tokens, output_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    id,
+                    "sess_1",
+                    "turn_1",
+                    "glm-5.2",
+                    completed_at,
+                    10_i64,
+                    1_i64
+                ],
+            )
+            .unwrap();
+        }
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].is_turn_start);
+        assert!(!messages[1].is_turn_start);
     }
 }
