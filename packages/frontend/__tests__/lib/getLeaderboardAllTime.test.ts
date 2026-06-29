@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const awaitedResults: unknown[] = [];
   const limitCalls: unknown[] = [];
@@ -506,14 +508,8 @@ describe("all-time leaderboard freshness queries", () => {
     // Regression: total_cost is numeric(18,4) (migration 0014); every cost cast must stay >= 18 wide or costs >= 1e8 overflow.
     // Width-based (not literal) so it also catches a re-narrowing to any precision below the column, e.g. DECIMAL(15,4).
     await getLeaderboardData("all", 1, 50, "cost");
-    const sqlTexts = serializeSqlCalls();
 
-    const costCastWidths = sqlTexts
-      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
-      .flatMap((text) => [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1])));
-
-    expect(costCastWidths.length).toBeGreaterThan(0);
-    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 });
 
@@ -522,16 +518,6 @@ describe("all-time cost aggregation precision across query shapes (numeric overf
   // shapes that also cast submissions.total_cost (decimal(18,4)). Any cast
   // narrower than 18 overflows on costs >= the narrowed ceiling and 500s the
   // query; width-based so a re-narrowing to e.g. DECIMAL(15,4) is still caught.
-  function expectNoNarrowedCostCast(sqlTexts: string[]): void {
-    const costCastWidths = sqlTexts
-      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
-      .flatMap((text) =>
-        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
-      );
-    expect(costCastWidths.length).toBeGreaterThan(0);
-    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
-  }
-
   it("casts total_cost at full column precision in the all-time search list", async () => {
     mockState.pushAwaitedResult([]);
     mockState.pushAwaitedResult([{ count: 0 }]);

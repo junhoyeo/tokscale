@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const selectResults: Array<Array<Record<string, unknown>>> = [];
   const executeResults: Array<Array<Record<string, unknown>>> = [];
@@ -294,13 +296,7 @@ describe("GET /api/users/[username]", () => {
 
     // submissions.total_cost is decimal(18,4); a narrower cast overflows for a
     // profile whose lifetime cost has grown past the narrowed ceiling.
-    const costCastWidths = serializeSqlCalls()
-      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
-      .flatMap((text) =>
-        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
-      );
-    expect(costCastWidths.length).toBeGreaterThan(0);
-    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 
   it("rejects ambiguous case-insensitive username matches", async () => {

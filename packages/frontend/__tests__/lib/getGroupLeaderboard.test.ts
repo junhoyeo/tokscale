@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const periodRows: Array<Record<string, unknown>> = [];
   const allTimeRows: Array<Record<string, unknown>> = [];
@@ -312,13 +314,6 @@ describe("group leaderboard data", () => {
       }, "");
     });
 
-    const costCastWidths = sqlTexts
-      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
-      .flatMap((text) =>
-        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
-      );
-    expect(costCastWidths.length).toBeGreaterThan(0);
-    // total_cost is decimal(18,4); any narrower precision overflows on big costs.
-    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+    expectNoNarrowedCostCast(sqlTexts);
   });
 });

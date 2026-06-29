@@ -1,5 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const awaitedResults: unknown[] = [];
   const executeResults: Array<Array<Record<string, unknown>>> = [];
@@ -223,13 +225,7 @@ describe("user embed data", () => {
 
     // submissions.total_cost is decimal(18,4); narrowing the cast overflows for
     // costs >= the narrowed ceiling and 500s the embed for that user.
-    const costCastWidths = serializeSqlCalls()
-      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
-      .flatMap((text) =>
-        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
-      );
-    expect(costCastWidths.length).toBeGreaterThan(0);
-    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 
   it("looks up embed stats usernames case-insensitively and returns the canonical username", async () => {
