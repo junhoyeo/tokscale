@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const periodRows: Array<Record<string, unknown>> = [];
   const allTimeRows: Array<Record<string, unknown>> = [];
@@ -294,5 +296,24 @@ describe("group leaderboard data", () => {
       mockState.tables.users.id
     );
     expect(leaderboard.users.map((user) => user.username)).toEqual(["alice", "bob"]);
+  });
+
+  // submissions.total_cost is decimal(18,4); narrowing the cast to DECIMAL(12,4)
+  // (max 99,999,999.9999) overflows for any row >= $100,000,000 and crashes the
+  // all-time group leaderboard exactly like the global leaderboard.
+  it("casts total_cost at full column precision for the all-time group leaderboard", async () => {
+    mockState.setAllTimeRows([]);
+
+    await getGroupLeaderboardData("group-1", "all", 1, 50, "cost");
+
+    const sqlTexts = mockState.sql.mock.calls.map((call) => {
+      const [strings, ...values] = call as [TemplateStringsArray, ...unknown[]];
+      return Array.from(strings).reduce((text, part, index) => {
+        const nextValue = index < values.length ? String(values[index]) : "";
+        return `${text}${part}${nextValue}`;
+      }, "");
+    });
+
+    expectNoNarrowedCostCast(sqlTexts);
   });
 });

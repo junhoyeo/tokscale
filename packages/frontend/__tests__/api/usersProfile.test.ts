@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const selectResults: Array<Array<Record<string, unknown>>> = [];
   const executeResults: Array<Array<Record<string, unknown>>> = [];
@@ -262,6 +264,44 @@ describe("GET /api/users/[username]", () => {
 
     expect(response.status).toBe(200);
     expect(body.user.username).toBe("ImLunaHey");
+  });
+
+  it("casts total_cost at full column precision in the profile stats query", async () => {
+    mockState.pushSelectResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 0,
+        totalCost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 0,
+        earliestDate: null,
+        latestDate: null,
+      },
+    ]);
+    mockState.pushSelectResult([]);
+    mockState.pushSelectResult([]);
+    mockState.pushExecuteResult([]);
+
+    await GET(
+      new Request("http://localhost:3000/api/users/alice"),
+      { params: Promise.resolve({ username: "alice" }) }
+    );
+
+    // submissions.total_cost is decimal(18,4); a narrower cast overflows for a
+    // profile whose lifetime cost has grown past the narrowed ceiling.
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 
   it("rejects ambiguous case-insensitive username matches", async () => {

@@ -1,5 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const awaitedResults: unknown[] = [];
   const executeResults: Array<Array<Record<string, unknown>>> = [];
@@ -177,7 +179,7 @@ describe("user embed data", () => {
 
     expect(tokenSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(true);
     expect(tokenSqlTexts.some((text) =>
-      text.includes("total_tokens DESC, CAST(total_cost AS DECIMAL(12,4)) DESC")
+      /total_tokens DESC, CAST\(total_cost AS DECIMAL\(\d+,4\)\) DESC/.test(text)
     )).toBe(false);
 
     mockState.reset();
@@ -200,8 +202,30 @@ describe("user embed data", () => {
 
     expect(costSqlTexts.some((text) => text.includes("RANK() OVER"))).toBe(true);
     expect(costSqlTexts.some((text) =>
-      text.includes("CAST(total_cost AS DECIMAL(12,4)) DESC, total_tokens DESC")
+      /CAST\(total_cost AS DECIMAL\(\d+,4\)\) DESC, total_tokens DESC/.test(text)
     )).toBe(false);
+  });
+
+  it("casts total_cost at full column precision for cost-sorted embed stats", async () => {
+    mockState.pushAwaitedResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+        submissionCount: 1,
+        updatedAt: new Date("2026-03-12T09:00:00.000Z"),
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: 2, total: 3 }]);
+
+    await getUserEmbedStats("alice", "cost");
+
+    // submissions.total_cost is decimal(18,4); narrowing the cast overflows for
+    // costs >= the narrowed ceiling and 500s the embed for that user.
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 
   it("looks up embed stats usernames case-insensitively and returns the canonical username", async () => {
