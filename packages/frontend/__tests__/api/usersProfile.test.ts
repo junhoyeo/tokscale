@@ -259,6 +259,50 @@ describe("GET /api/users/[username]", () => {
     expect(body.user.username).toBe("ImLunaHey");
   });
 
+  it("casts total_cost at full column precision in the profile stats query", async () => {
+    mockState.pushSelectResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 0,
+        totalCost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 0,
+        earliestDate: null,
+        latestDate: null,
+      },
+    ]);
+    mockState.pushSelectResult([]);
+    mockState.pushSelectResult([]);
+    mockState.pushExecuteResult([]);
+
+    await GET(
+      new Request("http://localhost:3000/api/users/alice"),
+      { params: Promise.resolve({ username: "alice" }) }
+    );
+
+    // submissions.total_cost is decimal(18,4); a narrower cast overflows for a
+    // profile whose lifetime cost has grown past the narrowed ceiling.
+    const costCastWidths = serializeSqlCalls()
+      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
+      .flatMap((text) =>
+        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
+      );
+    expect(costCastWidths.length).toBeGreaterThan(0);
+    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+  });
+
   it("rejects ambiguous case-insensitive username matches", async () => {
     mockState.pushSelectResult([
       {

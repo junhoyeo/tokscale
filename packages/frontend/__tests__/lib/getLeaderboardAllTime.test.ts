@@ -516,3 +516,53 @@ describe("all-time leaderboard freshness queries", () => {
     expect(costCastWidths.every((width) => width >= 18)).toBe(true);
   });
 });
+
+describe("all-time cost aggregation precision across query shapes (numeric overflow regression)", () => {
+  // Complements the all-time-list check above with the search and user-rank
+  // shapes that also cast submissions.total_cost (decimal(18,4)). Any cast
+  // narrower than 18 overflows on costs >= the narrowed ceiling and 500s the
+  // query; width-based so a re-narrowing to e.g. DECIMAL(15,4) is still caught.
+  function expectNoNarrowedCostCast(sqlTexts: string[]): void {
+    const costCastWidths = sqlTexts
+      .filter((text) => /CAST\([^)]*(?:total_cost|totalCost)[^)]*AS DECIMAL/.test(text))
+      .flatMap((text) =>
+        [...text.matchAll(/DECIMAL\((\d+),\s*4\)/g)].map((match) => Number(match[1]))
+      );
+    expect(costCastWidths.length).toBeGreaterThan(0);
+    expect(costCastWidths.every((width) => width >= 18)).toBe(true);
+  }
+
+  it("casts total_cost at full column precision in the all-time search list", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([
+      { totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 },
+    ]);
+
+    await getLeaderboardData("all", 1, 50, "cost", "ali");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+
+  it("casts total_cost at full column precision for all-time user rank", async () => {
+    mockState.pushAwaitedResult([
+      { id: "user-alice", username: "alice", displayName: "Alice", avatarUrl: null },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 3000,
+        totalCost: 40,
+        totalActiveTimeMs: 0,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T09:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+
+    await getUserRank("alice", "all", "cost");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+});
