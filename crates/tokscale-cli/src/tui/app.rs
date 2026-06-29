@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
-use crate::commands::usage::UsageOutput;
+use crate::commands::usage::{UsageFetchReport, UsageOutput};
 use crate::ClientFilter;
 
 use ratatui::style::Color;
@@ -38,6 +38,18 @@ pub struct TuiConfig {
     pub until: Option<String>,
     pub year: Option<String>,
     pub initial_tab: Option<Tab>,
+}
+
+#[cfg(not(test))]
+fn default_usage_fetcher() -> UsageFetchReport {
+    crate::commands::usage::fetch_all_report_with_intent(
+        crate::commands::usage::UsageFetchIntent::TuiSurface,
+    )
+}
+
+#[cfg(test)]
+fn test_usage_fetcher() -> UsageFetchReport {
+    UsageFetchReport::default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -323,6 +335,7 @@ pub struct App {
     pub model_shade_map: HashMap<String, Color>,
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
+    pub usage_fetch_diagnostics: Vec<crate::commands::usage::UsageFetchDiagnostic>,
     confirmed_codex_use_account_id: Rc<RefCell<Option<String>>>,
     confirmed_codex_remove_account_id: Rc<RefCell<Option<String>>>,
     confirmed_codex_reset_account_id: Rc<RefCell<Option<String>>>,
@@ -331,8 +344,9 @@ pub struct App {
     pub(crate) codex_login_outcome: Option<CodexLoginOutcome>,
 
     pub usage_fetch_attempted: bool,
-    usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+    usage_rx: Option<std::sync::mpsc::Receiver<UsageFetchReport>>,
     usage_fetch_preserve_status: bool,
+    usage_fetcher: fn() -> UsageFetchReport,
     codex_reset_rx: Option<
         std::sync::mpsc::Receiver<
             Result<crate::commands::usage::codex::RateLimitResetConsumeResult, String>,
@@ -465,6 +479,7 @@ impl App {
                     Vec::new()
                 }
             },
+            usage_fetch_diagnostics: Vec::new(),
             confirmed_codex_use_account_id,
             confirmed_codex_remove_account_id,
             confirmed_codex_reset_account_id,
@@ -474,6 +489,16 @@ impl App {
             usage_fetch_attempted: false,
             usage_rx: None,
             usage_fetch_preserve_status: false,
+            usage_fetcher: {
+                #[cfg(test)]
+                {
+                    test_usage_fetcher
+                }
+                #[cfg(not(test))]
+                {
+                    default_usage_fetcher
+                }
+            },
             codex_reset_rx: None,
             codex_login_rx: None,
             codex_login_child: None,
@@ -588,20 +613,21 @@ impl App {
         // Poll background usage fetch
         if let Some(ref rx) = self.usage_rx {
             match rx.try_recv() {
-                Ok(results) => {
+                Ok(report) => {
                     let preserve_status = self.usage_fetch_preserve_status;
                     self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
-                    self.subscription_usage = results;
+                    self.subscription_usage = report.outputs;
+                    self.usage_fetch_diagnostics = report.diagnostics;
                     if !self.subscription_usage.is_empty() {
                         crate::commands::usage::save_cache(&self.subscription_usage);
                         if !preserve_status {
-                            self.status_message = Some("Usage data loaded".into());
+                            self.status_message = Some(self.usage_loaded_status());
                         }
                     } else {
                         crate::commands::usage::clear_cache();
                         if !preserve_status {
-                            self.status_message = Some("No usage data available".into());
+                            self.status_message = Some(self.usage_empty_status());
                         }
                     }
                     if !preserve_status {
@@ -888,19 +914,17 @@ impl App {
         }
         self.usage_fetch_attempted = true;
         self.usage_fetch_preserve_status = preserve_status;
+        self.usage_fetch_diagnostics.clear();
         if !preserve_status {
             self.status_message = Some("Fetching usage data...".into());
             self.status_message_time = Some(std::time::Instant::now());
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.usage_rx = Some(rx);
+        let fetcher = self.usage_fetcher;
         std::thread::spawn(move || {
-            // Tests must not hit real provider endpoints or credentials.
-            #[cfg(test)]
-            let results = Vec::new();
-            #[cfg(not(test))]
-            let results = crate::commands::usage::fetch_all();
-            let _ = tx.send(results);
+            let report = fetcher();
+            let _ = tx.send(report);
         });
     }
 
@@ -921,6 +945,39 @@ impl App {
 
     pub fn is_fetching_usage(&self) -> bool {
         self.usage_rx.is_some()
+    }
+
+    fn usage_loaded_status(&self) -> String {
+        match self.usage_fetch_diagnostics.len() {
+            0 => "Usage data loaded".to_string(),
+            1 => "Usage data loaded with 1 issue".to_string(),
+            count => format!("Usage data loaded with {count} issues"),
+        }
+    }
+
+    fn usage_empty_status(&self) -> String {
+        if self.usage_fetch_diagnostics.is_empty() {
+            "No usage data available".to_string()
+        } else {
+            format!("Usage fetch failed: {}", self.usage_diagnostic_summary())
+        }
+    }
+
+    fn usage_diagnostic_summary(&self) -> String {
+        let mut names = self
+            .usage_fetch_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.display_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        let visible = names.iter().take(2).cloned().collect::<Vec<_>>();
+        let hidden = names.len().saturating_sub(visible.len());
+        if hidden == 0 {
+            visible.join(", ")
+        } else {
+            format!("{} +{hidden}", visible.join(", "))
+        }
     }
 
     /// Cache-first load of server-side aggregated multi-device stats.
@@ -1123,6 +1180,16 @@ impl App {
     }
 
     fn confirm_codex_account_removal(&mut self, account_id: &str) {
+        if self.subscription_usage.iter().any(|usage| {
+            usage
+                .account
+                .as_ref()
+                .is_some_and(|account| account.id == account_id && account.is_active)
+        }) {
+            self.set_status("Switch Codex accounts before removing the current account");
+            return;
+        }
+
         let account_label = self.codex_account_label(account_id);
         let dialog = ConfirmDialog::codex_remove(
             account_id.to_string(),
@@ -2260,7 +2327,9 @@ impl App {
 mod tests {
     use super::super::ui::widgets::get_provider_shade;
     use super::*;
-    use crate::commands::usage::{UsageAccount, UsageMetric, UsageOutput};
+    use crate::commands::usage::{
+        UsageAccount, UsageFetchDiagnostic, UsageFetchReport, UsageMetric, UsageOutput,
+    };
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
     use chrono::{NaiveDate, NaiveDateTime};
     use std::collections::{BTreeMap, BTreeSet};
@@ -2571,6 +2640,60 @@ mod tests {
             reset_credits: None,
             credit_status: None,
             spend_control: None,
+        }
+    }
+
+    fn sample_subscription_usage() -> Vec<UsageOutput> {
+        vec![usage_output(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
+        )]
+    }
+
+    fn sample_usage_fetcher() -> UsageFetchReport {
+        UsageFetchReport {
+            outputs: sample_subscription_usage(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn failing_usage_fetcher() -> UsageFetchReport {
+        UsageFetchReport {
+            outputs: Vec::new(),
+            diagnostics: vec![UsageFetchDiagnostic::new(
+                "Codex",
+                None,
+                "token refresh failed",
+            )],
+        }
+    }
+
+    fn partial_usage_fetcher() -> UsageFetchReport {
+        UsageFetchReport {
+            outputs: sample_subscription_usage(),
+            diagnostics: vec![UsageFetchDiagnostic::new(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_personal".to_string(),
+                    label: Some("personal".to_string()),
+                    is_active: false,
+                }),
+                "usage endpoint rejected credentials",
+            )],
+        }
+    }
+
+    fn drain_usage_fetch(app: &mut App) {
+        for _ in 0..20 {
+            app.on_tick();
+            if !app.is_fetching_usage() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -3489,6 +3612,7 @@ mod tests {
     #[test]
     fn test_handle_key_refresh_usage_tab_fetches_usage() {
         let mut app = make_app();
+        app.usage_fetcher = sample_usage_fetcher;
         app.current_tab = Tab::Usage;
 
         app.handle_key_event(key(KeyCode::Char('r')));
@@ -3499,6 +3623,58 @@ mod tests {
             app.status_message.as_deref(),
             Some("Fetching usage data...")
         );
+
+        drain_usage_fetch(&mut app);
+
+        assert_eq!(app.subscription_usage.len(), 1);
+        assert_eq!(app.subscription_usage[0].provider, "Codex");
+        assert_eq!(app.status_message.as_deref(), Some("Usage data loaded"));
+    }
+
+    #[test]
+    fn test_handle_key_refresh_usage_tab_reports_fetch_failure_diagnostic() {
+        let mut app = make_app();
+        app.usage_fetcher = failing_usage_fetcher;
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+        drain_usage_fetch(&mut app);
+
+        assert!(app.subscription_usage.is_empty());
+        assert_eq!(app.usage_fetch_diagnostics.len(), 1);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Usage fetch failed: Codex")
+        );
+    }
+
+    #[test]
+    fn test_handle_key_refresh_usage_tab_keeps_partial_fetch_diagnostic() {
+        let mut app = make_app();
+        app.usage_fetcher = partial_usage_fetcher;
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+        drain_usage_fetch(&mut app);
+
+        assert_eq!(app.subscription_usage.len(), 1);
+        assert_eq!(app.usage_fetch_diagnostics.len(), 1);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Usage data loaded with 1 issue")
+        );
+    }
+
+    #[test]
+    fn test_handle_key_refresh_usage_tab_clears_stale_diagnostics() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.usage_fetch_diagnostics = vec![UsageFetchDiagnostic::new("Codex", None, "stale issue")];
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+
+        assert!(app.is_fetching_usage());
+        assert!(app.usage_fetch_diagnostics.is_empty());
     }
 
     #[test]
@@ -3777,6 +3953,32 @@ mod tests {
         assert_eq!(
             app.status_message.as_deref(),
             Some("Confirm Codex account removal")
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_codex_remove_refuses_active_account() {
+        let mut app = make_app();
+        app.subscription_usage = sample_subscription_usage();
+        app.add_click_area(
+            Rect::new(0, 0, 10, 2),
+            ClickAction::CodexRemoveAccount {
+                account_id: "acct_work".to_string(),
+            },
+        );
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(event);
+
+        assert!(!app.dialog_stack.is_active());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Switch Codex accounts before removing the current account")
         );
     }
 

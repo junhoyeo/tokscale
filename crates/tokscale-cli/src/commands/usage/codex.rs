@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
+use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::helpers::capitalize;
 use super::{
-    UsageAccount, UsageCreditStatus, UsageMetric, UsageOutput, UsageResetCredit, UsageResetCredits,
-    UsageSpendControl,
+    UsageAccount, UsageCreditStatus, UsageFetchDiagnostic, UsageFetchDiagnosticKind,
+    UsageFetchDiagnosticSeverity, UsageFetchReport, UsageMetric, UsageOutput, UsageResetCredit,
+    UsageResetCredits, UsageSpendControl,
 };
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -19,7 +22,7 @@ struct Auth {
     tokens: Option<Tokens>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Tokens {
     #[serde(skip_serializing_if = "Option::is_none")]
     access_token: Option<String>,
@@ -169,8 +172,189 @@ enum CredentialSource {
     Store(String),
 }
 
+#[derive(Debug)]
+enum CodexUsageError {
+    MissingCredentials,
+    NeedsAuth,
+    UnsupportedStoreVersion { version: i64, path: PathBuf },
+}
+
+impl fmt::Display for CodexUsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingCredentials => {
+                write!(f, "No Codex credentials found. Run 'codex' to log in.")
+            }
+            Self::NeedsAuth => write!(f, "Codex credentials need authentication"),
+            Self::UnsupportedStoreVersion { version, path } => write!(
+                f,
+                "Unsupported Codex account store version {version} at {} (this tokscale supports version 1); refusing to modify it",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CodexUsageError {}
+
+fn has_codex_error(error: &anyhow::Error, predicate: impl Fn(&CodexUsageError) -> bool) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<CodexUsageError>()
+            .is_some_and(&predicate)
+    })
+}
+
+fn is_missing_credentials(error: &anyhow::Error) -> bool {
+    has_codex_error(error, |error| {
+        matches!(error, CodexUsageError::MissingCredentials)
+    })
+}
+
+fn is_needs_auth(error: &anyhow::Error) -> bool {
+    has_codex_error(error, |error| matches!(error, CodexUsageError::NeedsAuth))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexFetchIntent {
+    ReadOnly,
+    SaveCurrentLogin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreRepairPolicy {
+    InMemoryOnly,
+    Persist,
+}
+
 fn codex_store_path() -> PathBuf {
     crate::paths::get_config_dir().join("codex-credentials.json")
+}
+
+#[cfg(test)]
+fn codex_store_path_in_home(home_dir: &Path) -> PathBuf {
+    home_dir
+        .join(".config")
+        .join("tokscale")
+        .join("codex-credentials.json")
+}
+
+#[derive(Debug, Clone)]
+struct CodexAccountStore {
+    path: PathBuf,
+}
+
+impl CodexAccountStore {
+    fn default() -> Self {
+        Self {
+            path: codex_store_path(),
+        }
+    }
+
+    fn at_path(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    #[cfg(test)]
+    fn in_home(home_dir: &Path) -> Self {
+        Self::at_path(codex_store_path_in_home(home_dir))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        self.path.with_extension("lock")
+    }
+
+    fn with_lock<T>(&self, action: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let lock_path = self.lock_path();
+        if let Some(dir) = lock_path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| {
+                format!("Failed to create Codex account lock dir {}", dir.display())
+            })?;
+        }
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| {
+                format!("Failed to open Codex account lock {}", lock_path.display())
+            })?;
+        lock_file.lock_exclusive().with_context(|| {
+            format!("Failed to lock Codex account store {}", self.path.display())
+        })?;
+
+        let result = action(self);
+        let unlock_result = lock_file.unlock().with_context(|| {
+            format!(
+                "Failed to unlock Codex account store {}",
+                self.path.display()
+            )
+        });
+
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn read(&self) -> Option<CodexCredentialsStore> {
+        self.read_result().ok().flatten()
+    }
+
+    fn read_result(&self) -> Result<Option<CodexCredentialsStore>> {
+        self.read_unlocked(StoreRepairPolicy::InMemoryOnly)
+    }
+
+    fn read_for_update(&self) -> Result<Option<CodexCredentialsStore>> {
+        self.with_lock(|store| store.read_for_update_unlocked())
+    }
+
+    fn read_for_update_unlocked(&self) -> Result<Option<CodexCredentialsStore>> {
+        self.read_unlocked(StoreRepairPolicy::Persist)
+    }
+
+    fn read_unlocked(
+        &self,
+        repair_policy: StoreRepairPolicy,
+    ) -> Result<Option<CodexCredentialsStore>> {
+        load_credentials_store_from_path_unlocked(self.path(), repair_policy)
+    }
+
+    #[cfg(test)]
+    fn save(&self, store: &CodexCredentialsStore) -> Result<()> {
+        self.with_lock(|store_file| store_file.save_unlocked(store))
+    }
+
+    fn save_unlocked(&self, store: &CodexCredentialsStore) -> Result<()> {
+        let json = serde_json::to_string_pretty(store)?;
+        super::helpers::atomic_write_secret(self.path(), json.as_bytes()).with_context(|| {
+            format!(
+                "Failed to write Codex account store to {}",
+                self.path.display()
+            )
+        })
+    }
+
+    fn update_existing<T>(
+        &self,
+        missing_message: &'static str,
+        action: impl FnOnce(&mut CodexCredentialsStore) -> Result<T>,
+    ) -> Result<T> {
+        self.with_lock(|store_file| {
+            let mut store = store_file
+                .read_for_update_unlocked()?
+                .ok_or_else(|| anyhow::anyhow!(missing_message))?;
+            let result = action(&mut store)?;
+            store_file.save_unlocked(&store)?;
+            Ok(result)
+        })
+    }
 }
 
 fn current_auth_paths() -> Vec<PathBuf> {
@@ -240,7 +424,7 @@ fn read_current_credentials() -> Result<(Auth, CredentialSource)> {
         }
     }
 
-    anyhow::bail!("No Codex credentials found. Run 'codex' to log in.")
+    Err(CodexUsageError::MissingCredentials.into())
 }
 
 fn auth_document(tokens: &Tokens) -> serde_json::Value {
@@ -281,46 +465,77 @@ fn hash_token(token: &str) -> String {
         .collect::<String>()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexAccountIdentity {
+    stable_id: String,
+    account_id: Option<String>,
+    id_token: Option<String>,
+    access_token: Option<String>,
+}
+
+impl CodexAccountIdentity {
+    fn from_tokens(tokens: &Tokens) -> Self {
+        let account_id = normalized_token_value(tokens.account_id.as_deref());
+        let id_token = normalized_token_value(tokens.id_token.as_deref());
+        let access_token = normalized_token_value(tokens.access_token.as_deref());
+        let stable_id = account_id
+            .clone()
+            .or_else(|| {
+                id_token
+                    .as_deref()
+                    .map(|token| format!("id-{}", hash_token(token)))
+            })
+            .or_else(|| {
+                access_token
+                    .as_deref()
+                    .map(|token| format!("token-{}", hash_token(token)))
+            })
+            .unwrap_or_else(|| "account".to_string());
+
+        Self {
+            stable_id,
+            account_id,
+            id_token,
+            access_token,
+        }
+    }
+
+    fn stable_id(&self) -> &str {
+        &self.stable_id
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        if let (Some(a_id), Some(b_id)) = (self.account_id.as_deref(), other.account_id.as_deref())
+        {
+            return a_id == b_id;
+        }
+
+        if let (Some(a_id), Some(b_id)) = (self.id_token.as_deref(), other.id_token.as_deref()) {
+            return a_id == b_id;
+        }
+
+        match (self.access_token.as_deref(), other.access_token.as_deref()) {
+            (Some(a_token), Some(b_token)) => a_token == b_token,
+            _ => false,
+        }
+    }
+}
+
 fn derive_account_id(tokens: &Tokens) -> String {
-    if let Some(account_id) = tokens.account_id.as_deref() {
-        let trimmed = account_id.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    if let Some(id_token) = tokens.id_token.as_deref() {
-        let trimmed = id_token.trim();
-        if !trimmed.is_empty() {
-            return format!("id-{}", hash_token(trimmed));
-        }
-    }
-
-    tokens
-        .access_token
-        .as_deref()
-        .map(|token| format!("token-{}", hash_token(token)))
-        .unwrap_or_else(|| "account".to_string())
+    CodexAccountIdentity::from_tokens(tokens)
+        .stable_id()
+        .to_string()
 }
 
-fn normalized_token_field(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-/// Compares one identity field; `None` means the field is not present on both
-/// sides and the next field should decide.
-fn field_identity(a: Option<&str>, b: Option<&str>) -> Option<bool> {
-    match (normalized_token_field(a), normalized_token_field(b)) {
-        (Some(a), Some(b)) => Some(a == b),
-        _ => None,
-    }
+fn normalized_token_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn same_token_identity(a: &Tokens, b: &Tokens) -> bool {
-    field_identity(a.account_id.as_deref(), b.account_id.as_deref())
-        .or_else(|| field_identity(a.id_token.as_deref(), b.id_token.as_deref()))
-        .or_else(|| field_identity(a.access_token.as_deref(), b.access_token.as_deref()))
-        .unwrap_or(false)
+    CodexAccountIdentity::from_tokens(a).matches(&CodexAccountIdentity::from_tokens(b))
 }
 
 fn next_available_account_id(store: &CodexCredentialsStore, base_id: &str) -> String {
@@ -368,18 +583,27 @@ fn validate_label_available(
 }
 
 pub fn load_credentials_store() -> Option<CodexCredentialsStore> {
-    load_credentials_store_from_path(&codex_store_path())
+    CodexAccountStore::default().read()
 }
 
+#[cfg(test)]
+fn load_credentials_store_from_home(home_dir: &Path) -> Option<CodexCredentialsStore> {
+    CodexAccountStore::in_home(home_dir).read()
+}
+
+#[cfg(test)]
 fn load_credentials_store_from_path(path: &Path) -> Option<CodexCredentialsStore> {
-    load_credentials_store_for_update(path).ok().flatten()
+    CodexAccountStore::at_path(path).read()
 }
 
 /// Loads the store while distinguishing "no usable store" (`Ok(None)`) from a
 /// store written by a newer tokscale (`Err`). Write paths must propagate the
 /// error instead of silently clobbering a future-version store; read paths can
 /// treat both as "nothing usable".
-fn load_credentials_store_for_update(path: &Path) -> Result<Option<CodexCredentialsStore>> {
+fn load_credentials_store_from_path_unlocked(
+    path: &Path,
+    repair_policy: StoreRepairPolicy,
+) -> Result<Option<CodexCredentialsStore>> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Ok(None);
     };
@@ -397,7 +621,9 @@ fn load_credentials_store_for_update(path: &Path) -> Result<Option<CodexCredenti
     {
         if let Some(first_id) = first_account_id(&store) {
             store.active_account_id = first_id;
-            let _ = save_credentials_store_at_path(path, &store);
+            if repair_policy == StoreRepairPolicy::Persist {
+                let _ = CodexAccountStore::at_path(path).save_unlocked(&store);
+            }
         }
     }
 
@@ -414,22 +640,23 @@ fn bail_on_unknown_store_version(path: &Path, content: &str) -> Result<()> {
         return Ok(());
     };
     if version != 1 {
-        anyhow::bail!(
-            "Unsupported Codex account store version {version} at {} (this tokscale supports version 1); refusing to modify it",
-            path.display()
-        );
+        return Err(CodexUsageError::UnsupportedStoreVersion {
+            version,
+            path: path.to_path_buf(),
+        }
+        .into());
     }
     Ok(())
 }
 
-fn save_credentials_store(store: &CodexCredentialsStore) -> Result<()> {
-    save_credentials_store_at_path(&codex_store_path(), store)
+#[cfg(test)]
+fn save_credentials_store_in_home(home_dir: &Path, store: &CodexCredentialsStore) -> Result<()> {
+    CodexAccountStore::in_home(home_dir).save(store)
 }
 
+#[cfg(test)]
 fn save_credentials_store_at_path(path: &Path, store: &CodexCredentialsStore) -> Result<()> {
-    let json = serde_json::to_string_pretty(store)?;
-    super::helpers::atomic_write_secret(path, json.as_bytes())
-        .with_context(|| format!("Failed to write Codex account store to {}", path.display()))
+    CodexAccountStore::at_path(path).save(store)
 }
 
 fn resolve_account_id(store: &CodexCredentialsStore, name_or_id: &str) -> Option<String> {
@@ -564,74 +791,89 @@ fn save_account_from_auth_at_path(
     }
 
     let base_account_id = derive_account_id(&tokens);
-    let mut store =
-        load_credentials_store_for_update(store_path)?.unwrap_or_else(|| CodexCredentialsStore {
-            version: 1,
-            active_account_id: if make_active {
-                base_account_id.clone()
-            } else {
-                String::new()
-            },
-            accounts: HashMap::new(),
-        });
+    CodexAccountStore::at_path(store_path).with_lock(|store_file| {
+        let mut store =
+            store_file
+                .read_for_update_unlocked()?
+                .unwrap_or_else(|| CodexCredentialsStore {
+                    version: 1,
+                    active_account_id: if make_active {
+                        base_account_id.clone()
+                    } else {
+                        String::new()
+                    },
+                    accounts: HashMap::new(),
+                });
 
-    // Scan every stored account (not just the base-id key) so an account that
-    // was stored under a collision-suffixed id (e.g. `acct_x-2`) is updated in
-    // place instead of re-importing as `acct_x-3`, `acct_x-4`, ...
-    let existing_identity_id = store
-        .accounts
-        .iter()
-        .find(|(_, existing)| same_token_identity(&existing.tokens, &tokens))
-        .map(|(id, _)| id.clone());
+        // Scan every stored account (not just the base-id key) so an account
+        // stored under a collision-suffixed id (e.g. `acct_x-2`) is updated in
+        // place instead of re-importing as `acct_x-3`, `acct_x-4`, ...
+        let existing_identity_id = store
+            .accounts
+            .iter()
+            .find(|(_, existing)| same_token_identity(&existing.tokens, &tokens))
+            .map(|(id, _)| id.clone());
 
-    if let Some(existing_id) = existing_identity_id {
-        validate_label_available(&store, &existing_id, label)?;
-        if let Some(existing) = store.accounts.get_mut(&existing_id) {
-            existing.tokens = tokens;
-            if let Some(label) = label.map(str::trim).filter(|s| !s.is_empty()) {
-                existing.label = Some(label.to_string());
+        if let Some(existing_id) = existing_identity_id {
+            validate_label_available(&store, &existing_id, label)?;
+            let label = label.map(str::trim).filter(|s| !s.is_empty());
+            let active_changed = make_active && store.active_account_id != existing_id;
+            let mut account_changed = false;
+            if let Some(existing) = store.accounts.get_mut(&existing_id) {
+                if existing.tokens != tokens {
+                    existing.tokens = tokens;
+                    account_changed = true;
+                }
+                if let Some(label) = label {
+                    if existing.label.as_deref() != Some(label) {
+                        existing.label = Some(label.to_string());
+                        account_changed = true;
+                    }
+                }
             }
+            if make_active {
+                store.active_account_id = existing_id.clone();
+            }
+            if account_changed || active_changed {
+                store_file.save_unlocked(&store)?;
+            }
+
+            let account = store
+                .accounts
+                .get(&existing_id)
+                .ok_or_else(|| anyhow::anyhow!("Failed to save Codex account"))?;
+            return Ok(account_info(&store, &existing_id, account));
         }
+
+        let account_id = if store.accounts.contains_key(&base_account_id) {
+            next_available_account_id(&store, &base_account_id)
+        } else {
+            base_account_id
+        };
+
+        validate_label_available(&store, &account_id, label)?;
+
+        let account = CodexAccount {
+            tokens,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            label: label
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        };
+
+        store.accounts.insert(account_id.clone(), account);
         if make_active {
-            store.active_account_id = existing_id.clone();
+            store.active_account_id = account_id.clone();
         }
-        save_credentials_store_at_path(store_path, &store)?;
+        store_file.save_unlocked(&store)?;
 
         let account = store
             .accounts
-            .get(&existing_id)
+            .get(&account_id)
             .ok_or_else(|| anyhow::anyhow!("Failed to save Codex account"))?;
-        return Ok(account_info(&store, &existing_id, account));
-    }
-
-    let account_id = if store.accounts.contains_key(&base_account_id) {
-        next_available_account_id(&store, &base_account_id)
-    } else {
-        base_account_id
-    };
-
-    validate_label_available(&store, &account_id, label)?;
-
-    let account = CodexAccount {
-        tokens,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        label: label
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-    };
-
-    store.accounts.insert(account_id.clone(), account);
-    if make_active {
-        store.active_account_id = account_id.clone();
-    }
-    save_credentials_store_at_path(store_path, &store)?;
-
-    let account = store
-        .accounts
-        .get(&account_id)
-        .ok_or_else(|| anyhow::anyhow!("Failed to save Codex account"))?;
-    Ok(account_info(&store, &account_id, account))
+        Ok(account_info(&store, &account_id, account))
+    })
 }
 
 pub struct CodexLoginImport {
@@ -672,15 +914,20 @@ pub fn import_login_auth_file(path: &Path) -> Result<CodexLoginImport> {
     Ok(CodexLoginImport { info, warning })
 }
 
+pub fn save_current_auth_account() -> Result<CodexAccountInfo> {
+    let (auth, _) = read_current_credentials()?;
+    save_account_from_auth(auth, None)
+}
+
 fn update_account_tokens(account_id: &str, tokens: Tokens) -> Result<()> {
-    let mut store =
-        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Codex accounts"))?;
-    let account = store
-        .accounts
-        .get_mut(account_id)
-        .ok_or_else(|| anyhow::anyhow!("Codex account not found: {account_id}"))?;
-    account.tokens = tokens;
-    save_credentials_store(&store)
+    CodexAccountStore::default().update_existing("No saved Codex accounts", |store| {
+        let account = store
+            .accounts
+            .get_mut(account_id)
+            .ok_or_else(|| anyhow::anyhow!("Codex account not found: {account_id}"))?;
+        account.tokens = tokens;
+        Ok(())
+    })
 }
 
 fn load_account(name_or_id: Option<&str>) -> Result<(String, CodexAccount, CodexAccountInfo)> {
@@ -741,7 +988,7 @@ where
     T: DeserializeOwned,
 {
     if body.trim_start().starts_with('<') {
-        anyhow::bail!("NEEDS_AUTH");
+        return Err(CodexUsageError::NeedsAuth.into());
     }
     Ok(serde_json::from_str(body)?)
 }
@@ -752,7 +999,7 @@ where
 {
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        anyhow::bail!("NEEDS_AUTH");
+        return Err(CodexUsageError::NeedsAuth.into());
     }
     if !status.is_success() {
         anyhow::bail!("{request_label} failed (HTTP {status})");
@@ -948,7 +1195,7 @@ async fn fetch_with_auth_async(
     let mut effective_access_token = access_token.clone();
     let resp = match fetch_usage(&client, &access_token, tokens.account_id.as_deref()).await {
         Ok(r) => r,
-        Err(e) if e.to_string().contains("NEEDS_AUTH") => {
+        Err(e) if is_needs_auth(&e) => {
             let rt_str = tokens
                 .refresh_token
                 .as_ref()
@@ -1061,19 +1308,18 @@ fn matching_account_id_for_tokens(
     store: &CodexCredentialsStore,
     tokens: &Tokens,
 ) -> Option<String> {
-    let derived = derive_account_id(tokens);
-    if store
-        .accounts
-        .get(&derived)
-        .is_some_and(|account| same_token_identity(tokens, &account.tokens))
-    {
+    let identity = CodexAccountIdentity::from_tokens(tokens);
+    let derived = identity.stable_id().to_string();
+    if store.accounts.get(&derived).is_some_and(|account| {
+        identity.matches(&CodexAccountIdentity::from_tokens(&account.tokens))
+    }) {
         return Some(derived);
     }
 
     store
         .accounts
         .iter()
-        .find(|(_, account)| same_token_identity(tokens, &account.tokens))
+        .find(|(_, account)| identity.matches(&CodexAccountIdentity::from_tokens(&account.tokens)))
         .map(|(account_id, _)| account_id.clone())
         .or_else(|| store.accounts.contains_key(&derived).then_some(derived))
 }
@@ -1094,11 +1340,9 @@ fn active_account_id_for_usage(store: &mut CodexCredentialsStore) -> Option<Stri
     match active_account_id.as_ref() {
         Some(active_account_id) if store.active_account_id != *active_account_id => {
             store.active_account_id = active_account_id.clone();
-            let _ = save_credentials_store(store);
         }
         None if !store.active_account_id.trim().is_empty() => {
             store.active_account_id.clear();
-            let _ = save_credentials_store(store);
         }
         _ => {}
     }
@@ -1106,16 +1350,86 @@ fn active_account_id_for_usage(store: &mut CodexCredentialsStore) -> Option<Stri
     active_account_id
 }
 
+fn fetch_current_auth_report(diagnostics: Vec<UsageFetchDiagnostic>) -> UsageFetchReport {
+    match fetch() {
+        Ok(output) => UsageFetchReport {
+            outputs: vec![output],
+            diagnostics,
+        },
+        Err(error) => {
+            let mut diagnostics = diagnostics;
+            diagnostics.push(UsageFetchDiagnostic::new("Codex", None, error.to_string()));
+            UsageFetchReport {
+                outputs: Vec::new(),
+                diagnostics,
+            }
+        }
+    }
+}
+
 pub fn fetch_all() -> Result<Vec<UsageOutput>> {
-    let Some(mut store) = load_credentials_store() else {
-        return fetch().map(|output| vec![output]);
+    let report = fetch_all_report();
+    if report.outputs.is_empty() {
+        if let Some(diagnostic) = report.diagnostics.into_iter().next() {
+            anyhow::bail!("{}", diagnostic.message);
+        }
+    }
+    Ok(report.outputs)
+}
+
+pub fn fetch_all_report() -> UsageFetchReport {
+    fetch_all_report_inner(CodexFetchIntent::ReadOnly)
+}
+
+pub fn fetch_all_report_importing_current_auth() -> UsageFetchReport {
+    fetch_all_report_inner(CodexFetchIntent::SaveCurrentLogin)
+}
+
+fn load_credentials_store_for_fetch_intent(
+    intent: CodexFetchIntent,
+) -> Option<CodexCredentialsStore> {
+    match intent {
+        CodexFetchIntent::ReadOnly => load_credentials_store(),
+        CodexFetchIntent::SaveCurrentLogin => CodexAccountStore::default()
+            .read_for_update()
+            .ok()
+            .flatten(),
+    }
+}
+
+fn fetch_all_report_inner(intent: CodexFetchIntent) -> UsageFetchReport {
+    let mut diagnostics = Vec::new();
+    let current_auth_account = if intent == CodexFetchIntent::SaveCurrentLogin {
+        match save_current_auth_account() {
+            Ok(info) => Some(info),
+            Err(error) => {
+                if !is_missing_credentials(&error) {
+                    diagnostics.push(UsageFetchDiagnostic::with_kind(
+                        "Codex",
+                        None,
+                        UsageFetchDiagnosticKind::ImportCurrentLoginFailed,
+                        UsageFetchDiagnosticSeverity::Warning,
+                        format!("failed to import current Codex login: {error}"),
+                    ));
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let Some(mut store) = load_credentials_store_for_fetch_intent(intent) else {
+        return fetch_current_auth_report(diagnostics);
     };
 
     if store.accounts.is_empty() {
-        return fetch().map(|output| vec![output]);
+        return fetch_current_auth_report(diagnostics);
     }
 
-    let active_account_id = active_account_id_for_usage(&mut store);
+    let active_account_id = current_auth_account
+        .map(|account| account.id)
+        .or_else(|| active_account_id_for_usage(&mut store));
     let mut account_ids: Vec<_> = store.accounts.keys().cloned().collect();
     account_ids.sort_by(|a, b| {
         if active_account_id.as_deref() == Some(a.as_str()) {
@@ -1140,7 +1454,6 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
     });
 
     let mut outputs = Vec::new();
-    let mut first_error = None;
     for account_id in account_ids {
         let Some(account) = store.accounts.get(&account_id) else {
             continue;
@@ -1151,22 +1464,20 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
             auth_from_account(account),
             CredentialSource::Store(account_id.clone()),
             "Codex".into(),
-            Some(usage_account),
+            Some(usage_account.clone()),
         ) {
             Ok(output) => outputs.push(output),
-            Err(e) if first_error.is_none() => first_error = Some(e),
-            Err(_) => {}
+            Err(error) => diagnostics.push(UsageFetchDiagnostic::new(
+                "Codex",
+                Some(usage_account),
+                error.to_string(),
+            )),
         }
     }
 
-    if outputs.is_empty() {
-        if let Some(error) = first_error {
-            Err(error)
-        } else {
-            Ok(outputs)
-        }
-    } else {
-        Ok(outputs)
+    UsageFetchReport {
+        outputs,
+        diagnostics,
     }
 }
 
@@ -1193,7 +1504,7 @@ async fn consume_reset_credit_with_auth_async(
     .await
     {
         Ok(result) => Ok(result),
-        Err(e) if e.to_string().contains("NEEDS_AUTH") => {
+        Err(e) if is_needs_auth(&e) => {
             let rt_str = tokens
                 .refresh_token
                 .as_ref()
@@ -1265,34 +1576,41 @@ pub fn import_current_account(label: Option<&str>) -> Result<CodexAccountInfo> {
 }
 
 pub fn switch_active_account(name_or_id: &str) -> Result<CodexAccountInfo> {
-    let mut store =
-        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Codex accounts"))?;
-    let resolved = resolve_account_id(&store, name_or_id)
-        .ok_or_else(|| anyhow::anyhow!("Codex account not found: {name_or_id}"))?;
-    let account = store
-        .accounts
-        .get(&resolved)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Codex account not found: {resolved}"))?;
+    CodexAccountStore::default().update_existing("No saved Codex accounts", |store| {
+        let resolved = resolve_account_id(store, name_or_id)
+            .ok_or_else(|| anyhow::anyhow!("Codex account not found: {name_or_id}"))?;
+        let account = store
+            .accounts
+            .get(&resolved)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Codex account not found: {resolved}"))?;
 
-    let path = auth_write_path()?;
-    save_auth_tokens(&path, &account.tokens)?;
+        let path = auth_write_path()?;
+        save_auth_tokens(&path, &account.tokens)?;
 
-    store.active_account_id = resolved.clone();
-    save_credentials_store(&store)?;
+        store.active_account_id = resolved.clone();
 
-    Ok(account_info(&store, &resolved, &account))
+        Ok(account_info(store, &resolved, &account))
+    })
 }
 
 /// Removes an account from tokscale's store only. The codex CLI's own
 /// `auth.json` is intentionally left untouched: rewriting it would silently
 /// re-log the codex CLI into a different account (or log it out entirely).
 pub fn remove_account(name_or_id: &str) -> Result<CodexAccountInfo> {
-    let mut store =
-        load_credentials_store().ok_or_else(|| anyhow::anyhow!("No saved Codex accounts"))?;
-    let removed = remove_account_from_store(&mut store, name_or_id)?;
-    save_credentials_store(&store)?;
-    Ok(removed)
+    CodexAccountStore::default().update_existing("No saved Codex accounts", |store| {
+        let resolved = resolve_account_id(store, name_or_id)
+            .ok_or_else(|| anyhow::anyhow!("Codex account not found: {name_or_id}"))?;
+        let active_account_id = current_auth_account_id_in_store(store).or_else(|| {
+            (!store.active_account_id.trim().is_empty()).then(|| store.active_account_id.clone())
+        });
+        if active_account_id.as_deref() == Some(resolved.as_str()) {
+            anyhow::bail!(
+                "Cannot remove the active Codex account. Switch to another Codex account or log out of Codex first."
+            );
+        }
+        remove_account_from_store(store, &resolved)
+    })
 }
 
 pub fn run_codex_import(name: Option<String>) -> Result<()> {
@@ -1490,6 +1808,32 @@ mod tests {
         }
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn usage_response_treats_null_additional_rate_limits_as_empty() -> Result<()> {
         let usage: Usage = serde_json::from_value(serde_json::json!({
@@ -1520,7 +1864,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.to_string(), "NEEDS_AUTH");
+        assert!(
+            is_needs_auth(&error),
+            "expected Codex auth expiry, got: {error:#}"
+        );
     }
 
     #[test]
@@ -1690,6 +2037,59 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn active_account_id_for_usage_updates_only_loaded_snapshot() -> Result<()> {
+        let config = TempDir::new()?;
+        let codex_home = TempDir::new()?;
+        let auth = Auth {
+            tokens: Some(tokens("rotated-access-b", Some("acct_b"))),
+        };
+        std::fs::write(
+            codex_home.path().join("auth.json"),
+            serde_json::to_string_pretty(&auth)?,
+        )?;
+        let store_path = test_store_path(&config);
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: "acct_a".to_string(),
+                accounts: HashMap::from([
+                    (
+                        "acct_a".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-a", Some("acct_a")),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            label: Some("work".to_string()),
+                        },
+                    ),
+                    (
+                        "acct_b".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-b", Some("acct_b")),
+                            created_at: "2026-01-02T00:00:00Z".to_string(),
+                            label: Some("personal".to_string()),
+                        },
+                    ),
+                ]),
+            },
+        )?;
+
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config.path());
+        let _codex_guard = EnvVarGuard::set_path("CODEX_HOME", codex_home.path());
+
+        let mut loaded = load_credentials_store().expect("test store should load");
+        let active_id = active_account_id_for_usage(&mut loaded);
+
+        assert_eq!(active_id.as_deref(), Some("acct_b"));
+        assert_eq!(loaded.active_account_id, "acct_b");
+        let persisted: CodexCredentialsStore =
+            serde_json::from_str(&std::fs::read_to_string(&store_path)?)?;
+        assert_eq!(persisted.active_account_id, "acct_a");
+        Ok(())
+    }
+
+    #[test]
     fn load_credentials_store_repairs_missing_active_account() -> Result<()> {
         let tmp = TempDir::new()?;
         let mut accounts = HashMap::new();
@@ -1719,6 +2119,97 @@ mod tests {
 
         let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.active_account_id, "acct_b");
+        Ok(())
+    }
+
+    #[test]
+    fn load_credentials_store_read_path_does_not_persist_active_account_repair() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "acct_a".to_string(),
+            CodexAccount {
+                tokens: tokens("access-a", Some("acct_a")),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                label: Some("zulu".to_string()),
+            },
+        );
+        accounts.insert(
+            "acct_b".to_string(),
+            CodexAccount {
+                tokens: tokens("access-b", Some("acct_b")),
+                created_at: "2026-01-02T00:00:00Z".to_string(),
+                label: Some("alpha".to_string()),
+            },
+        );
+        let store_path = test_store_path(&tmp);
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: "missing".to_string(),
+                accounts,
+            },
+        )?;
+        let lock_path = CodexAccountStore::at_path(&store_path).lock_path();
+        if lock_path.exists() {
+            std::fs::remove_file(&lock_path)?;
+        }
+        let before = std::fs::read_to_string(&store_path)?;
+
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        let after = std::fs::read_to_string(&store_path)?;
+
+        assert_eq!(loaded.active_account_id, "acct_b");
+        assert_eq!(after, before);
+        assert!(!lock_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn usage_surface_store_loader_persists_active_account_repair() -> Result<()> {
+        let config = TempDir::new()?;
+        let store_path = test_store_path(&config);
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: "missing".to_string(),
+                accounts: HashMap::from([
+                    (
+                        "acct_a".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-a", Some("acct_a")),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            label: Some("zulu".to_string()),
+                        },
+                    ),
+                    (
+                        "acct_b".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-b", Some("acct_b")),
+                            created_at: "2026-01-02T00:00:00Z".to_string(),
+                            label: Some("alpha".to_string()),
+                        },
+                    ),
+                ]),
+            },
+        )?;
+
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config.path());
+
+        let loaded = load_credentials_store_for_fetch_intent(CodexFetchIntent::SaveCurrentLogin);
+
+        assert_eq!(
+            loaded
+                .as_ref()
+                .map(|store| store.active_account_id.as_str()),
+            Some("acct_b")
+        );
+        let persisted: CodexCredentialsStore =
+            serde_json::from_str(&std::fs::read_to_string(&store_path)?)?;
+        assert_eq!(persisted.active_account_id, "acct_b");
         Ok(())
     }
 
@@ -1792,6 +2283,93 @@ mod tests {
         let loaded = load_credentials_store_from_path(&store_path).unwrap();
         assert_eq!(loaded.active_account_id, "acct_a");
         assert!(loaded.accounts.contains_key("acct_a"));
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_current_auth_account_imports_codex_home_auth_when_store_missing() -> Result<()> {
+        let config = TempDir::new()?;
+        let codex_home = TempDir::new()?;
+        let auth = Auth {
+            tokens: Some(tokens("access-current", Some("acct_current"))),
+        };
+        std::fs::write(
+            codex_home.path().join("auth.json"),
+            serde_json::to_string_pretty(&auth)?,
+        )?;
+
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config.path());
+        let _codex_guard = EnvVarGuard::set_path("CODEX_HOME", codex_home.path());
+
+        let info = save_current_auth_account()?;
+        assert_eq!(info.id, "acct_current");
+        assert!(info.is_active);
+
+        let store_path = test_store_path(&config);
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        assert_eq!(loaded.active_account_id, "acct_current");
+        let account = loaded.accounts.get("acct_current").unwrap();
+        assert_eq!(
+            account.tokens.access_token.as_deref(),
+            Some("access-current")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_current_auth_account_imports_codex_home_auth_when_store_has_other_accounts(
+    ) -> Result<()> {
+        let config = TempDir::new()?;
+        let codex_home = TempDir::new()?;
+        let auth = Auth {
+            tokens: Some(tokens("access-current", Some("acct_current"))),
+        };
+        std::fs::write(
+            codex_home.path().join("auth.json"),
+            serde_json::to_string_pretty(&auth)?,
+        )?;
+        let store_path = test_store_path(&config);
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: String::new(),
+                accounts: HashMap::from([
+                    (
+                        "acct_a".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-a", Some("acct_a")),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            label: Some("work".to_string()),
+                        },
+                    ),
+                    (
+                        "acct_b".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-b", Some("acct_b")),
+                            created_at: "2026-01-02T00:00:00Z".to_string(),
+                            label: Some("personal".to_string()),
+                        },
+                    ),
+                ]),
+            },
+        )?;
+
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config.path());
+        let _codex_guard = EnvVarGuard::set_path("CODEX_HOME", codex_home.path());
+
+        let info = save_current_auth_account()?;
+        assert_eq!(info.id, "acct_current");
+        assert!(info.is_active);
+
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        assert_eq!(loaded.active_account_id, "acct_current");
+        assert_eq!(loaded.accounts.len(), 3);
+        assert!(loaded.accounts.contains_key("acct_a"));
+        assert!(loaded.accounts.contains_key("acct_b"));
+        assert!(loaded.accounts.contains_key("acct_current"));
         Ok(())
     }
 
@@ -1908,6 +2486,132 @@ mod tests {
         assert_eq!(loaded.active_account_id, "acct_a");
         assert!(loaded.accounts.contains_key("acct_a"));
         assert!(loaded.accounts.contains_key("acct_b"));
+        Ok(())
+    }
+
+    #[test]
+    fn save_account_from_auth_at_path_keeps_empty_active_when_inactive_import_is_first_account(
+    ) -> Result<()> {
+        let tmp = TempDir::new()?;
+        let store_path = test_store_path(&tmp);
+        let info = save_account_from_auth_at_path(
+            &store_path,
+            Auth {
+                tokens: Some(tokens("access-a", Some("acct_a"))),
+            },
+            Some("work"),
+            false,
+        )?;
+
+        assert_eq!(info.id, "acct_a");
+        assert!(!info.is_active);
+
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        assert!(loaded.active_account_id.is_empty());
+        assert!(loaded.accounts.contains_key("acct_a"));
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn remove_account_refuses_current_auth_account() -> Result<()> {
+        let config = TempDir::new()?;
+        let codex_home = TempDir::new()?;
+        let auth = Auth {
+            tokens: Some(tokens("access-current", Some("acct_current"))),
+        };
+        std::fs::write(
+            codex_home.path().join("auth.json"),
+            serde_json::to_string_pretty(&auth)?,
+        )?;
+        let store_path = test_store_path(&config);
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: "acct_current".to_string(),
+                accounts: HashMap::from([
+                    (
+                        "acct_current".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-current", Some("acct_current")),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            label: Some("work".to_string()),
+                        },
+                    ),
+                    (
+                        "acct_other".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-other", Some("acct_other")),
+                            created_at: "2026-01-02T00:00:00Z".to_string(),
+                            label: Some("personal".to_string()),
+                        },
+                    ),
+                ]),
+            },
+        )?;
+
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config.path());
+        let _codex_guard = EnvVarGuard::set_path("CODEX_HOME", codex_home.path());
+
+        let error =
+            remove_account("acct_current").expect_err("current auth account must not be removable");
+        assert!(
+            error.to_string().contains("Cannot remove the active"),
+            "unexpected error: {error:#}"
+        );
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        assert!(loaded.accounts.contains_key("acct_current"));
+        assert!(loaded.accounts.contains_key("acct_other"));
+        assert_eq!(loaded.active_account_id, "acct_current");
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn remove_account_refuses_store_active_account_without_current_auth() -> Result<()> {
+        let config = TempDir::new()?;
+        let codex_home = TempDir::new()?;
+        let store_path = test_store_path(&config);
+        save_credentials_store_at_path(
+            &store_path,
+            &CodexCredentialsStore {
+                version: 1,
+                active_account_id: "acct_current".to_string(),
+                accounts: HashMap::from([
+                    (
+                        "acct_current".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-current", Some("acct_current")),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            label: Some("work".to_string()),
+                        },
+                    ),
+                    (
+                        "acct_other".to_string(),
+                        CodexAccount {
+                            tokens: tokens("access-other", Some("acct_other")),
+                            created_at: "2026-01-02T00:00:00Z".to_string(),
+                            label: Some("personal".to_string()),
+                        },
+                    ),
+                ]),
+            },
+        )?;
+
+        let _config_guard = EnvVarGuard::set_path("TOKSCALE_CONFIG_DIR", config.path());
+        let _codex_guard = EnvVarGuard::set_path("CODEX_HOME", codex_home.path());
+
+        let error =
+            remove_account("acct_current").expect_err("store active account must not be removable");
+        assert!(
+            error.to_string().contains("Cannot remove the active"),
+            "unexpected error: {error:#}"
+        );
+        let loaded = load_credentials_store_from_path(&store_path).unwrap();
+        assert!(loaded.accounts.contains_key("acct_current"));
+        assert!(loaded.accounts.contains_key("acct_other"));
+        assert_eq!(loaded.active_account_id, "acct_current");
         Ok(())
     }
 

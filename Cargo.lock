@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "tokscale-cli"
-version = "4.0.4"
+version = "4.0.5"
 dependencies = [
  "ab_glyph",
  "aes",
@@ -3446,6 +3446,7 @@ dependencies = [
  "crossterm 0.28.1",
  "csv",
  "dirs",
+ "fs2",
  "hostname",
  "image",
  "imageproc",
@@ -3474,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "tokscale-core"
-version = "4.0.4"
+version = "4.0.5"
 dependencies = [
  "bincode",
  "chrono",

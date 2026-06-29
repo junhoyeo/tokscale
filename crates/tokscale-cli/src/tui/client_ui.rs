@@ -142,6 +142,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         display_name: "ZCode",
         hotkey: 'q',
     },
+    ClientUi {
+        display_name: "OpenCodeReview",
+        hotkey: 'O',
+    },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

@@ -915,14 +915,16 @@ fn scan_all_clients_with_env_strategy_inner(
         );
     }
 
-    // MiMo Code: SQLite database(s) at ~/.local/share/micode/mimocode*.db
+    // MiMo Code: SQLite database(s) at ~/.local/share/mimocode/mimocode*.db
     if enabled.contains(&ClientId::MiMoCode) {
-        let micode_xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
-        } else {
-            format!("{}/.local/share", home_dir)
-        };
-        let micode_data_dir = PathBuf::from(format!("{}/micode", micode_xdg_data));
+        // Derive the data dir from the client metadata so the scan path stays
+        // in sync with `ClientId::MiMoCode` (XdgData root + `mimocode`) rather
+        // than duplicating it here.
+        let micode_data_dir = PathBuf::from(
+            ClientId::MiMoCode
+                .data()
+                .resolve_path_with_env_strategy(home_dir, use_env_roots),
+        );
         // `discover_micode_dbs` already returns a sorted list.
         result.micode_dbs = discover_micode_dbs(&micode_data_dir);
     }

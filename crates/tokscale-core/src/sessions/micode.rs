@@ -1,7 +1,7 @@
 //! MiMo Code session parser
 //!
 //! Parses messages from:
-//! - SQLite database: ~/.local/share/micode/mimocode.db
+//! - SQLite database: ~/.local/share/mimocode/mimocode.db
 
 use super::utils::open_readonly_sqlite;
 use super::{
