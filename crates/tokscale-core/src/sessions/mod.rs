@@ -7,6 +7,7 @@ pub mod antigravity;
 pub mod antigravity_cli;
 pub mod claudecode;
 pub mod cline;
+pub mod codebuddy;
 pub mod codebuff;
 pub mod codex;
 pub mod commandcode;
