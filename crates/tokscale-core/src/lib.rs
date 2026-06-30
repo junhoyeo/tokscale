@@ -1542,6 +1542,21 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let deduped_trae_messages = dedupe_latest_trae_messages(trae_messages);
     all_messages.extend(deduped_trae_messages);
 
+    let workbuddy_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::WorkBuddy)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::workbuddy::parse_workbuddy_sqlite(path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(workbuddy_messages);
+
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
             let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
@@ -2820,6 +2835,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let warp_count = summed_parsed_message_count(&warp_msgs);
     counts.set(ClientId::Warp, warp_count);
     messages.extend(warp_msgs);
+
+    let workbuddy_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::WorkBuddy)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::workbuddy::parse_workbuddy_sqlite(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let workbuddy_count = summed_parsed_message_count(&workbuddy_msgs);
+    counts.set(ClientId::WorkBuddy, workbuddy_count);
+    messages.extend(workbuddy_msgs);
 
     let grok_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Grok)

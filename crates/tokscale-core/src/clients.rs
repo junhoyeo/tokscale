@@ -513,6 +513,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    WorkBuddy = 35 => {
+        id: "workbuddy",
+        root: PathRoot::Home,
+        relative: ".workbuddy",
+        pattern: "workbuddy.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -565,7 +574,17 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 35);
+        assert_eq!(ClientId::COUNT, 36);
+    }
+
+    #[test]
+    fn test_workbuddy_client_registered_as_local_sqlite_source() {
+        let client = ClientId::from_str("workbuddy").expect("workbuddy client should be registered");
+        assert_eq!(client.data().resolve_path("/tmp/home"), "/tmp/home/.workbuddy");
+        assert_eq!(client.data().pattern, "workbuddy.db");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
     }
 
     #[test]
