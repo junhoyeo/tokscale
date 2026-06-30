@@ -120,6 +120,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - [Date Filtering](#date-filtering)
   - [Pricing Lookup](#pricing-lookup)
   - [Social](#social)
+  - [Autosubmit](#autosubmit)
   - [Cursor IDE Commands](#cursor-ide-commands)
   - [Antigravity Commands](#antigravity-commands)
   - [Trae Commands](#trae-commands)
@@ -519,6 +520,31 @@ tokscale logout
 
 <img alt="CLI Submit" src="./.github/assets/cli-submit.png" />
 
+### Autosubmit
+
+Autosubmit schedules the normal `tokscale submit` flow with the operating system scheduler. It is useful for keeping your public profile current without a manual terminal run.
+
+```bash
+# Enable periodic submission. Uses launchd on macOS, systemd user timers on Linux
+# when available, cron as a Linux fallback, and Windows Task Scheduler on Windows.
+tokscale autosubmit enable --interval 24h
+
+# Keep the same client and date filters you would pass to submit.
+tokscale autosubmit enable --interval 2h --client opencode,claude --week
+
+# Show saved settings and the last run/error.
+tokscale autosubmit status
+tokscale autosubmit status --json
+
+# Run once now, even if the saved interval has not elapsed.
+tokscale autosubmit run --force
+
+# Disable autosubmit and remove the scheduler entry.
+tokscale autosubmit disable
+```
+
+Scheduled runs are non-interactive: they never prompt for GitHub auth or star confirmation. Run `tokscale login --token tt_xxx` once, or set `TOKSCALE_API_TOKEN` in the scheduler environment. Tokscale records scheduler state in `settings.json`, writes logs under `~/.config/tokscale/autosubmit/`, and uses a lock file so overlapping scheduler ticks do not submit twice.
+
 ### Cursor IDE Commands
 
 Cursor IDE support uses Cursor's web API export, cached by Tokscale at `~/.config/tokscale/cursor-cache/usage*.csv`. Tokscale does not parse local Cursor Agent CLI state under `~/.cursor`.
@@ -834,6 +860,7 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `defaultClients` | string[] | `[]` | Client filter applied when no `--client/-c` flag is passed. Accepts the same ids as `--client` (e.g. `["opencode", "claude", "synthetic"]`). Unknown ids are silently dropped. CLI flags always override this list completely — no merging. |
 | `light.writeCache` | boolean | `false` | When true, `tokscale --light` overwrites the TUI cache atomically after rendering. CLI flags `--write-cache` / `--no-write-cache` override per-invocation. |
 | `minutelyTabEnabled` | boolean | `false` | Show the per-minute Minutely tab in the TUI and aggregate per-minute usage during data loading. Default-off because minute-granularity is a niche/diagnostic view for most users and the per-minute bucketing has a non-trivial cost on large datasets. |
+| `autosubmit` | object | disabled | Saved `tokscale autosubmit` state: interval, client/date filters, scheduler backend, last run time, and last error. Prefer `tokscale autosubmit enable/status/disable` over editing this object by hand. |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 
 Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories, imported Gemini/OpenClaw histories, or Hermes profile databases. Hermes entries may point at a profile directory containing `state.db` or directly at a `state.db` file. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.

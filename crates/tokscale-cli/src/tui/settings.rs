@@ -16,6 +16,10 @@ const DEFAULT_NATIVE_TIMEOUT_MS: u64 = 300_000;
 const MIN_NATIVE_TIMEOUT_MS: u64 = 5_000;
 const MAX_NATIVE_TIMEOUT_MS: u64 = 3_600_000;
 
+pub const DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 24 * 60;
+pub const MIN_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 15;
+pub const MAX_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
+
 #[derive(Debug, Clone, Copy)]
 enum ExplicitHomeConfigLayout {
     UnixDotConfig,
@@ -40,6 +44,67 @@ pub struct LightSettings {
     /// flags `--write-cache` / `--no-write-cache` override this per-invocation.
     #[serde(default)]
     pub write_cache: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutosubmitSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_autosubmit_interval_minutes")]
+    pub interval_minutes: u64,
+    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    pub clients: Vec<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub year: Option<String>,
+    #[serde(default)]
+    pub today: bool,
+    #[serde(default)]
+    pub yesterday: bool,
+    #[serde(default)]
+    pub week: bool,
+    #[serde(default)]
+    pub month: bool,
+    #[serde(default)]
+    pub scheduler: Option<String>,
+    #[serde(default)]
+    pub last_run_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for AutosubmitSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_minutes: DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES,
+            clients: Vec::new(),
+            since: None,
+            until: None,
+            year: None,
+            today: false,
+            yesterday: false,
+            week: false,
+            month: false,
+            scheduler: None,
+            last_run_at_ms: None,
+            last_error: None,
+        }
+    }
+}
+
+impl AutosubmitSettings {
+    fn normalize(mut self) -> Self {
+        self.interval_minutes = self.interval_minutes.clamp(
+            MIN_AUTOSUBMIT_INTERVAL_MINUTES,
+            MAX_AUTOSUBMIT_INTERVAL_MINUTES,
+        );
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +149,8 @@ pub struct Settings {
     /// tab and enable its aggregation in subsequent loads.
     #[serde(default)]
     pub minutely_tab_enabled: bool,
+    #[serde(default)]
+    pub autosubmit: AutosubmitSettings,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -117,6 +184,10 @@ fn default_native_timeout_ms() -> u64 {
     DEFAULT_NATIVE_TIMEOUT_MS
 }
 
+fn default_autosubmit_interval_minutes() -> u64 {
+    DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -129,6 +200,7 @@ impl Default for Settings {
             default_clients: Vec::new(),
             light: LightSettings::default(),
             minutely_tab_enabled: false,
+            autosubmit: AutosubmitSettings::default(),
         }
     }
 }
@@ -170,6 +242,7 @@ impl Settings {
         self.native_timeout_ms = self
             .native_timeout_ms
             .clamp(MIN_NATIVE_TIMEOUT_MS, MAX_NATIVE_TIMEOUT_MS);
+        self.autosubmit = self.autosubmit.normalize();
         self
     }
 
@@ -466,6 +539,28 @@ mod tests {
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert!(parsed.scanner.opencode_db_paths.is_empty());
+    }
+
+    #[test]
+    fn settings_load_backfills_autosubmit_interval_when_missing_from_json() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+
+        assert!(!parsed.autosubmit.enabled);
+        assert_eq!(
+            parsed.autosubmit.interval_minutes,
+            DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+        );
+        assert_eq!(
+            AutosubmitSettings::default().interval_minutes,
+            DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+        );
     }
 
     #[test]

@@ -226,6 +226,11 @@ enum Commands {
         )]
         dry_run: bool,
     },
+    #[command(about = "Manage periodic usage submission")]
+    Autosubmit {
+        #[command(subcommand)]
+        subcommand: commands::autosubmit::AutosubmitSubcommand,
+    },
     #[command(about = "Capture subprocess output for token usage tracking")]
     Headless {
         #[arg(help = "Source CLI (currently only 'codex' supported)")]
@@ -681,7 +686,18 @@ fn main() -> Result<()> {
             // defaultClients view filter (which may exclude clients they still want
             // to upload). Pass an explicit empty defaults slice.
             let clients = build_client_filter_with_defaults(clients, &[]);
-            run_submit_command(clients, since, until, year, dry_run)
+            run_submit_command(
+                clients,
+                since,
+                until,
+                year,
+                dry_run,
+                SubmitMode::Interactive,
+            )
+        }
+        Some(Commands::Autosubmit { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "autosubmit")?;
+            run_autosubmit_command(subcommand)
         }
         Some(Commands::Headless {
             source,
@@ -4893,12 +4909,67 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
     println!();
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitMode {
+    Interactive,
+    Autosubmit,
+}
+
+fn run_autosubmit_command(subcommand: commands::autosubmit::AutosubmitSubcommand) -> Result<()> {
+    use commands::autosubmit::{AutosubmitRunDecision, AutosubmitSubcommand};
+
+    match subcommand {
+        AutosubmitSubcommand::Enable(args) => commands::autosubmit::enable(args),
+        AutosubmitSubcommand::Status { json } => commands::autosubmit::status(json),
+        AutosubmitSubcommand::Disable => commands::autosubmit::disable(),
+        AutosubmitSubcommand::Run { force } => {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let (settings, decision) = commands::autosubmit::load_run_config(force, now_ms)?;
+            match decision {
+                AutosubmitRunDecision::Disabled => {
+                    println!("Autosubmit is disabled.");
+                    return Ok(());
+                }
+                AutosubmitRunDecision::NotDue { next_run_at_ms } => {
+                    println!(
+                        "Autosubmit is not due yet. Next run: {}.",
+                        commands::autosubmit::format_timestamp_ms(next_run_at_ms)
+                    );
+                    return Ok(());
+                }
+                AutosubmitRunDecision::Due => {}
+            }
+
+            let Some(_lock) = commands::autosubmit::try_acquire_run_lock()? else {
+                println!("Autosubmit is already running.");
+                return Ok(());
+            };
+
+            let (clients, since, until, year) = commands::autosubmit::submit_filters(&settings);
+            match run_submit_command(clients, since, until, year, false, SubmitMode::Autosubmit) {
+                Ok(()) => {
+                    commands::autosubmit::record_run_success(
+                        chrono::Utc::now().timestamp_millis(),
+                    )?;
+                    Ok(())
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = commands::autosubmit::record_run_error(&message);
+                    Err(err)
+                }
+            }
+        }
+    }
+}
+
 fn run_submit_command(
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
     year: Option<String>,
     dry_run: bool,
+    mode: SubmitMode,
 ) -> Result<()> {
     use colored::Colorize;
     use std::io::IsTerminal;
@@ -4908,6 +4979,11 @@ fn run_submit_command(
     let auth_token = match auth::resolve_api_token() {
         Some(token) => token,
         None => {
+            if mode == SubmitMode::Autosubmit {
+                return Err(anyhow::anyhow!(
+                    "Autosubmit requires login. Run `tokscale login` or set TOKSCALE_API_TOKEN."
+                ));
+            }
             eprintln!("\n  {}", "Not logged in.".yellow());
             eprintln!(
                 "{}",
@@ -4917,7 +4993,8 @@ fn run_submit_command(
         }
     };
 
-    if auth_token.source == auth::ApiTokenSource::StoredCredentials
+    if mode == SubmitMode::Interactive
+        && auth_token.source == auth::ApiTokenSource::StoredCredentials
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
     {
@@ -5080,21 +5157,20 @@ fn run_submit_command(
                     });
 
             if !status.is_success() {
-                eprintln!(
-                    "\n  {}",
-                    format!(
-                        "Error: {}",
-                        body.error
-                            .unwrap_or_else(|| "Submission failed".to_string())
-                    )
-                    .red()
-                );
+                let error = body
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Submission failed".to_string());
+                eprintln!("\n  {}", format!("Error: {}", error).red());
                 if let Some(details) = body.details {
                     for detail in details {
                         eprintln!("{}", format!("    - {}", detail).bright_black());
                     }
                 }
                 println!();
+                if mode == SubmitMode::Autosubmit {
+                    return Err(anyhow::anyhow!(error));
+                }
                 std::process::exit(1);
             }
 
@@ -5152,6 +5228,9 @@ fn run_submit_command(
         Err(err) => {
             eprintln!("\n  {}", "Error: Failed to connect to server.".red());
             eprintln!("{}\n", format!("  {}", err).bright_black());
+            if mode == SubmitMode::Autosubmit {
+                return Err(anyhow::anyhow!("Failed to connect to server: {err}"));
+            }
             std::process::exit(1);
         }
     }
@@ -5159,7 +5238,9 @@ fn run_submit_command(
     // Warm the TUI cache so the next `tokscale` launch is instant.
     // Detached subprocess so submit returns to the shell immediately on large
     // datasets — a full re-scan would otherwise block for tens of seconds.
-    spawn_warm_tui_cache_detached();
+    if mode == SubmitMode::Interactive {
+        spawn_warm_tui_cache_detached();
+    }
 
     Ok(())
 }
@@ -6397,6 +6478,51 @@ mod tests {
     fn test_delete_submitted_data_command_parses() {
         let cli = Cli::try_parse_from(["tokscale", "delete-submitted-data"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
+    }
+
+    #[test]
+    fn test_autosubmit_commands_parse() {
+        let cli = Cli::try_parse_from([
+            "tokscale",
+            "autosubmit",
+            "enable",
+            "--interval",
+            "2h",
+            "--client",
+            "opencode,claude",
+            "--week",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Autosubmit {
+                subcommand: commands::autosubmit::AutosubmitSubcommand::Enable(_)
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["tokscale", "autosubmit", "status", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Autosubmit {
+                subcommand: commands::autosubmit::AutosubmitSubcommand::Status { json: true }
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["tokscale", "autosubmit", "run", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Autosubmit {
+                subcommand: commands::autosubmit::AutosubmitSubcommand::Run { force: true }
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["tokscale", "autosubmit", "disable"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Autosubmit {
+                subcommand: commands::autosubmit::AutosubmitSubcommand::Disable
+            })
+        ));
     }
 
     #[test]
