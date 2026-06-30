@@ -54,6 +54,16 @@ jobs:
             bin_name: tokscale
             build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
+  smoke-release-artifacts:
+    needs: [bump-versions, build-cli-binary]
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: cli-binary-*
+          path: release-artifacts
+      - run: bash scripts/test-release-package-artifacts.sh
+  prepare-release-provenance:
+    needs: [bump-versions, build-cli-binary, smoke-release-artifacts]
   publish-platform-packages:
     strategy:
       matrix:
@@ -180,11 +190,109 @@ PY
   grep -q "publish platform artifact drift" "${output}"
 }
 
+test_rejects_missing_release_artifact_smoke_job() {
+  local work="${TMP_DIR}/missing-smoke"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = re.sub(r"\n  smoke-release-artifacts:\n(?:    .*\n)*?  prepare-release-provenance:", "\n  prepare-release-provenance:", text)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-smoke-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject missing release artifact smoke job" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow missing smoke-release-artifacts job" "${output}"
+}
+
+test_rejects_commented_release_artifact_smoke_requirements() {
+  local work="${TMP_DIR}/commented-smoke-requirements"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("          pattern: cli-binary-*", "          # pattern: cli-binary-*")
+text = text.replace("      - run: bash scripts/test-release-package-artifacts.sh", "      # - run: bash scripts/test-release-package-artifacts.sh")
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/commented-smoke-requirements-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject commented release artifact smoke requirements" >&2
+    return 1
+  fi
+
+  grep -Fq "smoke-release-artifacts job must download cli-binary-* artifacts" "${output}"
+  grep -q "smoke-release-artifacts job must run scripts/test-release-package-artifacts.sh" "${output}"
+}
+
+test_accepts_multiline_release_artifact_smoke_dependency() {
+  local work="${TMP_DIR}/multiline-smoke-need"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "needs: [bump-versions, build-cli-binary, smoke-release-artifacts]",
+    "needs:\n      - bump-versions\n      - build-cli-binary\n      - smoke-release-artifacts",
+)
+path.write_text(text)
+PY
+
+  (
+    cd "${work}"
+    python3 "${SCRIPT_UNDER_TEST}" >"${TMP_DIR}/multiline-smoke-need-output.txt" 2>&1
+  )
+
+  grep -q "Release workflow safety OK" "${TMP_DIR}/multiline-smoke-need-output.txt"
+}
+
+test_rejects_provenance_without_release_artifact_smoke_dependency() {
+  local work="${TMP_DIR}/missing-smoke-need"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "needs: [bump-versions, build-cli-binary, smoke-release-artifacts]",
+    "needs: [bump-versions, build-cli-binary]",
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-smoke-need-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject provenance without release artifact smoke dependency" >&2
+    return 1
+  fi
+
+  grep -q "prepare-release-provenance must depend on smoke-release-artifacts" "${output}"
+}
+
 test_accepts_matching_publish_and_native_workflows
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
 test_rejects_release_env_drift
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
+test_rejects_missing_release_artifact_smoke_job
+test_rejects_commented_release_artifact_smoke_requirements
+test_accepts_multiline_release_artifact_smoke_dependency
+test_rejects_provenance_without_release_artifact_smoke_dependency
 
 echo "release workflow safety tests passed"

@@ -137,6 +137,48 @@ def package_manifest_name(package_dir: str) -> str:
     return name
 
 
+def block_contains(block: list[str], needle: str) -> bool:
+    return any(needle in line for line in uncommented_lines(block))
+
+
+def uncommented_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if not line.lstrip().startswith("#")]
+
+
+def parse_needs(block: list[str]) -> set[str]:
+    lines = uncommented_lines(block)
+    for index, line in enumerate(lines):
+        match = re.match(r"(\s*)needs:\s*(.*)$", line)
+        if not match:
+            continue
+
+        needs_indent = len(match.group(1))
+        value = match.group(2).strip()
+        if value:
+            value = strip_yaml_scalar(value)
+            if value.startswith("[") and value.endswith("]"):
+                return {
+                    strip_yaml_scalar(item)
+                    for item in value[1:-1].split(",")
+                    if strip_yaml_scalar(item)
+                }
+            return {value}
+
+        needs: set[str] = set()
+        for child in lines[index + 1 :]:
+            if not child.strip():
+                continue
+            child_indent = len(child) - len(child.lstrip(" "))
+            if child_indent <= needs_indent:
+                break
+            item_match = re.match(r"\s*-\s*(.+?)\s*$", child)
+            if item_match:
+                needs.add(strip_yaml_scalar(item_match.group(1)))
+        return needs
+
+    return set()
+
+
 def main() -> None:
     publish_lines = read_lines(PUBLISH_WORKFLOW)
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
@@ -229,6 +271,22 @@ def main() -> None:
             errors.append(
                 f"publish platform binary drift for {package_dir}: expected {build_entry.get('bin_name')}, found {platform_entry.get('binary_name')}"
             )
+
+    try:
+        smoke_block = job_block(publish_lines, "smoke-release-artifacts")
+    except SystemExit:
+        smoke_block = []
+        errors.append("publish workflow missing smoke-release-artifacts job")
+
+    if smoke_block:
+        if not block_contains(smoke_block, "pattern: cli-binary-*"):
+            errors.append("smoke-release-artifacts job must download cli-binary-* artifacts")
+        if not block_contains(smoke_block, "scripts/test-release-package-artifacts.sh"):
+            errors.append("smoke-release-artifacts job must run scripts/test-release-package-artifacts.sh")
+
+    prepare_block = job_block(publish_lines, "prepare-release-provenance")
+    if "smoke-release-artifacts" not in parse_needs(prepare_block):
+        errors.append("prepare-release-provenance must depend on smoke-release-artifacts")
 
     if errors:
         raise SystemExit("Release workflow safety check failed:\n- " + "\n- ".join(errors))

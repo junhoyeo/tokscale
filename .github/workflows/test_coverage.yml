@@ -12,6 +12,8 @@ on:
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
       - 'scripts/*.sh'
+      - 'scripts/*.py'
+      - '.github/workflows/build-native.yml'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
@@ -24,6 +26,8 @@ on:
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
       - 'scripts/*.sh'
+      - 'scripts/*.py'
+      - '.github/workflows/build-native.yml'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
 
@@ -51,6 +55,7 @@ jobs:
           bash scripts/test-check-version-coherence.sh
           bash scripts/test-npm-release-state.sh
           bash scripts/test-prepare-release-provenance.sh
+          bash scripts/test-release-workflow-safety.sh
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:

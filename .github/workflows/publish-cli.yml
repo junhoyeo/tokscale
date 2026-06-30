@@ -295,9 +295,45 @@ jobs:
           path: dist
           if-no-files-found: error
 
+  smoke-release-artifacts:
+    name: Smoke release artifacts
+    needs: [bump-versions, build-cli-binary]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download bumped release files
+        uses: actions/download-artifact@v6
+        with:
+          name: bumped-manifests
+          path: .
+
+      - name: Download CLI binary artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: cli-binary-*
+          path: release-artifacts
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.38
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Smoke release package artifacts
+        run: bash scripts/test-release-package-artifacts.sh
+
   prepare-release-provenance:
     name: Commit release provenance
-    needs: [bump-versions, build-cli-binary]
+    needs: [bump-versions, build-cli-binary, smoke-release-artifacts]
     runs-on: ubuntu-latest
     outputs:
       release_commit: ${{ steps.prepare.outputs.release_commit }}
