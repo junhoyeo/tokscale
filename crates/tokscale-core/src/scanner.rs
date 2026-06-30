@@ -335,6 +335,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
+                "workbuddy.db" => file_name == "workbuddy.db",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
                 // Antigravity CLI conversation databases. `ends_with(".db")`
@@ -1519,6 +1520,20 @@ mod tests {
         assert!(jsonl_files
             .iter()
             .all(|p| p.extension().unwrap() == "jsonl"));
+    }
+
+    #[test]
+    fn test_scan_directory_workbuddy_db_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("workbuddy.db")).unwrap();
+        File::create(path.join("workbuddy.db-wal")).unwrap();
+        File::create(path.join("workbuddy.db-shm")).unwrap();
+
+        let db_files = scan_directory(path.to_str().unwrap(), "workbuddy.db");
+
+        assert_eq!(db_files, vec![path.join("workbuddy.db")]);
     }
 
     #[test]
