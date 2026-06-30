@@ -21,7 +21,7 @@
 //! replays (depth-1 vs depth-2 files) collapsed to one message.
 
 use super::utils::file_modified_timestamp_ms;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, CostSource, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -73,11 +73,11 @@ struct GjcCost {
 }
 
 /// Reuse the embedded `usage.cost.total` (USD) only when present, finite, and
-/// non-negative. Otherwise return `0.0` so the dispatch Hermes guard reprices.
-fn embedded_cost(usage: &GjcUsage) -> f64 {
+/// non-negative. Otherwise return `0.0` so the dispatch pricing guard reprices.
+fn embedded_cost(usage: &GjcUsage) -> (f64, CostSource) {
     match usage.cost.as_ref().and_then(|c| c.total) {
-        Some(total) if total.is_finite() && total >= 0.0 => total,
-        _ => 0.0,
+        Some(total) if total.is_finite() && total >= 0.0 => (total, CostSource::ProviderReported),
+        _ => (0.0, CostSource::Unknown),
     }
 }
 
@@ -88,13 +88,21 @@ fn derive_dedup_key(
     session_id: &str,
     ts: i64,
     model: &str,
+    provider: &str,
     tokens: &TokenBreakdown,
-    ordinal: usize,
+    line: &str,
 ) -> String {
+    use sha2::{Digest, Sha256};
+
+    let line_hash = Sha256::digest(line.as_bytes());
+
     format!(
-        "gjc:{session_id}:{ts}:{model}:{i}-{o}:{ordinal}",
+        "gjc:{session_id}:{ts}:{model}:{provider}:{i}-{o}-{cr}-{cw}-{r}:{line_hash:x}",
         i = tokens.input,
         o = tokens.output,
+        cr = tokens.cache_read,
+        cw = tokens.cache_write,
+        r = tokens.reasoning,
     )
 }
 
@@ -118,7 +126,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut workspace_key: Option<String> = None;
     let mut workspace_label: Option<String> = None;
 
-    for (ordinal, line) in reader.lines().enumerate() {
+    for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
             Err(_) => continue,
@@ -199,7 +207,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             reasoning: 0,
         };
 
-        let cost = embedded_cost(&usage);
+        let (cost, cost_source) = embedded_cost(&usage);
 
         // No `{"type":"session",...}` header in this file: fall back to the file
         // name rather than a shared `"unknown"`, so two independent header-less
@@ -219,7 +227,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
         });
         let dedup_key = match entry.id.filter(|s| !s.is_empty()) {
             Some(msg_id) => format!("{session}:{msg_id}"),
-            None => derive_dedup_key(&session, timestamp, &model, &tokens, ordinal),
+            None => derive_dedup_key(&session, timestamp, &model, &provider, &tokens, trimmed),
         };
 
         let mut unified = UnifiedMessage::new_with_dedup(
@@ -232,6 +240,9 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             cost,
             Some(dedup_key),
         );
+        if cost_source == CostSource::ProviderReported {
+            unified.mark_provider_reported_cost();
+        }
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
     }
@@ -372,7 +383,7 @@ not valid json at all
         assert_eq!(messages.len(), 1);
         let key = messages[0].dedup_key.clone().unwrap();
         assert!(
-            key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:10-5:"),
+            key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:openai:10-5-0-0-0:"),
             "key={key}"
         );
     }

@@ -138,6 +138,13 @@ fn opencode_duration_ms(time: &OpenCodeTime) -> Option<i64> {
     }
 }
 
+fn embedded_cost(cost: Option<f64>) -> f64 {
+    match cost {
+        Some(cost) if cost.is_finite() && cost >= 0.0 => cost,
+        _ => 0.0,
+    }
+}
+
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let data = read_file_or_none(path)?;
     let mut bytes = data;
@@ -169,6 +176,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
 
     let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
     let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
+    let cost = embedded_cost(msg.cost);
 
     let mut unified = UnifiedMessage::new_with_agent(
         "opencode",
@@ -183,7 +191,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
             cache_write: tokens.cache.write.max(0),
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         },
-        msg.cost.unwrap_or(0.0).max(0.0),
+        cost,
         agent,
     );
     unified.duration_ms = opencode_duration_ms(&msg.time);
@@ -280,7 +288,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let reasoning = tokens.reasoning.unwrap_or(0).max(0);
         let cache_read = tokens.cache.read.max(0);
         let cache_write = tokens.cache.write.max(0);
-        let cost = msg.cost.unwrap_or(0.0).max(0.0);
+        let cost = embedded_cost(msg.cost);
         let dedup_key = message_id.clone().unwrap_or(row_id);
         let fingerprint = OpenCodeSqliteFingerprint {
             created_bits: msg.time.created.to_bits(),

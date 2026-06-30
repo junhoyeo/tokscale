@@ -23,7 +23,9 @@ use std::time::UNIX_EPOCH;
 // 23: Jcode parser now does journal-wins merge (first-occurrence-targeted) and
 // timezone-less timestamp parsing; schema-22 caches return stale snapshot
 // token_usage, so invalidate them.
-const CACHE_SCHEMA_VERSION: u32 = 23;
+// 24: UnifiedMessage now carries cost_source so cached provider-reported costs
+// are not repriced as if they were missing.
+const CACHE_SCHEMA_VERSION: u32 = 24;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

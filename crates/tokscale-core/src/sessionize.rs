@@ -392,6 +392,7 @@ mod tests {
                 reasoning: 0,
             },
             cost: 0.01,
+            cost_source: Default::default(),
             message_count: 1,
             agent: None,
             dedup_key: None,
