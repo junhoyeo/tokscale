@@ -1017,6 +1017,23 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             source_cache.insert(entry);
         }
     }
+    if let Some(db_path) = &scan_result.copilot_desktop_db {
+        let otel_sessions: HashSet<String> = all_messages
+            .iter()
+            .filter(|message| message.client == "copilot")
+            .map(|message| message.session_id.clone())
+            .collect();
+        let desktop_msgs = sessions::copilot_desktop::parse_copilot_desktop_db(db_path);
+        all_messages.extend(
+            desktop_msgs
+                .into_iter()
+                .filter(|message| !otel_sessions.contains(&message.session_id))
+                .map(|mut message| {
+                    apply_pricing_if_available(&mut message, pricing);
+                    message
+                }),
+        );
+    }
 
     let gemini_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Gemini)
@@ -2434,16 +2451,28 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
 
-    let copilot_msgs: Vec<ParsedMessage> = scan_result
+    let mut copilot_unified_msgs: Vec<_> = scan_result
         .get(ClientId::Copilot)
         .par_iter()
         .flat_map(|path| {
             sessions::copilot::parse_copilot_file(path)
                 .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
                 .collect::<Vec<_>>()
         })
         .collect();
+    if let Some(db_path) = &scan_result.copilot_desktop_db {
+        let otel_sessions: HashSet<String> = copilot_unified_msgs
+            .iter()
+            .map(|message| message.session_id.clone())
+            .collect();
+        copilot_unified_msgs.extend(
+            sessions::copilot_desktop::parse_copilot_desktop_db(db_path)
+                .into_iter()
+                .filter(|message| !otel_sessions.contains(&message.session_id)),
+        );
+    }
+    let copilot_msgs: Vec<ParsedMessage> =
+        copilot_unified_msgs.iter().map(unified_to_parsed).collect();
     let copilot_count = copilot_msgs.len() as i32;
     counts.set(ClientId::Copilot, copilot_count);
     messages.extend(copilot_msgs);

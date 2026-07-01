@@ -81,6 +81,7 @@ pub struct ScanResult {
     /// `opencode-nightly.db`, etc. See upstream logic in opencode's
     /// `packages/opencode/src/storage/db.ts` (`getChannelPath`).
     pub opencode_dbs: Vec<PathBuf>,
+    pub copilot_desktop_db: Option<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
@@ -101,6 +102,7 @@ impl Default for ScanResult {
         Self {
             files: std::array::from_fn(|_| Vec::new()),
             opencode_dbs: Vec::new(),
+            copilot_desktop_db: None,
             synthetic_db: None,
             kilo_db: None,
             hermes_db: None,
@@ -1365,6 +1367,11 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Copilot) {
+        let desktop_db = PathBuf::from(format!("{}/.copilot/data.db", home_dir));
+        if desktop_db.is_file() {
+            result.copilot_desktop_db = Some(desktop_db);
+        }
+
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
             if path.is_file() && seen.insert(path.clone()) {
                 let copilot_files = result.get_mut(ClientId::Copilot);
