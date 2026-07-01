@@ -453,21 +453,21 @@ fn collect_kiro_snapshot_text(
 }
 
 fn find_kiro_snapshot_model_id(value: &Value) -> Option<String> {
+    static KIRO_INTERNAL_MODELS: &[&str] = &["agent", "auto", "qdev"];
+
     match value {
         Value::Object(map) => {
             for key in ["model_id", "modelId", "model"] {
                 if let Some(model) = map.get(key).and_then(|v| v.as_str()) {
                     let model = model.trim();
-                    if !model.is_empty() {
+                    if !model.is_empty()
+                        && !KIRO_INTERNAL_MODELS.contains(&model.to_lowercase().as_str())
+                    {
                         return Some(model.to_string());
                     }
                 }
             }
 
-            // Recurse into the same containers `collect_kiro_snapshot_text`
-            // descends into, so the model id is discoverable wherever text is
-            // (otherwise a model id nested under e.g. `parts` or `prompt` would
-            // be missed and fall back to `unknown`). Keep these key-sets aligned.
             for key in [
                 "messages",
                 "conversation",
@@ -484,6 +484,8 @@ fn find_kiro_snapshot_model_id(value: &Value) -> Option<String> {
                 "parts",
                 "items",
                 "nodes",
+                "promptLogs",
+                "completionOptions",
             ] {
                 if let Some(item) = map.get(key) {
                     if let Some(model) = find_kiro_snapshot_model_id(item) {
@@ -526,7 +528,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
         Some(ws) => format!("{}/{}", ws, file_stem),
         None => file_stem.to_string(),
     };
-    let model_id = find_kiro_snapshot_model_id(&value).unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+    let model_id = find_kiro_snapshot_model_id(&value).unwrap_or_else(|| "auto".to_string());
 
     let mut counts = KiroSnapshotTextCounts::default();
     collect_kiro_snapshot_text(&value, &mut counts, None);
@@ -773,6 +775,40 @@ mod tests {
         assert_eq!(messages[0].duration_ms, Some(580));
         assert_eq!(messages[0].workspace_key, Some("/tmp/project".to_string()));
         assert_eq!(messages[0].workspace_label, Some("project".to_string()));
+    }
+
+    #[test]
+    fn test_real_kiro_ide_model_detection() {
+        let home = std::env::var("HOME").unwrap();
+        let path = std::path::Path::new(&home)
+            .join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-sessions/L1VzZXJzL3QxMDAwMDQw/d23984e6-4a36-4d8f-9dfb-3bf0e4431f31.json");
+        if !path.exists() {
+            eprintln!("Skipping: IDE file not found");
+            return;
+        }
+        eprintln!(
+            "is_kiro_global_storage_path: {}",
+            is_kiro_global_storage_path(&path)
+        );
+
+        let json = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let model = find_kiro_snapshot_model_id(&value);
+        eprintln!("find_kiro_snapshot_model_id result: {:?}", model);
+
+        let messages = parse_kiro_file(&path);
+        eprintln!("Messages: {}", messages.len());
+        for m in &messages {
+            eprintln!(
+                "  model={}, input={}, output={}",
+                m.model_id, m.tokens.input, m.tokens.output
+            );
+        }
+        assert!(!messages.is_empty());
+        assert_ne!(
+            messages[0].model_id, "unknown",
+            "Model should not be unknown"
+        );
     }
 
     #[test]
@@ -1049,10 +1085,11 @@ not valid json at all
             Some("claude-sonnet-4-5".to_string())
         );
 
-        let prompt_value: Value = serde_json::from_str(r#"{"prompt": {"model": "auto"}}"#).unwrap();
+        let prompt_value: Value =
+            serde_json::from_str(r#"{"prompt": {"model": "claude-sonnet-4"}}"#).unwrap();
         assert_eq!(
             find_kiro_snapshot_model_id(&prompt_value),
-            Some("auto".to_string())
+            Some("claude-sonnet-4".to_string())
         );
     }
 }
