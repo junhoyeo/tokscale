@@ -579,7 +579,8 @@ mod tests {
 
     #[test]
     fn test_codebuddy_client_registered_as_local_session_source() {
-        let client = ClientId::from_str("codebuddy").expect("codebuddy client should be registered");
+        let client =
+            ClientId::from_str("codebuddy").expect("codebuddy client should be registered");
         assert_eq!(
             client.data().resolve_path("/tmp/home"),
             "/tmp/home/.codebuddy/projects"

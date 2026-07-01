@@ -198,14 +198,20 @@ pub fn parse_codebuddy_file(path: &Path) -> Vec<UnifiedMessage> {
         let model_id = provider_data
             .and_then(|provider| provider.model.as_deref())
             .or_else(|| provider_data.and_then(|provider| provider.request_model_id.as_deref()))
-            .or_else(|| item.message.as_ref().and_then(|message| message.model.as_deref()))
+            .or_else(|| {
+                item.message
+                    .as_ref()
+                    .and_then(|message| message.model.as_deref())
+            })
             .filter(|model| !model.trim().is_empty())
             .unwrap_or(DEFAULT_MODEL)
             .to_string();
         let provider_id = provider_identity::inferred_provider_from_model(&model_id)
             .unwrap_or(DEFAULT_PROVIDER)
             .to_string();
-        let session_id = item.session_id.unwrap_or_else(|| fallback_session_id.clone());
+        let session_id = item
+            .session_id
+            .unwrap_or_else(|| fallback_session_id.clone());
         let timestamp = item.timestamp.unwrap_or(fallback_timestamp);
 
         let mut message = UnifiedMessage::new(
