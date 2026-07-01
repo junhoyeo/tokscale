@@ -108,7 +108,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   zcode: "https://github.com/zai-org.png",
   opencodereview: "https://github.com/alibaba.png",
   codebuddy:
-    "https://tencent-cloud.gallerycdn.vsassets.io/extensions/tencent-cloud/coding-copilot-vs/4.9.8763/1782466594259/Microsoft.VisualStudio.Services.Icons.Default",
+    "https://aitop100app-1251510006.cos.ap-shanghai.myqcloud.com/article/undefined/e2be6f30-0b19-4d14-8a7a-7767a5e8bad1.png",
   workbuddy:
     "https://codebuddy-1328495429.cos.accelerate.myqcloud.com/web/workbuddy/d1d0b9329b771f020a1025d11661a33296390d7c/assets/workbuddy-icon-BujKiC6G.svg",
 };
