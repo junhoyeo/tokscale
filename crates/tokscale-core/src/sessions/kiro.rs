@@ -778,40 +778,6 @@ mod tests {
     }
 
     #[test]
-    fn test_real_kiro_ide_model_detection() {
-        let home = std::env::var("HOME").unwrap();
-        let path = std::path::Path::new(&home)
-            .join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-sessions/L1VzZXJzL3QxMDAwMDQw/d23984e6-4a36-4d8f-9dfb-3bf0e4431f31.json");
-        if !path.exists() {
-            eprintln!("Skipping: IDE file not found");
-            return;
-        }
-        eprintln!(
-            "is_kiro_global_storage_path: {}",
-            is_kiro_global_storage_path(&path)
-        );
-
-        let json = std::fs::read_to_string(&path).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let model = find_kiro_snapshot_model_id(&value);
-        eprintln!("find_kiro_snapshot_model_id result: {:?}", model);
-
-        let messages = parse_kiro_file(&path);
-        eprintln!("Messages: {}", messages.len());
-        for m in &messages {
-            eprintln!(
-                "  model={}, input={}, output={}",
-                m.model_id, m.tokens.input, m.tokens.output
-            );
-        }
-        assert!(!messages.is_empty());
-        assert_ne!(
-            messages[0].model_id, "unknown",
-            "Model should not be unknown"
-        );
-    }
-
-    #[test]
     fn test_parse_kiro_skips_zero_content_turns() {
         let dir = TempDir::new().unwrap();
         let json = r#"{"session_id":"session-2","cwd":"/tmp","session_state":{"rts_model_state":{"model_info":{"model_id":"model"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"message_ids":["missing"]}]}}}"#;
