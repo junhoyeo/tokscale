@@ -104,7 +104,12 @@ pub fn fetch() -> Result<UsageOutput> {
 
         if let Some(limits) = quota.data.as_ref().and_then(|d| d.limits.as_ref()) {
             for limit in limits.iter() {
-                let pct = limit.percentage.unwrap_or(0.0).clamp(0.0, 100.0);
+                // Skip limits with no percentage rather than fabricating
+                // "0% used / 100% left" from a missing field.
+                let pct = match limit.percentage {
+                    Some(p) => p.clamp(0.0, 100.0),
+                    None => continue,
+                };
 
                 match limit.limit_type.as_deref() {
                     Some("TOKENS_LIMIT") => {
@@ -167,6 +172,9 @@ pub fn fetch() -> Result<UsageOutput> {
             plan,
             email: None,
             metrics,
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         })
     })
 }

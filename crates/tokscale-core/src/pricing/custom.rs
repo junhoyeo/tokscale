@@ -414,7 +414,7 @@ mod tests {
         fs::write(
             &path,
             r#"{
-                "$schema": "https://tokscale.dev/custom-pricing.schema.json",
+                "$schema": "https://tokscale.ai/custom-pricing.schema.json",
                 "models": {
                         "accounts/fireworks/routers/kimi-k2p6-turbo": {
                         "input_cost_per_million_tokens": 2.00,

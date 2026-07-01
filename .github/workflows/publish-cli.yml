@@ -273,11 +273,26 @@ jobs:
         shell: bash
         run: ${{ matrix.settings.strip }}
 
+      # Stage the binary plus, for the apple-fm arm64 build, the sidecar
+      # libFoundationModels.dylib that build.rs places next to it. The dylib is
+      # dlopen'd at runtime (never linked), so it must travel inside the npm
+      # package alongside tokscale. Other targets stage only the binary.
+      - name: Stage release artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}" dist/
+          if [ -f "target/${{ matrix.settings.target }}/release/libFoundationModels.dylib" ]; then
+            cp "target/${{ matrix.settings.target }}/release/libFoundationModels.dylib" dist/
+            echo "staged sidecar libFoundationModels.dylib"
+          fi
+          ls -la dist
+
       - name: Upload CLI binary artifact
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.settings.artifact_name }}
-          path: target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}
+          path: dist
           if-no-files-found: error
 
   prepare-release-provenance:
@@ -401,6 +416,13 @@ jobs:
           cp "artifacts/${{ matrix.settings.package_dir }}/${{ matrix.settings.binary_name }}" "packages/${{ matrix.settings.package_dir }}/bin/${{ matrix.settings.binary_name }}"
           if [ "${{ matrix.settings.binary_name }}" = "tokscale" ]; then
             chmod +x "packages/${{ matrix.settings.package_dir }}/bin/tokscale"
+          fi
+          # Ship the apple-fm sidecar dylib next to the binary when present (only
+          # the arm64-darwin artifact carries it). tokscale dlopen's it at runtime
+          # from its own directory; "files": ["bin"] already includes it.
+          if [ -f "artifacts/${{ matrix.settings.package_dir }}/libFoundationModels.dylib" ]; then
+            cp "artifacts/${{ matrix.settings.package_dir }}/libFoundationModels.dylib" "packages/${{ matrix.settings.package_dir }}/bin/libFoundationModels.dylib"
+            echo "shipped sidecar libFoundationModels.dylib"
           fi
           ls -la "packages/${{ matrix.settings.package_dir }}/bin"
 

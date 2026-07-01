@@ -10,10 +10,20 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+// 22: Codex fork-replay gate now recognizes a same-millisecond user-fork
+// (`thread_source:"user"`) turn without a `task_started`, adding
+// CodexParseState.forked_child_is_user_fork to the cached incremental state;
+// older cached entries must reparse.
+// 21: Codex fork-replay gate now disambiguates a same-millisecond turn via a
+// `task_started` turn_id, adding CodexParseState.forked_child_task_started_turn_ids
+// to the cached incremental state; older cached entries must reparse.
 // 20: Codex fork replay parsing now keeps user-fork turns after repeated child
 // session_meta rows; cached Codex entries from older parser logic can be empty.
 // (19 was the jcode parser change in #718 — bump again so those caches reparse.)
-const CACHE_SCHEMA_VERSION: u32 = 20;
+// 23: Jcode parser now does journal-wins merge (first-occurrence-targeted) and
+// timezone-less timestamp parsing; schema-22 caches return stale snapshot
+// token_usage, so invalidate them.
+const CACHE_SCHEMA_VERSION: u32 = 23;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -138,8 +148,24 @@ impl SourceFingerprint {
     /// until the next checkpoint rewrites the snapshot, so the source-message
     /// cache must invalidate when either file changes.
     pub(crate) fn from_jcode_path(path: &Path) -> Option<Self> {
-        let related_paths =
-            std::iter::once((".journal.jsonl".to_string(), jcode_journal_path(path)));
+        let related_paths = std::iter::once((
+            ".journal.jsonl".to_string(),
+            crate::sessions::jcode::jcode_journal_path(path),
+        ));
+        Self::from_path_with_related(path, related_paths)
+    }
+
+    /// Fingerprint for a Roo-family task (`ui_messages.json`) and its sibling
+    /// `api_conversation_history.json`. `parse_roo_kilo_file` reads the history
+    /// sibling for the model and agent, so a history-only rewrite (the UI file
+    /// unchanged) must still invalidate the cache or reports keep stale
+    /// model/agent/pricing.
+    pub(crate) fn from_roo_path(path: &Path) -> Option<Self> {
+        let history = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("api_conversation_history.json");
+        let related_paths = std::iter::once(("api_conversation_history.json".to_string(), history));
         Self::from_path_with_related(path, related_paths)
     }
 
@@ -186,17 +212,6 @@ impl SourceFingerprint {
             related_files,
         })
     }
-}
-
-fn jcode_journal_path(path: &Path) -> PathBuf {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return append_path_suffix(path, ".journal.jsonl");
-    };
-    let journal_name = file_name
-        .strip_suffix(".json")
-        .map(|stem| format!("{stem}.journal.jsonl"))
-        .unwrap_or_else(|| format!("{file_name}.journal.jsonl"));
-    path.with_file_name(journal_name)
 }
 
 impl RelatedFileFingerprint {
@@ -735,6 +750,37 @@ mod tests {
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[test]
+    fn from_roo_path_invalidates_on_history_only_change() {
+        // parse_roo_kilo_file reads model/agent from the sibling
+        // api_conversation_history.json, so a history-only rewrite (ui_messages
+        // byte-identical) must change the fingerprint or the cache serves stale
+        // model/agent/pricing.
+        let dir = TempDir::new().unwrap();
+        let ui = dir.path().join("ui_messages.json");
+        std::fs::write(&ui, b"[]").unwrap();
+        let history = dir.path().join("api_conversation_history.json");
+        std::fs::write(&history, b"<model>claude-sonnet-4</model>").unwrap();
+
+        let roo_before = SourceFingerprint::from_roo_path(&ui).unwrap();
+        let plain_before = SourceFingerprint::from_path(&ui).unwrap();
+
+        // Rewrite the history only; leave ui_messages.json byte-identical.
+        std::fs::write(&history, b"<model>claude-opus-4</model>").unwrap();
+
+        let roo_after = SourceFingerprint::from_roo_path(&ui).unwrap();
+        let plain_after = SourceFingerprint::from_path(&ui).unwrap();
+
+        assert_ne!(
+            roo_before, roo_after,
+            "a history-only change must alter the roo fingerprint"
+        );
+        assert_eq!(
+            plain_before, plain_after,
+            "from_path ignores the history sibling (control)"
+        );
+    }
 
     fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {
         unsafe {

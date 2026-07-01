@@ -84,6 +84,7 @@ struct TraceContext {
     model: Option<String>,
     session_id: Option<String>,
     session_id_priority: SessionIdPriority,
+    agent_id: Option<String>,
 }
 
 struct CopilotUsageCandidate {
@@ -97,6 +98,7 @@ struct CopilotUsageCandidate {
     duration_ms: Option<i64>,
     tokens: TokenBreakdown,
     dedup_key: String,
+    agent: Option<String>,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -120,6 +122,7 @@ impl CopilotUsageCandidate {
             Some(self.dedup_key),
         );
         message.duration_ms = self.duration_ms;
+        message.agent = self.agent;
         message
     }
 }
@@ -142,6 +145,7 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
                 model: None,
                 session_id: None,
                 session_id_priority: SessionIdPriority::Missing,
+                agent_id: None,
             });
 
         if context.model.is_none() {
@@ -152,6 +156,19 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
             if priority > context.session_id_priority {
                 context.session_id = Some(session_id.to_string());
                 context.session_id_priority = priority;
+            }
+        }
+
+        // Trace-level agent is only a FALLBACK for records that carry no
+        // gen_ai.agent.id of their own (see candidate_from_attributes). We keep
+        // the first non-empty agent id in the trace — for Copilot CLI this is
+        // the invoke_agent span's agent, which is the right default for plain
+        // chat turns that omit the attribute. Per-record agent ids (e.g. a
+        // sub-agent turn) take precedence at attribution time, so this
+        // first-wins lock does not mis-attribute records that name their agent.
+        if context.agent_id.is_none() {
+            if let Some(agent_id) = first_non_empty_attr(attributes, &["gen_ai.agent.id"]) {
+                context.agent_id = Some(agent_id.to_string());
             }
         }
     }
@@ -305,6 +322,14 @@ fn candidate_from_attributes(
         duration_ms,
         tokens,
         dedup_key,
+        // Per-record attribution first: when a chat/inference record carries its
+        // own gen_ai.agent.id (e.g. a sub-agent turn inside a shared trace), use
+        // it so sub-agents are not mis-attributed to the trace's first agent.
+        // Fall back to the trace-level agent (typically from the invoke_agent
+        // span) only when the record itself has none.
+        agent: first_non_empty_attr(attributes, &["gen_ai.agent.id"])
+            .map(str::to_string)
+            .or_else(|| trace_context.and_then(|tc| tc.agent_id.clone())),
     })
 }
 
@@ -562,7 +587,12 @@ fn normalize_input_tokens(
 fn first_non_empty_attr<'a>(attributes: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .filter_map(|key| attributes.get(*key).and_then(Value::as_str))
-        .find(|value| !value.trim().is_empty())
+        // Return the trimmed slice: callers store this value directly (model,
+        // agent id), and a surrounding-whitespace variant like
+        // " github.copilot.default " must match the same normalization branch
+        // as the trimmed form — otherwise it bypasses agent-name normalization.
+        .map(str::trim)
+        .find(|value| !value.is_empty())
 }
 
 fn best_session_attr(attributes: &Map<String, Value>) -> Option<(&str, SessionIdPriority)> {
@@ -823,6 +853,84 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.cache_read, 21881);
         assert_eq!(messages[0].tokens.cache_write, 1397);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_sets_agent_from_invoke_agent_span() {
+        // invoke_agent and chat spans share a traceId; gen_ai.agent.id from
+        // invoke_agent should propagate to chat messages via TraceContext so
+        // the Agents tab is populated for Copilot CLI sessions.
+        let content = r#"{"type":"span","traceId":"trace-agent","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.conversation.id":"conv-agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default","gen_ai.agent.version":"1.0.62"}}
+{"type":"span","traceId":"trace-agent","spanId":"chat-1","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-agent","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trims_whitespace_agent_id() {
+        // The invoke_agent span carries a gen_ai.agent.id padded with
+        // surrounding whitespace. first_non_empty_attr must store the TRIMMED
+        // value so the agent id matches the same normalization branch as a
+        // clean " github.copilot.default" id (without trimming, the stored
+        // agent would be " github.copilot.default " and bypass normalization).
+        let content = r#"{"type":"span","traceId":"trace-ws","spanId":"invoke-ws","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.conversation.id":"conv-ws","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"  github.copilot.default  "}}
+{"type":"span","traceId":"trace-ws","spanId":"chat-ws","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-ws","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_per_record_agent_id_wins_over_trace_agent() {
+        // A trace's invoke_agent span names the default agent, but a later chat
+        // record carries its OWN gen_ai.agent.id for a sub-agent. Per-record
+        // attribution must win so the sub-agent's tokens are not mis-attributed
+        // to the trace's first (default) agent.
+        let content = r#"{"type":"span","traceId":"trace-sub","spanId":"invoke-sub","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.conversation.id":"conv-sub","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-sub","spanId":"chat-sub","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-sub","gen_ai.agent.id":"github.copilot.reviewer","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent.as_deref(),
+            Some("github.copilot.reviewer")
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_underscore_cache_write_attribute() {
+        // Copilot CLI may emit the cache-write bucket with the fully
+        // underscored key gen_ai.usage.cache_write_input_tokens (a sibling of
+        // the documented cache_read_input_tokens variant). It must map to the
+        // cache_write token bucket.
+        let content = r#"{"type":"span","traceId":"trace-cw","spanId":"span-cw","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"resource":{"attributes":{"service.name":"github-copilot"}},"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.usage.input_tokens":21884,"gen_ai.usage.output_tokens":80,"gen_ai.usage.cache_write_input_tokens":21881}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_write, 21881);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_no_agent_when_invoke_agent_absent() {
+        let content = r#"{"type":"span","traceId":"trace-noagent","spanId":"chat-1","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-noagent","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent, None);
     }
 
     #[test]

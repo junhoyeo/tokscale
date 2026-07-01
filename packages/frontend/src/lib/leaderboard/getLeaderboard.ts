@@ -343,7 +343,7 @@ async function fetchLeaderboardData(
   const offset = (page - 1) * limit;
 
   const orderByColumn = sortBy === "cost"
-    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`
     : sortBy === "time"
     ? sql`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`
     : sql`SUM(${submissions.totalTokens})`;
@@ -351,7 +351,7 @@ async function fetchLeaderboardData(
     ? sql`SUM(${submissions.totalTokens})`
     : sortBy === "time"
     ? sql`SUM(${submissions.totalTokens})`
-    : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`;
+    : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`;
 
   if (search) {
     // When searching, use a subquery to compute global ranks for ALL users,
@@ -364,7 +364,7 @@ async function fetchLeaderboardData(
         displayName: users.displayName,
         avatarUrl: users.avatarUrl,
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
-        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
         totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`.as("total_active_time_ms"),
         submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
         lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
@@ -416,7 +416,7 @@ async function fetchLeaderboardData(
     const globalStats = await db
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
-        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`,
+        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`,
         totalSubmissions: sql<number>`COUNT(${submissions.id})`,
         uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
@@ -469,7 +469,7 @@ async function fetchLeaderboardData(
       displayName: users.displayName,
       avatarUrl: users.avatarUrl,
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
-      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
       totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`.as("total_active_time_ms"),
       submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
       lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
@@ -500,7 +500,7 @@ async function fetchLeaderboardData(
     db
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
-        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`,
+        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`,
         totalSubmissions: sql<number>`COUNT(${submissions.id})`,
         uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
@@ -602,7 +602,7 @@ async function fetchUserRank(
   const userStatsResult = await db
     .select({
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
-      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
+      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
       totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`.as("total_active_time_ms"),
       submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
       lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
@@ -635,7 +635,7 @@ async function fetchUserRank(
     ? userTotalActiveTimeMs
     : userTotalTokens;
   const compareColumn = sortBy === "cost"
-    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`
     : sortBy === "time"
     ? sql`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`
     : sql`SUM(${submissions.totalTokens})`;

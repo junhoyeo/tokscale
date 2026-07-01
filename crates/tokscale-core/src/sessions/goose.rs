@@ -33,7 +33,15 @@ fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
     if timestamp > 1e12 {
         timestamp as i64
     } else {
-        (timestamp * 1000.0) as i64
+        // Seconds -> milliseconds. Scale in f64 to keep sub-second precision,
+        // then clamp into i64 range so a garbage/huge timestamp saturates
+        // rather than producing an undefined cast during the conversion.
+        let millis = timestamp * 1000.0;
+        if millis.is_nan() {
+            0
+        } else {
+            millis.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+        }
     }
 }
 
@@ -190,6 +198,10 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                     output,
                     cache_read: 0,
                     cache_write: 0,
+                    // INFERRED, not a real field: Goose's schema has no reasoning
+                    // token column. We heuristically attribute any gap between the
+                    // reported total and (input + output) to reasoning. This is a
+                    // best-effort estimate, not a measured count.
                     reasoning: if total > input + output {
                         (total - input - output).max(0)
                     } else {

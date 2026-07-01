@@ -4,7 +4,7 @@
 
 use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -73,7 +73,8 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
 
     by_model
         .into_iter()
-        .filter_map(|(model_key, model_usage)| {
+        .enumerate()
+        .filter_map(|(index, (model_key, model_usage))| {
             let tokens =
                 |b: &Option<MuxTokenBucket>| b.as_ref().and_then(|b| b.tokens).unwrap_or(0).max(0);
             let cost =
@@ -93,6 +94,10 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                 return None;
             }
 
+            // Stable per-row dedup key so incremental re-parse collapses the
+            // same model entry instead of double-counting it.
+            let dedup_key = Some(format!("mux:{model_key}:{index}"));
+
             // Strip "provider:" prefix for model ID (e.g., "anthropic:claude-opus-4-6" -> "claude-opus-4-6")
             let (provider, model_id) = if model_key.contains(':') {
                 let mut parts = model_key.splitn(2, ':');
@@ -102,8 +107,9 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
             } else {
                 (String::new(), model_key)
             };
+            let provider = provider_identity::canonical_provider(&provider).unwrap_or(provider);
 
-            Some(UnifiedMessage::new(
+            Some(UnifiedMessage::new_with_dedup(
                 "mux",
                 model_id,
                 provider,
@@ -117,6 +123,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                     reasoning,
                 },
                 source_cost,
+                dedup_key,
             ))
         })
         .collect()

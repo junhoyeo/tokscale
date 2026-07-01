@@ -221,7 +221,11 @@ pub fn fetch() -> Result<UsageOutput> {
             // Reset time: prefer end_time, fallback to remains_time
             let resets_at = model.end_time.map(parse_end_time).or_else(|| {
                 model.remains_time.map(|rt| {
-                    let ms = if rt > 1_000_000_000 { rt } else { rt * 1000 };
+                    let ms = if rt > 1_000_000_000 {
+                        rt
+                    } else {
+                        rt.saturating_mul(1000)
+                    };
                     let dt = Utc::now() + chrono::Duration::milliseconds(ms);
                     dt.to_rfc3339()
                 })
@@ -246,6 +250,9 @@ pub fn fetch() -> Result<UsageOutput> {
             plan,
             email: None,
             metrics,
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         })
     })
 }

@@ -485,7 +485,7 @@ export async function POST(request: Request) {
       if (toUpdate.length > 0) {
         const valuesClauses = toUpdate.map(
           (row) =>
-            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
+            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(14,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
         );
 
         const valuesList = sql.join(valuesClauses, sql`, `);
@@ -511,7 +511,7 @@ export async function POST(request: Request) {
       const [aggregates] = await tx
         .select({
           totalTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.tokens}), 0)::bigint`,
-          totalCost: sql<string>`COALESCE(SUM(CAST(${dailyBreakdown.cost} AS DECIMAL(12,4))), 0)::text`,
+          totalCost: sql<string>`COALESCE(SUM(CAST(${dailyBreakdown.cost} AS DECIMAL(14,4))), 0)::text`,
           inputTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.inputTokens}), 0)::bigint`,
           outputTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)::bigint`,
           dateStart: sql<string>`MIN(${dailyBreakdown.date})`,

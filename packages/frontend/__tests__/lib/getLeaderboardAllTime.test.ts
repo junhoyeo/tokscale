@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const awaitedResults: unknown[] = [];
   const limitCalls: unknown[] = [];
@@ -500,5 +502,53 @@ describe("all-time leaderboard freshness queries", () => {
       "Multiple users match username imlunahey case-insensitively"
     );
     expect(mockState.limitCalls[0]).toBe(2);
+  });
+
+  it("casts all-time cost at the full numeric(18,4) column precision so large totals don't overflow", async () => {
+    // Regression: total_cost is numeric(18,4) (migration 0014); every cost cast must stay >= 18 wide or costs >= 1e8 overflow.
+    // Width-based (not literal) so it also catches a re-narrowing to any precision below the column, e.g. DECIMAL(15,4).
+    await getLeaderboardData("all", 1, 50, "cost");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+});
+
+describe("all-time cost aggregation precision across query shapes (numeric overflow regression)", () => {
+  // Complements the all-time-list check above with the search and user-rank
+  // shapes that also cast submissions.total_cost (decimal(18,4)). Any cast
+  // narrower than 18 overflows on costs >= the narrowed ceiling and 500s the
+  // query; width-based so a re-narrowing to e.g. DECIMAL(15,4) is still caught.
+  it("casts total_cost at full column precision in the all-time search list", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([
+      { totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 },
+    ]);
+
+    await getLeaderboardData("all", 1, 50, "cost", "ali");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+
+  it("casts total_cost at full column precision for all-time user rank", async () => {
+    mockState.pushAwaitedResult([
+      { id: "user-alice", username: "alice", displayName: "Alice", avatarUrl: null },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 3000,
+        totalCost: 40,
+        totalActiveTimeMs: 0,
+        submissionCount: 1,
+        lastSubmission: "2026-03-12T09:00:00.000Z",
+        cliVersion: "1.9.0",
+        schemaVersion: 1,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+
+    await getUserRank("alice", "all", "cost");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 });

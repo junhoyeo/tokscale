@@ -507,6 +507,8 @@ impl DataLoader {
             if let Some(agent) = msg.agent.as_ref() {
                 let normalized_agent = if msg.client == "opencode" {
                     sessions::normalize_opencode_agent_name(agent)
+                } else if msg.client == "copilot" {
+                    sessions::normalize_copilot_agent_name(agent)
                 } else {
                     sessions::normalize_agent_name(agent)
                 };
@@ -1370,6 +1372,7 @@ mod tests {
         assert_eq!(clients[29], ClientId::CommandCode);
         assert_eq!(clients[30], ClientId::MiMoCode);
         assert_eq!(clients[31], ClientId::AntigravityCli);
+        assert_eq!(clients[32], ClientId::Junie);
     }
 
     #[test]
@@ -1461,6 +1464,10 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::AntigravityCli),
             "Antigravity CLI"
         );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Junie),
+            "Junie"
+        );
     }
 
     #[test]
@@ -1493,6 +1500,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Grok), 'u');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Jcode), 'j');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::AntigravityCli), 'f');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Junie), 'p');
     }
 
     #[test]
@@ -1588,6 +1596,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('f'),
             Some(ClientId::AntigravityCli)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('p'),
+            Some(ClientId::Junie)
         );
     }
 
@@ -2444,7 +2456,7 @@ after"#,
         let expected_cost = expected_message_cost(
             &pricing,
             "accounts/fireworks/models/deepseek-v3-0324",
-            "fireworks",
+            "fireworks_ai",
             CoreTokenBreakdown {
                 input: 10,
                 output: 5,
@@ -2456,7 +2468,9 @@ after"#,
 
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].client, "opencode");
-        assert_eq!(usage.models[0].provider, "fireworks");
+        // opencode now canonicalizes the provider (fireworks -> fireworks_ai),
+        // matching every other session parser.
+        assert_eq!(usage.models[0].provider, "fireworks_ai");
         assert_eq!(usage.models[0].model, "deepseek-v3-0324");
         assert_eq!(usage.models[0].tokens.total(), 15);
         assert_cost_matches(usage.models[0].cost, expected_cost);

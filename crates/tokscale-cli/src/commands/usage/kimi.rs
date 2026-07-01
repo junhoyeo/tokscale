@@ -256,10 +256,11 @@ pub fn fetch() -> Result<UsageOutput> {
                     };
                     if let Some(metric) = parse_quota_detail(label, detail) {
                         let key = format!(
-                            "{}:{}:{}",
+                            "{}:{}:{}:{}",
                             label,
                             metric.used_percent,
-                            metric.remaining_label.as_deref().unwrap_or("")
+                            metric.remaining_label.as_deref().unwrap_or(""),
+                            metric.resets_at.as_deref().unwrap_or("")
                         );
                         if seen.insert(key) {
                             metrics.push(metric);
@@ -273,10 +274,11 @@ pub fn fetch() -> Result<UsageOutput> {
         if let Some(ref usage) = resp.usage {
             if let Some(metric) = parse_quota_detail("Weekly", usage) {
                 let key = format!(
-                    "{}:{}:{}",
+                    "{}:{}:{}:{}",
                     "Weekly",
                     metric.used_percent,
-                    metric.remaining_label.as_deref().unwrap_or("")
+                    metric.remaining_label.as_deref().unwrap_or(""),
+                    metric.resets_at.as_deref().unwrap_or("")
                 );
                 if seen.insert(key) {
                     metrics.push(metric);
@@ -290,6 +292,9 @@ pub fn fetch() -> Result<UsageOutput> {
             plan,
             email: None,
             metrics,
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
         })
     })
 }

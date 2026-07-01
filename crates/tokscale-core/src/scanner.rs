@@ -88,6 +88,8 @@ pub struct ScanResult {
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
+    /// ZCode v2 CLI usage database at `~/.zcode/cli/db/db.sqlite`.
+    pub zcode_db: Option<PathBuf>,
     /// MiMo Code SQLite databases discovered under the data dir.
     pub micode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
@@ -106,6 +108,7 @@ impl Default for ScanResult {
             zed_db: None,
             kiro_db: None,
             crush_dbs: Vec::new(),
+            zcode_db: None,
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
         }
@@ -328,6 +331,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "updates.jsonl" => file_name == "updates.jsonl",
+                "events.jsonl" => file_name == "events.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
@@ -914,14 +918,16 @@ fn scan_all_clients_with_env_strategy_inner(
         );
     }
 
-    // MiMo Code: SQLite database(s) at ~/.local/share/micode/mimocode*.db
+    // MiMo Code: SQLite database(s) at ~/.local/share/mimocode/mimocode*.db
     if enabled.contains(&ClientId::MiMoCode) {
-        let micode_xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
-        } else {
-            format!("{}/.local/share", home_dir)
-        };
-        let micode_data_dir = PathBuf::from(format!("{}/micode", micode_xdg_data));
+        // Derive the data dir from the client metadata so the scan path stays
+        // in sync with `ClientId::MiMoCode` (XdgData root + `mimocode`) rather
+        // than duplicating it here.
+        let micode_data_dir = PathBuf::from(
+            ClientId::MiMoCode
+                .data()
+                .resolve_path_with_env_strategy(home_dir, use_env_roots),
+        );
         // `discover_micode_dbs` already returns a sorted list.
         result.micode_dbs = discover_micode_dbs(&micode_data_dir);
     }
@@ -1202,6 +1208,13 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::Crush) {
         result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
+    }
+
+    if enabled.contains(&ClientId::Zcode) {
+        let zcode_db_path = PathBuf::from(format!("{}/.zcode/cli/db/db.sqlite", home_dir));
+        if zcode_db_path.is_file() {
+            result.zcode_db = Some(zcode_db_path);
+        }
     }
 
     if enabled.contains(&ClientId::Kiro) {
@@ -1647,6 +1660,23 @@ mod tests {
     fn test_scan_directory_nonexistent() {
         let files = scan_directory("/nonexistent/path/that/does/not/exist", "*.json");
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_zcode_v2_sqlite() {
+        let dir = TempDir::new().unwrap();
+        let db_dir = dir.path().join(".zcode/cli/db");
+        fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("db.sqlite");
+        File::create(&db_path).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            dir.path().to_str().unwrap(),
+            &["zcode".to_string()],
+            false,
+        );
+
+        assert_eq!(result.zcode_db.as_deref(), Some(db_path.as_path()));
     }
 
     #[test]

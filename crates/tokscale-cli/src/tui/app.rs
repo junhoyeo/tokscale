@@ -9,17 +9,23 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
+use crate::commands::usage::{UsageFetchReport, UsageOutput};
 use crate::ClientFilter;
 
 use ratatui::style::Color;
 
+use super::codex_login::{
+    cancel_codex_login_child, run_codex_login_worker, CodexLoginChildSlot, CodexLoginEvent,
+    CodexLoginOutcome,
+};
 use super::data::{
     AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, TokenBreakdown,
     UsageData,
 };
+use super::privacy::looks_like_email;
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
-use super::ui::dialog::{ClientPickerDialog, DialogStack};
+use super::ui::dialog::{ClientPickerDialog, ConfirmDialog, DialogStack};
 use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
 
 /// Configuration for TUI initialization
@@ -32,6 +38,18 @@ pub struct TuiConfig {
     pub until: Option<String>,
     pub year: Option<String>,
     pub initial_tab: Option<Tab>,
+}
+
+#[cfg(not(test))]
+fn default_usage_fetcher() -> UsageFetchReport {
+    crate::commands::usage::fetch_all_report_with_intent(
+        crate::commands::usage::UsageFetchIntent::TuiSurface,
+    )
+}
+
+#[cfg(test)]
+fn test_usage_fetcher() -> UsageFetchReport {
+    UsageFetchReport::default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -164,26 +182,91 @@ pub enum ClickAction {
     UsageRefresh,
     CodexStartLogin,
     CodexDismissLogin,
+    UsageSelect { index: usize },
+    UsageToggleEmailPrivacy,
     CodexUseAccount { account_id: String },
     CodexRemoveAccount { account_id: String },
+    CodexResetAccount { account_id: String },
 }
 
-#[derive(Debug, Clone)]
-pub enum CodexLoginOutcome {
-    Imported(crate::commands::usage::codex::CodexAccountInfo),
-    Failed(String),
+fn codex_reset_outcome_label(
+    result: &crate::commands::usage::codex::RateLimitResetConsumeResult,
+) -> String {
+    match result.code.as_str() {
+        "reset" => match result.windows_reset {
+            Some(1) => "reset 1 window".to_string(),
+            Some(count) => format!("reset {count} windows"),
+            None => "reset complete".to_string(),
+        },
+        "already_redeemed" => "credit already redeemed".to_string(),
+        "nothing_to_reset" => "nothing to reset".to_string(),
+        "no_credit" => "no credit available".to_string(),
+        "" => "unknown response".to_string(),
+        other => other.to_string(),
+    }
 }
 
-#[derive(Debug, Clone)]
-enum CodexLoginEvent {
-    Output(String),
-    Finished(CodexLoginOutcome),
+fn short_account_id(account_id: &str) -> String {
+    let id = account_id.trim();
+    if id.is_empty() {
+        return "Account unknown".to_string();
+    }
+
+    let char_count = id.chars().count();
+    if char_count <= 12 {
+        return format!("Account {id}");
+    }
+
+    let head: String = id.chars().take(6).collect();
+    let tail: String = id
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("Account {head}...{tail}")
 }
 
-/// Shared handle to the spawned `codex login` child process. The login worker
-/// polls it via `try_wait`; the TUI takes the child out of the slot to kill it
-/// on dismiss or exit (an emptied slot tells the worker it was cancelled).
-type CodexLoginChildSlot = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>;
+fn compare_codex_usage_outputs(a: &UsageOutput, b: &UsageOutput) -> std::cmp::Ordering {
+    let active_order = codex_usage_is_active(b).cmp(&codex_usage_is_active(a));
+    if active_order != std::cmp::Ordering::Equal {
+        return active_order;
+    }
+
+    codex_usage_sort_key(a)
+        .cmp(&codex_usage_sort_key(b))
+        .then_with(|| codex_usage_account_id(a).cmp(codex_usage_account_id(b)))
+}
+
+fn codex_usage_is_active(output: &UsageOutput) -> bool {
+    output
+        .account
+        .as_ref()
+        .is_some_and(|account| account.is_active)
+}
+
+fn codex_usage_sort_key(output: &UsageOutput) -> String {
+    output
+        .account
+        .as_ref()
+        .map(|account| {
+            account
+                .label_name()
+                .unwrap_or(account.id.as_str())
+                .to_lowercase()
+        })
+        .unwrap_or_else(|| output.display_name().to_lowercase())
+}
+
+fn codex_usage_account_id(output: &UsageOutput) -> &str {
+    output
+        .account
+        .as_ref()
+        .map(|account| account.id.as_str())
+        .unwrap_or_default()
+}
 
 struct MinutelySortCache {
     sort_field: SortField,
@@ -226,6 +309,7 @@ pub struct App {
 
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
+    pub last_auto_refresh: Instant,
     pub last_refresh: Instant,
 
     pub status_message: Option<String>,
@@ -251,12 +335,23 @@ pub struct App {
     pub model_shade_map: HashMap<String, Color>,
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
-    pub pending_codex_remove_account_id: Option<String>,
+    pub usage_fetch_diagnostics: Vec<crate::commands::usage::UsageFetchDiagnostic>,
+    confirmed_codex_use_account_id: Rc<RefCell<Option<String>>>,
+    confirmed_codex_remove_account_id: Rc<RefCell<Option<String>>>,
+    confirmed_codex_reset_account_id: Rc<RefCell<Option<String>>>,
+    pub hide_usage_emails: bool,
     pub codex_login_lines: Vec<String>,
-    pub codex_login_outcome: Option<CodexLoginOutcome>,
+    pub(crate) codex_login_outcome: Option<CodexLoginOutcome>,
 
     pub usage_fetch_attempted: bool,
-    usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+    usage_rx: Option<std::sync::mpsc::Receiver<UsageFetchReport>>,
+    usage_fetch_preserve_status: bool,
+    usage_fetcher: fn() -> UsageFetchReport,
+    codex_reset_rx: Option<
+        std::sync::mpsc::Receiver<
+            Result<crate::commands::usage::codex::RateLimitResetConsumeResult, String>,
+        >,
+    >,
     codex_login_rx: Option<std::sync::mpsc::Receiver<CodexLoginEvent>>,
     codex_login_child: Option<CodexLoginChildSlot>,
 
@@ -322,6 +417,9 @@ impl App {
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
+        let confirmed_codex_use_account_id = Rc::new(RefCell::new(None));
+        let confirmed_codex_remove_account_id = Rc::new(RefCell::new(None));
+        let confirmed_codex_reset_account_id = Rc::new(RefCell::new(None));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
         let current_tab = if Self::tab_visible(&settings, requested_tab) {
             requested_tab
@@ -353,6 +451,7 @@ impl App {
             stats_breakdown_total_lines: 0,
             auto_refresh,
             auto_refresh_interval,
+            last_auto_refresh: Instant::now(),
             last_refresh: Instant::now(),
             status_message: if has_data {
                 Some("Loaded from cache".to_string())
@@ -380,11 +479,27 @@ impl App {
                     Vec::new()
                 }
             },
-            pending_codex_remove_account_id: None,
+            usage_fetch_diagnostics: Vec::new(),
+            confirmed_codex_use_account_id,
+            confirmed_codex_remove_account_id,
+            confirmed_codex_reset_account_id,
+            hide_usage_emails: true,
             codex_login_lines: Vec::new(),
             codex_login_outcome: None,
             usage_fetch_attempted: false,
             usage_rx: None,
+            usage_fetch_preserve_status: false,
+            usage_fetcher: {
+                #[cfg(test)]
+                {
+                    test_usage_fetcher
+                }
+                #[cfg(not(test))]
+                {
+                    default_usage_fetcher
+                }
+            },
+            codex_reset_rx: None,
             codex_login_rx: None,
             codex_login_child: None,
             remote_stats: None,
@@ -394,6 +509,7 @@ impl App {
             minutely_sort_cache: RefCell::new(None),
         };
         app.build_model_shade_map();
+        app.maybe_fetch_usage_on_entry();
         Ok(app)
     }
 
@@ -476,11 +592,17 @@ impl App {
             }
         }
 
-        if self.auto_refresh
-            && !self.background_loading
-            && self.last_refresh.elapsed() >= self.auto_refresh_interval
-        {
-            self.needs_reload = true;
+        if self.auto_refresh && self.last_auto_refresh.elapsed() >= self.auto_refresh_interval {
+            if self.current_tab == Tab::Usage {
+                self.last_auto_refresh = Instant::now();
+                // Auto-refresh is a silent background poll, not a user action,
+                // so it must not overwrite the current status message (e.g. a
+                // Codex reset result) with "Fetching usage data...".
+                self.fetch_subscription_usage_preserving_status();
+            } else if !self.background_loading {
+                self.last_auto_refresh = Instant::now();
+                self.needs_reload = true;
+            }
         }
 
         if *self.dialog_needs_reload.borrow() {
@@ -491,21 +613,59 @@ impl App {
         // Poll background usage fetch
         if let Some(ref rx) = self.usage_rx {
             match rx.try_recv() {
-                Ok(results) => {
+                Ok(report) => {
+                    let preserve_status = self.usage_fetch_preserve_status;
+                    self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
-                    self.subscription_usage = results;
+                    self.subscription_usage = report.outputs;
+                    self.usage_fetch_diagnostics = report.diagnostics;
                     if !self.subscription_usage.is_empty() {
                         crate::commands::usage::save_cache(&self.subscription_usage);
-                        self.status_message = Some("Usage data loaded".into());
+                        if !preserve_status {
+                            self.status_message = Some(self.usage_loaded_status());
+                        }
                     } else {
                         crate::commands::usage::clear_cache();
-                        self.status_message = Some("No usage data available".into());
+                        if !preserve_status {
+                            self.status_message = Some(self.usage_empty_status());
+                        }
                     }
+                    if !preserve_status {
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let preserve_status = self.usage_fetch_preserve_status;
+                    self.usage_fetch_preserve_status = false;
+                    self.usage_rx = None;
+                    if !preserve_status {
+                        self.status_message = Some("Usage fetch failed".into());
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Some(ref rx) = self.codex_reset_rx {
+            match rx.try_recv() {
+                Ok(Ok(result)) => {
+                    self.codex_reset_rx = None;
+                    self.status_message = Some(format!(
+                        "Codex reset credit: {}",
+                        codex_reset_outcome_label(&result)
+                    ));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    self.fetch_subscription_usage_preserving_status();
+                }
+                Ok(Err(error)) => {
+                    self.codex_reset_rx = None;
+                    self.status_message = Some(format!("Codex reset failed: {error}"));
                     self.status_message_time = Some(std::time::Instant::now());
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.usage_rx = None;
-                    self.status_message = Some("Usage fetch failed".into());
+                    self.codex_reset_rx = None;
+                    self.status_message = Some("Codex reset failed".into());
                     self.status_message_time = Some(std::time::Instant::now());
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -585,17 +745,33 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Remap the produced character to its US-QWERTY physical position so
+        // single-letter hotkeys keep working under non-Latin layouts (Russian,
+        // Greek, …). Modifiers and non-char keys are unaffected. Dialogs still
+        // receive the raw `key.code` and normalize per-field, since some of
+        // them (e.g. the picker filter) accept literal text input.
+        let code = crate::tui::keymap::normalize_hotkey(key.code);
+
+        if code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return true;
         }
 
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key.code);
+            self.consume_confirmed_codex_account_action();
             return false;
         }
 
-        match key.code {
+        if code == KeyCode::Esc
+            && self.current_tab == Tab::Usage
+            && self.should_show_codex_login_panel()
+        {
+            self.dismiss_codex_login();
+            return false;
+        }
+
+        match code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
                 return true;
@@ -654,7 +830,14 @@ impl App {
                 self.cycle_theme();
             }
             KeyCode::Char('r') => {
-                self.refresh_usage();
+                self.last_auto_refresh = Instant::now();
+                if self.current_tab == Tab::Usage {
+                    self.refresh_usage();
+                } else if self.background_loading {
+                    self.set_status("Refresh already in progress");
+                } else {
+                    self.needs_reload = true;
+                }
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.toggle_auto_refresh();
@@ -690,8 +873,14 @@ impl App {
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
             }
-            KeyCode::Char('u') if self.current_tab == Tab::Usage => {
-                self.refresh_usage();
+            KeyCode::Char('a') if self.current_tab == Tab::Usage => {
+                self.start_codex_login();
+            }
+            KeyCode::Char('m') if self.current_tab == Tab::Usage => {
+                self.toggle_usage_email_privacy();
+            }
+            KeyCode::Char('x') if self.current_tab == Tab::Usage => {
+                self.confirm_selected_codex_rate_limit_reset();
             }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
@@ -716,21 +905,33 @@ impl App {
     }
 
     pub fn fetch_subscription_usage(&mut self) {
+        self.fetch_subscription_usage_with_status(false);
+    }
+
+    fn fetch_subscription_usage_preserving_status(&mut self) {
+        self.fetch_subscription_usage_with_status(true);
+    }
+
+    fn fetch_subscription_usage_with_status(&mut self, preserve_status: bool) {
         if self.usage_rx.is_some() {
+            if preserve_status {
+                self.usage_fetch_preserve_status = true;
+            }
             return; // already fetching
         }
         self.usage_fetch_attempted = true;
-        self.status_message = Some("Fetching usage data...".into());
-        self.status_message_time = Some(std::time::Instant::now());
+        self.usage_fetch_preserve_status = preserve_status;
+        self.usage_fetch_diagnostics.clear();
+        if !preserve_status {
+            self.status_message = Some("Fetching usage data...".into());
+            self.status_message_time = Some(std::time::Instant::now());
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         self.usage_rx = Some(rx);
+        let fetcher = self.usage_fetcher;
         std::thread::spawn(move || {
-            // Tests must not hit real provider endpoints or credentials.
-            #[cfg(test)]
-            let results = Vec::new();
-            #[cfg(not(test))]
-            let results = crate::commands::usage::fetch_all();
-            let _ = tx.send(results);
+            let report = fetcher();
+            let _ = tx.send(report);
         });
     }
 
@@ -738,15 +939,52 @@ impl App {
         if self.usage_rx.is_some() {
             self.set_status("Refresh already in progress");
         } else {
-            if !self.background_loading {
-                self.needs_reload = true;
-            }
+            self.fetch_subscription_usage();
+        }
+    }
+
+    pub(crate) fn maybe_fetch_usage_on_entry(&mut self) {
+        if self.current_tab == Tab::Usage && !self.usage_fetch_attempted && self.usage_rx.is_none()
+        {
             self.fetch_subscription_usage();
         }
     }
 
     pub fn is_fetching_usage(&self) -> bool {
         self.usage_rx.is_some()
+    }
+
+    fn usage_loaded_status(&self) -> String {
+        match self.usage_fetch_diagnostics.len() {
+            0 => "Usage data loaded".to_string(),
+            1 => "Usage data loaded with 1 issue".to_string(),
+            count => format!("Usage data loaded with {count} issues"),
+        }
+    }
+
+    fn usage_empty_status(&self) -> String {
+        if self.usage_fetch_diagnostics.is_empty() {
+            "No usage data available".to_string()
+        } else {
+            format!("Usage fetch failed: {}", self.usage_diagnostic_summary())
+        }
+    }
+
+    fn usage_diagnostic_summary(&self) -> String {
+        let mut names = self
+            .usage_fetch_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.display_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        let visible = names.iter().take(2).cloned().collect::<Vec<_>>();
+        let hidden = names.len().saturating_sub(visible.len());
+        if hidden == 0 {
+            visible.join(", ")
+        } else {
+            format!("{} +{hidden}", visible.join(", "))
+        }
     }
 
     /// Cache-first load of server-side aggregated multi-device stats.
@@ -848,6 +1086,7 @@ impl App {
                 self.scroll_offset = 0;
             }
             ClickAction::UsageRefresh => {
+                self.last_auto_refresh = Instant::now();
                 self.refresh_usage();
             }
             ClickAction::CodexStartLogin => {
@@ -856,11 +1095,21 @@ impl App {
             ClickAction::CodexDismissLogin => {
                 self.dismiss_codex_login();
             }
+            ClickAction::UsageSelect { index } => {
+                self.selected_index = index;
+                self.clamp_selection();
+            }
+            ClickAction::UsageToggleEmailPrivacy => {
+                self.toggle_usage_email_privacy();
+            }
             ClickAction::CodexUseAccount { account_id } => {
-                self.use_codex_account(&account_id);
+                self.confirm_codex_account_switch(&account_id);
             }
             ClickAction::CodexRemoveAccount { account_id } => {
-                self.remove_codex_account(&account_id);
+                self.confirm_codex_account_removal(&account_id);
+            }
+            ClickAction::CodexResetAccount { account_id } => {
+                self.confirm_codex_rate_limit_reset(&account_id);
             }
         }
     }
@@ -881,7 +1130,6 @@ impl App {
             return;
         }
 
-        self.pending_codex_remove_account_id = None;
         self.codex_login_lines.clear();
         self.codex_login_outcome = None;
 
@@ -914,19 +1162,111 @@ impl App {
         let Some(slot) = self.codex_login_child.take() else {
             return;
         };
-        let child = slot.lock().ok().and_then(|mut child| child.take());
-        if let Some(mut child) = child {
-            let _ = child.kill();
-            let _ = child.wait();
+        cancel_codex_login_child(&slot);
+    }
+
+    fn confirm_codex_account_switch(&mut self, account_id: &str) {
+        if self.subscription_usage.iter().any(|usage| {
+            usage
+                .account
+                .as_ref()
+                .is_some_and(|account| account.id == account_id && account.is_active)
+        }) {
+            self.set_status("Codex account already active");
+            return;
+        }
+
+        let account_label = self.codex_account_label(account_id);
+        let dialog = ConfirmDialog::codex_switch(
+            account_id.to_string(),
+            account_label,
+            self.confirmed_codex_use_account_id.clone(),
+        );
+        self.dialog_stack.show(Box::new(dialog));
+        self.set_status("Confirm Codex account switch");
+    }
+
+    fn confirm_codex_account_removal(&mut self, account_id: &str) {
+        if self.subscription_usage.iter().any(|usage| {
+            usage
+                .account
+                .as_ref()
+                .is_some_and(|account| account.id == account_id && account.is_active)
+        }) {
+            self.set_status("Switch Codex accounts before removing the current account");
+            return;
+        }
+
+        let account_label = self.codex_account_label(account_id);
+        let dialog = ConfirmDialog::codex_remove(
+            account_id.to_string(),
+            account_label,
+            self.confirmed_codex_remove_account_id.clone(),
+        );
+        self.dialog_stack.show(Box::new(dialog));
+        self.set_status("Confirm Codex account removal");
+    }
+
+    fn consume_confirmed_codex_account_action(&mut self) {
+        let account_id = self.confirmed_codex_use_account_id.borrow_mut().take();
+        if let Some(account_id) = account_id {
+            self.use_codex_account(&account_id);
+            return;
+        }
+
+        let account_id = self.confirmed_codex_remove_account_id.borrow_mut().take();
+        if let Some(account_id) = account_id {
+            self.remove_codex_account(&account_id);
+            return;
+        }
+
+        let account_id = self.confirmed_codex_reset_account_id.borrow_mut().take();
+        if let Some(account_id) = account_id {
+            self.reset_codex_rate_limits(&account_id);
         }
     }
 
-    fn use_codex_account(&mut self, account_id: &str) {
-        self.pending_codex_remove_account_id = None;
+    fn codex_account_label(&self, account_id: &str) -> String {
+        self.subscription_usage
+            .iter()
+            .find_map(|usage| {
+                let account = usage.account.as_ref()?;
+                if account.id != account_id {
+                    return None;
+                }
 
+                let label = usage
+                    .account_display_name()
+                    .unwrap_or_else(|| account.display_name());
+                if self.hide_usage_emails && looks_like_email(&label) {
+                    Some(format!("Account {}", account.short_id()))
+                } else {
+                    Some(label)
+                }
+            })
+            .unwrap_or_else(|| short_account_id(account_id))
+    }
+
+    fn use_codex_account(&mut self, account_id: &str) {
         match crate::commands::usage::codex::switch_active_account(account_id) {
             Ok(info) => {
                 self.mark_active_codex_account(&info.id);
+                self.sort_codex_subscription_usage();
+                if let Some(index) = self.subscription_usage.iter().position(|usage| {
+                    usage
+                        .account
+                        .as_ref()
+                        .is_some_and(|account| account.id == info.id)
+                }) {
+                    self.selected_index = index;
+                    if self.selected_index < self.scroll_offset {
+                        self.scroll_offset = self.selected_index;
+                    } else if self.selected_index >= self.scroll_offset + self.max_visible_items {
+                        self.scroll_offset = self
+                            .selected_index
+                            .saturating_sub(self.max_visible_items.saturating_sub(1));
+                    }
+                }
                 self.persist_subscription_usage_cache();
                 let display = info.label.as_deref().unwrap_or(&info.id);
                 self.set_status(&format!("Active Codex account: {display}"));
@@ -937,25 +1277,122 @@ impl App {
         }
     }
 
-    fn remove_codex_account(&mut self, account_id: &str) {
-        if self.pending_codex_remove_account_id.as_deref() != Some(account_id) {
-            self.pending_codex_remove_account_id = Some(account_id.to_string());
-            self.set_status("Click Confirm to remove this Codex account");
+    fn toggle_usage_email_privacy(&mut self) {
+        self.hide_usage_emails = !self.hide_usage_emails;
+        if self.hide_usage_emails {
+            self.set_status("Usage emails hidden");
+        } else {
+            self.set_status("Usage emails shown");
+        }
+    }
+
+    fn confirm_selected_codex_rate_limit_reset(&mut self) {
+        let Some(output) = self.subscription_usage.get(self.selected_index) else {
+            self.set_status("No usage account selected");
+            return;
+        };
+
+        if output.provider != "Codex" {
+            self.set_status("Codex reset only supports Codex accounts");
             return;
         }
 
-        self.pending_codex_remove_account_id = None;
+        let Some(account_id) = output.account.as_ref().map(|account| account.id.clone()) else {
+            self.set_status("Select a saved Codex account to reset");
+            return;
+        };
+
+        self.confirm_codex_rate_limit_reset(&account_id);
+    }
+
+    fn confirm_codex_rate_limit_reset(&mut self, account_id: &str) {
+        if self.codex_reset_rx.is_some() {
+            self.set_status("Codex reset already in progress");
+            return;
+        }
+
+        let Some(output) = self.subscription_usage.iter().find(|usage| {
+            usage.provider == "Codex"
+                && usage
+                    .account
+                    .as_ref()
+                    .is_some_and(|account| account.id == account_id)
+        }) else {
+            self.set_status("Codex account not found");
+            return;
+        };
+
+        let available = output
+            .reset_credits
+            .as_ref()
+            .map(|credits| credits.available_count)
+            .unwrap_or(0);
+        if available == 0 {
+            self.set_status("No Codex reset credits available");
+            return;
+        }
+
+        let mut account_label = self.codex_account_label(account_id);
+        account_label.push_str(&format!(" - {available} reset"));
+        if available != 1 {
+            account_label.push('s');
+        }
+        if let Some(expiry) = output.reset_credits.as_ref().and_then(|credits| {
+            credits
+                .credits
+                .iter()
+                .find_map(|credit| credit.expires_at.as_ref())
+        }) {
+            account_label.push_str(&format!(
+                " - {}",
+                crate::commands::usage::helpers::format_reset_time(expiry)
+                    .replace("resets", "expires")
+            ));
+        }
+
+        let dialog = ConfirmDialog::codex_reset(
+            account_id.to_string(),
+            account_label,
+            self.confirmed_codex_reset_account_id.clone(),
+        );
+        self.dialog_stack.show(Box::new(dialog));
+        self.set_status("Confirm Codex reset credit use");
+    }
+
+    fn reset_codex_rate_limits(&mut self, account_id: &str) {
+        if self.codex_reset_rx.is_some() {
+            self.set_status("Codex reset already in progress");
+            return;
+        }
+
+        let account_id = account_id.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.codex_reset_rx = Some(rx);
+        self.set_status("Resetting Codex limits...");
+        std::thread::spawn(move || {
+            let result =
+                crate::commands::usage::codex::consume_rate_limit_reset_credit(&account_id)
+                    .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    fn remove_codex_account(&mut self, account_id: &str) {
         match crate::commands::usage::codex::remove_account(account_id) {
             Ok(info) => {
                 self.subscription_usage.retain(|usage| {
                     usage.account.as_ref().map(|account| account.id.as_str())
                         != Some(info.id.as_str())
                 });
+                self.clamp_selection();
                 if let Some(active) = crate::commands::usage::codex::list_accounts()
                     .into_iter()
                     .find(|account| account.is_active)
                 {
                     self.mark_active_codex_account(&active.id);
+                    self.sort_codex_subscription_usage();
+                } else {
+                    self.clear_active_codex_accounts();
                 }
                 self.persist_subscription_usage_cache();
                 let display = info.label.as_deref().unwrap_or(&info.id);
@@ -987,9 +1424,42 @@ impl App {
         }
     }
 
+    fn clear_active_codex_accounts(&mut self) {
+        for usage in &mut self.subscription_usage {
+            if usage.provider == "Codex" {
+                if let Some(account) = &mut usage.account {
+                    account.is_active = false;
+                }
+            }
+        }
+    }
+
+    fn sort_codex_subscription_usage(&mut self) {
+        let mut codex_outputs = self
+            .subscription_usage
+            .iter()
+            .filter(|usage| usage.provider == "Codex")
+            .cloned()
+            .collect::<Vec<_>>();
+        if codex_outputs.len() < 2 {
+            return;
+        }
+
+        codex_outputs.sort_by(compare_codex_usage_outputs);
+        let mut sorted = codex_outputs.into_iter();
+        for usage in &mut self.subscription_usage {
+            if usage.provider == "Codex" {
+                if let Some(next) = sorted.next() {
+                    *usage = next;
+                }
+            }
+        }
+    }
+
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_mouse(event);
+            self.consume_confirmed_codex_account_action();
             return;
         }
 
@@ -1079,9 +1549,6 @@ impl App {
         self.persist_current_sort();
 
         self.current_tab = target;
-        if target != Tab::Usage {
-            self.pending_codex_remove_account_id = None;
-        }
         if target != Tab::Daily {
             self.selected_daily_detail_date = None;
         }
@@ -1093,6 +1560,8 @@ impl App {
             .unwrap_or_else(|| Self::default_sort_for_tab(target));
         self.sort_field = field;
         self.sort_direction = dir;
+
+        self.maybe_fetch_usage_on_entry();
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
@@ -1435,6 +1904,9 @@ impl App {
 
     fn toggle_auto_refresh(&mut self) {
         self.auto_refresh = !self.auto_refresh;
+        if self.auto_refresh {
+            self.last_auto_refresh = Instant::now();
+        }
         self.settings.auto_refresh_enabled = self.auto_refresh;
         let save_result = self.settings.save();
         let msg = if self.auto_refresh {
@@ -1858,216 +2330,13 @@ impl App {
     }
 }
 
-fn run_codex_login_worker(
-    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
-    child_slot: CodexLoginChildSlot,
-) {
-    let result = run_codex_login_worker_inner(tx.clone(), child_slot);
-    let outcome = match result {
-        Ok(info) => CodexLoginOutcome::Imported(info),
-        Err(e) => CodexLoginOutcome::Failed(e.to_string()),
-    };
-    let _ = tx.send(CodexLoginEvent::Finished(outcome));
-}
-
-fn run_codex_login_worker_inner(
-    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
-    child_slot: CodexLoginChildSlot,
-) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
-    let codex_home =
-        std::env::temp_dir().join(format!("tokscale-codex-login-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&codex_home)
-        .map_err(|e| anyhow::anyhow!("failed to create temporary Codex home: {e}"))?;
-
-    let result = run_codex_login_in_home(&codex_home, tx, child_slot);
-    let _ = std::fs::remove_dir_all(&codex_home);
-    result
-}
-
-fn run_codex_login_in_home(
-    codex_home: &std::path::Path,
-    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
-    child_slot: CodexLoginChildSlot,
-) -> Result<crate::commands::usage::codex::CodexAccountInfo> {
-    let _ = tx.send(CodexLoginEvent::Output(
-        "Starting Codex browser login".to_string(),
-    ));
-
-    let mut child = std::process::Command::new("codex")
-        .arg("login")
-        .env("CODEX_HOME", codex_home)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to start codex login: {e}"))?;
-
-    let output_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut readers = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        readers.push(spawn_codex_login_output_reader(
-            stdout,
-            tx.clone(),
-            std::sync::Arc::clone(&output_lines),
-        ));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        readers.push(spawn_codex_login_output_reader(
-            stderr,
-            tx.clone(),
-            std::sync::Arc::clone(&output_lines),
-        ));
-    }
-
-    if let Ok(mut slot) = child_slot.lock() {
-        *slot = Some(child);
-    } else {
-        anyhow::bail!("codex login state lock poisoned");
-    }
-
-    let status = wait_for_codex_login_child(&child_slot);
-    for reader in readers {
-        let _ = reader.join();
-    }
-    let Some(status) = status? else {
-        // The TUI emptied the slot: the login was dismissed or the app exited.
-        anyhow::bail!("Codex login cancelled");
-    };
-
-    if !status.success() {
-        let output_lines = output_lines
-            .lock()
-            .map(|lines| lines.clone())
-            .unwrap_or_default();
-        anyhow::bail!("{}", codex_login_failure_message(&status, &output_lines));
-    }
-
-    let auth_path = codex_home.join("auth.json");
-    let import = crate::commands::usage::codex::import_login_auth_file(&auth_path)?;
-    if let Some(warning) = import.warning {
-        let _ = tx.send(CodexLoginEvent::Output(warning));
-    }
-    Ok(import.info)
-}
-
-/// Polls the login child until it exits. Returns `Ok(None)` when the TUI took
-/// the child out of the slot to kill it (dismiss or app exit).
-fn wait_for_codex_login_child(
-    child_slot: &CodexLoginChildSlot,
-) -> Result<Option<std::process::ExitStatus>> {
-    loop {
-        {
-            let mut slot = child_slot
-                .lock()
-                .map_err(|_| anyhow::anyhow!("codex login state lock poisoned"))?;
-            let Some(child) = slot.as_mut() else {
-                return Ok(None);
-            };
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    *slot = None;
-                    return Ok(Some(status));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    *slot = None;
-                    return Err(anyhow::anyhow!("failed to wait for codex login: {e}"));
-                }
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-}
-
-fn spawn_codex_login_output_reader<R>(
-    reader: R,
-    tx: std::sync::mpsc::Sender<CodexLoginEvent>,
-    output_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-) -> std::thread::JoinHandle<()>
-where
-    R: std::io::Read + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let reader = std::io::BufReader::new(reader);
-        for line in std::io::BufRead::lines(reader).map_while(std::result::Result::ok) {
-            let line = sanitize_codex_login_line(&line);
-            if !line.trim().is_empty() {
-                if let Ok(mut output_lines) = output_lines.lock() {
-                    output_lines.push(line.clone());
-                }
-                let _ = tx.send(CodexLoginEvent::Output(line));
-            }
-        }
-    })
-}
-
-fn codex_login_failure_message(
-    status: &std::process::ExitStatus,
-    output_lines: &[String],
-) -> String {
-    codex_login_failure_message_from_output(&status.to_string(), output_lines)
-}
-
-fn codex_login_failure_message_from_output(status: &str, output_lines: &[String]) -> String {
-    let output = output_lines.join("\n").to_lowercase();
-
-    if output.contains("429") || output.contains("too many requests") {
-        return "OpenAI login is rate-limited (429 Too Many Requests). Wait before trying Add Codex again.".to_string();
-    }
-
-    if output.contains("expired") {
-        return "Codex device code expired. Start Add Codex again to get a new code.".to_string();
-    }
-
-    if output.contains("device auth failed") {
-        return "Codex device login failed. Try Add Codex again later.".to_string();
-    }
-
-    format!("codex login exited with {status}")
-}
-
-fn sanitize_codex_login_line(line: &str) -> String {
-    let mut sanitized = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.next() {
-                Some('[') => {
-                    for ch in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&ch) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    while let Some(ch) = chars.next() {
-                        if ch == '\x07' {
-                            break;
-                        }
-                        if ch == '\x1b' && chars.peek() == Some(&'\\') {
-                            let _ = chars.next();
-                            break;
-                        }
-                    }
-                }
-                Some(_) | None => {}
-            }
-            continue;
-        }
-
-        if !ch.is_control() || ch == '\t' {
-            sanitized.push(ch);
-        }
-    }
-
-    sanitized
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::ui::widgets::get_provider_shade;
     use super::*;
+    use crate::commands::usage::{
+        UsageAccount, UsageFetchDiagnostic, UsageFetchReport, UsageMetric, UsageOutput,
+    };
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
     use chrono::{NaiveDate, NaiveDateTime};
     use std::collections::{BTreeMap, BTreeSet};
@@ -2362,6 +2631,121 @@ mod tests {
         App::new_with_cached_data(config, None).unwrap()
     }
 
+    fn usage_output(provider: &str, account: Option<UsageAccount>) -> UsageOutput {
+        UsageOutput {
+            provider: provider.to_string(),
+            account,
+            plan: Some("Pro".to_string()),
+            email: None,
+            metrics: vec![UsageMetric {
+                label: "Session".to_string(),
+                used_percent: 20.0,
+                remaining_percent: 80.0,
+                remaining_label: Some("80% left".to_string()),
+                resets_at: None,
+            }],
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
+        }
+    }
+
+    fn sample_subscription_usage() -> Vec<UsageOutput> {
+        vec![usage_output(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
+        )]
+    }
+
+    fn sample_usage_fetcher() -> UsageFetchReport {
+        UsageFetchReport {
+            outputs: sample_subscription_usage(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn failing_usage_fetcher() -> UsageFetchReport {
+        UsageFetchReport {
+            outputs: Vec::new(),
+            diagnostics: vec![UsageFetchDiagnostic::new(
+                "Codex",
+                None,
+                "token refresh failed",
+            )],
+        }
+    }
+
+    fn partial_usage_fetcher() -> UsageFetchReport {
+        UsageFetchReport {
+            outputs: sample_subscription_usage(),
+            diagnostics: vec![UsageFetchDiagnostic::new(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_personal".to_string(),
+                    label: Some("personal".to_string()),
+                    is_active: false,
+                }),
+                "usage endpoint rejected credentials",
+            )],
+        }
+    }
+
+    fn drain_usage_fetch(app: &mut App) {
+        for _ in 0..20 {
+            app.on_tick();
+            if !app.is_fetching_usage() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn test_codex_usage_sort_moves_active_account_to_first_codex_row() {
+        let mut app = make_app();
+        app.subscription_usage = vec![
+            usage_output("Claude", None),
+            usage_output(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_work".to_string(),
+                    label: Some("work".to_string()),
+                    is_active: true,
+                }),
+            ),
+            usage_output("Warp/Oz", None),
+            usage_output(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_personal".to_string(),
+                    label: Some("personal".to_string()),
+                    is_active: false,
+                }),
+            ),
+        ];
+
+        app.mark_active_codex_account("acct_personal");
+        app.sort_codex_subscription_usage();
+
+        assert_eq!(app.subscription_usage[0].provider, "Claude");
+        assert_eq!(app.subscription_usage[2].provider, "Warp/Oz");
+        let codex_ids = app
+            .subscription_usage
+            .iter()
+            .filter(|usage| usage.provider == "Codex")
+            .filter_map(|usage| usage.account.as_ref().map(|account| account.id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(codex_ids, vec!["acct_personal", "acct_work"]);
+        assert!(app.subscription_usage[1]
+            .account
+            .as_ref()
+            .is_some_and(|account| account.is_active));
+    }
+
     #[test]
     fn test_app_no_filter_default_matches_default_set() {
         // Regression for an Oracle-flagged HIGH bug: the no-filter TUI
@@ -2590,6 +2974,24 @@ mod tests {
     fn test_handle_key_quit_ctrl_c() {
         let mut app = make_app();
         let quit = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(quit);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_handle_key_quit_q_russian_layout() {
+        // Physical `Q` on a Russian layout produces 'й'; it must still quit.
+        let mut app = make_app();
+        let quit = app.handle_key_event(key(KeyCode::Char('й')));
+        assert!(quit);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_handle_key_quit_ctrl_c_russian_layout() {
+        // Physical `C` on a Russian layout produces 'с'; Ctrl+С must still quit.
+        let mut app = make_app();
+        let quit = app.handle_key_event(key_with_mod(KeyCode::Char('с'), KeyModifiers::CONTROL));
         assert!(quit);
         assert!(app.should_quit);
     }
@@ -3225,10 +3627,195 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('r')));
 
         assert!(!app.needs_reload);
+        assert!(!app.is_fetching_usage());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Refresh already in progress")
+        );
+    }
+
+    #[test]
+    fn test_handle_key_refresh_usage_tab_fetches_usage() {
+        let mut app = make_app();
+        app.usage_fetcher = sample_usage_fetcher;
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+
+        assert!(!app.needs_reload);
         assert!(app.is_fetching_usage());
         assert_eq!(
             app.status_message.as_deref(),
             Some("Fetching usage data...")
+        );
+
+        drain_usage_fetch(&mut app);
+
+        assert_eq!(app.subscription_usage.len(), 1);
+        assert_eq!(app.subscription_usage[0].provider, "Codex");
+        assert_eq!(app.status_message.as_deref(), Some("Usage data loaded"));
+    }
+
+    #[test]
+    fn test_handle_key_refresh_usage_tab_reports_fetch_failure_diagnostic() {
+        let mut app = make_app();
+        app.usage_fetcher = failing_usage_fetcher;
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+        drain_usage_fetch(&mut app);
+
+        assert!(app.subscription_usage.is_empty());
+        assert_eq!(app.usage_fetch_diagnostics.len(), 1);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Usage fetch failed: Codex")
+        );
+    }
+
+    #[test]
+    fn test_handle_key_refresh_usage_tab_keeps_partial_fetch_diagnostic() {
+        let mut app = make_app();
+        app.usage_fetcher = partial_usage_fetcher;
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+        drain_usage_fetch(&mut app);
+
+        assert_eq!(app.subscription_usage.len(), 1);
+        assert_eq!(app.usage_fetch_diagnostics.len(), 1);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Usage data loaded with 1 issue")
+        );
+    }
+
+    #[test]
+    fn test_handle_key_refresh_usage_tab_clears_stale_diagnostics() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.usage_fetch_diagnostics = vec![UsageFetchDiagnostic::new("Codex", None, "stale issue")];
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+
+        assert!(app.is_fetching_usage());
+        assert!(app.usage_fetch_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_handle_key_u_on_usage_is_unassigned() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('u')));
+
+        assert!(!app.needs_reload);
+        assert!(!app.is_fetching_usage());
+        assert!(!app.usage_fetch_attempted);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_refreshes_usage_only() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+
+        app.on_tick();
+
+        assert!(!app.needs_reload);
+        assert!(app.usage_fetch_attempted);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_while_fetching_preserves_status() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.usage_rx = Some(rx);
+        app.status_message = Some("Existing status".into());
+
+        app.on_tick();
+
+        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(!app.needs_reload);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_when_idle_preserves_status() {
+        // The while-fetching case above hits the early return in
+        // fetch_subscription_usage_with_status. This covers the idle case
+        // (no fetch in flight), where a non-preserving fetch would overwrite
+        // the status with "Fetching usage data...". Auto-refresh must keep the
+        // existing message and start a silent background fetch.
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        app.status_message = Some("Existing status".into());
+        assert!(app.usage_rx.is_none());
+
+        app.on_tick();
+
+        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(app.usage_fetch_attempted);
+        assert!(!app.needs_reload);
+    }
+
+    #[test]
+    fn test_auto_refresh_on_overview_refreshes_token_data_only() {
+        let mut app = make_app();
+        app.current_tab = Tab::Overview;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+
+        app.on_tick();
+
+        assert!(app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_codex_reset_success_status_survives_follow_up_usage_refresh() {
+        let mut app = make_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.codex_reset_rx = Some(rx);
+        tx.send(Ok(
+            crate::commands::usage::codex::RateLimitResetConsumeResult {
+                code: "reset".to_string(),
+                windows_reset: Some(1),
+            },
+        ))
+        .unwrap();
+        drop(tx);
+
+        app.on_tick();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex reset credit: reset 1 window")
+        );
+        assert!(app.is_fetching_usage());
+
+        for _ in 0..20 {
+            app.on_tick();
+            if !app.is_fetching_usage() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(!app.is_fetching_usage());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Codex reset credit: reset 1 window")
         );
     }
 
@@ -3267,6 +3854,21 @@ mod tests {
         let initial = app.auto_refresh;
         app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
         assert_ne!(app.auto_refresh, initial);
+    }
+
+    #[test]
+    fn test_enabling_auto_refresh_waits_for_next_interval() {
+        let mut app = make_app();
+        app.auto_refresh = false;
+        app.auto_refresh_interval = Duration::from_secs(60);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(120);
+
+        app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
+        app.on_tick();
+
+        assert!(app.auto_refresh);
+        assert!(!app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
     }
 
     #[test]
@@ -3355,7 +3957,7 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_mouse_click_codex_remove_requires_confirmation() {
+    fn test_handle_mouse_click_codex_remove_opens_confirmation_dialog() {
         let mut app = make_app();
         app.add_click_area(
             Rect::new(0, 0, 10, 2),
@@ -3372,13 +3974,36 @@ mod tests {
         };
         app.handle_mouse_event(event);
 
-        assert_eq!(
-            app.pending_codex_remove_account_id.as_deref(),
-            Some("acct_work")
-        );
+        assert!(app.dialog_stack.is_active());
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Click Confirm to remove this Codex account")
+            Some("Confirm Codex account removal")
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_codex_remove_refuses_active_account() {
+        let mut app = make_app();
+        app.subscription_usage = sample_subscription_usage();
+        app.add_click_area(
+            Rect::new(0, 0, 10, 2),
+            ClickAction::CodexRemoveAccount {
+                account_id: "acct_work".to_string(),
+            },
+        );
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(event);
+
+        assert!(!app.dialog_stack.is_active());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Switch Codex accounts before removing the current account")
         );
     }
 
@@ -3586,26 +4211,6 @@ mod tests {
         assert!(!app.should_show_codex_login_panel());
     }
 
-    #[test]
-    fn test_wait_for_codex_login_child_returns_none_when_cancelled() {
-        let slot = CodexLoginChildSlot::default();
-        let status = wait_for_codex_login_child(&slot).unwrap();
-        assert!(status.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_wait_for_codex_login_child_reports_exit_status() {
-        let child = std::process::Command::new("true").spawn().unwrap();
-        let slot = CodexLoginChildSlot::default();
-        *slot.lock().unwrap() = Some(child);
-
-        let status = wait_for_codex_login_child(&slot).unwrap();
-
-        assert!(status.unwrap().success());
-        assert!(slot.lock().unwrap().is_none());
-    }
-
     #[cfg(unix)]
     #[test]
     fn test_dismiss_codex_login_while_running_kills_child() {
@@ -3618,7 +4223,7 @@ mod tests {
         app.codex_login_rx = Some(rx);
         app.codex_login_lines.push("waiting".to_string());
         let slot = CodexLoginChildSlot::default();
-        *slot.lock().unwrap() = Some(child);
+        crate::tui::codex_login::put_codex_login_child_for_test(&slot, child).unwrap();
         app.codex_login_child = Some(std::sync::Arc::clone(&slot));
 
         app.dismiss_codex_login();
@@ -3627,10 +4232,7 @@ mod tests {
         assert!(app.codex_login_child.is_none());
         assert!(app.codex_login_lines.is_empty());
         assert!(app.codex_login_outcome.is_none());
-        assert!(
-            slot.lock().unwrap().is_none(),
-            "child must be taken and killed on dismiss"
-        );
+        assert!(crate::tui::codex_login::codex_login_slot_child_is_none_for_test(&slot));
         assert_eq!(app.status_message.as_deref(), Some("Codex login cancelled"));
     }
 
@@ -3647,48 +4249,6 @@ mod tests {
         assert_eq!(
             app.status_message.as_deref(),
             Some("Codex login panel dismissed")
-        );
-    }
-
-    #[test]
-    fn test_sanitize_codex_login_line_strips_ansi_sequences() {
-        assert_eq!(
-            sanitize_codex_login_line("\u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m"),
-            "https://auth.openai.com/codex/device"
-        );
-        assert_eq!(
-            sanitize_codex_login_line("\u{1b}[90mCAGW-LNUYX\u{1b}[0m"),
-            "CAGW-LNUYX"
-        );
-    }
-
-    #[test]
-    fn test_codex_login_failure_message_identifies_rate_limit() {
-        let message = codex_login_failure_message_from_output(
-            "exit status: 1",
-            &[
-                "Device codes are a common phishing target. Never share this code.".to_string(),
-                "Error logging in with device code: device auth failed with status 429 Too Many Requests"
-                    .to_string(),
-            ],
-        );
-
-        assert_eq!(
-            message,
-            "OpenAI login is rate-limited (429 Too Many Requests). Wait before trying Add Codex again."
-        );
-    }
-
-    #[test]
-    fn test_codex_login_failure_message_identifies_expired_code() {
-        let message = codex_login_failure_message_from_output(
-            "exit status: 1",
-            &["Error logging in with device code: expired".to_string()],
-        );
-
-        assert_eq!(
-            message,
-            "Codex device code expired. Start Add Codex again to get a new code."
         );
     }
 

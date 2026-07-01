@@ -129,6 +129,7 @@ pub fn parse_kilo_sqlite_with_fallback(
             .or_else(|| provider_identity::inferred_provider_from_model(&model_id))
             .unwrap_or("kilo")
             .to_string();
+        let provider = provider_identity::canonical_provider(&provider).unwrap_or(provider);
 
         let mut unified = UnifiedMessage::new_with_agent(
             "kilo",

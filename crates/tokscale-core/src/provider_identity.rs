@@ -129,6 +129,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         || contains_delimited(&lower, "opus")
         || contains_delimited(&lower, "sonnet")
         || contains_delimited(&lower, "haiku")
+        || contains_delimited(&lower, "fable")
     {
         return Some("anthropic");
     }
@@ -168,6 +169,14 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
 
     if lower.contains("qwen") {
         return Some("qwen");
+    }
+
+    // Sakana's `fugu` / `fugu-ultra` model line. Bare `fugu` is intentionally
+    // still mapped to the sakana provider here (provider identity is independent
+    // of whether we can price the model — see build_sakana_overrides, which
+    // deliberately does NOT price bare `fugu`).
+    if lower.contains("fugu") {
+        return Some("sakana");
     }
 
     None
@@ -237,6 +246,21 @@ mod tests {
     }
 
     #[test]
+    fn fable_models_map_to_anthropic() {
+        // Fable is a Claude model family; the bare, claude-prefixed, and [1m]
+        // context-variant forms must all attribute to Anthropic.
+        assert_eq!(inferred_provider_from_model("fable-5"), Some("anthropic"));
+        assert_eq!(
+            inferred_provider_from_model("claude-fable-5"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            inferred_provider_from_model("claude-fable-5[1m]"),
+            Some("anthropic")
+        );
+    }
+
+    #[test]
     fn test_inferred_provider_from_model() {
         assert_eq!(
             inferred_provider_from_model("claude-sonnet-4"),
@@ -271,6 +295,19 @@ mod tests {
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));
         assert_eq!(inferred_provider_from_model("qwen3-coder"), Some("qwen"));
         assert_eq!(inferred_provider_from_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn test_inferred_provider_fugu_maps_to_sakana() {
+        assert_eq!(inferred_provider_from_model("fugu"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("fugu-ultra"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("Fugu"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("FUGU-ULTRA"), Some("sakana"));
+    }
+
+    #[test]
+    fn test_provider_tags_preserves_sakana() {
+        assert_eq!(provider_tags("sakana"), vec!["sakana"]);
     }
 
     #[test]

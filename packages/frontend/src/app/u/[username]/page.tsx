@@ -5,6 +5,9 @@ import ProfilePageClient from './ProfilePageClient';
 
 export const revalidate = 60;
 
+const PROFILE_PERIODS = ["all", "week", "month"] as const;
+type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
+
 // In production: use explicit URL or Vercel auto-URL.
 // In dev: use 127.0.0.1 to avoid ECONNREFUSED from localhost dual-stack DNS.
 function getBaseUrl(): string {
@@ -13,8 +16,21 @@ function getBaseUrl(): string {
     || 'http://127.0.0.1:3000';
 }
 
-async function getProfileData(username: string) {
-  const res = await fetch(`${getBaseUrl()}/api/users/${username}`, {
+function parseProfilePeriod(value: string | string[] | undefined): ProfilePeriod {
+  const period = Array.isArray(value) ? value[0] : value;
+  return PROFILE_PERIODS.includes(period as ProfilePeriod)
+    ? (period as ProfilePeriod)
+    : "all";
+}
+
+async function getProfileData(username: string, period: ProfilePeriod) {
+  const params = new URLSearchParams();
+  if (period !== "all") {
+    params.set("period", period);
+  }
+
+  const query = params.toString();
+  const res = await fetch(`${getBaseUrl()}/api/users/${username}${query ? `?${query}` : ""}`, {
     next: { revalidate: 60 },
   });
 
@@ -78,10 +94,18 @@ export async function generateMetadata({ params }: { params: Promise<{ username:
   };
 }
 
-export default async function ProfilePage({ params }: { params: Promise<{ username: string }> }) {
+export default async function ProfilePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ username: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { username } = await params;
+  const resolvedSearchParams = await searchParams;
+  const period = parseProfilePeriod(resolvedSearchParams.period);
   const [data, devices] = await Promise.all([
-    getProfileData(username),
+    getProfileData(username, period),
     getProfileDevices(username),
   ]);
 
@@ -90,7 +114,7 @@ export default async function ProfilePage({ params }: { params: Promise<{ userna
   }
 
   if (data.user?.username && data.user.username !== username) {
-    permanentRedirect(`/u/${data.user.username}`);
+    permanentRedirect(`/u/${data.user.username}${period === "all" ? "" : `?period=${period}`}`);
   }
 
   return <ProfilePageClient initialData={data} initialDevices={devices} username={username} />;

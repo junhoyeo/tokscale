@@ -691,8 +691,14 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
 }
 
 fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
-    if clients.split(", ").any(|client| client == "opencode") {
+    // Mirror the per-client normalization in `tui::data` (see the `msg.agent`
+    // branch there): copilot and opencode agent ids use bespoke normalizers,
+    // everything else falls back to the generic one. Keep these two in sync.
+    let has_client = |name: &str| clients.split(", ").any(|client| client == name);
+    if has_client("opencode") {
         sessions::normalize_opencode_agent_name(agent)
+    } else if has_client("copilot") {
+        sessions::normalize_copilot_agent_name(agent)
     } else {
         sessions::normalize_agent_name(agent)
     }
@@ -997,6 +1003,28 @@ mod tests {
             .find(|agent| agent.agent == "Prometheus")
             .unwrap();
         assert_eq!(prometheus.message_count, 1);
+    }
+
+    #[test]
+    fn test_normalize_cached_agents_merges_copilot_display_variants() {
+        // Copilot cached agent ids must go through normalize_copilot_agent_name
+        // (mirroring tui::data). Without the copilot branch in
+        // normalize_cached_agent_name, the raw "github.copilot.default" id would
+        // be left untouched (generic normalizer titlecases it differently) and
+        // would NOT merge with the "GitHub Copilot" display name.
+        let agents = normalize_cached_agents(vec![
+            cached_agent("github.copilot.default", "copilot", 10),
+            cached_agent("GITHUB.COPILOT.DEFAULT", "copilot", 20),
+        ]);
+
+        assert_eq!(agents.len(), 1);
+        let copilot = agents
+            .iter()
+            .find(|agent| agent.agent == "GitHub Copilot")
+            .unwrap();
+        assert_eq!(copilot.clients, "copilot");
+        assert_eq!(copilot.message_count, 2);
+        assert_eq!(copilot.tokens.input, 30);
     }
 
     // ── check_client_match ──────────────────────────────────────────

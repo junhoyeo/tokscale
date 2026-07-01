@@ -69,6 +69,7 @@ fn parse_usage_row(value: &Value, fallback_model: Option<&str>) -> Option<Unifie
         .filter(|text| !text.trim().is_empty())
         .map(|text| text.to_string())
         .unwrap_or_else(|| infer_provider(&model_id).to_string());
+    let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
 
     let input = to_safe_i64(value.get("input"));
     let output = to_safe_i64(value.get("output"));

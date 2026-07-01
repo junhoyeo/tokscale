@@ -117,3 +117,56 @@ async fn test_jcode_deduplicates_replayed_message_ids() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].tokens.input, 100);
 }
+
+/// Regression: when the snapshot replays a duplicate message id, the journal
+/// update for that id must target the *surviving* (first) occurrence, because
+/// downstream dedup is first-wins. A previous version built the merge index
+/// with `collect()`, which kept the *last* duplicate index — so the journal
+/// overwrote a row that dedup later discarded, preserving the stale first
+/// snapshot token_usage instead of the corrected journal value.
+#[tokio::test]
+async fn test_jcode_journal_corrects_replayed_snapshot_duplicate() {
+    let home_dir = tempfile::TempDir::new().unwrap();
+    let home = home_dir.path();
+
+    // Snapshot replays the same message id twice (stale token_usage = 100).
+    let session_body = r#"{
+  "id":"session_dup",
+  "provider_key":"openai",
+  "model":"jcode-test-model",
+  "messages":[
+    {"id":"assistant_replayed","role":"assistant","timestamp":"2026-06-16T00:00:01Z","token_usage":{"input_tokens":100,"output_tokens":10}},
+    {"id":"assistant_replayed","role":"assistant","timestamp":"2026-06-16T00:00:02Z","token_usage":{"input_tokens":100,"output_tokens":10}}
+  ]
+}"#;
+    let session_path = write_jcode_session(home, "session_dup.json", session_body);
+
+    // Journal carries the authoritative correction (input_tokens = 999) for
+    // the same message id.
+    let journal_path = session_path.with_file_name("session_dup.journal.jsonl");
+    fs::write(
+        &journal_path,
+        r#"{"append_messages":[{"id":"assistant_replayed","role":"assistant","timestamp":"2026-06-16T00:00:03Z","token_usage":{"input_tokens":999,"output_tokens":10}}]}
+"#,
+    )
+    .unwrap();
+
+    let messages = parse_local_unified_messages_with_pricing(
+        LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["jcode".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: ScannerSettings::default(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(messages.len(), 1);
+    // The journal correction must win over the stale snapshot duplicate.
+    assert_eq!(messages[0].tokens.input, 999);
+}

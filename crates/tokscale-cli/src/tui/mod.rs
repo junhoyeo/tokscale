@@ -1,15 +1,18 @@
 mod app;
 mod cache;
 pub mod client_ui;
+pub(crate) mod codex_login;
 mod colors;
 pub mod config;
 pub mod data;
 mod event;
 mod export;
+mod keymap;
+pub(crate) mod privacy;
 pub mod remote;
 pub mod settings;
 mod themes;
-mod ui;
+pub(crate) mod ui;
 
 pub use app::{App, Tab, TuiConfig};
 pub use cache::{

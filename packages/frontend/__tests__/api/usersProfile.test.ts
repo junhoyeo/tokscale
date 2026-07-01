@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const selectResults: Array<Array<Record<string, unknown>>> = [];
   const executeResults: Array<Array<Record<string, unknown>>> = [];
@@ -35,6 +37,7 @@ const mockState = vi.hoisted(() => {
       submissionId: "dailyBreakdown.submissionId",
       date: "dailyBreakdown.date",
       timestampMs: "dailyBreakdown.timestampMs",
+      activeTimeMs: "dailyBreakdown.activeTimeMs",
       tokens: "dailyBreakdown.tokens",
       cost: "dailyBreakdown.cost",
       inputTokens: "dailyBreakdown.inputTokens",
@@ -47,6 +50,7 @@ const mockState = vi.hoisted(() => {
   const desc = vi.fn(() => "desc");
   const and = vi.fn(() => "and");
   const gte = vi.fn(() => "gte");
+  const lte = vi.fn(() => "lte");
   const sql = Object.assign(
     vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({
       strings: Array.from(strings),
@@ -88,6 +92,7 @@ const mockState = vi.hoisted(() => {
     desc,
     and,
     gte,
+    lte,
     sql,
     reset() {
       selectResults.length = 0;
@@ -99,6 +104,7 @@ const mockState = vi.hoisted(() => {
       desc.mockClear();
       and.mockClear();
       gte.mockClear();
+      lte.mockClear();
       sql.mockClear();
       sql.raw.mockClear();
     },
@@ -147,6 +153,7 @@ vi.mock("drizzle-orm", () => ({
   sql: mockState.sql,
   and: mockState.and,
   gte: mockState.gte,
+  lte: mockState.lte,
 }));
 
 type ModuleExports = typeof import("../../src/app/api/users/[username]/route");
@@ -257,6 +264,44 @@ describe("GET /api/users/[username]", () => {
 
     expect(response.status).toBe(200);
     expect(body.user.username).toBe("ImLunaHey");
+  });
+
+  it("casts total_cost at full column precision in the profile stats query", async () => {
+    mockState.pushSelectResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 0,
+        totalCost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 0,
+        earliestDate: null,
+        latestDate: null,
+      },
+    ]);
+    mockState.pushSelectResult([]);
+    mockState.pushSelectResult([]);
+    mockState.pushExecuteResult([]);
+
+    await GET(
+      new Request("http://localhost:3000/api/users/alice"),
+      { params: Promise.resolve({ username: "alice" }) }
+    );
+
+    // submissions.total_cost is decimal(18,4); a narrower cast overflows for a
+    // profile whose lifetime cost has grown past the narrowed ceiling.
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 
   it("rejects ambiguous case-insensitive username matches", async () => {
@@ -430,6 +475,141 @@ describe("GET /api/users/[username]", () => {
         percentage: 100,
       }),
     ]);
+  });
+
+  it("recalculates profile overview stats from daily rows for rolling periods", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-28T12:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 1000,
+        totalCost: 10,
+        inputTokens: 600,
+        outputTokens: 400,
+        cacheReadTokens: 100,
+        cacheCreationTokens: 50,
+        reasoningTokens: 25,
+        submissionCount: 3,
+        earliestDate: "2026-01-01",
+        latestDate: "2026-06-28",
+        totalActiveTimeMs: 1200000,
+        sessionCount: 8,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        sourcesUsed: ["codex", "claude"],
+        modelsUsed: ["gpt-5.5", "claude-sonnet-4-5"],
+        updatedAt: new Date("2026-06-28T10:00:00.000Z"),
+        cliVersion: "2.0.0",
+        schemaVersion: 2,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        date: "2026-06-22",
+        timestampMs: 100,
+        activeTimeMs: 300000,
+        tokens: 200,
+        cost: "2.0000",
+        inputTokens: 120,
+        outputTokens: 80,
+        sourceBreakdown: {
+          codex: {
+            tokens: 200,
+            cost: 2,
+            input: 120,
+            output: 80,
+            cacheRead: 30,
+            cacheWrite: 10,
+            reasoning: 5,
+            messages: 2,
+            models: {
+              "gpt-5.5": {
+                tokens: 200,
+                cost: 2,
+                input: 120,
+                output: 80,
+                cacheRead: 30,
+                cacheWrite: 10,
+                reasoning: 5,
+                messages: 2,
+              },
+            },
+          },
+        },
+      },
+      {
+        date: "2026-06-28",
+        timestampMs: 200,
+        activeTimeMs: 600000,
+        tokens: 300,
+        cost: "3.0000",
+        inputTokens: 180,
+        outputTokens: 120,
+        sourceBreakdown: {
+          claude: {
+            tokens: 300,
+            cost: 3,
+            input: 180,
+            output: 120,
+            cacheRead: 40,
+            cacheWrite: 20,
+            reasoning: 10,
+            messages: 3,
+            models: {
+              "claude-sonnet-4-5": {
+                tokens: 300,
+                cost: 3,
+                input: 180,
+                output: 120,
+                cacheRead: 40,
+                cacheWrite: 20,
+                reasoning: 10,
+                messages: 3,
+              },
+            },
+          },
+        },
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: 4 }]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/users/alice?period=week"),
+      { params: Promise.resolve({ username: "alice" }) }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockState.gte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, "2026-06-22");
+    expect(mockState.lte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, "2026-06-28");
+    expect(body.period).toBe("week");
+    expect(body.dateRange).toEqual({ start: "2026-06-22", end: "2026-06-28" });
+    expect(body.stats).toEqual(expect.objectContaining({
+      totalTokens: 500,
+      totalCost: 5,
+      inputTokens: 300,
+      outputTokens: 200,
+      cacheReadTokens: 70,
+      cacheWriteTokens: 30,
+      reasoningTokens: 15,
+      activeDays: 2,
+      totalActiveTimeMs: 900000,
+      sessionCount: 0,
+    }));
+    expect(body.clients).toEqual(["codex", "claude"]);
+    expect(body.models).toEqual(["gpt-5.5", "claude-sonnet-4-5"]);
   });
 
   it("returns submission freshness metadata for the latest submission", async () => {

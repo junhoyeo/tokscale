@@ -6,7 +6,7 @@
 
 use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -54,11 +54,12 @@ struct JcodeTokenUsage {
 
 fn provider_id(provider_key: Option<&str>) -> String {
     let provider = provider_key.unwrap_or("jcode").trim();
-    if provider.is_empty() {
+    let provider = if provider.is_empty() {
         "jcode".to_string()
     } else {
         provider.to_string()
-    }
+    };
+    provider_identity::canonical_provider(&provider).unwrap_or(provider)
 }
 
 fn model_id(model: Option<&str>) -> String {
@@ -124,9 +125,17 @@ impl JcodeSessionContext {
     }
 }
 
-fn jcode_journal_path(path: &Path) -> std::path::PathBuf {
+/// Resolve the append-only journal sidecar path for a Jcode session snapshot.
+///
+/// Jcode persists recent changes in `session_*.journal.jsonl` until the next
+/// checkpoint rewrites the snapshot. This is the single source of truth for the
+/// snapshot→journal mapping; `message_cache.rs` reuses it so the parser and the
+/// cache-fingerprint logic can never disagree about which sidecar to read.
+pub(crate) fn jcode_journal_path(path: &Path) -> std::path::PathBuf {
     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return path.with_extension("journal.jsonl");
+        let mut os = std::ffi::OsString::from(path.as_os_str());
+        os.push(".journal.jsonl");
+        return std::path::PathBuf::from(os);
     };
     let journal_name = file_name
         .strip_suffix(".json")
@@ -216,6 +225,28 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
         "snapshot",
     );
 
+    // Track where each dedup_key landed in `parsed`. The journal is written
+    // after the snapshot, so a journal entry that repeats a snapshotted
+    // message_id carries the *authoritative* (updated) token_usage. The
+    // downstream dedup (`should_keep_deduped_message`) keeps the FIRST
+    // occurrence per dedup_key, so emitting the snapshot then appending the
+    // journal would silently drop the journal's correction. Instead, replace
+    // the snapshot entry in place when the journal repeats its id — journal
+    // wins, and the message_id still collapses to exactly one entry.
+    // Downstream dedup is first-wins, so when the snapshot itself replays a
+    // duplicate dedup_key we must map the key to its FIRST index — that's the
+    // entry that survives dedup. Mapping to the last index would let a journal
+    // update overwrite a row that is later discarded, preserving the stale
+    // first snapshot row. `collect()` keeps the last insertion, so build the
+    // map explicitly with `or_insert` to keep the first.
+    let mut index_by_dedup_key: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (idx, message) in parsed.iter().enumerate() {
+        if let Some(key) = message.dedup_key.clone() {
+            index_by_dedup_key.entry(key).or_insert(idx);
+        }
+    }
+
     let journal_path = jcode_journal_path(path);
     if let Ok(file) = std::fs::File::open(&journal_path) {
         use std::io::{BufRead, BufReader};
@@ -234,12 +265,33 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
             if let Some(meta) = entry.meta {
                 context.apply_meta(meta);
             }
-            parsed.extend(parse_jcode_messages(
+            let journal_messages = parse_jcode_messages(
                 entry.append_messages,
                 &mut context,
                 journal_fallback_timestamp,
                 &format!("journal:{line_index}"),
-            ));
+            );
+            for mut message in journal_messages {
+                match message
+                    .dedup_key
+                    .as_ref()
+                    .and_then(|key| index_by_dedup_key.get(key).copied())
+                {
+                    Some(existing_index) => {
+                        // Preserve the snapshot's turn-start flag: turn structure
+                        // is derived from snapshot ordering, while the journal only
+                        // carries the corrected token_usage for this message_id.
+                        message.is_turn_start = parsed[existing_index].is_turn_start;
+                        parsed[existing_index] = message;
+                    }
+                    None => {
+                        if let Some(key) = message.dedup_key.clone() {
+                            index_by_dedup_key.insert(key, parsed.len());
+                        }
+                        parsed.push(message);
+                    }
+                }
+            }
         }
     }
 
@@ -401,6 +453,120 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].timestamp, snapshot_fallback);
         assert_eq!(messages[1].timestamp, journal_fallback);
+    }
+
+    #[test]
+    fn journal_update_for_snapshotted_id_wins_and_collapses_to_one_entry() {
+        // The snapshot persists an in-flight assistant message with partial
+        // token_usage; the next checkpoint hasn't rewritten the snapshot yet, so
+        // the journal carries the SAME message_id with the final (larger)
+        // token_usage. The journal value must win and the message_id must
+        // collapse to exactly one entry (no double-counting).
+        let dir = tempfile::TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        std::fs::write(
+            &snapshot,
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[
+    {"id":"assistant_live","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":100,"output_tokens":10}}
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("session_test.journal.jsonl"),
+            r#"{"append_messages":[{"id":"assistant_live","role":"assistant","timestamp":"2026-06-16T12:00:05Z","token_usage":{"input_tokens":900,"output_tokens":300,"cache_read_input_tokens":40}}]}
+"#,
+        )
+        .unwrap();
+
+        let messages = parse_jcode_file(&snapshot);
+        // Exactly one entry for the repeated id (no double-counting).
+        assert_eq!(messages.len(), 1);
+        // Journal value wins over the stale snapshot value.
+        assert_eq!(messages[0].tokens.input, 900);
+        assert_eq!(messages[0].tokens.output, 300);
+        assert_eq!(messages[0].tokens.cache_read, 40);
+    }
+
+    #[test]
+    fn journal_update_replaces_value_after_downstream_dedup() {
+        // Mirror the lib.rs dedup contract: should_keep_deduped_message keeps the
+        // FIRST occurrence per dedup_key. The in-parser merge must therefore have
+        // already replaced the snapshot value in place, so the surviving entry
+        // carries the journal's token_usage even after downstream dedup.
+        use std::collections::HashSet;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        std::fs::write(
+            &snapshot,
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[
+    {"id":"assistant_live","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":100,"output_tokens":10}}
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("session_test.journal.jsonl"),
+            r#"{"append_messages":[{"id":"assistant_live","role":"assistant","timestamp":"2026-06-16T12:00:05Z","token_usage":{"input_tokens":900,"output_tokens":300}}]}
+"#,
+        )
+        .unwrap();
+
+        let messages = parse_jcode_file(&snapshot);
+        let mut seen: HashSet<String> = HashSet::new();
+        let deduped: Vec<_> = messages
+            .into_iter()
+            .filter(|message| {
+                message
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|key| seen.insert(key.clone()))
+            })
+            .collect();
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].tokens.input, 900);
+        assert_eq!(deduped[0].tokens.output, 300);
+    }
+
+    #[test]
+    fn parses_timezone_less_timestamps_instead_of_falling_back_to_mtime() {
+        // Jcode (and proxy variants) sometimes emit naive ISO-8601 datetimes
+        // with no `Z`/offset. These must parse as UTC, not collapse to the
+        // file mtime (which would scatter the message into the wrong bucket).
+        let dir = tempfile::TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        std::fs::write(
+            &snapshot,
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[
+    {"id":"assistant_naive","role":"assistant","timestamp":"2026-06-16T12:00:00","token_usage":{"input_tokens":100,"output_tokens":10}}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        // Force a clearly-different mtime so a fallback would be detectable.
+        let mtime =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&snapshot) {
+            let _ = file.set_modified(mtime);
+        }
+        let fallback = file_modified_timestamp_ms(&snapshot);
+
+        let messages = parse_jcode_file(&snapshot);
+        assert_eq!(messages.len(), 1);
+        // "2026-06-16T12:00:00" UTC == 1781611200000 ms.
+        assert_eq!(messages[0].timestamp, 1_781_611_200_000);
+        assert_ne!(messages[0].timestamp, fallback);
     }
 
     #[test]

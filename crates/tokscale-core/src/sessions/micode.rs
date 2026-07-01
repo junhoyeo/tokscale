@@ -1,14 +1,14 @@
 //! MiMo Code session parser
 //!
 //! Parses messages from:
-//! - SQLite database: ~/.local/share/micode/mimocode.db
+//! - SQLite database: ~/.local/share/mimocode/mimocode.db
 
 use super::utils::open_readonly_sqlite;
 use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
 };
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -130,8 +130,26 @@ fn merge_duplicate_workspace(
     }
 }
 
+/// Normalize an epoch `time.created`/`time.completed` value to milliseconds.
+///
+/// MiMo Code is expected to store epoch milliseconds (matching OpenCode), but
+/// some builds/channels have been observed writing epoch *seconds*, which made
+/// dates land ~1000x in the past (1970-era). A recent epoch is ~1.7e12 in ms
+/// versus ~1.7e9 in seconds, so a value at/under the `1e12` threshold is
+/// treated as seconds and scaled up. This mirrors `timestamp_secs_to_ms` in the
+/// goose/hermes parsers.
+fn micode_timestamp_to_ms(timestamp: f64) -> f64 {
+    if timestamp > 1e12 {
+        timestamp
+    } else {
+        timestamp * 1000.0
+    }
+}
+
 fn micode_duration_ms(time: &MiMoCodeTime) -> Option<i64> {
-    let duration = time.completed? - time.created;
+    // Normalize both endpoints so a seconds/ms mismatch (or both-in-seconds)
+    // still yields a millisecond duration rather than a value 1000x too small.
+    let duration = micode_timestamp_to_ms(time.completed?) - micode_timestamp_to_ms(time.created);
     if duration.is_finite() && duration > 0.0 {
         Some(duration as i64)
     } else {
@@ -184,6 +202,15 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let mut fingerprint_indices: HashMap<MiMoCodeSqliteFingerprint, usize> = HashMap::new();
     let mut dedup_states: Vec<MiMoCodeSqliteDedupState> = Vec::new();
 
+    // Namespace ONLY the row-id fallback by the database. MiMo Code uses
+    // channel-suffixed databases (mimocode.db and mimocode-<channel>.db), and a
+    // mid-session channel switch can write the SAME message to both files. The
+    // embedded message id is globally unique, so it must stay un-namespaced to
+    // collapse those duplicates across files. SQLite rowids, by contrast, are
+    // per-database and not globally unique, so the fallback path namespaces them
+    // to avoid falsely merging two different messages that share a rowid.
+    let db_namespace = db_path.to_string_lossy().to_string();
+
     for row_result in rows {
         let (row_id, session_id, data_json, row_workspace_root) = match row_result {
             Ok(r) => r,
@@ -218,6 +245,8 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         };
 
         let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
+        let provider_id =
+            provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
         let agent_or_mode = msg.mode.or(msg.agent);
         let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
         let input = tokens.input.max(0);
@@ -227,10 +256,21 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let cache_read = cache.read.max(0);
         let cache_write = cache.write.max(0);
         let cost = msg.cost.unwrap_or(0.0).max(0.0);
-        let dedup_key = message_id.clone().unwrap_or(row_id);
+        // Normalize epoch values to milliseconds up front so the timestamp, the
+        // dedup fingerprint, and the duration all agree even when MiMo writes
+        // seconds instead of milliseconds.
+        let created_ms = micode_timestamp_to_ms(msg.time.created);
+        let completed_ms = msg.time.completed.map(micode_timestamp_to_ms);
+        let dedup_key = match message_id.clone() {
+            // Embedded ids are globally unique: keep them un-namespaced so the
+            // same message in mimocode.db and mimocode-<channel>.db collapses.
+            Some(id) => id,
+            // Rowids are per-database: namespace to avoid false cross-DB merges.
+            None => format!("{db_namespace}:{row_id}"),
+        };
         let fingerprint = MiMoCodeSqliteFingerprint {
-            created_bits: msg.time.created.to_bits(),
-            completed_bits: msg.time.completed.map(f64::to_bits),
+            created_bits: created_ms.to_bits(),
+            completed_bits: completed_ms.map(f64::to_bits),
             model_id: model_id.clone(),
             provider_id: provider_id.clone(),
             input,
@@ -247,9 +287,10 @@ pub fn parse_micode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             model_id,
             provider_id,
             session_id,
-            // `time.created` is epoch milliseconds (matching OpenCode);
+            // `time.created` is normalized to epoch milliseconds above (MiMo
+            // matches OpenCode's ms, but some channels write seconds);
             // UnifiedMessage's timestamp_to_date treats it as ms.
-            msg.time.created as i64,
+            created_ms as i64,
             TokenBreakdown {
                 input,
                 output,
@@ -383,7 +424,118 @@ mod tests {
 
         let messages = parse_micode_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key, Some("msg_assistant".to_string()));
+        // This message carries no embedded JSON id, so the dedup key falls back
+        // to the SQLite row id and is namespaced by the database path.
+        assert!(messages[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":msg_assistant")));
+    }
+
+    /// Regression: MiMo Code uses channel-suffixed databases (mimocode.db and
+    /// mimocode-<channel>.db). A mid-session channel switch can write the SAME
+    /// message (same embedded id) to both files. The embedded id must NOT be
+    /// namespaced by the database, otherwise the cross-file dedup set produces
+    /// two distinct keys and the message's cost + tokens get counted twice.
+    #[test]
+    fn embedded_message_id_is_not_namespaced_by_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_a = dir.path().join("mimocode.db");
+        let db_b = dir.path().join("mimocode-beta.db");
+        // Embedded JSON "id" is the globally unique message id.
+        let msg = r#"{
+            "id": "msg_shared",
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 10, "output": 5 },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        // Different SQLite row ids prove the collapse is driven by the embedded
+        // id (not the row id), exactly as a mid-session channel switch records.
+        for (db, row_id) in [(&db_a, "row_a"), (&db_b, "row_b")] {
+            let conn = create_micode_sqlite_db(db);
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, "ses_1", msg],
+            )
+            .unwrap();
+            drop(conn);
+        }
+
+        let a = parse_micode_sqlite(&db_a);
+        let b = parse_micode_sqlite(&db_b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        // Same embedded id across both channel databases yields IDENTICAL,
+        // un-namespaced dedup keys, so a shared dedup set collapses the
+        // duplicate to a single count.
+        assert_eq!(a[0].dedup_key, Some("msg_shared".to_string()));
+        assert_eq!(b[0].dedup_key, Some("msg_shared".to_string()));
+
+        // Prove the collapse end-to-end with the same HashSet logic used by the
+        // cross-file aggregation in lib.rs.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let kept: Vec<_> = a
+            .into_iter()
+            .chain(b)
+            .filter(|m| m.dedup_key.as_ref().is_none_or(|k| seen.insert(k.clone())))
+            .collect();
+        assert_eq!(kept.len(), 1, "shared embedded id must be counted once");
+    }
+
+    /// Two DIFFERENT messages that happen to share a SQLite rowid across two
+    /// databases (rowids are per-database, not globally unique) must NOT be
+    /// collapsed by the cross-file dedup set. The row-id fallback path is
+    /// namespaced by database precisely to keep them distinct.
+    #[test]
+    fn rowid_fallback_is_namespaced_by_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_a = dir.path().join("a.db");
+        let db_b = dir.path().join("b.db");
+        // No embedded "id" field -> the parser falls back to the SQLite rowid.
+        let msg = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 10, "output": 5 },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        for db in [&db_a, &db_b] {
+            let conn = create_micode_sqlite_db(db);
+            // Same SQLite row id ("id" column) in both databases. With no
+            // embedded JSON id, the parser falls back to this row id.
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["row_shared", "ses_1", msg],
+            )
+            .unwrap();
+            drop(conn);
+        }
+
+        let a = parse_micode_sqlite(&db_a);
+        let b = parse_micode_sqlite(&db_b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        // Same row id ("row_shared") in two databases must yield DISTINCT,
+        // db-namespaced keys so the two unrelated messages are not merged.
+        assert_ne!(a[0].dedup_key, b[0].dedup_key);
+        assert!(a[0].dedup_key.as_deref().unwrap().ends_with(":row_shared"));
+        assert!(b[0].dedup_key.as_deref().unwrap().ends_with(":row_shared"));
+
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let kept: Vec<_> = a
+            .into_iter()
+            .chain(b)
+            .filter(|m| m.dedup_key.as_ref().is_none_or(|k| seen.insert(k.clone())))
+            .collect();
+        assert_eq!(
+            kept.len(),
+            2,
+            "rowid collisions across DBs must stay distinct"
+        );
     }
 
     #[test]
@@ -560,6 +712,150 @@ mod tests {
         let messages = parse_micode_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent, Some("Build".to_string()));
+    }
+
+    /// Regression for PR #710: `time.created` was hard-assumed to be epoch
+    /// milliseconds. If MiMo writes epoch *seconds*, the date landed ~1000x in
+    /// the past (1970-era). A ms-valued and a seconds-valued `time.created` that
+    /// denote the SAME instant must normalize to the same date and the same
+    /// (millisecond-scale) timestamp. Without `micode_timestamp_to_ms`, the
+    /// seconds variant would yield 1970-01-20 instead of 2023-11-14.
+    #[test]
+    fn test_parse_micode_sqlite_normalizes_seconds_and_milliseconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_ms = dir.path().join("ms.db");
+        let db_secs = dir.path().join("secs.db");
+
+        // 1_700_000_000 s == 1_700_000_000_000 ms == 2023-11-14T22:13:20Z.
+        let msg_ms = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 10, "output": 5 },
+            "time": { "created": 1700000000000.0, "completed": 1700000001234.0 }
+        }"#;
+        // Same instant, expressed in epoch SECONDS (the bugged-input shape).
+        let msg_secs = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 10, "output": 5 },
+            "time": { "created": 1700000000.0, "completed": 1700000001.234 }
+        }"#;
+
+        for (db, data) in [(&db_ms, msg_ms), (&db_secs, msg_secs)] {
+            let conn = create_micode_sqlite_db(db);
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["msg_1", "ses_1", data],
+            )
+            .unwrap();
+            drop(conn);
+        }
+
+        let ms = parse_micode_sqlite(&db_ms);
+        let secs = parse_micode_sqlite(&db_secs);
+        assert_eq!(ms.len(), 1);
+        assert_eq!(secs.len(), 1);
+
+        // Both inputs resolve to the SAME instant: identical timestamp (ms) and
+        // identical, non-empty (i.e. not 1970-era-then-formatted) date.
+        assert_eq!(ms[0].timestamp, 1_700_000_000_000);
+        assert_eq!(secs[0].timestamp, 1_700_000_000_000);
+        assert_eq!(ms[0].date, secs[0].date);
+        assert!(!ms[0].date.is_empty());
+
+        // Duration is in milliseconds for BOTH representations (~1234 ms), not
+        // ~1 (which is what the seconds input would have produced unnormalized).
+        assert_eq!(ms[0].duration_ms, Some(1234));
+        assert_eq!(secs[0].duration_ms, Some(1234));
+    }
+
+    /// A non-object `path` field (e.g. a bare string instead of `{ "root": .. }`)
+    /// must not crash deserialization or fail the whole message: the custom
+    /// `deserialize_micode_path` extracts `root` defensively, leaving it `None`.
+    /// The message must still parse and have no embedded-path workspace.
+    #[test]
+    fn test_parse_micode_sqlite_non_object_path_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_micode.db");
+        let conn = create_micode_sqlite_db(&db_path);
+
+        // `path` is a string, not an object — the deserializer's `.get("root")`
+        // returns None rather than erroring, so the message survives.
+        let data_json = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 100, "output": 50 },
+            "path": "/some/string/not/an/object",
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg_badpath", "ses_001", data_json],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_micode_sqlite(&db_path);
+        assert_eq!(
+            messages.len(),
+            1,
+            "non-object path must not drop the message"
+        );
+        assert_eq!(messages[0].tokens.input, 100);
+        // No usable root -> no workspace derived from the embedded path.
+        assert_eq!(messages[0].workspace_key, None);
+        assert_eq!(messages[0].workspace_label, None);
+    }
+
+    /// Legacy-query fallback: when the database has no `session` table, the
+    /// modern query (which JOINs `session`) fails to prepare and the parser
+    /// falls back to `legacy_query`. In that path `workspace_root` from the row
+    /// is NULL, so the workspace must come from the message's EMBEDDED `path.root`.
+    #[test]
+    fn test_parse_micode_sqlite_legacy_fallback_embedded_path_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_micode.db");
+        // Note: create_micode_sqlite_db creates ONLY the `message` table, so the
+        // modern query's `LEFT JOIN session` cannot prepare and we exercise the
+        // legacy fallback.
+        let conn = create_micode_sqlite_db(&db_path);
+
+        let data_json = r#"{
+            "role": "assistant",
+            "modelID": "mimo-v2.5-pro",
+            "providerID": "mimo",
+            "cost": 0.05,
+            "tokens": { "input": 100, "output": 50 },
+            "path": { "root": "/Users/bob/embedded-repo" },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg_embedded", "ses_001", data_json],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_micode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        // Row workspace_root is NULL on the legacy path, so the embedded
+        // `path.root` supplies the workspace.
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/Users/bob/embedded-repo")
+        );
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("embedded-repo")
+        );
     }
 
     #[test]

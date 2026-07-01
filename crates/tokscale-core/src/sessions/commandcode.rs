@@ -14,21 +14,23 @@
 //! Code's server-reported usage, which reflects tool-output truncation and
 //! auxiliary model runs (e.g. tool-desc, taste-1) absent from the transcript.
 //!
-//! **Input estimation is an intentional upper-bound approximation.**
-//! Because Command Code re-sends the full conversation history on every request
-//! and stores no local token counts, input is estimated from the *cumulative*
-//! conversation context (all prior messages) preceding each assistant response,
-//! and is attributed entirely as fresh (non-cached) input (`cache_read = 0`).
-//! Whether re-sent context should instead be attributed to `cache_read` is a
-//! maintainer decision that requires knowledge of Command Code's real billing
-//! model, which is not available from the on-disk transcript. As a consequence,
-//! **cost for long sessions is an over-estimate**: reported input grows with
-//! cumulative context length, so a session with N turns will over-count input
-//! tokens compared to what Command Code actually bills. This is deliberate:
-//! the over-estimate is clearly bounded and avoids under-reporting on the
-//! leaderboard. Do not silently change the estimation model without a
-//! corresponding update to this doc-comment and the pinning test
-//! `test_commandcode_input_is_cumulative_context_upper_bound`.
+//! **Input estimation is per-turn, not cumulative.**
+//! Command Code stores no local token counts and re-sends prior context on each
+//! request, but the on-disk transcript does not say how much of that context is
+//! cached versus re-billed. Each assistant turn's input is therefore estimated
+//! from only the *new* context that turn introduced — the user prompt plus any
+//! tool results since the previous assistant response — and attributed entirely
+//! as fresh (non-cached) input (`cache_read = 0`). Counting the *cumulative*
+//! conversation context on every turn instead (the previous behavior) grows the
+//! per-turn input across the session, costs O(N^2) characters scanned for an
+//! N-turn session, and inflates reported input far beyond comparable clients.
+//! The per-turn delta sums to each message's own content exactly once across the
+//! whole session, which is the same accounting other estimated clients use.
+//! Whether re-sent context should be attributed to `cache_read` remains a
+//! maintainer decision requiring Command Code's real billing model, which is not
+//! available from the transcript. Do not silently change the estimation model
+//! without a corresponding update to this doc-comment and the pinning test
+//! `test_commandcode_input_is_per_turn_delta`.
 //!
 //! Output is estimated from the assistant message's own content. The model id
 //! is not stored per message, so it is read from `~/.commandcode/config.json`
@@ -77,7 +79,17 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
     };
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    let model_id = model_from_config(path)
+    let raw_model = model_from_config(path);
+    // Recover the real provider from the configured gateway id (e.g.
+    // `MiniMaxAI/MiniMax-M3-Free` -> `minimax`) so pricing resolves to that
+    // provider's catalog. The client's own `command-code` provider is not a
+    // pricing provider, so without this a MiniMax model would never reach a
+    // `minimax/...` key. Falls back to `command-code` when nothing is inferred.
+    let provider_id = raw_model
+        .as_deref()
+        .and_then(provider_hint_for_model)
+        .unwrap_or(PROVIDER_ID);
+    let model_id = raw_model
         .map(|model| canonicalize_model(&model))
         .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
     let session_id_from_path = session_id_from_path(path);
@@ -86,10 +98,13 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let mut messages = Vec::new();
     let mut session_id: Option<String> = None;
-    // Running char count of the conversation context seen so far. This stands in
-    // for the input (prompt) tokens sent on each request, which Command Code
-    // re-sends in full every turn.
-    let mut context_chars: usize = 0;
+    // Char count of the *new* context added since the previous assistant
+    // response (the user prompt plus any tool results for this turn). This
+    // stands in for the input (prompt) tokens of the current request without
+    // re-counting the entire conversation history every turn — counting the
+    // cumulative context instead grows the per-turn input across the session
+    // (O(N^2) total) and inflates input versus other clients.
+    let mut turn_input_chars: usize = 0;
     // The first assistant message after a user message starts a new turn.
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
@@ -120,11 +135,12 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
         match entry.role.as_deref() {
             Some("assistant") => {
-                let input = estimate_tokens(context_chars);
+                let input = estimate_tokens(turn_input_chars);
                 let output = estimate_tokens(chars);
-                // Context the model received to produce this response includes
-                // everything before it, not its own output.
-                context_chars += chars;
+                // This turn's input has been consumed; the next turn's input is
+                // only the *new* context that follows this response. The
+                // assistant's own output is not part of any input estimate.
+                turn_input_chars = 0;
 
                 if input + output == 0 {
                     pending_turn_start = false;
@@ -143,7 +159,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 let mut message = UnifiedMessage::new_with_dedup(
                     CLIENT_ID,
                     model_id.clone(),
-                    PROVIDER_ID,
+                    provider_id,
                     resolved_session.clone(),
                     timestamp,
                     TokenBreakdown {
@@ -166,12 +182,12 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
             }
             Some("user") => {
                 pending_turn_start = true;
-                context_chars += chars;
+                turn_input_chars += chars;
             }
-            // Tool results (and any other roles) are part of the context the
-            // model sees on subsequent turns.
+            // Tool results (and any other roles) are part of the new context the
+            // model sees on the next turn.
             _ => {
-                context_chars += chars;
+                turn_input_chars += chars;
             }
         }
     }
@@ -203,20 +219,41 @@ fn estimate_tokens(chars: usize) -> i64 {
 }
 
 /// Canonicalize the configured model id for pricing. Command Code reports
-/// gateway ids such as `MiniMaxAI/MiniMax-M3-Free`; the `MiniMaxAI/` org prefix
-/// steers tokscale's pricing resolver to the wrong model and the `-Free` suffix
-/// is a temporary promo. Stripping both yields the real paid model (e.g.
-/// `MiniMax-M3`), so the cost estimate reflects what the tokens actually cost.
+/// gateway ids such as `MiniMaxAI/MiniMax-M3-Free`; the `-Free` suffix is a
+/// temporary promo and the org prefix is not a key tokscale's pricing resolver
+/// recognizes verbatim. Dropping the org segment yields the real paid model
+/// (e.g. `MiniMax-M3`) so output pricing resolves; the provider hint that the
+/// org segment carried (e.g. `minimax`) is recovered separately by
+/// [`provider_hint_for_model`] and applied to `provider_id`, so pricing keys
+/// like `minimax/minimax-m3` are still reached.
 fn canonicalize_model(model: &str) -> String {
     let base = model.rsplit('/').next().unwrap_or(model);
+    // Char-safe, case-insensitive suffix strip. The original code byte-sliced
+    // `base[base.len() - N..]` guarded only by a length check, which panics on a
+    // non-ASCII model id from the untrusted `~/.commandcode/config.json` when
+    // the byte index lands mid-codepoint. `-free` is pure ASCII, so when the
+    // lowercased tail matches, the matched bytes are guaranteed ASCII and
+    // `base.len() - PROMO_SUFFIX.len()` is a valid char boundary.
     const PROMO_SUFFIX: &str = "-free";
     if base.len() > PROMO_SUFFIX.len()
-        && base[base.len() - PROMO_SUFFIX.len()..].eq_ignore_ascii_case(PROMO_SUFFIX)
+        && base
+            .get(base.len() - PROMO_SUFFIX.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(PROMO_SUFFIX))
     {
         base[..base.len() - PROMO_SUFFIX.len()].to_string()
     } else {
         base.to_string()
     }
+}
+
+/// Recover the provider hint that the configured model id carries (e.g.
+/// `MiniMaxAI/MiniMax-M3-Free` -> `minimax`) so pricing resolves to the real
+/// provider's catalog. Command Code's own `command-code` provider id is not a
+/// pricing provider, so without this hint a MiniMax model would never reach a
+/// `minimax/...` pricing key. Returns `None` when no known provider can be
+/// inferred, leaving the default `command-code` provider in place.
+fn provider_hint_for_model(model: &str) -> Option<&'static str> {
+    crate::provider_identity::inferred_provider_from_model(model)
 }
 
 fn parse_rfc3339_ms(timestamp: &str) -> Option<i64> {
@@ -290,6 +327,23 @@ mod tests {
         );
         assert_eq!(canonicalize_model("MiniMaxAI/MiniMax-M2.5"), "MiniMax-M2.5");
         assert_eq!(canonicalize_model("taste-1"), "taste-1");
+        // Mixed-case promo suffix is still stripped (case-insensitive match).
+        assert_eq!(canonicalize_model("MiniMax-M3-FrEe"), "MiniMax-M3");
+    }
+
+    /// Regression: a non-ASCII model id from the untrusted
+    /// `~/.commandcode/config.json` must not panic. The previous implementation
+    /// byte-sliced `base[base.len() - 5..]` guarded only by a length check; for
+    /// an id whose final 5 bytes straddle a multi-byte UTF-8 codepoint that
+    /// slice panics (byte index not on a char boundary).
+    #[test]
+    fn test_canonicalize_model_does_not_panic_on_non_ascii() {
+        // "modèle" ends with the multi-byte 'è' inside the last 5 bytes.
+        assert_eq!(canonicalize_model("vendor/modèle"), "modèle");
+        // Emoji at the tail: last bytes are deep inside a 4-byte codepoint.
+        assert_eq!(canonicalize_model("café-🚀"), "café-🚀");
+        // A non-ASCII id that nonetheless ends in the promo suffix still strips.
+        assert_eq!(canonicalize_model("café-free"), "café");
     }
 
     #[test]
@@ -320,7 +374,9 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.client, "commandcode");
-        assert_eq!(msg.provider_id, "command-code");
+        // Provider is recovered from the gateway id (MiniMaxAI -> minimax) so
+        // pricing resolves against the `minimax/...` catalog, not `command-code`.
+        assert_eq!(msg.provider_id, "minimax");
         // Promo suffix + org prefix stripped so pricing hits the real model.
         assert_eq!(msg.model_id, "MiniMax-M3");
         assert_eq!(msg.session_id, "sess-1");
@@ -339,20 +395,25 @@ mod tests {
         assert_eq!(msg.workspace_label.as_deref(), Some("users-alice-repo"));
     }
 
+    /// Per-turn input does NOT accumulate prior turns: each assistant turn is
+    /// charged only for the new context (user + tool results) introduced since
+    /// the previous response. A long, expensive turn must not permanently
+    /// inflate later, cheaper turns — the previous cumulative implementation
+    /// would have made turn 2 strictly larger than turn 1 here, so this test
+    /// fails without the per-turn-delta fix.
     #[test]
-    fn test_input_grows_with_cumulative_context() {
+    fn test_input_is_per_turn_delta_not_cumulative() {
         let dir = TempDir::new().unwrap();
         write_config(&dir, "model-x");
-        // Two turns; the second assistant's input must include all prior text
-        // (user1 + assistant1 + tool result + user2), so it exceeds the first.
+        // Turn 1 carries a large user prompt; turn 2 carries only a tiny one.
+        // With cumulative counting turn 2 would still include all of turn 1 and
+        // therefore exceed it; with per-turn deltas turn 2 is much smaller.
         let jsonl = concat!(
-            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"aaaa"}]}"#,
+            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
             "\n",
             r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"bbbb"}]}"#,
             "\n",
-            r#"{"role":"tool","sessionId":"s","content":[{"type":"tool-result","output":{"type":"text","value":"cccccccc"}}]}"#,
-            "\n",
-            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"dddd"}]}"#,
+            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"d"}]}"#,
             "\n",
             r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"e"}]}"#,
         );
@@ -364,28 +425,37 @@ mod tests {
         assert!(messages[0].tokens.input > 0);
         assert!(messages[0].is_turn_start);
         assert!(messages[1].is_turn_start);
-        // Cumulative context strictly grows across turns.
-        assert!(messages[1].tokens.input > messages[0].tokens.input);
+        // Turn 2's input reflects only its own small delta (tool result + tiny
+        // user prompt), which here is smaller than turn 1's big prompt. The old
+        // cumulative model would have made this strictly greater.
+        assert!(
+            messages[1].tokens.input < messages[0].tokens.input,
+            "turn 2 input ({}) must reflect only its own delta, not the cumulative \
+             history that included turn 1 ({})",
+            messages[1].tokens.input,
+            messages[0].tokens.input
+        );
     }
 
-    /// Pins the cumulative-input upper-bound estimation so a future refactor
-    /// cannot silently change leaderboard numbers.
+    /// Pins the per-turn-delta input estimation so a future refactor cannot
+    /// silently reintroduce cumulative (O(N^2)) counting or otherwise change
+    /// leaderboard numbers.
     ///
-    /// Command Code re-sends the full conversation history every turn and stores
-    /// no local token counts, so input is estimated from the *cumulative*
-    /// context preceding each assistant response and is attributed entirely as
-    /// fresh non-cached input (`cache_read = 0`). This is an intentional
-    /// over-estimate for long sessions. See the module-level doc-comment for the
-    /// rationale; changing the model requires a maintainer decision with real
-    /// billing data.
+    /// Command Code stores no local token counts, so each assistant turn's input
+    /// is estimated from only the *new* context that turn introduced (the user
+    /// prompt plus any tool results since the previous response) and is
+    /// attributed entirely as fresh non-cached input (`cache_read = 0`). Summed
+    /// over the session this charges every message's content exactly once. See
+    /// the module-level doc-comment for the rationale; changing the model
+    /// requires a maintainer decision with real billing data.
     ///
     /// The exact token values asserted here are load-bearing: they reflect the
-    /// current ~4 chars/token heuristic applied to the cumulative char counts
-    /// of the synthetic session below. If this test starts failing after an
+    /// current ~4 chars/token heuristic applied to the per-turn char deltas of
+    /// the synthetic session below. If this test starts failing after an
     /// unrelated refactor, that is intentional — update the values AND the
     /// module doc-comment together, not just this test.
     #[test]
-    fn test_commandcode_input_is_cumulative_context_upper_bound() {
+    fn test_commandcode_input_is_per_turn_delta() {
         let dir = TempDir::new().unwrap();
         write_config(&dir, "model-x");
 
@@ -400,7 +470,7 @@ mod tests {
         //   user:      content = [{"type":"text","text":"cccc"}]
         //   assistant: content = [{"type":"text","text":"dddd"}]
         //
-        // We pre-compute the expected cumulative char counts and expected tokens
+        // We pre-compute the expected per-turn char deltas and expected tokens
         // from the same helpers used by the parser to keep the assertions
         // self-consistent without hard-coding magic numbers.
         let user1_content = json!([{"type": "text", "text": "aaaa"}]);
@@ -413,10 +483,11 @@ mod tests {
         let user2_chars = content_chars(&user2_content);
         let asst2_chars = content_chars(&asst2_content);
 
-        // Turn 1 input = only user1 context (nothing before it).
+        // Turn 1 input = only user1 (the new context before turn 1's response).
         let expected_input_turn1 = estimate_tokens(user1_chars);
-        // Turn 2 input = cumulative: user1 + asst1 + user2.
-        let expected_input_turn2 = estimate_tokens(user1_chars + asst1_chars + user2_chars);
+        // Turn 2 input = only user2 (the new context since turn 1's response);
+        // asst1 is the prior assistant output and is NOT re-counted as input.
+        let expected_input_turn2 = estimate_tokens(user2_chars);
 
         let jsonl = format!(
             "{}\n{}\n{}\n{}",
@@ -434,22 +505,22 @@ mod tests {
         let turn1 = &messages[0];
         let turn2 = &messages[1];
 
-        // Input grows with cumulative context (upper-bound over-estimation).
+        // Each turn's input is its own delta; turn 2 does NOT accumulate turn 1.
         assert!(
             expected_input_turn1 > 0,
             "turn 1 input must be positive (user1 context non-empty)"
         );
         assert!(
-            expected_input_turn2 > expected_input_turn1,
-            "turn 2 input must exceed turn 1 because cumulative context grew"
+            expected_input_turn2 > 0,
+            "turn 2 input must be positive (user2 context non-empty)"
         );
         assert_eq!(
             turn1.tokens.input, expected_input_turn1,
-            "turn 1 input pinned to cumulative-context estimate"
+            "turn 1 input pinned to its own per-turn delta (user1)"
         );
         assert_eq!(
             turn2.tokens.input, expected_input_turn2,
-            "turn 2 input pinned to cumulative-context estimate (upper bound)"
+            "turn 2 input pinned to its own per-turn delta (user2), not cumulative"
         );
         assert_eq!(
             turn1.tokens.output,
@@ -474,6 +545,59 @@ mod tests {
         );
         assert_eq!(turn1.tokens.cache_write, 0, "cache_write must be 0");
         assert_eq!(turn2.tokens.cache_write, 0, "cache_write must be 0");
+    }
+
+    /// Regression: a MiniMax model from `config.json` must resolve non-zero
+    /// pricing. Command Code's own `command-code` provider is not a pricing
+    /// provider, so the parser must recover the real provider (`minimax`) from
+    /// the gateway id and drop only the org prefix / `-Free` promo so the model
+    /// matches a `minimax/...` pricing key. Without the provider recovery and
+    /// char-safe canonicalization, `calculate_cost_with_provider` returns 0.
+    #[test]
+    fn test_minimax_model_resolves_nonzero_pricing() {
+        use crate::pricing::{ModelPricing, PricingService};
+        use std::collections::HashMap;
+
+        let dir = TempDir::new().unwrap();
+        write_config(&dir, "MiniMaxAI/MiniMax-M3-Free");
+        let jsonl = concat!(
+            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"hello there how are you"}]}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"doing great thanks"}]}"#,
+        );
+        let path = write_session(&dir, "proj", "s", jsonl);
+
+        let messages = parse_commandcode_file(&path);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.model_id, "MiniMax-M3");
+        assert_eq!(msg.provider_id, "minimax");
+
+        // Pricing keyed under the canonical `minimax/...` litellm key, exactly as
+        // the resolver expects for MiniMax models.
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "minimax/minimax-m3".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                output_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+        let pricing = PricingService::new(litellm, HashMap::new());
+
+        // Mirror lib::apply_pricing_if_available: cost is computed from the
+        // message's own model_id + provider_id.
+        let cost = pricing.calculate_cost_with_provider(
+            &msg.model_id,
+            Some(&msg.provider_id),
+            &msg.tokens,
+        );
+        assert!(
+            cost > 0.0,
+            "MiniMax model must price non-zero (got {cost}); provider hint or \
+             model canonicalization is dropping the pricing key"
+        );
     }
 
     #[test]

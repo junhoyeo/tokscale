@@ -463,7 +463,7 @@ define_clients!(
     MiMoCode = 30 => {
         id: "micode",
         root: PathRoot::XdgData,
-        relative: "micode",
+        relative: "mimocode",
         pattern: "*.db",
         headless: false,
         parse_local: true,
@@ -483,6 +483,33 @@ define_clients!(
         },
         relative: "antigravity-cli/conversations",
         pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Junie = 32 => {
+        id: "junie",
+        root: PathRoot::Home,
+        relative: ".junie/sessions",
+        pattern: "events.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Zcode = 33 => {
+        id: "zcode",
+        root: PathRoot::Home,
+        relative: ".zcode/projects",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    OpenCodeReview = 34 => {
+        id: "opencodereview",
+        root: PathRoot::Home,
+        relative: ".opencodereview/sessions",
+        pattern: "*.jsonl",
         headless: false,
         parse_local: true,
         submit_default: true
@@ -538,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 32);
+        assert_eq!(ClientId::COUNT, 35);
     }
 
     #[test]
@@ -550,6 +577,19 @@ mod tests {
             "/tmp/home/.commandcode/projects"
         );
         assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
+    }
+
+    #[test]
+    fn test_junie_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("junie").expect("junie client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/tmp/home/.junie/sessions"
+        );
+        assert_eq!(client.data().pattern, "events.jsonl");
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
         assert!(!client.data().headless);

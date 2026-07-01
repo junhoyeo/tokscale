@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
@@ -20,6 +21,8 @@ import {
   type ModelUsage,
 } from "@/components/profile";
 import type { TokenContributionData, DailyContribution, ClientType } from "@/lib/types";
+
+type ProfilePeriod = "all" | "week" | "month";
 
 interface ProfileData {
   user: {
@@ -52,6 +55,7 @@ interface ProfileData {
   mcpServers?: string[];
   modelUsage?: ModelUsage[];
   contributions: DailyContribution[];
+  period?: ProfilePeriod;
 }
 
 interface ProfilePageClientProps {
@@ -63,6 +67,7 @@ interface ProfilePageClientProps {
 export default function ProfilePageClient({ initialData, initialDevices, username }: ProfilePageClientProps) {
   const [activeTab, setActiveTab] = useState<ProfileTab>("activity");
   const data = initialData;
+  const period = data.period ?? "all";
 
   const graphData: TokenContributionData | null = useMemo(() => {
     if (!data || data.contributions.length === 0) return null;
@@ -171,6 +176,8 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
             stats={stats}
             lastUpdated={data.updatedAt || undefined}
           />
+
+          <ProfilePeriodSelector username={username} current={period} />
 
           <ProfileTabBar activeTab={activeTab} onTabChange={setActiveTab} />
 
@@ -303,4 +310,82 @@ const ActivitySection = styled.div`
   display: flex;
   flex-direction: column;
   gap: 24px;
+`;
+
+const PERIOD_OPTIONS: Array<{ value: ProfilePeriod; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "week", label: "7d" },
+  { value: "month", label: "30d" },
+];
+
+function buildProfilePeriodHref(username: string, period: ProfilePeriod): string {
+  const basePath = `/u/${encodeURIComponent(username)}`;
+  if (period === "all") {
+    return basePath;
+  }
+
+  return `${basePath}?period=${period}`;
+}
+
+function ProfilePeriodSelector({ username, current }: { username: string; current: ProfilePeriod }) {
+  return (
+    <PeriodSelectorContainer aria-label="Overview range">
+      {PERIOD_OPTIONS.map((option) => {
+        const isActive = current === option.value;
+
+        return (
+          <PeriodLink
+            key={option.value}
+            href={buildProfilePeriodHref(username, option.value)}
+            $active={isActive}
+            aria-current={isActive ? "page" : undefined}
+          >
+            {option.label}
+          </PeriodLink>
+        );
+      })}
+    </PeriodSelectorContainer>
+  );
+}
+
+const PeriodSelectorContainer = styled.nav`
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-bg-subtle);
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+`;
+
+const PeriodLink = styled(Link)<{ $active: boolean }>`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  color: ${({ $active }) => ($active ? "var(--color-fg-default)" : "var(--color-fg-muted)")};
+  background: ${({ $active }) => ($active ? "var(--color-bg-default)" : "transparent")};
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.12s, color 0.12s;
+
+  &:hover {
+    color: var(--color-fg-default);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 `;

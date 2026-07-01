@@ -31,13 +31,31 @@ pub(crate) fn parse_timestamp_value(value: &Value) -> Option<i64> {
     if numeric >= 1_000_000_000_000 {
         Some(numeric)
     } else {
-        Some(numeric * 1000)
+        // Seconds -> milliseconds: saturating so a garbage/huge timestamp
+        // cannot overflow i64 during the conversion.
+        Some(numeric.saturating_mul(1000))
     }
 }
 
 pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
         return Some(dt.timestamp_millis());
+    }
+
+    // Timezone-less ISO-8601 datetimes (e.g. "2026-06-16T12:00:00",
+    // "2026-06-16 12:00:00", optional fractional seconds) carry no offset, so
+    // `parse_from_rfc3339` rejects them. Interpret them as UTC rather than
+    // collapsing to the file mtime, which would scatter the message into the
+    // wrong day/month bucket.
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return Some(naive.and_utc().timestamp_millis());
+        }
     }
 
     if let Ok(numeric) = value.parse::<i64>() {
@@ -47,7 +65,9 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
         if numeric >= 1_000_000_000_000 {
             return Some(numeric);
         }
-        return Some(numeric * 1000);
+        // Seconds -> milliseconds: saturating so a garbage/huge timestamp
+        // cannot overflow i64 during the conversion.
+        return Some(numeric.saturating_mul(1000));
     }
 
     None
@@ -105,5 +125,28 @@ mod tests {
     fn parse_timestamp_str_rejects_zero_and_negative_strings() {
         assert!(parse_timestamp_str("0").is_none());
         assert!(parse_timestamp_str("-5").is_none());
+    }
+
+    #[test]
+    fn parse_timestamp_str_accepts_timezone_less_datetimes_as_utc() {
+        // "2026-06-16T12:00:00" UTC == 1781611200000 ms.
+        assert_eq!(
+            parse_timestamp_str("2026-06-16T12:00:00"),
+            Some(1_781_611_200_000)
+        );
+        // Space separator and fractional seconds variants.
+        assert_eq!(
+            parse_timestamp_str("2026-06-16 12:00:00"),
+            Some(1_781_611_200_000)
+        );
+        assert_eq!(
+            parse_timestamp_str("2026-06-16T12:00:00.500"),
+            Some(1_781_611_200_500)
+        );
+        // Offset-bearing input still goes through the rfc3339 path unchanged.
+        assert_eq!(
+            parse_timestamp_str("2026-06-16T12:00:00Z"),
+            Some(1_781_611_200_000)
+        );
     }
 }

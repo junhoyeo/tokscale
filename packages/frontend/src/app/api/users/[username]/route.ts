@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, desc, sql, and, gte } from "drizzle-orm";
+import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
 import {
   AmbiguousUsernameError,
   USERNAME_LOOKUP_LIMIT,
@@ -14,15 +14,62 @@ function normalizeClientId(id: string): string {
   return LEGACY_CLIENT_ALIASES[id] ?? id;
 }
 
+const PROFILE_PERIODS = ["all", "week", "month"] as const;
+type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
+
+interface ProfilePeriodDateRange {
+  start: string;
+  end: string;
+}
+
+function toUtcDateString(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function parseProfilePeriod(value: string | null): ProfilePeriod {
+  return PROFILE_PERIODS.includes(value as ProfilePeriod)
+    ? (value as ProfilePeriod)
+    : "all";
+}
+
+function getProfilePeriodDateRange(
+  period: ProfilePeriod,
+  now: Date = new Date()
+): ProfilePeriodDateRange | null {
+  if (period === "all") {
+    return null;
+  }
+
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
+
+  return {
+    start: toUtcDateString(start),
+    end: toUtcDateString(end),
+  };
+}
+
+function serializeUpdatedAt(value: Date | string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
 export const revalidate = 60; // ISR: revalidate every 60 seconds
 
 interface RouteParams {
   params: Promise<{ username: string }>;
 }
 
-export async function GET(_request: Request, { params }: RouteParams) {
+export async function GET(request: Request, { params }: RouteParams) {
   try {
     const { username } = await params;
+    const { searchParams } = new URL(request.url);
+    const period = parseProfilePeriod(searchParams.get("period"));
+    const periodRange = getProfilePeriodDateRange(period);
 
     // Find user
     const matchingUsers = await db
@@ -43,17 +90,32 @@ export async function GET(_request: Request, { params }: RouteParams) {
     }
 
     if (username !== user.username) {
-      return NextResponse.redirect(new URL(`/api/users/${user.username}`, _request.url), 308);
+      const canonicalUrl = new URL(`/api/users/${user.username}`, request.url);
+      if (period !== "all") {
+        canonicalUrl.searchParams.set("period", period);
+      }
+      return NextResponse.redirect(canonicalUrl, 308);
     }
 
     const oneYearAgo = new Date();
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    const profileStartDate = periodRange?.start ?? oneYearAgo.toISOString().split("T")[0];
+    const dailyBreakdownFilter = periodRange
+      ? and(
+          eq(submissions.userId, user.id),
+          gte(dailyBreakdown.date, periodRange.start),
+          lte(dailyBreakdown.date, periodRange.end)
+        )
+      : and(
+          eq(submissions.userId, user.id),
+          gte(dailyBreakdown.date, profileStartDate)
+        );
 
     const [statsResult, latestSubmissionResult, rankResult, dailyData] = await Promise.all([
       db
         .select({
           totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)`,
-          totalCost: sql<number>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4))), 0)`,
+          totalCost: sql<number>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4))), 0)`,
           inputTokens: sql<number>`COALESCE(SUM(${submissions.inputTokens}), 0)`,
           outputTokens: sql<number>`COALESCE(SUM(${submissions.outputTokens}), 0)`,
           cacheReadTokens: sql<number>`COALESCE(SUM(${submissions.cacheReadTokens}), 0)`,
@@ -103,6 +165,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
         .select({
           date: dailyBreakdown.date,
           timestampMs: dailyBreakdown.timestampMs,
+          activeTimeMs: dailyBreakdown.activeTimeMs,
           tokens: dailyBreakdown.tokens,
           cost: dailyBreakdown.cost,
           inputTokens: dailyBreakdown.inputTokens,
@@ -111,12 +174,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
         })
         .from(dailyBreakdown)
         .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
-        .where(
-          and(
-            eq(submissions.userId, user.id),
-            gte(dailyBreakdown.date, oneYearAgo.toISOString().split("T")[0])
-          )
-        )
+        .where(dailyBreakdownFilter)
         .orderBy(dailyBreakdown.date),
     ]);
 
@@ -153,6 +211,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       {
         date: string;
         timestampMs: number | null;
+        activeTimeMs: number;
         tokens: number;
         cost: number;
         inputTokens: number;
@@ -175,6 +234,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
         existing.cost += Number(day.cost);
         existing.inputTokens += Number(day.inputTokens);
         existing.outputTokens += Number(day.outputTokens);
+        existing.activeTimeMs += Number(day.activeTimeMs) || 0;
         if (day.sourceBreakdown) {
           for (const [rawClient, data] of Object.entries(day.sourceBreakdown)) {
             const client = normalizeClientId(rawClient);
@@ -332,6 +392,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
         aggregatedDaily.set(day.date, {
           date: day.date,
           timestampMs: day.timestampMs ?? null,
+          activeTimeMs: Number(day.activeTimeMs) || 0,
           tokens: Number(day.tokens),
           cost: Number(day.cost),
           inputTokens: Number(day.inputTokens),
@@ -345,6 +406,33 @@ export async function GET(_request: Request, { params }: RouteParams) {
     // Calculate max cost for intensity
     const contributions = Array.from(aggregatedDaily.values());
     const maxCost = Math.max(...contributions.map((c) => c.cost), 0);
+    const periodTotals = contributions.reduce(
+      (totals, day) => {
+        totals.totalTokens += day.tokens;
+        totals.totalCost += day.cost;
+        totals.inputTokens += day.inputTokens;
+        totals.outputTokens += day.outputTokens;
+        totals.totalActiveTimeMs += day.activeTimeMs;
+
+        for (const clientData of Object.values(day.clients)) {
+          totals.cacheReadTokens += clientData.cacheRead || 0;
+          totals.cacheWriteTokens += clientData.cacheWrite || 0;
+          totals.reasoningTokens += clientData.reasoning || 0;
+        }
+
+        return totals;
+      },
+      {
+        totalTokens: 0,
+        totalCost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        totalActiveTimeMs: 0,
+      }
+    );
 
     // Build contribution graph data
     const graphContributions = contributions.map((day) => {
@@ -425,6 +513,11 @@ export async function GET(_request: Request, { params }: RouteParams) {
         percentage: totalModelCost > 0 ? (data.cost / totalModelCost) * 100 : 0,
       }))
       .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
+    const periodClients = Array.from(
+      new Set(contributions.flatMap((day) => Object.keys(day.clients)))
+    );
+    const periodModels = Array.from(modelUsageMap.keys()).filter((model) => model !== "<synthetic>");
+    const isPeriodFiltered = period !== "all";
 
     return NextResponse.json({
       user: {
@@ -433,33 +526,35 @@ export async function GET(_request: Request, { params }: RouteParams) {
         displayName: user.displayName,
         avatarUrl: user.avatarUrl,
         createdAt: user.createdAt,
-        rank: rank ? Number(rank) : null,
+        rank: isPeriodFiltered ? null : rank ? Number(rank) : null,
       },
       stats: {
-        totalTokens: Number(stats?.totalTokens) || 0,
-        totalCost: Number(stats?.totalCost) || 0,
-        inputTokens: Number(stats?.inputTokens) || 0,
-        outputTokens: Number(stats?.outputTokens) || 0,
-        cacheReadTokens: Number(stats?.cacheReadTokens) || 0,
-        cacheWriteTokens: Number(stats?.cacheCreationTokens) || 0,
-        reasoningTokens: Number(stats?.reasoningTokens) || 0,
+        totalTokens: isPeriodFiltered ? periodTotals.totalTokens : Number(stats?.totalTokens) || 0,
+        totalCost: isPeriodFiltered ? periodTotals.totalCost : Number(stats?.totalCost) || 0,
+        inputTokens: isPeriodFiltered ? periodTotals.inputTokens : Number(stats?.inputTokens) || 0,
+        outputTokens: isPeriodFiltered ? periodTotals.outputTokens : Number(stats?.outputTokens) || 0,
+        cacheReadTokens: isPeriodFiltered ? periodTotals.cacheReadTokens : Number(stats?.cacheReadTokens) || 0,
+        cacheWriteTokens: isPeriodFiltered ? periodTotals.cacheWriteTokens : Number(stats?.cacheCreationTokens) || 0,
+        reasoningTokens: isPeriodFiltered ? periodTotals.reasoningTokens : Number(stats?.reasoningTokens) || 0,
         submissionCount: Number(stats?.submissionCount) || 0,
         activeDays,
-        totalActiveTimeMs: Number(stats?.totalActiveTimeMs) || 0,
-        sessionCount: Number(stats?.sessionCount) || 0,
+        totalActiveTimeMs: isPeriodFiltered ? periodTotals.totalActiveTimeMs : Number(stats?.totalActiveTimeMs) || 0,
+        // Session count is only stored at submission level, so hide it for rolling ranges.
+        sessionCount: isPeriodFiltered ? 0 : Number(stats?.sessionCount) || 0,
       },
       dateRange: {
-        start: stats?.earliestDate || null,
-        end: stats?.latestDate || null,
+        start: periodRange?.start ?? stats?.earliestDate ?? null,
+        end: periodRange?.end ?? stats?.latestDate ?? null,
       },
-      updatedAt: latestSubmission?.updatedAt?.toISOString() || null,
+      period,
+      updatedAt: serializeUpdatedAt(latestSubmission?.updatedAt),
       submissionFreshness: buildSubmissionFreshness({
         updatedAt: latestSubmission?.updatedAt,
         cliVersion: latestSubmission?.cliVersion,
         schemaVersion: latestSubmission?.schemaVersion,
       }),
-      clients: latestSubmission?.sourcesUsed || [],
-      models: latestSubmission?.modelsUsed || [],
+      clients: isPeriodFiltered ? periodClients : latestSubmission?.sourcesUsed || [],
+      models: isPeriodFiltered ? periodModels : latestSubmission?.modelsUsed || [],
       mcpServers: latestSubmission?.mcpServers || [],
       modelUsage,
       contributions: graphContributions,

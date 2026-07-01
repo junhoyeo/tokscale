@@ -101,6 +101,51 @@ pub fn parse_gemini_file(path: &Path) -> Vec<UnifiedMessage> {
     parse_gemini_file_with_cache_status(path).messages
 }
 
+/// Returns the canonical Gemini `session_id` for a transcript on disk, matching
+/// how [`parse_gemini_file`] populates wiki entries: for chat recordings and
+/// headless JSONL the id comes from the in-file `sessionId`/`session_id` field
+/// (the `init` line for JSONL), falling back to the file stem when absent.
+///
+/// Callers that index sessions by id (e.g. the report summarizer) must use this
+/// rather than the filename, because the filename stem differs from the wiki id
+/// for these formats.
+pub fn gemini_session_id_for_file(path: &Path) -> Option<String> {
+    let stem = || {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    };
+
+    let content = std::fs::read_to_string(path).ok()?;
+
+    if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+        // Headless JSONL: the `init` line (or any line) carries the real id.
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+                if let Some(id) =
+                    extract_string(value.get("session_id").or_else(|| value.get("sessionId")))
+                {
+                    return Some(id);
+                }
+            }
+        }
+        return stem();
+    }
+
+    // Chat recording: a single JSON document with a top-level `sessionId`.
+    if let Ok(value) = serde_json::from_str::<Value>(&content) {
+        if let Some(id) = extract_string(value.get("sessionId").or_else(|| value.get("session_id")))
+        {
+            return Some(id);
+        }
+    }
+    stem()
+}
+
 pub(crate) fn parse_gemini_file_with_cache_status(path: &Path) -> GeminiParseResult {
     let fallback_timestamp = file_modified_timestamp_ms(path);
 

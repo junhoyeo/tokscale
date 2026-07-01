@@ -59,6 +59,7 @@
 | <img width="48px" src=".github/assets/client-claude.jpg" alt="Claude" /> | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/` and `~/.claude/transcripts/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-openclaw.jpg" alt="OpenClaw" /> | [OpenClaw](https://openclaw.ai/) | `~/.openclaw/agents/` (+ legacy: `.clawdbot`, `.moltbot`, `.moldbot`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | via Codex — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` (fallback: `~/.hermes/state.db`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (fallback: `~/.gemini/tmp/*/chats/*.json`) | ✅ Yes |
@@ -85,8 +86,11 @@
 | <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage tasks (Linux: `~/.config/Code/...`; macOS: `~/Library/Application Support/Code/...`; Windows: `%APPDATA%\Code\...`; server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`) | ✅ Yes |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/` (override via `GJC_CODING_AGENT_DIR`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`; `$XDG_DATA_HOME/gjc/sessions/` on Linux/macOS) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` sidecars (override via `JCODE_HOME`) | ✅ Yes |
-| <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo) | `~/.local/share/micode/mimocode.db` (XDG data dir; SQLite) | ✅ Yes |
-| <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` | ✅ Yes |
+| <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) | `~/.local/share/mimocode/mimocode.db` (XDG data dir; SQLite) | ✅ Yes |
+| <img width="48px" src="https://github.com/JetBrains.png" alt="Junie" /> | [Junie](https://www.jetbrains.com/junie/) | `~/.junie/sessions/*/events.jsonl` | ✅ Yes |
+| <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` (token usage estimated from transcripts at ~4 chars/token; not persisted on disk) | ✅ Yes |
+| <img width="48px" src="https://github.com/zai-org.png" alt="ZCode" /> | [ZCode](https://zcode.z.ai/) | `~/.zcode/cli/db/db.sqlite` (v2 usage database) and `~/.zcode/projects/**/*.jsonl` (legacy transcripts) | ✅ Yes |
+| <img width="48px" src="https://github.com/alibaba.png" alt="OpenCodeReview" /> | [OpenCodeReview](https://github.com/alibaba/open-code-review) | `~/.opencodereview/sessions/**/*.jsonl` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | Re-attributed from other sources via `hf:` model prefix or `synthetic` provider (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ Yes |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
@@ -157,7 +161,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, and Synthetic
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, and Synthetic
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -368,9 +372,9 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `synthetic`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `synthetic`.
 
-> **Deprecation notice**: The legacy single-client flags (`--opencode`, `--claude`, `--codex`, etc.) still work for backward compatibility but are hidden from `--help` and will be removed in the next major release. Migrate to `--client` whenever possible. Running tokscale in an interactive terminal will print a one-line warning when a legacy flag is used.
+> **Breaking change (v4.0.0):** The per-client boolean flags (`--opencode`, `--claude`, `--codex`, etc.) have been removed and now error. Use the canonical `--client`/`-c` flag instead — e.g. `tokscale --client opencode,claude`.
 
 ### Date Filtering
 
@@ -434,7 +438,7 @@ Create `custom-pricing.json` in Tokscale's config directory (`~/.config/tokscale
 
 ```json
 {
-  "$schema": "https://tokscale.dev/custom-pricing.schema.json",
+  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "accounts/fireworks/routers/kimi-k2p6-turbo": {
       "input_cost_per_million_tokens": 2.00,
@@ -499,7 +503,7 @@ tokscale submit
 TOKSCALE_API_TOKEN=tt_xxx tokscale submit
 
 # Revoke a token: visit Settings > API Tokens on the leaderboard site
-# (https://tokscale.com/settings) and click "Revoke" on the token row.
+# (https://tokscale.ai/settings) and click "Revoke" on the token row.
 # Revocation takes effect immediately — subsequent requests with that
 # token will get HTTP 401 "Invalid API token".
 
@@ -681,7 +685,7 @@ tokscale report --workspace my-project --client opencode
 
 | Backend | Command | Notes |
 |---------|---------|-------|
-| `apple-fm` | (default) | Uses Apple Foundation Models on-device via native Rust FFI (no Python). Requires a macOS build with the `apple-fm` Cargo feature and Apple Intelligence enabled; otherwise it transparently falls back to a built-in Rust heuristic classifier (so the default works everywhere). |
+| `apple-fm` | (default) | On-device Apple Foundation Models via native Rust FFI (no Python). Enabled in the prebuilt Apple Silicon (macOS arm64) binary; runs on macOS 26+ with Apple Intelligence on, and transparently falls back to a built-in Rust heuristic everywhere else (Intel Macs, older macOS, Linux, Windows) — so the default works on every platform. |
 | `claude` | `claude -p` | Requires Claude Code CLI installed and authenticated. |
 | `codex` | `codex --quiet` | Requires Codex CLI installed and authenticated. |
 | `gemini` | `gemini -p` | Requires Gemini CLI installed and authenticated. |
@@ -741,6 +745,8 @@ In the TUI, navigate to the **Usage** tab to see subscription data. Use `[Refres
 | **Grok Build** | OAuth (`~/.grok/auth.json`) | Credits, subscription plan | Run `grok login` |
 | **Kimi** | OAuth (`~/.kimi/credentials/kimi-code.json`) | Session, Weekly quotas | Run `kimi` to log in |
 | **MiniMax** | API key (env var) | Prompt quotas per model | Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN` |
+| **MiniMax Token Plan** | API key (env var) | Interval + weekly remaining-percent quotas (per region: CN minimaxi.com + Global minimax.io) | Set `MINIMAX_TOKEN_PLAN_CN_KEY` and/or `MINIMAX_TOKEN_PLAN_GLOBAL_KEY` |
+| **Sakana** (Fugu) | Session cookie (env var or file) — billing-console HTML scrape, no public API | 5-hour, Weekly quota windows (plan tier + monthly price as metadata) | Set `SAKANA_SESSION_COOKIE` (see [docs/providers/sakana.md](docs/providers/sakana.md)) |
 
 Providers are auto-detected — only those with valid credentials are shown. If a provider is missing, ensure you've logged in or set the required environment variable.
 
@@ -870,6 +876,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 | `TOKSCALE_API_TOKEN` | unset | Tokscale personal API token for non-interactive `submit` and `delete-submitted-data` runs. Create one from Settings > API Tokens or save it locally with `tokscale login --token tt_xxx`. |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
 | `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/`, and `trae-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
+| `TOKSCALE_FM_DEBUG` | unset | When set, prints Apple Foundation Models diagnostics (macOS version gate, dlopen dylib path, load/symbol errors) to stderr to explain why on-device apple-fm did or didn't engage. |
 
 ```bash
 # Example: Increase timeout for very large datasets
@@ -958,7 +965,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Synthetic)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, Synthetic)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -1294,8 +1301,11 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Warp/Oz | `~/.config/tokscale/warp-cache/usage.json` | `%APPDATA%\tokscale\warp-cache\usage.json` | Synced via `tokscale warp sync`; aggregate requests and spend only, no token transcripts |
 | Grok Build | `~/.grok/sessions/` | `%USERPROFILE%\.grok\sessions\` | Configurable via `GROK_HOME` env var; parses `updates.jsonl` session updates |
 | Jcode | `~/.jcode/sessions/` | `%USERPROFILE%\.jcode\sessions\` | Configurable via `JCODE_HOME` env var; parses `session_*.json` snapshots plus `session_*.journal.jsonl` sidecars |
-| MiMo Code | `~/.local/share/micode/` | `%USERPROFILE%\.local\share\micode\` | Uses XDG data directory; SQLite database `mimocode.db` |
+| MiMo Code | `~/.local/share/mimocode/` | `%USERPROFILE%\.local\share\mimocode\` | Uses XDG data directory; SQLite database `mimocode.db` |
 | Gajae-Code | `~/.gjc/agent/sessions/` | `%USERPROFILE%\.gjc\agent\sessions\` | Configurable via `GJC_CODING_AGENT_DIR` (also `GJC_CONFIG_DIR`/`PI_CONFIG_DIR`; `$XDG_DATA_HOME/gjc/sessions/` flattens on Linux/macOS) |
+| Junie | `~/.junie/sessions/` | `%USERPROFILE%\.junie\sessions\` | Same home-relative path on all platforms; parses `events.jsonl` usage events |
+| ZCode | `~/.zcode/cli/db/db.sqlite` and `~/.zcode/projects/` | `%USERPROFILE%\.zcode\cli\db\db.sqlite` and `%USERPROFILE%\.zcode\projects\` | Parses v2 SQLite model usage plus legacy `*.jsonl` session transcripts; Z.ai's ADE for GLM models |
+| OpenCodeReview | `~/.opencodereview/sessions/` | `%USERPROFILE%\.opencodereview\sessions\` | Parses `*.jsonl` session transcripts; Alibaba's AI code review tool |
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 
 > **Note**: On Windows, `~` expands to `%USERPROFILE%` (e.g., `C:\Users\YourName`). These tools intentionally use Unix-style paths (like `.local/share`) even on Windows for cross-platform consistency, rather than Windows-native paths like `%APPDATA%`.
@@ -1713,7 +1723,7 @@ Tokscale also checks Octofriend SQLite at `~/.local/share/octofriend/sqlite.db` 
 
 ### MiMo Code
 
-Location: `~/.local/share/micode/mimocode.db` (XDG data directory)
+Location: `~/.local/share/mimocode/mimocode.db` (XDG data directory)
 
 MiMo Code stores session data in a SQLite database. Tokscale queries the `message` table joined with `session` for workspace context:
 
@@ -1753,6 +1763,8 @@ Tokscale fetches real-time pricing from [LiteLLM's pricing database](https://git
 **Dynamic Fallback**: For models not yet available in LiteLLM (e.g., recently released models), Tokscale automatically fetches pricing from [OpenRouter's endpoints API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints). This ensures you get accurate pricing from the model's author provider (e.g., Z.AI for glm-4.7) without waiting for LiteLLM updates.
 
 **Cursor Model Pricing**: For very recently released models not yet in either LiteLLM or OpenRouter (e.g., `gpt-5.3-codex`), Tokscale includes hardcoded pricing sourced from [Cursor's model docs](https://cursor.com/en-US/docs/models). These overrides are checked after all upstream sources but before fuzzy matching, so they automatically yield once real upstream pricing becomes available.
+
+**Sakana Fugu Pricing**: Fugu Ultra cost is estimated from Sakana's published pay-as-you-go rates; the `fugu` router model is intentionally left unpriced because its cost is the variable rate of whichever underlying model it orchestrated.
 
 **Caching**: Pricing data is cached to disk with 1-hour TTL for fast startup:
 - LiteLLM cache: `~/.config/tokscale/cache/pricing-litellm.json`
