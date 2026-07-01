@@ -1563,11 +1563,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             source_cache.insert(entry);
         }
     }
-    let workbuddy_messages: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::WorkBuddy)
+    let workbuddy_paths = select_workbuddy_paths(scan_result.get(ClientId::WorkBuddy));
+    let workbuddy_messages_raw: Vec<UnifiedMessage> = workbuddy_paths
         .par_iter()
         .flat_map(|path| {
-            sessions::workbuddy::parse_workbuddy_sqlite(path)
+            sessions::workbuddy::parse_workbuddy_file(path)
                 .into_iter()
                 .map(|mut msg| {
                     apply_pricing_if_available(&mut msg, pricing);
@@ -1576,7 +1576,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 .collect::<Vec<_>>()
         })
         .collect();
-    all_messages.extend(workbuddy_messages);
+    let mut workbuddy_seen: HashSet<String> = HashSet::new();
+    all_messages.extend(workbuddy_messages_raw.into_iter().filter(|message| {
+        message
+            .dedup_key
+            .as_ref()
+            .is_none_or(|key| workbuddy_seen.insert(key.clone()))
+    }));
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
@@ -1646,6 +1652,19 @@ fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Unified
             .then_with(|| a.timestamp.cmp(&b.timestamp))
     });
     deduped
+}
+
+fn select_workbuddy_paths(paths: &[PathBuf]) -> Vec<&PathBuf> {
+    let has_detailed_sources = paths
+        .iter()
+        .any(|path| sessions::workbuddy::is_detailed_workbuddy_source(path));
+
+    paths
+        .iter()
+        .filter(|path| {
+            !has_detailed_sources || sessions::workbuddy::is_detailed_workbuddy_source(path)
+        })
+        .collect()
 }
 
 fn filter_unified_messages(
@@ -2876,15 +2895,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let codebuddy_count = summed_parsed_message_count(&codebuddy_msgs);
     counts.set(ClientId::CodeBuddy, codebuddy_count);
     messages.extend(codebuddy_msgs);
-    let workbuddy_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::WorkBuddy)
+    let workbuddy_paths = select_workbuddy_paths(scan_result.get(ClientId::WorkBuddy));
+    let workbuddy_msgs_raw: Vec<UnifiedMessage> = workbuddy_paths
         .par_iter()
-        .flat_map(|path| {
-            sessions::workbuddy::parse_workbuddy_sqlite(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
+        .flat_map(|path| sessions::workbuddy::parse_workbuddy_file(path))
+        .collect();
+    let mut workbuddy_seen: HashSet<String> = HashSet::new();
+    let workbuddy_msgs: Vec<ParsedMessage> = workbuddy_msgs_raw
+        .into_iter()
+        .filter(|message| {
+            message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| workbuddy_seen.insert(key.clone()))
         })
+        .map(|msg| unified_to_parsed(&msg))
         .collect();
     let workbuddy_count = summed_parsed_message_count(&workbuddy_msgs);
     counts.set(ClientId::WorkBuddy, workbuddy_count);

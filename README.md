@@ -91,8 +91,8 @@
 | <img width="48px" src="https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png" alt="Command Code" /> | [Command Code](https://github.com/CommandCodeAI/command-code) | `~/.commandcode/projects/**/*.jsonl` (token usage estimated from transcripts at ~4 chars/token; not persisted on disk) | ✅ Yes |
 | <img width="48px" src="https://github.com/zai-org.png" alt="ZCode" /> | [ZCode](https://zcode.z.ai/) | `~/.zcode/cli/db/db.sqlite` (v2 usage database) and `~/.zcode/projects/**/*.jsonl` (legacy transcripts) | ✅ Yes |
 | <img width="48px" src="https://github.com/alibaba.png" alt="OpenCodeReview" /> | [OpenCodeReview](https://github.com/alibaba/open-code-review) | `~/.opencodereview/sessions/**/*.jsonl` | ✅ Yes |
-| <img width="48px" src="https://github.com/Tencent.png" alt="CodeBuddy" /> | [CodeBuddy CLI](https://www.codebuddy.cn/docs/cli/overview) | `~/.codebuddy/projects/**/*.jsonl` | ✅ Yes |
-| <img width="48px" src="https://github.com/Tencent.png" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/workbuddy.db` (aggregate session usage) | ✅ Yes |
+| <img width="48px" src="https://tencent-cloud.gallerycdn.vsassets.io/extensions/tencent-cloud/coding-copilot-vs/4.9.8763/1782466594259/Microsoft.VisualStudio.Services.Icons.Default" alt="CodeBuddy" /> | [CodeBuddy](https://www.codebuddy.cn/docs/cli/overview) (CLI, IDE, VS Code plugin) | `~/.codebuddy/projects/**/*.jsonl` + extension logs | ✅ Yes |
+| <img width="48px" src="https://aitop100app-1251510006.cos.ap-shanghai.myqcloud.com/article/undefined/e2be6f30-0b19-4d14-8a7a-7767a5e8bad1.png" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl` + SQLite fallback | ✅ Yes |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | Re-attributed from other sources via `hf:` model prefix or `synthetic` provider (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) | ✅ Yes |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
@@ -1310,8 +1310,8 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Junie | `~/.junie/sessions/` | `%USERPROFILE%\.junie\sessions\` | Same home-relative path on all platforms; parses `events.jsonl` usage events |
 | ZCode | `~/.zcode/cli/db/db.sqlite` and `~/.zcode/projects/` | `%USERPROFILE%\.zcode\cli\db\db.sqlite` and `%USERPROFILE%\.zcode\projects\` | Parses v2 SQLite model usage plus legacy `*.jsonl` session transcripts; Z.ai's ADE for GLM models |
 | OpenCodeReview | `~/.opencodereview/sessions/` | `%USERPROFILE%\.opencodereview\sessions\` | Parses `*.jsonl` session transcripts; Alibaba's AI code review tool |
-| CodeBuddy | `~/.codebuddy/projects/` | `%USERPROFILE%\.codebuddy\projects\` | Parses CodeBuddy CLI assistant message usage from project `*.jsonl` transcripts |
-| WorkBuddy | `~/.workbuddy/workbuddy.db` | `%USERPROFILE%\.workbuddy\workbuddy.db` | Parses aggregate session usage from WorkBuddy's local SQLite database |
+| CodeBuddy | `~/.codebuddy/projects/` + extension logs | `%USERPROFILE%\.codebuddy\projects\` + CodeBuddy / VS Code extension logs | Parses CodeBuddy CLI, IDE, and VS Code plugin token usage |
+| WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db` | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db` | Parses WorkBuddy token usage, with the aggregate SQLite database as a fallback |
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 
 > **Note**: On Windows, `~` expands to `%USERPROFILE%` (e.g., `C:\Users\YourName`). These tools intentionally use Unix-style paths (like `.local/share`) even on Windows for cross-platform consistency, rather than Windows-native paths like `%APPDATA%`.

@@ -1,15 +1,35 @@
 //! WorkBuddy session usage parser.
 //!
-//! WorkBuddy stores aggregate session usage in `~/.workbuddy/workbuddy.db`.
-//! The `session_usage` table currently exposes a total `used` value, but does
-//! not split input/output/cache tokens. Tokscale preserves that measured total
-//! in the input bucket so reports can surface the usage without estimating.
+//! WorkBuddy stores detailed token usage in `~/.workbuddy/projects/**/*.jsonl`.
+//! Older installs also expose an aggregate `~/.workbuddy/workbuddy.db`; that
+//! database is kept as a fallback when detailed token sources are unavailable.
 
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use tracing::warn;
+
+const DEFAULT_MODEL: &str = "workbuddy";
+
+pub fn parse_workbuddy_file(path: &Path) -> Vec<UnifiedMessage> {
+    if is_detailed_workbuddy_source(path) {
+        if super::tencent_buddy::is_extension_log_source(path) {
+            return super::tencent_buddy::parse_extension_log_file(
+                "workbuddy",
+                DEFAULT_MODEL,
+                path,
+            );
+        }
+        return super::tencent_buddy::parse_jsonl_file("workbuddy", DEFAULT_MODEL, path);
+    }
+
+    parse_workbuddy_sqlite(path)
+}
+
+pub fn is_detailed_workbuddy_source(path: &Path) -> bool {
+    super::tencent_buddy::is_jsonl_source(path) || super::tencent_buddy::is_extension_log_source(path)
+}
 
 #[derive(Debug)]
 struct WorkBuddyUsageRow {
@@ -219,5 +239,28 @@ mod tests {
         drop(conn);
 
         assert!(parse_workbuddy_sqlite(&db_path).is_empty());
+    }
+
+    #[test]
+    fn parse_workbuddy_file_reads_jsonl_function_call_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-1.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"call-1","timestamp":1780000000100,"type":"function_call","sessionId":"session-1","cwd":"/Users/alice/admin-panel","providerData":{"requestModelId":"glm-5.2","messageId":"msg-1","rawUsage":{"prompt_tokens":64700,"completion_tokens":635,"prompt_cache_hit_tokens":76032}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_workbuddy_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.client, "workbuddy");
+        assert_eq!(message.model_id, "glm-5.2");
+        assert_eq!(message.tokens.input, 64700);
+        assert_eq!(message.tokens.output, 635);
+        assert_eq!(message.tokens.cache_read, 76032);
+        assert_eq!(message.tokens.total(), 141367);
+        assert_eq!(message.workspace_label.as_deref(), Some("admin-panel"));
     }
 }

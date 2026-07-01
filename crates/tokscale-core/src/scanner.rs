@@ -267,6 +267,16 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "*.log" => file_name.ends_with(".log"),
+                "codebuddy-extension-log" => {
+                    file_name.ends_with(".log")
+                        && path.components().any(|component| {
+                            component
+                                .as_os_str()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
+                        })
+                }
                 // OpenClaw: also match archived transcripts
                 // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
                 "*.jsonl*" => {
@@ -862,6 +872,82 @@ fn scan_all_clients_with_env_strategy_inner(
 
     for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
+    }
+
+    if enabled.contains(&ClientId::CodeBuddy) {
+        let home_path = PathBuf::from(home_dir);
+        let mut codebuddy_log_roots = vec![(
+            home_path
+                .join("AppData")
+                .join("Local")
+                .join("CodeBuddyExtension")
+                .join("Logs"),
+            "*.log",
+        )];
+        let roaming_codebuddy_roots = [
+            home_path
+                .join("AppData")
+                .join("Roaming")
+                .join("CodeBuddy CN")
+                .join("logs"),
+            home_path
+                .join("AppData")
+                .join("Roaming")
+                .join("Code")
+                .join("logs"),
+        ];
+        codebuddy_log_roots.extend(
+            roaming_codebuddy_roots
+                .into_iter()
+                .map(|root| (root, "codebuddy-extension-log")),
+        );
+        if use_env_roots {
+            if let Some(local_app_data) = dirs::data_local_dir() {
+                codebuddy_log_roots.push((
+                    local_app_data.join("CodeBuddyExtension").join("Logs"),
+                    "*.log",
+                ));
+            }
+            if let Some(roaming_app_data) = dirs::config_dir() {
+                codebuddy_log_roots.push((
+                    roaming_app_data.join("CodeBuddy CN").join("logs"),
+                    "codebuddy-extension-log",
+                ));
+                codebuddy_log_roots.push((
+                    roaming_app_data.join("Code").join("logs"),
+                    "codebuddy-extension-log",
+                ));
+            }
+        }
+
+        for (log_root, pattern) in codebuddy_log_roots {
+            for root in ["CodeBuddyIDE", "VSCode"] {
+                push_unique_scan_task_with_pattern(
+                    &mut tasks,
+                    &mut seen_scan_roots,
+                    ClientId::CodeBuddy,
+                    log_root.join(root),
+                    pattern,
+                );
+            }
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::CodeBuddy,
+                log_root,
+                pattern,
+            );
+        }
+    }
+
+    if enabled.contains(&ClientId::WorkBuddy) {
+        push_unique_scan_task_with_pattern(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::WorkBuddy,
+            PathBuf::from(home_dir).join(".workbuddy/projects"),
+            "*.jsonl",
+        );
     }
 
     // Extra scan directories are part of the caller's environment, so they are
@@ -1523,6 +1609,20 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_directory_log_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("ide.log")).unwrap();
+        File::create(path.join("vscode.log")).unwrap();
+        File::create(path.join("session.jsonl")).unwrap();
+
+        let log_files = scan_directory(path.to_str().unwrap(), "*.log");
+        assert_eq!(log_files.len(), 2);
+        assert!(log_files.iter().all(|p| p.extension().unwrap() == "log"));
+    }
+
+    #[test]
     fn test_scan_directory_workbuddy_db_pattern() {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
@@ -1692,6 +1792,62 @@ mod tests {
         );
 
         assert_eq!(result.zcode_db.as_deref(), Some(db_path.as_path()));
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_codebuddy_extension_logs() {
+        let dir = TempDir::new().unwrap();
+        let ide_dir = dir
+            .path()
+            .join("AppData")
+            .join("Local")
+            .join("CodeBuddyExtension")
+            .join("Logs")
+            .join("CodeBuddyIDE")
+            .join("2026-07-01");
+        let vscode_dir = dir
+            .path()
+            .join("AppData")
+            .join("Local")
+            .join("CodeBuddyExtension")
+            .join("Logs")
+            .join("VSCode")
+            .join("2026-07-01");
+        fs::create_dir_all(&ide_dir).unwrap();
+        fs::create_dir_all(&vscode_dir).unwrap();
+        let ide_log = ide_dir.join("ide.log");
+        let vscode_log = vscode_dir.join("vscode.log");
+        File::create(&ide_log).unwrap();
+        File::create(&vscode_log).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            dir.path().to_str().unwrap(),
+            &["codebuddy".to_string()],
+            false,
+        );
+
+        let files = result.get(ClientId::CodeBuddy);
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&ide_log));
+        assert!(files.contains(&vscode_log));
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_workbuddy_project_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let project_dir = dir.path().join(".workbuddy/projects/project-a");
+        fs::create_dir_all(&project_dir).unwrap();
+        let session = project_dir.join("session.jsonl");
+        File::create(&session).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            dir.path().to_str().unwrap(),
+            &["workbuddy".to_string()],
+            false,
+        );
+
+        let files = result.get(ClientId::WorkBuddy);
+        assert_eq!(files.as_slice(), std::slice::from_ref(&session));
     }
 
     #[test]

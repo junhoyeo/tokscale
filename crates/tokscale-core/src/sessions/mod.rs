@@ -35,6 +35,7 @@ pub mod pi;
 pub mod qwen;
 pub mod roocode;
 pub mod synthetic;
+pub(crate) mod tencent_buddy;
 pub mod trae;
 pub(crate) mod utils;
 pub mod warp;
