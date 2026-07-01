@@ -513,17 +513,17 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
+    if let Some(messages) = try_parse_kiro_execution_file(&value, path) {
+        return messages;
+    }
+
     let file_stem = path
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or("unknown");
-    // Attribute the snapshot to its IDE workspace folder, mirroring how the
-    // file/sqlite Kiro paths derive workspace identity from `cwd`.
     let workspace = kiro_global_storage_workspace(path);
     let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
-    // Namespace the session id by workspace so two workspaces that both contain
-    // e.g. `execution.chat` do not collapse into one session / dedup_key.
     let session_id = match workspace.as_deref() {
         Some(ws) => format!("{}/{}", ws, file_stem),
         None => file_stem.to_string(),
@@ -539,15 +539,6 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
         return Vec::new();
     }
 
-    // Date-bucketing limitation: Kiro IDE globalStorage snapshots are a single
-    // rolling JSON blob with no per-turn timestamps — turns carry only their
-    // text, not a `timestamp`/`end_timestamp` field (unlike the CLI `.jsonl`
-    // and the sqlite `request_metadata` sources, which do expose per-turn
-    // times). We therefore emit the entire snapshot as ONE message stamped at
-    // the file's mtime. This mis-buckets historical usage into the day the file
-    // was last written rather than the days the turns actually occurred. We do
-    // NOT synthesize timestamps; if a future snapshot schema adds per-turn
-    // times, read them here and split into one message per turn.
     let snapshot_timestamp = fallback_timestamp;
 
     let mut message = UnifiedMessage::new_with_dedup(
@@ -564,19 +555,115 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
             reasoning: 0,
         },
         0.0,
-        // dedup_key is structurally disjoint from the sqlite (CLI) source: this
-        // key is `<workspace>/<file_stem>:globalstorage` (always the literal
-        // `:globalstorage` suffix), whereas `parse_kiro_sqlite` emits
-        // `<conversation_id>:<turn_index>` (always a numeric-index suffix).
-        // IDE globalStorage snapshots and the kiro-cli `data.sqlite3` are
-        // distinct surfaces, so the same conversation cannot appear in both and
-        // these keys can never collide — no cross-source dedup is needed.
         Some(format!("{}:globalstorage", session_id)),
     );
     message.message_count = 1;
     message.is_turn_start = true;
     message.set_workspace(workspace_key, workspace_label);
     vec![message]
+}
+
+fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<UnifiedMessage>> {
+    let obj = value.as_object()?;
+    let execution_id = obj.get("executionId")?.as_str()?;
+    let actions = obj.get("actions")?.as_array()?;
+    let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status != "succeed" {
+        return Some(Vec::new());
+    }
+
+    let session_id = obj
+        .get("chatSessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or(execution_id)
+        .to_string();
+    let timestamp = obj
+        .get("startTime")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| file_modified_timestamp_ms(path));
+    let end_time = obj.get("endTime").and_then(|v| v.as_i64());
+    let _duration_ms =
+        end_time.and_then(|end| Some(end.saturating_sub(timestamp)).filter(|&d| d > 0));
+
+    let mut output_chars = 0usize;
+    for action in actions {
+        let action_type = action
+            .get("actionType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !matches!(action_type, "say" | "reasoning") {
+            continue;
+        }
+        let msg = action
+            .get("output")
+            .and_then(|o| {
+                if let Some(s) = o.as_str() {
+                    Some(s.to_string())
+                } else {
+                    o.get("message")
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string())
+                }
+            })
+            .unwrap_or_default();
+        output_chars += msg.chars().count();
+    }
+
+    let input_chars = obj
+        .get("context")
+        .and_then(|ctx| ctx.get("messages"))
+        .and_then(|msgs| msgs.as_array())
+        .map(|msgs| {
+            msgs.iter()
+                .map(|m| {
+                    m.get("entries")
+                        .and_then(|e| e.as_array())
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|entry| {
+                                    if entry.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        entry
+                                            .get("text")
+                                            .and_then(|t| t.as_str())
+                                            .map(|s| s.chars().count())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .sum::<usize>()
+                        })
+                        .unwrap_or(0)
+                })
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+
+    let input = estimate_tokens(input_chars);
+    let output = estimate_tokens(output_chars);
+    if input + output == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut message = UnifiedMessage::new_with_dedup(
+        CLIENT_ID,
+        "auto".to_string(),
+        PROVIDER_ID,
+        session_id,
+        timestamp,
+        TokenBreakdown {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        Some(format!("execution:{}", execution_id)),
+    );
+    message.message_count = 1;
+    message.is_turn_start = true;
+    Some(vec![message])
 }
 
 pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
