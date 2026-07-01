@@ -2,9 +2,11 @@ use anyhow::Result;
 use chrono::{Local, TimeZone};
 use colored::Colorize;
 use std::collections::HashMap;
-use std::process::{Command, Stdio};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 
 use super::apple_fm;
+use std::time::Duration;
 use tokscale_core::content_extractor::metadata_only_content;
 use tokscale_core::content_extractor::SessionContent;
 use tokscale_core::pricing::PricingService;
@@ -85,14 +87,12 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
             let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
             print_report_table(&entries, &db, is_multi_day, opts.full)?;
         }
+    } else if opts.json {
+        let json = serde_json::to_string_pretty(&entries)?;
+        println!("{}", json);
     } else {
-        if opts.json {
-            let json = serde_json::to_string_pretty(&entries)?;
-            println!("{}", json);
-        } else {
-            let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
-            print_report_table(&entries, &db, is_multi_day, opts.full)?;
-        }
+        let is_multi_day = opts.week || opts.month || (opts.since.is_some() && !opts.today);
+        print_report_table(&entries, &db, is_multi_day, opts.full)?;
     }
 
     Ok(())
@@ -317,35 +317,45 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
     parts.push("\nRespond with a JSON array.".to_string());
     let prompt = parts.join("\n");
 
-    let output = match backend {
-        "claude" => Command::new("claude")
-            .args(["-p", "--output-format", "text"])
-            .arg(format!("System: {}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
-        "codex" => Command::new("codex")
-            .args(["exec"])
-            .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
-        "gemini" => Command::new("gemini")
-            .args(["-p"])
-            .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
-        "kiro" => Command::new("kiro-cli")
-            .args(["chat", "--no-interactive"])
-            .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
+    let cmd = match backend {
+        "claude" => {
+            let mut c = Command::new("claude");
+            c.args(["-p", "--output-format", "text"])
+                .arg(format!("System: {}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt));
+            c
+        }
+        "codex" => {
+            let mut c = Command::new("codex");
+            c.args(["exec"])
+                .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt));
+            c
+        }
+        "gemini" => {
+            let mut c = Command::new("gemini");
+            c.args(["-p"])
+                .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt));
+            c
+        }
+        "kiro" => {
+            let mut c = Command::new("kiro-cli");
+            c.args(["chat", "--no-interactive"])
+                .arg(format!("{}\n\n{}", GROUPING_SYSTEM_PROMPT, prompt));
+            c
+        }
         _ => {
             eprintln!(
                 " skipped (task grouping requires a CLI backend: claude, codex, gemini, or kiro)"
             );
+            return Ok(());
+        }
+    };
+
+    // A timed-out (or otherwise un-spawnable) backend must degrade gracefully:
+    // skip grouping and continue the report rather than aborting it.
+    let output = match run_command_with_timeout(cmd, BACKEND_TIMEOUT, None) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("\n  {} grouping failed: {}", "⚠".yellow(), e);
             return Ok(());
         }
     };
@@ -478,35 +488,45 @@ fn run_cli_summarizer(
 ) -> Result<Vec<serde_json::Value>> {
     let prompt = build_cli_prompt(payloads);
 
-    let output = match backend {
-        "claude" => Command::new("claude")
-            .args(["-p", "--output-format", "text"])
-            .arg(format!(
+    let cmd = match backend {
+        "claude" => {
+            let mut c = Command::new("claude");
+            c.args(["-p", "--output-format", "text"]).arg(format!(
                 "System: {}\n\n{}",
                 SUMMARIZER_SYSTEM_PROMPT, prompt
-            ))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
-        "codex" => Command::new("codex")
-            .args(["exec"])
-            .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
-        "gemini" => Command::new("gemini")
-            .args(["-p"])
-            .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
-        "kiro" => Command::new("kiro-cli")
-            .args(["chat", "--no-interactive"])
-            .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?,
+            ));
+            c
+        }
+        "codex" => {
+            let mut c = Command::new("codex");
+            c.args(["exec"])
+                .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt));
+            c
+        }
+        "gemini" => {
+            let mut c = Command::new("gemini");
+            c.args(["-p"])
+                .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt));
+            c
+        }
+        "kiro" => {
+            let mut c = Command::new("kiro-cli");
+            c.args(["chat", "--no-interactive"])
+                .arg(format!("{}\n\n{}", SUMMARIZER_SYSTEM_PROMPT, prompt));
+            c
+        }
         _ => return Ok(Vec::new()),
+    };
+
+    // A timed-out (or un-spawnable) backend must degrade gracefully: log it and
+    // return no summaries so the caller continues, matching the non-zero-exit
+    // path below.
+    let output = match run_command_with_timeout(cmd, BACKEND_TIMEOUT, None) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("  {} {} summarizer failed: {}", "⚠".yellow(), backend, e);
+            return Ok(Vec::new());
+        }
     };
 
     if !output.status.success() {
@@ -536,6 +556,96 @@ fn run_cli_summarizer(
             Ok(Vec::new())
         }
     }
+}
+
+/// Upper bound on how long any LLM summarizer subprocess may run before we
+/// kill it. Deliberately generous (5 min) so legitimate batched LLM calls
+/// never trip it, but it bounds a true hang (auth prompt, network stall) so
+/// `tokscale report` can never block forever.
+const BACKEND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Spawn `cmd`, optionally write `stdin_bytes` to its stdin, and wait up to
+/// `timeout` for it to finish.
+///
+/// Mirrors the pure-std spawn + reader-thread + `try_wait()` deadline + kill
+/// approach used by `run_capture_command` in `main.rs` (no extra dependency).
+/// Both stdout and stderr are drained on dedicated threads so a chatty backend
+/// cannot deadlock on a full pipe buffer while we poll for exit.
+///
+/// On timeout the child is killed and an `io::Error` of kind `TimedOut` is
+/// returned, which callers treat as a recoverable "skip this backend" signal.
+fn run_command_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+    stdin_bytes: Option<&[u8]>,
+) -> std::io::Result<Output> {
+    use std::io::Read;
+    use std::thread;
+    use std::time::Instant;
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin_bytes.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+
+    let mut child = cmd.spawn()?;
+
+    // Write to stdin (if requested) before draining output, then drop the
+    // handle so the child sees EOF.
+    if let Some(bytes) = stdin_bytes {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(bytes)?;
+        }
+    }
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture subprocess stdout"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture subprocess stderr"))?;
+
+    let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf)?;
+        Ok(buf)
+    });
+    let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        stderr.read_to_end(&mut buf)?;
+        Ok(buf)
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "summarizer backend timed out",
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let stdout = stdout_handle
+        .join()
+        .map_err(|_| std::io::Error::other("subprocess stdout reader thread panicked"))??;
+    let stderr = stderr_handle
+        .join()
+        .map_err(|_| std::io::Error::other("subprocess stderr reader thread panicked"))??;
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn extract_json_array(text: &str) -> String {
