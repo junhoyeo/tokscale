@@ -579,8 +579,12 @@ mod tests {
 
     #[test]
     fn test_workbuddy_client_registered_as_local_sqlite_source() {
-        let client = ClientId::from_str("workbuddy").expect("workbuddy client should be registered");
-        assert_eq!(client.data().resolve_path("/tmp/home"), "/tmp/home/.workbuddy");
+        let client =
+            ClientId::from_str("workbuddy").expect("workbuddy client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/tmp/home/.workbuddy"
+        );
         assert_eq!(client.data().pattern, "workbuddy.db");
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);

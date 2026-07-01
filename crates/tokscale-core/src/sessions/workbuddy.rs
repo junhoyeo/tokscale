@@ -124,7 +124,9 @@ fn usage_row_to_message(row: WorkBuddyUsageRow) -> UnifiedMessage {
         },
         0.0,
     );
-    message.dedup_key = Some(format!("workbuddy:{}", row.session_id));
+    // Include `updated_at` so distinct usage rows for the same session (e.g.
+    // per-date or incremental writes) are not collapsed by the dedup key.
+    message.dedup_key = Some(format!("workbuddy:{}:{}", row.session_id, row.updated_at));
 
     if let Some(workspace_key) = row.cwd.as_deref().and_then(normalize_workspace_key) {
         let workspace_label = workspace_label_from_key(&workspace_key);
@@ -198,7 +200,10 @@ mod tests {
         assert_eq!(message.tokens.output, 0);
         assert_eq!(message.message_count, 1);
         assert_eq!(message.workspace_label.as_deref(), Some("project"));
-        assert_eq!(message.dedup_key.as_deref(), Some("workbuddy:session-1"));
+        assert_eq!(
+            message.dedup_key.as_deref(),
+            Some("workbuddy:session-1:1780000000000")
+        );
     }
 
     #[test]
