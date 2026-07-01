@@ -147,6 +147,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         hotkey: 'O',
     },
     ClientUi {
+        display_name: "CodeBuddy",
+        hotkey: 'C',
+    },
+    ClientUi {
         display_name: "WorkBuddy",
         hotkey: 'B',
     },

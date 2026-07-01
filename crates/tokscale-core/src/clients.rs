@@ -514,7 +514,16 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    WorkBuddy = 35 => {
+    CodeBuddy = 35 => {
+        id: "codebuddy",
+        root: PathRoot::Home,
+        relative: ".codebuddy/projects",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    WorkBuddy = 36 => {
         id: "workbuddy",
         root: PathRoot::Home,
         relative: ".workbuddy",
@@ -574,7 +583,21 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 36);
+        assert_eq!(ClientId::COUNT, 37);
+    }
+
+    #[test]
+    fn test_codebuddy_client_registered_as_local_session_source() {
+        let client =
+            ClientId::from_str("codebuddy").expect("codebuddy client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/tmp/home/.codebuddy/projects"
+        );
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
     }
 
     #[test]

@@ -35,6 +35,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "junie",
   "zcode",
   "opencodereview",
+  "codebuddy",
   "workbuddy",
 ] as const;
 

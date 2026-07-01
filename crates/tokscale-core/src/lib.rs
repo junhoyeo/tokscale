@@ -1542,6 +1542,27 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let deduped_trae_messages = dedupe_latest_trae_messages(trae_messages);
     all_messages.extend(deduped_trae_messages);
 
+    let codebuddy_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::CodeBuddy)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::codebuddy::parse_codebuddy_file(path)
+            })
+        })
+        .collect();
+    let mut codebuddy_seen: HashSet<String> = HashSet::new();
+    for outcome in codebuddy_outcomes {
+        all_messages.extend(outcome.messages.into_iter().filter(|message| {
+            message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| codebuddy_seen.insert(key.clone()))
+        }));
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
     let workbuddy_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::WorkBuddy)
         .par_iter()
@@ -2836,6 +2857,25 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Warp, warp_count);
     messages.extend(warp_msgs);
 
+    let codebuddy_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::CodeBuddy)
+        .par_iter()
+        .flat_map(|path| sessions::codebuddy::parse_codebuddy_file(path))
+        .collect();
+    let mut codebuddy_seen: HashSet<String> = HashSet::new();
+    let codebuddy_msgs: Vec<ParsedMessage> = codebuddy_msgs_raw
+        .into_iter()
+        .filter(|message| {
+            message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| codebuddy_seen.insert(key.clone()))
+        })
+        .map(|msg| unified_to_parsed(&msg))
+        .collect();
+    let codebuddy_count = summed_parsed_message_count(&codebuddy_msgs);
+    counts.set(ClientId::CodeBuddy, codebuddy_count);
+    messages.extend(codebuddy_msgs);
     let workbuddy_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::WorkBuddy)
         .par_iter()
