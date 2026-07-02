@@ -643,7 +643,10 @@ mod tests {
             Some("grok:session-1:signals")
         );
         assert_eq!(
-            messages.iter().map(|message| message.tokens.input).sum::<i64>(),
+            messages
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
             3396968
         );
     }
