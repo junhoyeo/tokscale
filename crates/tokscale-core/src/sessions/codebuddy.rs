@@ -78,7 +78,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "kimi-k2.7");
         assert_eq!(messages[0].tokens.total(), 141367);
-        assert_eq!(messages[0].workspace_label.as_deref(), Some("ide-extension"));
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("ide-extension")
+        );
     }
 
     #[test]
@@ -101,5 +104,4 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_read, 20841);
         assert_eq!(messages[0].tokens.total(), 33161);
     }
-
 }

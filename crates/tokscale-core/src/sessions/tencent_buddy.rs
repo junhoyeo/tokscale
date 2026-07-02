@@ -173,8 +173,8 @@ pub(crate) fn parse_jsonl_file(
             Err(_) => continue,
         };
 
-        let is_assistant_message =
-            item.line_type.as_deref() == Some("message") && item.role.as_deref() == Some("assistant");
+        let is_assistant_message = item.line_type.as_deref() == Some("message")
+            && item.role.as_deref() == Some("assistant");
         let is_function_call = item.line_type.as_deref() == Some("function_call");
         if !is_assistant_message && !is_function_call {
             continue;
@@ -295,7 +295,9 @@ pub(crate) fn parse_extension_log_file(
             continue;
         }
 
-        if !line.contains("[AgentReporter]") || !line.contains("Agent execution successful with usage:") {
+        if !line.contains("[AgentReporter]")
+            || !line.contains("Agent execution successful with usage:")
+        {
             continue;
         }
 
@@ -336,7 +338,7 @@ pub(crate) fn parse_extension_log_file(
             0.0,
         );
         message.dedup_key = Some(format!(
-            "{client}:extension-log:{agent_id}:{}:{}:{}:{}:{}",
+            "{client}:extension-log:{agent_id}:{timestamp}:{}:{}:{}:{}:{}",
             message.tokens.input,
             message.tokens.output,
             message.tokens.cache_read,
@@ -412,7 +414,8 @@ fn parse_log_timestamp_ms(line: &str) -> Option<i64> {
     }
 
     let normalized = format!("{:04}-{:02}-{:02} {}", parts[0], parts[1], parts[2], time);
-    parse_local_naive_timestamp_ms(&normalized).or_else(|| super::utils::parse_timestamp_str(&normalized))
+    parse_local_naive_timestamp_ms(&normalized)
+        .or_else(|| super::utils::parse_timestamp_str(&normalized))
 }
 
 fn parse_local_naive_timestamp_ms(value: &str) -> Option<i64> {
@@ -510,6 +513,27 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 635);
         assert_eq!(messages[0].tokens.cache_read, 76032);
         assert_eq!(messages[0].tokens.total(), 141367);
-        assert_eq!(messages[0].workspace_label.as_deref(), Some("moza-configurator"));
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("moza-configurator")
+        );
+    }
+
+    #[test]
+    fn parse_extension_log_file_keeps_repeated_agent_usage_at_different_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.log");
+        std::fs::write(
+            &path,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}
+[2026/7/1 16:57:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+        )
+        .unwrap();
+
+        let messages = parse_extension_log_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 2);
+        assert_ne!(messages[0].dedup_key, messages[1].dedup_key);
     }
 }

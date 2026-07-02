@@ -921,15 +921,19 @@ fn scan_all_clients_with_env_strategy_inner(
         }
 
         for (log_root, pattern) in codebuddy_log_roots {
-            for root in ["CodeBuddyIDE", "VSCode"] {
-                push_unique_scan_task_with_pattern(
-                    &mut tasks,
-                    &mut seen_scan_roots,
-                    ClientId::CodeBuddy,
-                    log_root.join(root),
-                    pattern,
-                );
+            if pattern == "*.log" {
+                for root in ["CodeBuddyIDE", "VSCode"] {
+                    push_unique_scan_task_with_pattern(
+                        &mut tasks,
+                        &mut seen_scan_roots,
+                        ClientId::CodeBuddy,
+                        log_root.join(root),
+                        pattern,
+                    );
+                }
+                continue;
             }
+
             push_unique_scan_task_with_pattern(
                 &mut tasks,
                 &mut seen_scan_roots,

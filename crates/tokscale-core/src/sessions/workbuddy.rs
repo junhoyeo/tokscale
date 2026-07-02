@@ -28,7 +28,8 @@ pub fn parse_workbuddy_file(path: &Path) -> Vec<UnifiedMessage> {
 }
 
 pub fn is_detailed_workbuddy_source(path: &Path) -> bool {
-    super::tencent_buddy::is_jsonl_source(path) || super::tencent_buddy::is_extension_log_source(path)
+    super::tencent_buddy::is_jsonl_source(path)
+        || super::tencent_buddy::is_extension_log_source(path)
 }
 
 #[derive(Debug)]

@@ -1563,26 +1563,42 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             source_cache.insert(entry);
         }
     }
-    let workbuddy_paths = select_workbuddy_paths(scan_result.get(ClientId::WorkBuddy));
-    let workbuddy_messages_raw: Vec<UnifiedMessage> = workbuddy_paths
+    let (workbuddy_detailed_paths, workbuddy_fallback_paths) =
+        partition_workbuddy_paths(scan_result.get(ClientId::WorkBuddy));
+    let workbuddy_detailed_outcomes: Vec<CachedParseOutcome> = workbuddy_detailed_paths
         .par_iter()
-        .flat_map(|path| {
-            sessions::workbuddy::parse_workbuddy_file(path)
-                .into_iter()
-                .map(|mut msg| {
-                    apply_pricing_if_available(&mut msg, pricing);
-                    msg
-                })
-                .collect::<Vec<_>>()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::workbuddy::parse_workbuddy_file(path)
+            })
         })
         .collect();
-    let mut workbuddy_seen: HashSet<String> = HashSet::new();
-    all_messages.extend(workbuddy_messages_raw.into_iter().filter(|message| {
-        message
-            .dedup_key
-            .as_ref()
-            .is_none_or(|key| workbuddy_seen.insert(key.clone()))
-    }));
+    let workbuddy_fallback_outcomes: Vec<CachedParseOutcome> = workbuddy_fallback_paths
+        .par_iter()
+        .map(|path| {
+            load_or_parse_sqlite_source(path, &source_cache, pricing, |path| {
+                sessions::workbuddy::parse_workbuddy_file(path)
+            })
+        })
+        .collect();
+    let mut workbuddy_detailed_messages = Vec::new();
+    for outcome in workbuddy_detailed_outcomes {
+        workbuddy_detailed_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    let mut workbuddy_fallback_messages = Vec::new();
+    for outcome in workbuddy_fallback_outcomes {
+        workbuddy_fallback_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    all_messages.extend(merge_workbuddy_messages(
+        workbuddy_detailed_messages,
+        workbuddy_fallback_messages,
+    ));
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
@@ -1654,17 +1670,31 @@ fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Unified
     deduped
 }
 
-fn select_workbuddy_paths(paths: &[PathBuf]) -> Vec<&PathBuf> {
-    let has_detailed_sources = paths
-        .iter()
-        .any(|path| sessions::workbuddy::is_detailed_workbuddy_source(path));
-
+fn partition_workbuddy_paths(paths: &[PathBuf]) -> (Vec<&PathBuf>, Vec<&PathBuf>) {
     paths
         .iter()
-        .filter(|path| {
-            !has_detailed_sources || sessions::workbuddy::is_detailed_workbuddy_source(path)
-        })
-        .collect()
+        .partition(|path| sessions::workbuddy::is_detailed_workbuddy_source(path))
+}
+
+fn merge_workbuddy_messages(
+    detailed_messages: Vec<UnifiedMessage>,
+    fallback_messages: Vec<UnifiedMessage>,
+) -> Vec<UnifiedMessage> {
+    let detailed_dates: HashSet<String> = detailed_messages
+        .iter()
+        .filter_map(|message| (!message.date.is_empty()).then(|| message.date.clone()))
+        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut merged: Vec<UnifiedMessage> = detailed_messages
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut seen, message))
+        .collect();
+
+    merged.extend(fallback_messages.into_iter().filter(|message| {
+        (detailed_dates.is_empty() || !detailed_dates.contains(&message.date))
+            && should_keep_deduped_message(&mut seen, message)
+    }));
+    merged
 }
 
 fn filter_unified_messages(
@@ -2895,22 +2925,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let codebuddy_count = summed_parsed_message_count(&codebuddy_msgs);
     counts.set(ClientId::CodeBuddy, codebuddy_count);
     messages.extend(codebuddy_msgs);
-    let workbuddy_paths = select_workbuddy_paths(scan_result.get(ClientId::WorkBuddy));
-    let workbuddy_msgs_raw: Vec<UnifiedMessage> = workbuddy_paths
+    let (workbuddy_detailed_paths, workbuddy_fallback_paths) =
+        partition_workbuddy_paths(scan_result.get(ClientId::WorkBuddy));
+    let workbuddy_detailed_messages: Vec<UnifiedMessage> = workbuddy_detailed_paths
         .par_iter()
         .flat_map(|path| sessions::workbuddy::parse_workbuddy_file(path))
         .collect();
-    let mut workbuddy_seen: HashSet<String> = HashSet::new();
-    let workbuddy_msgs: Vec<ParsedMessage> = workbuddy_msgs_raw
-        .into_iter()
-        .filter(|message| {
-            message
-                .dedup_key
-                .as_ref()
-                .is_none_or(|key| workbuddy_seen.insert(key.clone()))
-        })
-        .map(|msg| unified_to_parsed(&msg))
+    let workbuddy_fallback_messages: Vec<UnifiedMessage> = workbuddy_fallback_paths
+        .par_iter()
+        .flat_map(|path| sessions::workbuddy::parse_workbuddy_file(path))
         .collect();
+    let workbuddy_msgs: Vec<ParsedMessage> =
+        merge_workbuddy_messages(workbuddy_detailed_messages, workbuddy_fallback_messages)
+            .into_iter()
+            .map(|msg| unified_to_parsed(&msg))
+            .collect();
     let workbuddy_count = summed_parsed_message_count(&workbuddy_msgs);
     counts.set(ClientId::WorkBuddy, workbuddy_count);
     messages.extend(workbuddy_msgs);
@@ -3142,6 +3171,26 @@ mod tests {
         msg
     }
 
+    fn make_workbuddy_message(timestamp: i64, input: i64, dedup_key: &str) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new(
+            "workbuddy",
+            "glm-5.2",
+            "zai",
+            "session",
+            timestamp,
+            TokenBreakdown {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+        msg.dedup_key = Some(dedup_key.to_string());
+        msg
+    }
+
     fn make_trae_message(
         session_id: &str,
         timestamp: i64,
@@ -3164,6 +3213,32 @@ mod tests {
             cost,
             dedup_key.map(str::to_string),
         )
+    }
+
+    #[test]
+    fn workbuddy_fallback_fills_dates_without_detailed_usage() {
+        let detailed = vec![make_workbuddy_message(
+            1_782_883_200_000,
+            100,
+            "workbuddy:detailed",
+        )];
+        let fallback = vec![
+            make_workbuddy_message(1_782_883_200_000, 1000, "workbuddy:fallback-same-day"),
+            make_workbuddy_message(1_782_969_600_000, 2000, "workbuddy:fallback-next-day"),
+        ];
+
+        let merged = super::merge_workbuddy_messages(detailed, fallback);
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged
+            .iter()
+            .any(|message| message.dedup_key.as_deref() == Some("workbuddy:detailed")));
+        assert!(merged
+            .iter()
+            .any(|message| message.dedup_key.as_deref() == Some("workbuddy:fallback-next-day")));
+        assert!(!merged
+            .iter()
+            .any(|message| message.dedup_key.as_deref() == Some("workbuddy:fallback-same-day")));
     }
 
     #[allow(clippy::too_many_arguments)]
