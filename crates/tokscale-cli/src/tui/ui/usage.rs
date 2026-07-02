@@ -554,9 +554,16 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[UsageO
 }
 
 fn render_medium_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[UsageOutput]) {
+    let selected_index = app.selected_index;
+    let selected = &outputs[selected_index];
     let summary_height = if area.height >= 36 { 8 } else { 6 }.min(area.height);
-    let selected_height =
-        if area.height >= 36 { 11 } else { 9 }.min(area.height.saturating_sub(summary_height));
+    let base_selected_height = if area.height >= 36 { 11 } else { 9 };
+    let selected_height = if has_available_reset_credit(selected) {
+        medium_selected_account_preferred_height(selected)
+    } else {
+        base_selected_height
+    }
+    .min(area.height.saturating_sub(summary_height));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -567,9 +574,17 @@ fn render_medium_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &
         .split(area);
 
     render_usage_status(frame, app, chunks[0], outputs);
-    let selected_index = app.selected_index;
     render_selected_account(frame, app, chunks[1], &outputs[selected_index], outputs);
     render_accounts_table(frame, app, chunks[2], outputs);
+}
+
+fn medium_selected_account_preferred_height(selected: &UsageOutput) -> u16 {
+    let status_rows = 3
+        + usize::from(credits_status_line(selected).is_some())
+        + reset_credit_detail_rows(selected);
+    let limit_rows = 2 + selected.metrics.len().min(4);
+    let action_rows = 3;
+    (status_rows + limit_rows + action_rows + 2).clamp(9, 22) as u16
 }
 
 fn usage_top_column_percentages(width: u16) -> (u16, u16) {
@@ -1201,24 +1216,13 @@ fn render_selected_account(
             );
         }
     }
-    if lines.len() < detail_limit {
-        if let Some(label) = reset_credits_line(selected) {
-            push_kv_styled(
-                &mut lines,
-                app,
-                "Reset Bank",
-                &label,
-                if has_available_reset_credit(selected) {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    app.theme.secondary_text_style()
-                },
-                inner.width as usize,
-            );
-        }
-    }
+    append_selected_reset_credit_lines(
+        &mut lines,
+        app,
+        selected,
+        inner.width as usize,
+        detail_limit,
+    );
     push_section_spacing(&mut lines, detail_limit);
     if lines.len() < detail_limit {
         lines.push(section_heading("Limits", app));
@@ -1252,6 +1256,104 @@ fn render_selected_account(
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn append_selected_reset_credit_lines(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    selected: &UsageOutput,
+    width: usize,
+    max_lines: usize,
+) {
+    if lines.len() >= max_lines {
+        return;
+    }
+
+    let Some(credits) = selected.reset_credits.as_ref() else {
+        return;
+    };
+
+    let count_label = reset_credit_count_label(credits.available_count);
+    let value_style = if has_available_reset_credit(selected) {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        app.theme.secondary_text_style()
+    };
+    push_kv_styled(lines, app, "Reset Bank", &count_label, value_style, width);
+
+    if lines.len() >= max_lines {
+        return;
+    }
+
+    let buckets = reset_credit_buckets(credits);
+    if buckets.is_empty() {
+        if credits.available_count > 0 {
+            lines.push(selected_reset_schedule_line(
+                "expiry unknown",
+                app.theme.subtle_text_style(),
+                width,
+            ));
+        }
+        return;
+    }
+
+    let available = max_lines.saturating_sub(lines.len());
+    let visible_count = if buckets.len() > available {
+        available.saturating_sub(1)
+    } else {
+        buckets.len()
+    };
+
+    for bucket in buckets.iter().take(visible_count) {
+        lines.push(selected_reset_schedule_line(
+            &format_selected_reset_schedule_entry(bucket),
+            app.theme.secondary_text_style(),
+            width,
+        ));
+    }
+
+    let hidden = hidden_expiry_count(&buckets[visible_count..]);
+    if hidden > 0 && lines.len() < max_lines {
+        lines.push(selected_reset_schedule_line(
+            &format!("+{hidden} more reset credits"),
+            app.theme.subtle_text_style(),
+            width,
+        ));
+    }
+}
+
+fn selected_reset_schedule_line(value: &str, value_style: Style, width: usize) -> Line<'static> {
+    let prefix_width = 14usize;
+    Line::from(vec![
+        Span::raw(" ".repeat(prefix_width)),
+        Span::styled(
+            truncate_string(value, width.saturating_sub(prefix_width + 2)),
+            value_style,
+        ),
+    ])
+}
+
+fn format_selected_reset_schedule_entry(bucket: &(String, usize)) -> String {
+    if bucket.1 > 1 {
+        format!("x{} expires {}", bucket.1, bucket.0)
+    } else {
+        format!("expires {}", bucket.0)
+    }
+}
+
+fn reset_credit_detail_rows(selected: &UsageOutput) -> usize {
+    let Some(credits) = selected.reset_credits.as_ref() else {
+        return 0;
+    };
+
+    if credits.available_count == 0 {
+        return 1;
+    }
+
+    let bucket_count = reset_credit_buckets(credits).len();
+    1 + bucket_count.max(1)
 }
 
 fn append_credit_bank_summary_lines(
@@ -1311,10 +1413,10 @@ fn reset_credit_account_line(
     } else {
         format!("{} credits", credits.available_count)
     };
-    let expiry = credit_expiry_summary(credits);
     let label_width: usize = if width >= 72 { 28 } else { 18 };
     let count_width: usize = if width >= 72 { 12 } else { 10 };
     let used = 2 + label_width + count_width + 2;
+    let expiry = credit_nearest_expiry_line(credits);
     let marker = if selected { "> " } else { "  " };
     Line::from(vec![
         Span::raw(marker),
@@ -1339,27 +1441,54 @@ fn reset_credit_account_line(
     ])
 }
 
-fn credit_expiry_summary(credits: &crate::commands::usage::UsageResetCredits) -> String {
-    let mut expiries: Vec<String> = credits
-        .credits
-        .iter()
-        .filter_map(|credit| credit.expires_at.as_deref())
-        .map(format_credit_expiry_label)
-        .collect();
-    expiries.sort();
-    expiries.dedup();
+fn reset_credit_buckets(
+    credits: &crate::commands::usage::UsageResetCredits,
+) -> Vec<(String, usize)> {
+    credit_expiry_buckets(
+        credits
+            .credits
+            .iter()
+            .filter_map(|credit| credit.expires_at.as_deref()),
+    )
+}
 
-    if expiries.is_empty() {
-        return "expiry unknown".to_string();
+fn credit_nearest_expiry_line(credits: &crate::commands::usage::UsageResetCredits) -> String {
+    nearest_credit_expiry_label(&reset_credit_buckets(credits))
+        .unwrap_or_else(|| "expiry unknown".to_string())
+}
+
+fn nearest_credit_expiry_label(buckets: &[(String, usize)]) -> Option<String> {
+    buckets
+        .first()
+        .map(|bucket| format!("nearest expires {}", bucket.0))
+}
+
+fn credit_expiry_buckets<'a>(expiries: impl Iterator<Item = &'a str>) -> Vec<(String, usize)> {
+    let mut values: Vec<String> = expiries.map(str::to_string).collect();
+    values.sort();
+
+    let mut buckets = Vec::new();
+    let mut current: Option<String> = None;
+    let mut count = 0usize;
+    for value in values {
+        if current.as_deref() == Some(value.as_str()) {
+            count += 1;
+            continue;
+        }
+        if let Some(previous) = current.replace(value) {
+            buckets.push((format_credit_expiry_label(&previous), count));
+        }
+        count = 1;
+    }
+    if let Some(previous) = current {
+        buckets.push((format_credit_expiry_label(&previous), count));
     }
 
-    let visible: Vec<String> = expiries.iter().take(2).cloned().collect();
-    let hidden = expiries.len().saturating_sub(visible.len());
-    if hidden > 0 {
-        format!("expires {} +{hidden}", visible.join(", "))
-    } else {
-        format!("expires {}", visible.join(", "))
-    }
+    buckets
+}
+
+fn hidden_expiry_count(buckets: &[(String, usize)]) -> usize {
+    buckets.iter().map(|(_, count)| *count).sum()
 }
 
 fn format_credit_expiry_label(value: &str) -> String {
@@ -2238,6 +2367,14 @@ fn has_available_reset_credit(output: &UsageOutput) -> bool {
             .is_some_and(|credits| credits.available_count > 0)
 }
 
+fn reset_credit_count_label(count: u32) -> String {
+    if count == 1 {
+        "1 available".to_string()
+    } else {
+        format!("{count} available")
+    }
+}
+
 fn reset_bank_summary(outputs: &[UsageOutput]) -> String {
     let available: u32 = outputs
         .iter()
@@ -2249,43 +2386,23 @@ fn reset_bank_summary(outputs: &[UsageOutput]) -> String {
         return "No reset credits".to_string();
     }
 
-    let nearest_expiry = outputs
-        .iter()
-        .filter_map(|output| output.reset_credits.as_ref())
-        .flat_map(|credits| credits.credits.iter())
-        .filter_map(|credit| credit.expires_at.as_deref())
-        .min()
-        .map(format_expiry_time);
+    let expiries = credit_expiry_buckets(
+        outputs
+            .iter()
+            .filter_map(|output| output.reset_credits.as_ref())
+            .flat_map(|credits| credits.credits.iter())
+            .filter_map(|credit| credit.expires_at.as_deref()),
+    );
 
     let count = if available == 1 {
-        "1 available".to_string()
+        reset_credit_count_label(available)
     } else {
         format!("{available} available across accounts")
     };
-    match nearest_expiry {
-        Some(expiry) => format!("{count} · nearest {expiry}"),
+    match nearest_credit_expiry_label(&expiries) {
+        Some(nearest) => format!("{count} · {nearest}"),
         None => count,
     }
-}
-
-fn reset_credits_line(output: &UsageOutput) -> Option<String> {
-    let credits = output.reset_credits.as_ref()?;
-    let count = credits.available_count;
-    let mut label = if count == 1 {
-        "1 available".to_string()
-    } else {
-        format!("{count} available")
-    };
-    if let Some(expiry) = credits
-        .credits
-        .iter()
-        .filter_map(|credit| credit.expires_at.as_deref())
-        .min()
-    {
-        label.push_str(" · ");
-        label.push_str(&format_expiry_time(expiry));
-    }
-    Some(label)
 }
 
 fn credits_status_line(output: &UsageOutput) -> Option<String> {
@@ -2416,6 +2533,30 @@ mod tests {
                 title: Some("One free rate limit reset".to_string()),
                 description: None,
             }],
+        });
+        output
+    }
+
+    fn output_with_reset_credit_expiries(
+        provider: &str,
+        account: Option<UsageAccount>,
+        expiries: &[&str],
+    ) -> UsageOutput {
+        let mut output = output(provider, account);
+        output.reset_credits = Some(UsageResetCredits {
+            available_count: expiries.len() as u32,
+            credits: expiries
+                .iter()
+                .enumerate()
+                .map(|(index, expiry)| UsageResetCredit {
+                    id: Some(format!("credit_{index}")),
+                    status: Some("available".to_string()),
+                    reset_type: Some("codex_rate_limits".to_string()),
+                    expires_at: Some((*expiry).to_string()),
+                    title: Some("One free rate limit reset".to_string()),
+                    description: None,
+                })
+                .collect(),
         });
         output
     }
@@ -2954,16 +3095,118 @@ mod tests {
     }
 
     #[test]
-    fn selected_account_panel_aligns_detail_sections() {
+    fn usage_reset_bank_summarizes_nearest_and_expands_selected_expiries() {
         let mut app = make_app();
-        app.subscription_usage = vec![output_with_reset_credits(
+        app.subscription_usage = vec![output_with_reset_credit_expiries(
             "Codex",
             Some(UsageAccount {
                 id: "acct_work".to_string(),
                 label: Some("work".to_string()),
                 is_active: true,
             }),
-            2,
+            &["reset-a", "reset-b", "reset-c", "reset-d"],
+        )];
+
+        let body = render_body(&mut app, 180, 32);
+        let credit_account = body
+            .lines()
+            .find(|line| line.contains("4 credits"))
+            .expect("missing credit account row");
+
+        assert!(body.contains("4 available"), "{body}");
+        assert!(
+            credit_account.contains("nearest expires reset-a"),
+            "{credit_account}"
+        );
+        assert!(!credit_account.contains("reset-b"), "{credit_account}");
+        assert!(body.contains("expires reset-a"), "{body}");
+        assert!(body.contains("expires reset-d"), "{body}");
+        assert!(!body.contains("scheduled resets"), "{body}");
+        assert!(!body.contains("Schedule"), "{body}");
+        assert!(!body.contains("+2"), "{body}");
+    }
+
+    #[test]
+    fn medium_usage_reset_bank_keeps_selected_expiries_visible() {
+        let mut app = make_app();
+        app.subscription_usage = vec![output_with_reset_credit_expiries(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
+            &["reset-a", "reset-b", "reset-c", "reset-d"],
+        )];
+
+        let body = render_body(&mut app, 120, 36);
+
+        assert!(body.contains("Reset Bank"), "{body}");
+        assert!(body.contains("4 available"), "{body}");
+        assert!(body.contains("expires reset-a"), "{body}");
+        assert!(body.contains("expires reset-d"), "{body}");
+        assert!(!body.contains("scheduled resets"), "{body}");
+        assert!(!body.contains("Schedule"), "{body}");
+        assert!(!body.contains("+2"), "{body}");
+    }
+
+    #[test]
+    fn reset_credit_account_line_uses_nearest_expiry_only() {
+        let app = make_app();
+        let output = output_with_reset_credit_expiries(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
+            &["reset-a", "reset-b", "reset-c", "reset-d"],
+        );
+        let credits = output.reset_credits.as_ref().unwrap();
+
+        let line = line_text(&reset_credit_account_line(&app, &output, credits, true, 80));
+
+        assert!(line.contains("4 credits"), "{line}");
+        assert!(line.contains("nearest expires reset-a"), "{line}");
+        assert!(!line.contains("reset-b"), "{line}");
+    }
+
+    #[test]
+    fn selected_reset_schedule_groups_duplicate_expiries() {
+        let output =
+            output_with_reset_credit_expiries("Codex", None, &["reset-a", "reset-a", "reset-b"]);
+        let credits = output.reset_credits.as_ref().unwrap();
+
+        let buckets = reset_credit_buckets(credits);
+
+        assert_eq!(
+            format_selected_reset_schedule_entry(&buckets[0]),
+            "x2 expires reset-a"
+        );
+        assert_eq!(
+            format_selected_reset_schedule_entry(&buckets[1]),
+            "expires reset-b"
+        );
+    }
+
+    #[test]
+    fn reset_credit_buckets_sort_raw_expiry_values_before_formatting() {
+        let buckets = credit_expiry_buckets(["reset-b", "reset-a", "reset-a"].into_iter());
+
+        assert_eq!(buckets[0], ("reset-a".to_string(), 2));
+        assert_eq!(buckets[1], ("reset-b".to_string(), 1));
+    }
+
+    #[test]
+    fn selected_account_panel_aligns_detail_sections() {
+        let mut app = make_app();
+        app.subscription_usage = vec![output(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_work".to_string(),
+                label: Some("work".to_string()),
+                is_active: true,
+            }),
         )];
 
         let body = render_body(&mut app, 180, 32);
