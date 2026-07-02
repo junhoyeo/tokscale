@@ -1682,7 +1682,8 @@ fn merge_workbuddy_messages(
 ) -> Vec<UnifiedMessage> {
     let detailed_dates: HashSet<String> = detailed_messages
         .iter()
-        .filter_map(|message| (!message.date.is_empty()).then(|| message.date.clone()))
+        .filter(|message| !message.date.is_empty())
+        .map(|message| message.date.clone())
         .collect();
     let mut seen: HashSet<String> = HashSet::new();
     let mut merged: Vec<UnifiedMessage> = detailed_messages

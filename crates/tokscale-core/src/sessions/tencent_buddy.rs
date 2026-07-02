@@ -311,7 +311,7 @@ pub(crate) fn parse_extension_log_file(
         let Some(json_end) = usage_json.rfind('}') else {
             continue;
         };
-        let mut bytes = usage_json[..=json_end].as_bytes().to_vec();
+        let mut bytes = usage_json.as_bytes()[..=json_end].to_vec();
         let usage = match simd_json::from_slice::<BuddyUsage>(&mut bytes) {
             Ok(usage) => usage,
             Err(_) => continue,
