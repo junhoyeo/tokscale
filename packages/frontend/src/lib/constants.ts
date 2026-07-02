@@ -108,9 +108,9 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   zcode: "https://github.com/zai-org.png",
   opencodereview: "https://github.com/alibaba.png",
   codebuddy:
-    "https://aitop100app-1251510006.cos.ap-shanghai.myqcloud.com/article/undefined/e2be6f30-0b19-4d14-8a7a-7767a5e8bad1.png",
+    "https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png",
   workbuddy:
-    "https://codebuddy-1328495429.cos.accelerate.myqcloud.com/web/workbuddy/d1d0b9329b771f020a1025d11661a33296390d7c/assets/workbuddy-icon-BujKiC6G.svg",
+    "https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
