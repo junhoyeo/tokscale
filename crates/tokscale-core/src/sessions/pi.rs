@@ -1,7 +1,7 @@
-//! Pi (badlogic/pi-mono) session parser
+//! Pi (badlogic/pi-mono) and Oh My Pi session parser
 //!
-//! Parses JSONL files from ~/.pi/agent/sessions/<encoded-cwd>/*.jsonl
-
+//! Parses JSONL files from `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`
+//! and `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl`.
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
@@ -10,7 +10,10 @@ use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-/// Pi session header (first line of JSONL)
+/// Pi/Oh My Pi session header — found in JSONL files as a line whose
+/// `type` field equals `"session"`. OMP files may precede it with a
+/// `title` line (type == "title"), so we scan for the first `"session"`
+/// entry rather than assuming it's line #1.
 #[derive(Debug, Deserialize)]
 pub struct PiSessionHeader {
     #[serde(rename = "type")]
@@ -55,7 +58,10 @@ pub struct PiUsage {
     pub total_tokens: Option<i64>,
 }
 
-/// Parse a Pi JSONL session file
+/// Parse a Pi or Oh My Pi JSONL session file.
+///
+/// OMP session files may start with a `title` line before the actual
+/// `session` header, so we skip non-`"session"` lines until we find it.
 pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -90,8 +96,10 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
                 Err(_) => return Vec::new(),
             };
 
+            // OMP files may start with a `title` line — skip until we
+            // find the actual `"session"` header.
             if header.entry_type != "session" {
-                return Vec::new();
+                continue;
             }
             session_id = Some(header.id);
             workspace_key = header.cwd.as_deref().and_then(normalize_workspace_key);
