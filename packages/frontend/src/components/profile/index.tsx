@@ -895,6 +895,9 @@ export function ProfileStats({ stats, favoriteModel }: ProfileStatsProps) {
 }
 
 const MODEL_COLORS: Record<string, string> = {
+  // "fable" must precede "claude": lookup is first-match and IDs like
+  // "claude-fable-5" contain both keys.
+  "fable": "#DC2626",
   "claude": "#D97706",
   "sonnet": "#D97706",
   "opus": "#DC2626",
