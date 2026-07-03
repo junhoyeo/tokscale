@@ -1,12 +1,15 @@
 const MODEL_COLORS: Record<string, string> = {
-  // Lookup is first-match, so family keys (fable/opus/sonnet/haiku) must
-  // precede the generic "claude" fallback: real IDs like "claude-opus-4-6"
-  // contain both keys and would otherwise never reach their family color.
-  "fable": "#DC2626",
-  "opus": "#DC2626",
-  "sonnet": "#D97706",
-  "haiku": "#059669",
-  "claude": "#D97706",
+  // Anthropic families use the same orange ramp as the TUI's ANTHROPIC_SHADES
+  // (crates/tokscale-cli/src/tui/ui/widgets.rs): brightness encodes the family
+  // hierarchy — fable darkest, then opus, sonnet, haiku, generic claude palest.
+  // Lookup is first-match, so family keys must precede the generic "claude"
+  // fallback: real IDs like "claude-opus-4-6" contain both keys and would
+  // otherwise never reach their family color.
+  "fable": "#DA7756",
+  "opus": "#DF886B",
+  "sonnet": "#E39980",
+  "haiku": "#E8AA95",
+  "claude": "#ECB8A6",
   "gpt": "#10B981",
   "o1": "#6366F1",
   "o3": "#8B5CF6",
