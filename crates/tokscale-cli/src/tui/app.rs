@@ -4346,7 +4346,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shade_map_assigns_rank_0_to_highest_cost() {
+    fn test_shade_map_ranks_by_family_hierarchy() {
         let mut app = make_app();
         app.data.models = vec![
             model_usage("claude-haiku-4-5", 10.0, None),
