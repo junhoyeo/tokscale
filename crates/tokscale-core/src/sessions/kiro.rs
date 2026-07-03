@@ -774,7 +774,7 @@ fn try_parse_kiro_workspace_session(
         if let Some(prompt_logs) = entry.get("promptLogs").and_then(|v| v.as_array()) {
             for pl in prompt_logs {
                 if let Some(prompt) = pl.get("prompt").and_then(|v| v.as_str()) {
-                    total_prompt_chars += prompt.len();
+                    total_prompt_chars += prompt.chars().count();
                     prompt_log_count += 1;
                 }
             }
@@ -782,7 +782,7 @@ fn try_parse_kiro_workspace_session(
         if let Some(msg) = entry.get("message") {
             if msg.get("role").and_then(|v| v.as_str()) == Some("assistant") {
                 if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                    assistant_chars += content.len();
+                    assistant_chars += content.chars().count();
                 }
             }
         }
