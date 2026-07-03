@@ -11,6 +11,7 @@ const MODEL_COLORS: Record<string, string> = {
   "haiku": "#E8AA95",
   "claude": "#ECB8A6",
   "gpt": "#10B981",
+  "chatgpt": "#10B981",
   "o1": "#6366F1",
   "o3": "#8B5CF6",
   "gemini": "#3B82F6",
@@ -21,9 +22,17 @@ const MODEL_COLORS: Record<string, string> = {
 };
 
 export function getModelColor(modelName: string): string {
-  const lowerName = modelName.toLowerCase();
+  // Match keys as delimited tokens (optionally followed by a version digit,
+  // e.g. "gpt4"), not raw substrings — otherwise ids like "unfabled-x" would
+  // land in the Anthropic palette. Mirrors the TUI's delimited matching in
+  // get_provider_from_model.
+  const tokens = modelName.toLowerCase().split(/[^a-z0-9]+/);
   for (const [key, color] of Object.entries(MODEL_COLORS)) {
-    if (lowerName.includes(key)) return color;
+    for (const token of tokens) {
+      if (token === key || (token.startsWith(key) && /^\d/.test(token.slice(key.length)))) {
+        return color;
+      }
+    }
   }
   return "#6B7280";
 }

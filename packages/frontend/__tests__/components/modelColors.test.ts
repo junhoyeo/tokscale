@@ -45,4 +45,17 @@ describe("getModelColor", () => {
   it("falls back to gray for unknown models", () => {
     expect(getModelColor("fugu")).toBe(UNKNOWN_GRAY);
   });
+
+  it("matches keys as delimited tokens, not raw substrings", () => {
+    // Regression (PR #808 review): includes() matching painted unrelated ids
+    // containing "fable"/"opus" fragments in Anthropic colors.
+    expect(getModelColor("unfabled-5")).toBe(UNKNOWN_GRAY);
+    expect(getModelColor("fableton-1")).toBe(UNKNOWN_GRAY);
+    // But version digits may trail a key without a delimiter...
+    expect(getModelColor("gpt4")).toBe(getModelColor("gpt-4"));
+    expect(getModelColor("qwen2.5-72b")).toBe(getModelColor("qwen-max"));
+    // ...and bracketed context markers tokenize away cleanly.
+    expect(getModelColor("claude-fable-5[1m]")).toBe(FABLE_ORANGE);
+    expect(getModelColor("chatgpt-4o-latest")).toBe(getModelColor("gpt-4o"));
+  });
 });
