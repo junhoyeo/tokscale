@@ -154,10 +154,6 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   workbuddy: "#2563EB",
 };
 
-export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {
-  droid: "#FFFFFF",
-};
-
 // Derived values
 export const CELL_SIZE = BOX_WIDTH + BOX_MARGIN;
 

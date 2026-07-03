@@ -90,29 +90,6 @@ export function filterByClient(data: TokenContributionData, clients: ClientType[
   };
 }
 
-export function filterByModel(data: TokenContributionData, models: string[]): TokenContributionData {
-  if (models.length === 0) return data;
-
-  const modelSet = new Set(models);
-  const filteredContributions = data.contributions.map((day) => {
-    const filteredClients = day.clients.filter((c) => modelSet.has(c.modelId));
-    return recalculateDayTotals({ ...day, clients: filteredClients });
-  });
-
-  const filteredClientSet = new Set<ClientType>();
-  for (const c of filteredContributions) {
-    for (const client of c.clients) {
-      filteredClientSet.add(client.client);
-    }
-  }
-
-  return {
-    ...data,
-    contributions: recalculateIntensity(filteredContributions),
-    summary: recalculateSummary(filteredContributions, Array.from(filteredClientSet)),
-  };
-}
-
 export function filterByYear(contributions: DailyContribution[], year: string): DailyContribution[] {
   return contributions.filter((c) => c.date.startsWith(year));
 }
@@ -300,17 +277,6 @@ export function calculateLongestStreak(contributions: DailyContribution[]): numb
 export function findBestDay(contributions: DailyContribution[]): DailyContribution | null {
   if (contributions.length === 0) return null;
   return contributions.reduce((best, current) => (current.totals.cost > best.totals.cost ? current : best));
-}
-
-export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result
-    ? {
-        r: parseInt(result[1], 16),
-        g: parseInt(result[2], 16),
-        b: parseInt(result[3], 16),
-      }
-    : null;
 }
 
 export function hexToNumber(hex: string): number {
