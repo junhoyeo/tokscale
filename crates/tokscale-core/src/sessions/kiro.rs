@@ -520,6 +520,14 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
         return messages;
     }
 
+    if value.get("executions").is_some() && value.get("version").is_some() {
+        return Vec::new();
+    }
+
+    if let Some(messages) = try_parse_kiro_workspace_session(&value, path, fallback_timestamp) {
+        return messages;
+    }
+
     let file_stem = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -653,7 +661,37 @@ fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<Unifi
                 })
                 .sum::<usize>()
         })
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + obj
+            .get("input")
+            .and_then(|inp| inp.get("data"))
+            .and_then(|data| data.get("messages"))
+            .and_then(|msgs| msgs.as_array())
+            .map(|msgs| {
+                msgs.iter()
+                    .map(|msg| {
+                        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+                            content
+                                .iter()
+                                .filter_map(|part| {
+                                    if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        part.get("text")
+                                            .and_then(|t| t.as_str())
+                                            .map(|s| s.chars().count())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .sum::<usize>()
+                        } else if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                            text.chars().count()
+                        } else {
+                            0
+                        }
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
 
     let input = estimate_tokens(input_chars);
     let output = estimate_tokens(output_chars);
@@ -691,6 +729,94 @@ fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<Unifi
     message.message_count = 1;
     message.is_turn_start = true;
     message.duration_ms = duration_ms;
+    message.set_workspace(workspace_key, workspace_label);
+    Some(vec![message])
+}
+
+fn try_parse_kiro_workspace_session(
+    value: &Value,
+    path: &Path,
+    fallback_timestamp: i64,
+) -> Option<Vec<UnifiedMessage>> {
+    let history = value.get("history")?.as_array()?;
+    if value.get("sessionId").is_none() && value.get("selectedModel").is_none() {
+        return None;
+    }
+
+    let file_stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let workspace = kiro_global_storage_workspace(path);
+    let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
+    let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+    let session_id = value
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| match workspace.as_deref() {
+            Some(ws) => format!("{}/{}", ws, file_stem),
+            None => file_stem.to_string(),
+        });
+
+    let model_id = value
+        .get("selectedModel")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty())
+        .unwrap_or("auto")
+        .to_string();
+
+    let mut total_prompt_chars: usize = 0;
+    let mut prompt_log_count: i32 = 0;
+    let mut assistant_chars: usize = 0;
+
+    for entry in history {
+        if let Some(prompt_logs) = entry.get("promptLogs").and_then(|v| v.as_array()) {
+            for pl in prompt_logs {
+                if let Some(prompt) = pl.get("prompt").and_then(|v| v.as_str()) {
+                    total_prompt_chars += prompt.len();
+                    prompt_log_count += 1;
+                }
+            }
+        }
+        if let Some(msg) = entry.get("message") {
+            if msg.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                    assistant_chars += content.len();
+                }
+            }
+        }
+    }
+
+    if total_prompt_chars == 0 {
+        return None;
+    }
+
+    let input = estimate_tokens(total_prompt_chars);
+    let output = estimate_tokens(assistant_chars);
+
+    if input + output == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut message = UnifiedMessage::new_with_dedup(
+        CLIENT_ID,
+        model_id,
+        PROVIDER_ID,
+        session_id.clone(),
+        fallback_timestamp,
+        TokenBreakdown {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        Some(format!("{}:workspace-session", session_id)),
+    );
+    message.message_count = prompt_log_count.max(1);
+    message.is_turn_start = true;
     message.set_workspace(workspace_key, workspace_label);
     Some(vec![message])
 }
