@@ -10,6 +10,7 @@ import { formatNumber, formatCurrency, formatDuration } from "@/lib/utils";
 import { legacy } from "@/lib/responsive";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
 import { ListCard, ListHeader, ListMetricCell, ListRow } from "./listStyles";
+import { getModelColor } from "./modelColors";
 
 export { ProfileDevices } from "./ProfileDevices";
 export type { ProfileDevice } from "./ProfileDevices";
@@ -892,32 +893,6 @@ export function ProfileStats({ stats, favoriteModel }: ProfileStatsProps) {
       </StatsGrid>
     </StatsContainer>
   );
-}
-
-const MODEL_COLORS: Record<string, string> = {
-  // "fable" must precede "claude": lookup is first-match and IDs like
-  // "claude-fable-5" contain both keys.
-  "fable": "#DC2626",
-  "claude": "#D97706",
-  "sonnet": "#D97706",
-  "opus": "#DC2626",
-  "haiku": "#059669",
-  "gpt": "#10B981",
-  "o1": "#6366F1",
-  "o3": "#8B5CF6",
-  "gemini": "#3B82F6",
-  "deepseek": "#06B6D4",
-  "codex": "#F59E0B",
-  "kimi": "#A855F7",
-  "qwen": "#1A73E8",
-};
-
-function getModelColor(modelName: string): string {
-  const lowerName = modelName.toLowerCase();
-  for (const [key, color] of Object.entries(MODEL_COLORS)) {
-    if (lowerName.includes(key)) return color;
-  }
-  return "#6B7280";
 }
 
 export interface ModelUsage {
