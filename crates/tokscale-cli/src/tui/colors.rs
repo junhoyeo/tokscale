@@ -89,22 +89,26 @@ fn family_tier(provider: &str, model: &str) -> u8 {
 }
 
 /// Extracts a `(major, minor)` version from a model id:
-/// "claude-opus-4-6" -> (4, 6), "gpt-5.4" -> (5, 4), "claude-fable-5" -> (5, 0).
-/// Scanning stops at the first 4+ digit token (dates like 20241022) so ids
-/// such as "o1-2024-12-17" don't misparse a date fragment as a version;
-/// ids without a version yield (0, 0).
+/// "claude-opus-4-6" -> (4, 6), "gpt-5.4" -> (5, 4), "gpt-4o" -> (4, 0),
+/// "claude-fable-5" -> (5, 0). Tokens only need to *start* with digits, so
+/// alphanumeric versions like "4o" parse as their numeric prefix. Scanning
+/// stops at the first 4+ digit value (dates like 20241022) so ids such as
+/// "o1-2024-12-17" don't misparse a date fragment as a version; ids without
+/// a version yield (0, 0).
 fn model_version(model: &str) -> (u32, u32) {
     let tokens: Vec<&str> = model
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
         .collect();
     for (i, token) in tokens.iter().enumerate() {
-        let Ok(major) = token.parse::<u32>() else {
+        let Some(major) = leading_number(token) else {
             continue;
         };
         if major >= 1000 {
             return (0, 0);
         }
+        // Minor must be fully numeric: suffix tokens like "1m" (from a
+        // "[1m]" context-window marker) are not version fragments.
         let minor = tokens
             .get(i + 1)
             .and_then(|t| t.parse::<u32>().ok())
@@ -113,6 +117,16 @@ fn model_version(model: &str) -> (u32, u32) {
         return (major, minor);
     }
     (0, 0)
+}
+
+/// Parses the leading digit run of a token: "4o" -> Some(4), "5" -> Some(5),
+/// "turbo" -> None.
+fn leading_number(token: &str) -> Option<u32> {
+    let end = token
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map_or(token.len(), |(i, _)| i);
+    token[..end].parse::<u32>().ok()
 }
 
 #[cfg(test)]
@@ -147,6 +161,12 @@ mod tests {
         assert_eq!(model_version("gpt-5.4"), (5, 4));
         assert_eq!(model_version("claude-3-5-sonnet-20241022"), (3, 5));
         assert_eq!(model_version("gpt-4-turbo"), (4, 0));
+        // Alphanumeric version tokens parse by their numeric prefix.
+        assert_eq!(model_version("gpt-4o"), (4, 0));
+        assert_eq!(model_version("gpt-4o-mini"), (4, 0));
+        assert_eq!(model_version("gpt-3.5-turbo"), (3, 5));
+        // A "[1m]" context marker is not a minor version.
+        assert_eq!(model_version("gpt-4o[1m]"), (4, 0));
         // Date fragments must not be read as versions.
         assert_eq!(model_version("o1-2024-12-17"), (0, 0));
         assert_eq!(model_version("codex-mini-latest"), (0, 0));
@@ -243,6 +263,24 @@ mod tests {
         );
         assert_eq!(
             shade(&map, "openai", "gpt-4"),
+            get_provider_shade("openai", 1)
+        );
+    }
+
+    #[test]
+    fn alphanumeric_versions_outrank_older_numeric_ones() {
+        // Regression (PR #810 review): "4o" used to parse as no version at
+        // all, letting gpt-3.5-turbo render darker than gpt-4o.
+        let map = build_model_shade_map(&[
+            usage("gpt-3.5-turbo", "openai", 900.0),
+            usage("gpt-4o", "openai", 1.0),
+        ]);
+        assert_eq!(
+            shade(&map, "openai", "gpt-4o"),
+            get_provider_shade("openai", 0)
+        );
+        assert_eq!(
+            shade(&map, "openai", "gpt-3.5-turbo"),
             get_provider_shade("openai", 1)
         );
     }
