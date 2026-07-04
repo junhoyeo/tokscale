@@ -85,6 +85,7 @@ struct TraceContext {
     session_id: Option<String>,
     session_id_priority: SessionIdPriority,
     agent_id: Option<String>,
+    agent_from_invoke_agent: bool,
 }
 
 struct CopilotUsageCandidate {
@@ -146,6 +147,7 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
                 session_id: None,
                 session_id_priority: SessionIdPriority::Missing,
                 agent_id: None,
+                agent_from_invoke_agent: false,
             });
 
         if context.model.is_none() {
@@ -160,15 +162,19 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
         }
 
         // Trace-level agent is only a FALLBACK for records that carry no
-        // gen_ai.agent.id of their own (see candidate_from_attributes). We keep
-        // the first non-empty agent id in the trace — for Copilot CLI this is
-        // the invoke_agent span's agent, which is the right default for plain
-        // chat turns that omit the attribute. Per-record agent ids (e.g. a
-        // sub-agent turn) take precedence at attribution time, so this
-        // first-wins lock does not mis-attribute records that name their agent.
-        if context.agent_id.is_none() {
-            if let Some(agent_id) = first_non_empty_attr(attributes, &["gen_ai.agent.id"]) {
+        // gen_ai.agent.id of their own (see candidate_from_attributes). Prefer
+        // the invoke_agent span's agent id (the trace default) and otherwise
+        // keep the first non-empty id, because OTel export order is not
+        // guaranteed: a child chat/sub-agent span may be exported before its
+        // parent invoke_agent span, and a plain first-wins lock would then make
+        // the sub-agent the trace fallback and mis-attribute agentless turns.
+        // Per-record agent ids still take precedence at attribution time.
+        if let Some(agent_id) = first_non_empty_attr(attributes, &["gen_ai.agent.id"]) {
+            let from_invoke_agent = is_agent_summary_span_record(record, attributes);
+            if (from_invoke_agent && !context.agent_from_invoke_agent) || context.agent_id.is_none()
+            {
                 context.agent_id = Some(agent_id.to_string());
+                context.agent_from_invoke_agent = from_invoke_agent;
             }
         }
     }
@@ -904,6 +910,36 @@ mod tests {
             messages[0].agent.as_deref(),
             Some("github.copilot.reviewer")
         );
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_agent_prefers_invoke_agent_over_child_span() {
+        // OTel export order is not guaranteed. A child chat span that carries
+        // its own gen_ai.agent.id (a sub-agent turn) can be exported BEFORE the
+        // parent invoke_agent span. The trace-level fallback agent must still
+        // resolve to the invoke_agent span's default rather than whichever agent
+        // id appears first in the trace, so a later agentless turn inherits the
+        // trace default instead of the sub-agent that happened to export first.
+        let content = r#"{"type":"span","traceId":"trace-order","spanId":"chat-sub","name":"chat claude-sonnet-4.6","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-sub","gen_ai.agent.id":"github.copilot.reviewer","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
+{"type":"span","traceId":"trace-order","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-order","spanId":"chat-plain","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        // The child sub-agent turn keeps its own agent id (per-record wins).
+        let sub = messages
+            .iter()
+            .find(|message| message.model_id == "claude-sonnet-4.6")
+            .unwrap();
+        assert_eq!(sub.agent.as_deref(), Some("github.copilot.reviewer"));
+        // The agentless turn inherits the invoke_agent default, not the
+        // sub-agent that happened to export first.
+        let plain = messages
+            .iter()
+            .find(|message| message.model_id == "gpt-5.4-mini")
+            .unwrap();
+        assert_eq!(plain.agent.as_deref(), Some("github.copilot.default"));
     }
 
     #[test]
