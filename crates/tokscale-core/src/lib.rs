@@ -1853,11 +1853,13 @@ fn aggregate_model_usage_entries(
             entry.provider = format!("{}, {}", entry.provider, msg.provider_id);
         }
 
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
+        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
+        // can't overflow the fold (matches the grand-total sum below).
+        entry.input = entry.input.saturating_add(msg.tokens.input);
+        entry.output = entry.output.saturating_add(msg.tokens.output);
+        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
+        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
+        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
         entry.message_count += msg.message_count.max(0);
         entry.cost += msg.cost;
         entry
@@ -1907,6 +1909,24 @@ fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
         .saturating_add(tokens.reasoning.max(0))
 }
 
+/// Sum the (input, output, cache_read, cache_write) token fields across model
+/// usage entries with saturating_add, so clamped (i64::MAX) entry buckets from a
+/// corrupt source can't overflow the report-level totals (the entries are
+/// already saturated per-field by aggregate_model_usage_entries).
+fn model_report_token_totals(entries: &[ModelUsage]) -> (i64, i64, i64, i64) {
+    entries.iter().fold(
+        (0, 0, 0, 0),
+        |(input, output, cache_read, cache_write), entry| {
+            (
+                input.saturating_add(entry.input),
+                output.saturating_add(entry.output),
+                cache_read.saturating_add(entry.cache_read),
+                cache_write.saturating_add(entry.cache_write),
+            )
+        },
+    )
+}
+
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
     let start = Instant::now();
 
@@ -1933,10 +1953,8 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     let filtered = filter_messages_for_report(all_messages, &options);
     let entries = aggregate_model_usage_entries(filtered, &options.group_by);
 
-    let total_input: i64 = entries.iter().map(|e| e.input).sum();
-    let total_output: i64 = entries.iter().map(|e| e.output).sum();
-    let total_cache_read: i64 = entries.iter().map(|e| e.cache_read).sum();
-    let total_cache_write: i64 = entries.iter().map(|e| e.cache_write).sum();
+    let (total_input, total_output, total_cache_read, total_cache_write) =
+        model_report_token_totals(&entries);
     let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
 
@@ -2002,10 +2020,12 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         entry
             .models
             .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
+        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
+        // can't overflow the fold.
+        entry.input = entry.input.saturating_add(msg.tokens.input);
+        entry.output = entry.output.saturating_add(msg.tokens.output);
+        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
+        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
         entry.message_count += msg.message_count.max(0);
         entry.cost += msg.cost;
     }
@@ -2099,11 +2119,13 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         entry
             .models
             .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
+        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
+        // can't overflow the fold.
+        entry.input = entry.input.saturating_add(msg.tokens.input);
+        entry.output = entry.output.saturating_add(msg.tokens.output);
+        entry.cache_read = entry.cache_read.saturating_add(msg.tokens.cache_read);
+        entry.cache_write = entry.cache_write.saturating_add(msg.tokens.cache_write);
+        entry.reasoning = entry.reasoning.saturating_add(msg.tokens.reasoning);
         entry.message_count += msg.message_count.max(0);
         if msg.is_turn_start {
             entry.turn_count += 1;
@@ -3198,6 +3220,76 @@ mod tests {
         };
         assert_eq!(t.total(), i64::MAX);
         assert_eq!(super::positive_token_total(&t), i64::MAX);
+    }
+
+    #[test]
+    fn model_aggregation_saturates_overflowing_token_folds() {
+        // token_total_saturates_on_overlarge_buckets covers a single message's
+        // grand total; the per-field CROSS-MESSAGE fold in
+        // aggregate_model_usage_entries must saturate too. An antigravity-cli
+        // row can carry an i64::MAX bucket after the untrusted-varint clamp
+        // (sessions/antigravity_cli.rs to_i64), so two such rows folded into one
+        // model group with plain `+=` overflow (debug panic / release wrap)
+        // before the already-saturating grand total runs.
+        let make = || {
+            UnifiedMessage::new_with_dedup(
+                "antigravity-cli",
+                "gemini-3-pro",
+                "antigravity",
+                "session-overflow",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: i64::MAX,
+                    output: 0,
+                    cache_read: i64::MAX,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+                None,
+            )
+        };
+
+        let entries = aggregate_model_usage_entries(vec![make(), make()], &GroupBy::Model);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].input, i64::MAX);
+        assert_eq!(entries[0].cache_read, i64::MAX);
+    }
+
+    #[test]
+    fn model_report_totals_saturate_across_groups() {
+        // aggregate_model_usage_entries saturates each entry's fields, so an
+        // entry can be i64::MAX. get_model_report sums the entries into the
+        // report-level totals via model_report_token_totals; two saturated
+        // entries (two distinct models) must not overflow that sum either.
+        let make = |model: &str| {
+            UnifiedMessage::new_with_dedup(
+                "antigravity-cli",
+                model,
+                "antigravity",
+                "session-overflow",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: i64::MAX,
+                    output: 0,
+                    cache_read: i64::MAX,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+                None,
+            )
+        };
+
+        let entries = aggregate_model_usage_entries(
+            vec![make("gemini-3-pro"), make("claude-opus-4-6")],
+            &GroupBy::Model,
+        );
+        assert_eq!(entries.len(), 2);
+        let (total_input, _total_output, total_cache_read, _total_cache_write) =
+            super::model_report_token_totals(&entries);
+        assert_eq!(total_input, i64::MAX);
+        assert_eq!(total_cache_read, i64::MAX);
     }
 
     fn make_workspace_message(

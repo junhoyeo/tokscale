@@ -71,11 +71,22 @@ impl SessionBlock {
 
     fn add(&mut self, span: &SessionMessageSpan<'_>) {
         self.end_ts = self.end_ts.max(span.end_ts);
-        self.tokens.input += span.msg.tokens.input;
-        self.tokens.output += span.msg.tokens.output;
-        self.tokens.cache_read += span.msg.tokens.cache_read;
-        self.tokens.cache_write += span.msg.tokens.cache_write;
-        self.tokens.reasoning += span.msg.tokens.reasoning;
+        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
+        // can't overflow the fold.
+        self.tokens.input = self.tokens.input.saturating_add(span.msg.tokens.input);
+        self.tokens.output = self.tokens.output.saturating_add(span.msg.tokens.output);
+        self.tokens.cache_read = self
+            .tokens
+            .cache_read
+            .saturating_add(span.msg.tokens.cache_read);
+        self.tokens.cache_write = self
+            .tokens
+            .cache_write
+            .saturating_add(span.msg.tokens.cache_write);
+        self.tokens.reasoning = self
+            .tokens
+            .reasoning
+            .saturating_add(span.msg.tokens.reasoning);
         self.cost += span.msg.cost;
         self.message_count += span.msg.message_count.max(1);
     }
@@ -426,6 +437,31 @@ mod tests {
         assert_eq!(result[0].wall_duration_ms, 0);
         assert_eq!(result[0].active_duration_ms, 0);
         assert_eq!(result[0].message_count, 1);
+    }
+
+    #[test]
+    fn test_sessionize_saturates_overflowing_token_fold() {
+        // A parser can clamp an untrusted token count to i64::MAX (e.g.
+        // antigravity_cli). Two such messages in one (client, session_id) block
+        // within the idle gap fold into the same SessionBlock; a plain `+=`
+        // fold would overflow (debug panic / release wrap) before it is
+        // serialized into SessionInterval.tokens.
+        let overlarge = |ts: i64| {
+            let mut message = make_msg("antigravity-cli", "ses1", ts);
+            message.tokens = TokenBreakdown {
+                input: i64::MAX,
+                output: 0,
+                cache_read: i64::MAX,
+                cache_write: 0,
+                reasoning: 0,
+            };
+            message
+        };
+        let msgs = vec![overlarge(1_000_000), overlarge(1_001_000)];
+        let result = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tokens.input, i64::MAX);
+        assert_eq!(result[0].tokens.cache_read, i64::MAX);
     }
 
     #[test]
