@@ -149,16 +149,34 @@ fn parse_jcode_messages(
     context: &mut JcodeSessionContext,
     fallback_timestamp: i64,
     fallback_id_scope: &str,
+    known_dedup_keys: Option<&std::collections::HashMap<String, usize>>,
 ) -> Vec<UnifiedMessage> {
     messages
         .into_iter()
         .enumerate()
         .filter_map(|(ordinal, message)| {
-            match message.role.as_deref() {
-                Some("user") => context.pending_turn_start = true,
-                Some("assistant") => {}
-                _ => {}
+            let message_id = message
+                .id
+                // Real Jcode messages include stable IDs; this fallback keeps
+                // malformed/custom files parseable without colliding across
+                // snapshot and journal batches.
+                .unwrap_or_else(|| format!("{fallback_id_scope}:{ordinal}"));
+            let dedup_key = format!("jcode:{}:{message_id}", context.session_id);
+
+            // A journal correction that only replaces an already-emitted message
+            // is turn-neutral: the merge in `parse_jcode_file` overwrites its
+            // is_turn_start with the snapshot entry's flag, so letting it advance
+            // the turn-state machine would consume a pending turn-start that a
+            // following brand-new journal message should have received (an
+            // under-count of that session's turn_count). `known_dedup_keys` is
+            // None for the snapshot pass, so snapshot parsing is unchanged.
+            let is_replacement = known_dedup_keys
+                .is_some_and(|keys| keys.contains_key(&dedup_key));
+
+            if !is_replacement && message.role.as_deref() == Some("user") {
+                context.pending_turn_start = true;
             }
+
             let usage = message.token_usage?;
             let tokens = tokens_from_usage(&usage);
             if tokens.total() <= 0 {
@@ -169,13 +187,6 @@ fn parse_jcode_messages(
                 .as_deref()
                 .and_then(parse_timestamp_str)
                 .unwrap_or(fallback_timestamp);
-            let message_id = message
-                .id
-                // Real Jcode messages include stable IDs; this fallback keeps
-                // malformed/custom files parseable without colliding across
-                // snapshot and journal batches.
-                .unwrap_or_else(|| format!("{fallback_id_scope}:{ordinal}"));
-            let dedup_key = format!("jcode:{}:{message_id}", context.session_id);
             let mut unified = UnifiedMessage::new_with_dedup(
                 "jcode",
                 context.model.clone(),
@@ -187,7 +198,10 @@ fn parse_jcode_messages(
                 Some(dedup_key),
             );
             unified.duration_ms = message.tool_duration_ms.filter(|duration| *duration > 0);
-            if message.role.as_deref() == Some("assistant") && context.pending_turn_start {
+            if !is_replacement
+                && message.role.as_deref() == Some("assistant")
+                && context.pending_turn_start
+            {
                 unified.is_turn_start = true;
                 context.pending_turn_start = false;
             }
@@ -223,6 +237,7 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
         &mut context,
         fallback_timestamp,
         "snapshot",
+        None,
     );
 
     // Track where each dedup_key landed in `parsed`. The journal is written
@@ -270,6 +285,7 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 &mut context,
                 journal_fallback_timestamp,
                 &format!("journal:{line_index}"),
+                Some(&index_by_dedup_key),
             );
             for mut message in journal_messages {
                 match message
@@ -599,5 +615,50 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[1].tokens.input, 200);
+    }
+
+    #[test]
+    fn journal_correction_of_snapshot_message_keeps_pending_turn_start() {
+        // The snapshot ends on a user message, so a turn-start is pending when
+        // the journal is merged. The journal's first entry corrects an
+        // already-snapshotted assistant id (a replace, whose is_turn_start is
+        // taken from the snapshot during the merge), and its second entry opens
+        // a brand-new assistant turn. The correction must stay turn-neutral: if
+        // it consumes the pending turn-start, the following new assistant is
+        // never marked is_turn_start and the session's turn_count is
+        // under-counted by one.
+        let dir = tempfile::TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        std::fs::write(
+            &snapshot,
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[
+    {"id":"user_1","role":"user","timestamp":"2026-06-16T12:00:00Z"},
+    {"id":"assistant_snap","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":100,"output_tokens":10}},
+    {"id":"user_2","role":"user","timestamp":"2026-06-16T12:00:02Z"}
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("session_test.journal.jsonl"),
+            r#"{"append_messages":[{"id":"assistant_snap","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":150,"output_tokens":15}}]}
+{"append_messages":[{"id":"assistant_journal","role":"assistant","timestamp":"2026-06-16T12:00:03Z","token_usage":{"input_tokens":200,"output_tokens":20}}]}
+"#,
+        )
+        .unwrap();
+
+        let messages = parse_jcode_file(&snapshot);
+        assert_eq!(messages.len(), 2);
+        // The snapshot assistant keeps its turn-start; the journal correction
+        // replaced its token_usage in place (150 in), preserving the flag.
+        assert!(messages[0].is_turn_start);
+        assert_eq!(messages[0].tokens.input, 150);
+        // The brand-new journal assistant opens the second turn.
+        assert!(messages[1].is_turn_start);
+        let turn_count = messages.iter().filter(|m| m.is_turn_start).count();
+        assert_eq!(turn_count, 2);
     }
 }

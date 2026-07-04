@@ -25,7 +25,11 @@ use std::time::UNIX_EPOCH;
 // token_usage, so invalidate them.
 // 24: UnifiedMessage now carries cost_source so cached provider-reported costs
 // are not repriced as if they were missing.
-const CACHE_SCHEMA_VERSION: u32 = 24;
+// 25: Jcode journal corrections that only replace a snapshotted message are now
+// turn-neutral, so a following brand-new journal turn is no longer robbed of
+// its is_turn_start; schema-24 caches carry the under-counted turn flags, so
+// invalidate them.
+const CACHE_SCHEMA_VERSION: u32 = 25;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
