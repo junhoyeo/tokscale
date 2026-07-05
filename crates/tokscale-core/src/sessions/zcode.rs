@@ -350,12 +350,12 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
     "#;
 
-    let mut stmt = match conn
-        .prepare(modern_query)
-        .or_else(|_| conn.prepare(legacy_query))
-    {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
+    let (mut stmt, is_legacy_schema) = match conn.prepare(modern_query) {
+        Ok(stmt) => (stmt, false),
+        Err(_) => match conn.prepare(legacy_query) {
+            Ok(stmt) => (stmt, true),
+            Err(_) => return Vec::new(),
+        },
     };
 
     let rows = match stmt.query_map([], |row| {
@@ -418,18 +418,28 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 raw_reasoning,
                 Some(total),
             ),
-            // `computed_total_tokens` is absent only on pre-migration rows
-            // read through the legacy-schema fallback query. Every sampled
-            // row in a real ZCode database (all providers/models) is
-            // cache/reasoning-inclusive — see the fix PR description for the
-            // sampled evidence — so subtract unconditionally rather than
-            // passing the raw, overlap-laden columns straight through.
-            None => (
+            // When `computed_total_tokens` is NULL, distinguish two cases:
+            // 1. Legacy schema (column doesn't exist): unconditionally subtract,
+            //    since every sampled row in a real ZCode database is confirmed
+            //    cache/reasoning-inclusive.
+            // 2. Modern schema but this row's value is NULL: can't detect shape,
+            //    so pass through unchanged (the normalize function's default when
+            //    total is None). Subtracting unconditionally here would undercount
+            //    rows that are already cache-exclusive.
+            None if is_legacy_schema => (
                 subtract_overlap(
                     raw_input,
                     raw_cache_read.max(0).saturating_add(raw_cache_write.max(0)),
                 ),
                 subtract_overlap(raw_output, raw_reasoning),
+            ),
+            None => normalize_zcode_input_and_output(
+                raw_input,
+                raw_output,
+                raw_cache_read,
+                raw_cache_write,
+                raw_reasoning,
+                None,
             ),
         };
 
