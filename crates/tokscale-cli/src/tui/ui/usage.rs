@@ -2501,6 +2501,7 @@ mod tests {
     };
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::UsageData;
+    use chrono::{Duration, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
 
@@ -2534,10 +2535,22 @@ mod tests {
         output
     }
 
+    /// An RFC3339 instant far enough ahead of "now" that
+    /// `helpers::format_reset_time` always takes the absolute-date branch
+    /// (`resets <month> <day> <time>`), independent of wall-clock date or
+    /// local timezone. Using a hardcoded date here previously caused
+    /// `usage_reset_button_renders_when_credit_available` to fail whenever
+    /// tests ran within 24h of, on/after, or under a timezone that shifted,
+    /// the hardcoded expiry — see #828.
+    fn far_future_reset_timestamp() -> String {
+        (Utc::now() + Duration::days(10)).to_rfc3339()
+    }
+
     fn output_with_reset_credits(
         provider: &str,
         account: Option<UsageAccount>,
         available_count: u32,
+        expires_at: &str,
     ) -> UsageOutput {
         let mut output = output(provider, account);
         output.reset_credits = Some(UsageResetCredits {
@@ -2546,7 +2559,7 @@ mod tests {
                 id: Some("credit_1".to_string()),
                 status: Some("available".to_string()),
                 reset_type: Some("codex_rate_limits".to_string()),
-                expires_at: Some("2026-07-12T01:31:33Z".to_string()),
+                expires_at: Some(expires_at.to_string()),
                 title: Some("One free rate limit reset".to_string()),
                 description: None,
             }],
@@ -2670,6 +2683,7 @@ mod tests {
                 is_active: true,
             }),
             1,
+            &far_future_reset_timestamp(),
         );
         output.metrics.clear();
         app.subscription_usage = vec![output];
@@ -3062,6 +3076,7 @@ mod tests {
     #[test]
     fn usage_reset_button_renders_when_credit_available() {
         let mut app = make_app();
+        let expires_at = far_future_reset_timestamp();
         app.subscription_usage = vec![output_with_reset_credits(
             "Codex",
             Some(UsageAccount {
@@ -3070,9 +3085,11 @@ mod tests {
                 is_active: true,
             }),
             2,
+            &expires_at,
         )];
 
         let body = render_body(&mut app, 180, 32);
+        let expected_expiry = helpers::format_reset_time(&expires_at).replace("resets", "expires");
 
         assert!(body.contains("Reset Bank"), "{body}");
         assert!(body.contains("2 available"), "{body}");
@@ -3080,7 +3097,7 @@ mod tests {
         assert!(body.contains(" Reset "), "{body}");
         assert!(body.contains("Credit Bank"), "{body}");
         assert!(body.contains("2 credits"), "{body}");
-        assert!(body.contains("expires Jul 12"), "{body}");
+        assert!(body.contains(&expected_expiry), "{body}");
         let state_line = body
             .lines()
             .find(|line| line.contains("State"))
@@ -3207,6 +3224,7 @@ mod tests {
                     is_active: true,
                 }),
                 1,
+                &far_future_reset_timestamp(),
             ),
             output(
                 "Codex",
@@ -3250,6 +3268,7 @@ mod tests {
                 is_active: true,
             }),
             1,
+            &far_future_reset_timestamp(),
         )];
 
         let body = render_body(&mut app, 120, 24);
