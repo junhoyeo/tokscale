@@ -170,8 +170,7 @@ fn parse_jcode_messages(
             // following brand-new journal message should have received (an
             // under-count of that session's turn_count). `known_dedup_keys` is
             // None for the snapshot pass, so snapshot parsing is unchanged.
-            let is_replacement = known_dedup_keys
-                .is_some_and(|keys| keys.contains_key(&dedup_key));
+            let is_replacement = known_dedup_keys.is_some_and(|keys| keys.contains_key(&dedup_key));
 
             if !is_replacement && message.role.as_deref() == Some("user") {
                 context.pending_turn_start = true;
