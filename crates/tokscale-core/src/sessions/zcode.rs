@@ -43,36 +43,59 @@ struct ZcodeEntry {
 /// Token usage block — field names follow the Z.ai / GLM API convention.
 #[derive(Debug, Deserialize)]
 struct ZcodeUsage {
-    #[serde(alias = "input_tokens", alias = "prompt_tokens")]
+    #[serde(alias = "input_tokens", alias = "prompt_tokens", alias = "inputTokens")]
     input: Option<i64>,
-    #[serde(alias = "output_tokens", alias = "completion_tokens")]
+    #[serde(
+        alias = "output_tokens",
+        alias = "completion_tokens",
+        alias = "outputTokens"
+    )]
     output: Option<i64>,
-    #[serde(alias = "input_cache_read", alias = "cache_read_tokens")]
+    #[serde(
+        alias = "input_cache_read",
+        alias = "cache_read_tokens",
+        alias = "cacheReadTokens"
+    )]
     cache_read: Option<i64>,
-    #[serde(alias = "input_cache_creation", alias = "cache_write_tokens")]
+    #[serde(
+        alias = "input_cache_creation",
+        alias = "cache_write_tokens",
+        alias = "cacheCreationTokens"
+    )]
     cache_write: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "reasoningTokens")]
     reasoning: Option<i64>,
+    #[serde(default, alias = "totalTokens")]
+    total: Option<i64>,
 }
 
 impl ZcodeUsage {
     fn to_breakdown(&self) -> Option<TokenBreakdown> {
-        let input = self.input.unwrap_or(0).max(0);
-        let output = self.output.unwrap_or(0).max(0);
-        let cache_read = self.cache_read.unwrap_or(0).max(0);
-        let cache_write = self.cache_write.unwrap_or(0).max(0);
-        let reasoning = self.reasoning.unwrap_or(0).max(0);
+        let raw_input = self.input.unwrap_or(0).max(0);
+        let raw_output = self.output.unwrap_or(0).max(0);
+        let raw_cache_read = self.cache_read.unwrap_or(0).max(0);
+        let raw_cache_write = self.cache_write.unwrap_or(0).max(0);
+        let raw_reasoning = self.reasoning.unwrap_or(0).max(0);
 
-        if input + output + cache_read + cache_write + reasoning == 0 {
+        if raw_input + raw_output + raw_cache_read + raw_cache_write + raw_reasoning == 0 {
             return None;
         }
 
+        let (net_input, net_output) = normalize_zcode_input_and_output(
+            raw_input,
+            raw_output,
+            raw_cache_read,
+            raw_cache_write,
+            raw_reasoning,
+            self.total,
+        );
+
         Some(TokenBreakdown {
-            input,
-            output,
-            cache_read,
-            cache_write,
-            reasoning,
+            input: net_input,
+            output: net_output,
+            cache_read: raw_cache_read,
+            cache_write: raw_cache_write,
+            reasoning: raw_reasoning,
         })
     }
 }
@@ -203,6 +226,68 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
     messages
 }
 
+/// Subtract `overlap` out of `value`, clamping both operands to non-negative
+/// and never going below zero. Mirrors `gemini.rs`'s `subtract_cached_overlap`
+/// but takes the pre-summed overlap directly, since ZCode's `input_tokens`
+/// absorbs two separate buckets (cache read + cache write) rather than one.
+fn subtract_overlap(value: i64, overlap: i64) -> i64 {
+    let value = value.max(0);
+    let overlap = overlap.max(0);
+    value.saturating_sub(overlap.min(value))
+}
+
+/// ZCode's `model_usage` rows report `input_tokens` and `output_tokens` as
+/// cache/reasoning-inclusive: `input_tokens` already contains
+/// `cache_read_input_tokens` + `cache_creation_input_tokens`, and
+/// `output_tokens` already contains `reasoning_tokens`. Tokscale's
+/// `TokenBreakdown` instead expects five non-overlapping buckets, so passing
+/// the raw columns straight through double-counts cache and reasoning in
+/// `TokenBreakdown::total()`.
+///
+/// When a reported `total` is available we use it to detect which shape
+/// we're looking at, mirroring `gemini.rs`'s
+/// `normalize_gemini_session_input_and_cache`: if the reported total matches
+/// the cache/reasoning-inclusive sum (`input + output`) rather than the fully
+/// additive sum (`input + output + cache_read + cache_write + reasoning`),
+/// the row is inclusive and needs the overlap subtracted.
+///
+/// When `total` is absent, the shape can't be detected here, so the raw
+/// input/output are returned unchanged; callers that have separate evidence
+/// about their data source's shape (e.g. `parse_zcode_sqlite`'s legacy-schema
+/// fallback) apply their own subtraction. Returns `(net_input, net_output)`.
+fn normalize_zcode_input_and_output(
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    total: Option<i64>,
+) -> (i64, i64) {
+    let input = input.max(0);
+    let output = output.max(0);
+    let cache_overlap = cache_read.max(0).saturating_add(cache_write.max(0));
+    let reasoning = reasoning.max(0);
+
+    let Some(total) = total.map(|value| value.max(0)) else {
+        return (input, output);
+    };
+
+    let inclusive_total = input.saturating_add(output);
+    let exclusive_total = inclusive_total
+        .saturating_add(cache_overlap)
+        .saturating_add(reasoning);
+
+    if (cache_overlap > 0 || reasoning > 0) && total == inclusive_total && total != exclusive_total
+    {
+        return (
+            subtract_overlap(input, cache_overlap),
+            subtract_overlap(output, reasoning),
+        );
+    }
+
+    (input, output)
+}
+
 pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let Some(conn) = open_readonly_sqlite(db_path) else {
         return Vec::new();
@@ -223,6 +308,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             mu.reasoning_tokens,
             mu.cache_read_input_tokens,
             mu.cache_creation_input_tokens,
+            mu.computed_total_tokens,
             NULLIF(mu.agent, ''),
             NULLIF(mu.mode, ''),
             NULLIF(s.directory, ''),
@@ -250,6 +336,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             mu.reasoning_tokens,
             mu.cache_read_input_tokens,
             mu.cache_creation_input_tokens,
+            NULL,
             NULLIF(mu.agent, ''),
             NULLIF(mu.mode, ''),
             NULL,
@@ -285,10 +372,11 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             reasoning_tokens: row.get(9)?,
             cache_read_input_tokens: row.get(10)?,
             cache_creation_input_tokens: row.get(11)?,
-            agent: row.get(12)?,
-            mode: row.get(13)?,
-            session_directory: row.get(14)?,
-            session_path: row.get(15)?,
+            computed_total_tokens: row.get(12)?,
+            agent: row.get(13)?,
+            mode: row.get(14)?,
+            session_directory: row.get(15)?,
+            session_path: row.get(16)?,
         })
     }) {
         Ok(rows) => rows,
@@ -314,12 +402,43 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .completed_at
             .or(row.started_at)
             .unwrap_or(fallback_timestamp);
+
+        let raw_input = row.input_tokens.unwrap_or(0);
+        let raw_output = row.output_tokens.unwrap_or(0);
+        let raw_cache_read = row.cache_read_input_tokens.unwrap_or(0);
+        let raw_cache_write = row.cache_creation_input_tokens.unwrap_or(0);
+        let raw_reasoning = row.reasoning_tokens.unwrap_or(0);
+
+        let (net_input, net_output) = match row.computed_total_tokens {
+            Some(total) => normalize_zcode_input_and_output(
+                raw_input,
+                raw_output,
+                raw_cache_read,
+                raw_cache_write,
+                raw_reasoning,
+                Some(total),
+            ),
+            // `computed_total_tokens` is absent only on pre-migration rows
+            // read through the legacy-schema fallback query. Every sampled
+            // row in a real ZCode database (all providers/models) is
+            // cache/reasoning-inclusive — see the fix PR description for the
+            // sampled evidence — so subtract unconditionally rather than
+            // passing the raw, overlap-laden columns straight through.
+            None => (
+                subtract_overlap(
+                    raw_input,
+                    raw_cache_read.max(0).saturating_add(raw_cache_write.max(0)),
+                ),
+                subtract_overlap(raw_output, raw_reasoning),
+            ),
+        };
+
         let tokens = TokenBreakdown {
-            input: row.input_tokens.unwrap_or(0).max(0),
-            output: row.output_tokens.unwrap_or(0).max(0),
-            cache_read: row.cache_read_input_tokens.unwrap_or(0).max(0),
-            cache_write: row.cache_creation_input_tokens.unwrap_or(0).max(0),
-            reasoning: row.reasoning_tokens.unwrap_or(0).max(0),
+            input: net_input,
+            output: net_output,
+            cache_read: raw_cache_read.max(0),
+            cache_write: raw_cache_write.max(0),
+            reasoning: raw_reasoning.max(0),
         };
 
         if tokens.total() == 0 {
@@ -371,6 +490,7 @@ struct ZcodeUsageRow {
     reasoning_tokens: Option<i64>,
     cache_read_input_tokens: Option<i64>,
     cache_creation_input_tokens: Option<i64>,
+    computed_total_tokens: Option<i64>,
     agent: Option<String>,
     mode: Option<String>,
     session_directory: Option<String>,
@@ -456,6 +576,7 @@ mod tests {
                 reasoning_tokens INTEGER,
                 cache_read_input_tokens INTEGER,
                 cache_creation_input_tokens INTEGER,
+                computed_total_tokens INTEGER,
                 agent TEXT,
                 mode TEXT
             );
@@ -693,8 +814,8 @@ mod tests {
             INSERT INTO model_usage (
                 id, session_id, turn_id, model_id, started_at, completed_at,
                 duration_ms, input_tokens, output_tokens, reasoning_tokens,
-                cache_read_input_tokens, cache_creation_input_tokens, agent, mode
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens, agent, mode
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
             params![
                 "usage_1",
@@ -709,6 +830,7 @@ mod tests {
                 5_i64,
                 7_i64,
                 3_i64,
+                120_i64,
                 "zcode-agent",
                 "yolo",
             ],
@@ -725,8 +847,8 @@ mod tests {
         assert_eq!(msg.session_id, "sess_1");
         assert_eq!(msg.timestamp, 1_782_718_001_000_i64);
         assert_eq!(msg.duration_ms, Some(1000));
-        assert_eq!(msg.tokens.input, 100);
-        assert_eq!(msg.tokens.output, 20);
+        assert_eq!(msg.tokens.input, 90);
+        assert_eq!(msg.tokens.output, 15);
         assert_eq!(msg.tokens.reasoning, 5);
         assert_eq!(msg.tokens.cache_read, 7);
         assert_eq!(msg.tokens.cache_write, 3);
@@ -768,5 +890,85 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0].is_turn_start);
         assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn test_parse_zcode_sqlite_cache_inclusive_normalization() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, completed_at,
+                input_tokens, output_tokens, reasoning_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                "usage_cache_incl",
+                "sess_cache",
+                "glm-5.2",
+                1_000_i64,
+                100_i64,
+                50_i64,
+                10_i64,
+                80_i64,
+                5_i64,
+                150_i64,
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.tokens.input, 15);
+        assert_eq!(msg.tokens.output, 40);
+        assert_eq!(msg.tokens.cache_read, 80);
+        assert_eq!(msg.tokens.cache_write, 5);
+        assert_eq!(msg.tokens.reasoning, 10);
+        assert_eq!(msg.tokens.total(), 150);
+    }
+
+    #[test]
+    fn test_parse_zcode_sqlite_cache_exclusive_preserved() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, completed_at,
+                input_tokens, output_tokens, reasoning_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                "usage_cache_excl",
+                "sess_excl",
+                "claude-sonnet-5",
+                1_000_i64,
+                20_i64,
+                30_i64,
+                5_i64,
+                80_i64,
+                10_i64,
+                145_i64,
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.tokens.input, 20);
+        assert_eq!(msg.tokens.output, 30);
+        assert_eq!(msg.tokens.cache_read, 80);
+        assert_eq!(msg.tokens.cache_write, 10);
+        assert_eq!(msg.tokens.reasoning, 5);
+        assert_eq!(msg.tokens.total(), 145);
     }
 }
