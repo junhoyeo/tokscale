@@ -158,6 +158,10 @@ fn current_count_label(app: &App) -> String {
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
         Tab::Minutely => format!(" ({} minutes)", app.data.minutely.len()),
+        Tab::Monthly if app.is_monthly_detail_active() => {
+            format!(" ({} days)", app.get_sorted_monthly_detail_days().len())
+        }
+        Tab::Monthly => format!(" ({} months)", app.data.monthly.len()),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }
@@ -193,6 +197,14 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
             }
         }
+        if app.current_tab == Tab::Monthly {
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            if app.is_monthly_detail_active() {
+                spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
+            } else {
+                spans.push(Span::styled("↵", Style::default().fg(Color::Yellow)));
+            }
+        }
         if app.current_tab == Tab::Hourly {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
             spans.push(Span::styled("v", Style::default().fg(Color::Yellow)));
@@ -221,6 +233,20 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(" ", Style::default()));
                 spans.push(Span::styled(
                     "[j:today]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+        }
+        if app.current_tab == Tab::Monthly {
+            if app.is_monthly_detail_active() {
+                spans.push(Span::styled(
+                    "[esc:back]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "[enter:details]",
                     Style::default().fg(Color::Yellow),
                 ));
             }
@@ -406,6 +432,10 @@ mod tests {
         );
         assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
         assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Monthly)),
+            " (0 months)"
+        );
         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
     }
 

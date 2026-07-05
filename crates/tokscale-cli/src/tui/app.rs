@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
@@ -19,8 +19,8 @@ use super::codex_login::{
     CodexLoginOutcome,
 };
 use super::data::{
-    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, TokenBreakdown,
-    UsageData,
+    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, MonthlyUsage,
+    TokenBreakdown, UsageData,
 };
 use super::privacy::looks_like_email;
 use super::settings::Settings;
@@ -60,6 +60,7 @@ pub enum Tab {
     Daily,
     Hourly,
     Minutely,
+    Monthly,
     Stats,
     Agents,
 }
@@ -73,6 +74,7 @@ impl Tab {
             Tab::Daily,
             Tab::Hourly,
             Tab::Minutely,
+            Tab::Monthly,
             Tab::Stats,
             Tab::Agents,
         ]
@@ -86,6 +88,7 @@ impl Tab {
             Tab::Daily => "Daily",
             Tab::Hourly => "Hourly",
             Tab::Minutely => "Minutely",
+            Tab::Monthly => "Monthly",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
         }
@@ -99,6 +102,7 @@ impl Tab {
             Tab::Daily => "Day",
             Tab::Hourly => "Hr",
             Tab::Minutely => "Min",
+            Tab::Monthly => "Mon",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
         }
@@ -111,7 +115,8 @@ impl Tab {
             Tab::Models => Tab::Daily,
             Tab::Daily => Tab::Hourly,
             Tab::Hourly => Tab::Minutely,
-            Tab::Minutely => Tab::Stats,
+            Tab::Minutely => Tab::Monthly,
+            Tab::Monthly => Tab::Stats,
             Tab::Stats => Tab::Agents,
             Tab::Agents => Tab::Overview,
         }
@@ -125,7 +130,8 @@ impl Tab {
             Tab::Daily => Tab::Models,
             Tab::Hourly => Tab::Daily,
             Tab::Minutely => Tab::Hourly,
-            Tab::Stats => Tab::Minutely,
+            Tab::Monthly => Tab::Minutely,
+            Tab::Stats => Tab::Monthly,
             Tab::Agents => Tab::Stats,
         }
     }
@@ -304,6 +310,10 @@ pub struct App {
     daily_list_selected_index: usize,
     daily_list_scroll_offset: usize,
 
+    pub selected_monthly_detail_month: Option<String>,
+    monthly_list_selected_index: usize,
+    monthly_list_scroll_offset: usize,
+
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
 
@@ -447,6 +457,9 @@ impl App {
             selected_daily_detail_date: None,
             daily_list_selected_index: 0,
             daily_list_scroll_offset: 0,
+            selected_monthly_detail_month: None,
+            monthly_list_selected_index: 0,
+            monthly_list_scroll_offset: 0,
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -533,6 +546,15 @@ impl App {
                 self.selected_daily_detail_date = None;
                 self.selected_index = self.daily_list_selected_index;
                 self.scroll_offset = self.daily_list_scroll_offset;
+            }
+        }
+
+        // Same for Monthly-detail mode: exit if the month disappeared.
+        if let Some(ref month) = self.selected_monthly_detail_month {
+            if !self.data.monthly.iter().any(|m| &m.month == month) {
+                self.selected_monthly_detail_month = None;
+                self.selected_index = self.monthly_list_selected_index;
+                self.scroll_offset = self.monthly_list_scroll_offset;
             }
         }
 
@@ -885,6 +907,9 @@ impl App {
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
             }
+            KeyCode::Enter if self.current_tab == Tab::Monthly => {
+                self.open_selected_monthly_detail();
+            }
             KeyCode::Enter if self.current_tab == Tab::Stats => {
                 self.handle_graph_selection();
             }
@@ -892,6 +917,11 @@ impl App {
                 if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
             {
                 self.close_daily_detail();
+            }
+            KeyCode::Esc | KeyCode::Backspace
+                if self.current_tab == Tab::Monthly && self.is_monthly_detail_active() =>
+            {
+                self.close_monthly_detail();
             }
             KeyCode::Esc if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
@@ -1541,6 +1571,9 @@ impl App {
         self.selected_daily_detail_date = None;
         self.daily_list_selected_index = 0;
         self.daily_list_scroll_offset = 0;
+        self.selected_monthly_detail_month = None;
+        self.monthly_list_selected_index = 0;
+        self.monthly_list_scroll_offset = 0;
         self.selected_graph_cell = None;
         self.stats_breakdown_total_lines = 0;
     }
@@ -1551,6 +1584,9 @@ impl App {
         self.current_tab = target;
         if target != Tab::Daily {
             self.selected_daily_detail_date = None;
+        }
+        if target != Tab::Monthly {
+            self.selected_monthly_detail_month = None;
         }
 
         let (field, dir) = self
@@ -1565,7 +1601,7 @@ impl App {
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
-        if matches!(tab, Tab::Hourly | Tab::Minutely) {
+        if matches!(tab, Tab::Hourly | Tab::Minutely | Tab::Monthly) {
             (SortField::Date, SortDirection::Descending)
         } else {
             (SortField::Cost, SortDirection::Descending)
@@ -1721,6 +1757,10 @@ impl App {
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
             Tab::Minutely => self.data.minutely.len(),
+            Tab::Monthly if self.is_monthly_detail_active() => {
+                self.get_sorted_monthly_detail_days().len()
+            }
+            Tab::Monthly => self.data.monthly.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
                     self.stats_breakdown_total_lines
@@ -1747,7 +1787,9 @@ impl App {
             self.sort_direction = SortDirection::Descending;
         }
         self.persist_current_sort();
-        if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
+        if (self.current_tab == Tab::Daily && self.is_daily_detail_active())
+            || (self.current_tab == Tab::Monthly && self.is_monthly_detail_active())
+        {
             self.selected_index = 0;
             self.scroll_offset = 0;
         } else {
@@ -1902,6 +1944,56 @@ impl App {
         self.clamp_selection();
     }
 
+    fn open_selected_monthly_detail(&mut self) {
+        if self.is_monthly_detail_active() {
+            return;
+        }
+
+        let selected_month = {
+            let monthly = self.get_sorted_monthly();
+            monthly.get(self.selected_index).map(|m| m.month.clone())
+        };
+
+        if let Some(month) = selected_month {
+            self.monthly_list_selected_index = self.selected_index;
+            self.monthly_list_scroll_offset = self.scroll_offset;
+            self.selected_monthly_detail_month = Some(month.clone());
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.set_status(&format!("Viewing daily breakdown for {}", month));
+            self.clamp_selection();
+        }
+    }
+
+    fn close_monthly_detail(&mut self) {
+        let Some(ref detail_month) = self.selected_monthly_detail_month else {
+            return;
+        };
+        let detail_month = detail_month.clone();
+
+        self.selected_monthly_detail_month = None;
+
+        let restored_index = self
+            .get_sorted_monthly()
+            .iter()
+            .position(|m| m.month == detail_month)
+            .unwrap_or(self.monthly_list_selected_index);
+
+        self.selected_index = restored_index;
+
+        let max_visible = self.max_visible_items.max(1);
+        let viewport_still_holds = restored_index >= self.monthly_list_scroll_offset
+            && restored_index < self.monthly_list_scroll_offset + max_visible;
+        self.scroll_offset = if viewport_still_holds {
+            self.monthly_list_scroll_offset
+        } else {
+            restored_index.saturating_sub(max_visible / 2)
+        };
+
+        self.set_status("Returned to monthly usage");
+        self.clamp_selection();
+    }
+
     fn toggle_auto_refresh(&mut self) {
         self.auto_refresh = !self.auto_refresh;
         if self.auto_refresh {
@@ -1997,6 +2089,14 @@ impl App {
                         m.cost
                     )
                 }),
+            Tab::Monthly if self.is_monthly_detail_active() => self
+                .get_sorted_monthly_detail_days()
+                .get(self.selected_index)
+                .map(|d| format!("{}: {} tokens, ${:.4}", d.date, d.tokens.total(), d.cost)),
+            Tab::Monthly => self
+                .get_sorted_monthly()
+                .get(self.selected_index)
+                .map(|m| format!("{}: {} tokens, ${:.4}", m.month, m.tokens.total(), m.cost)),
             Tab::Stats | Tab::Usage => None,
         };
 
@@ -2146,6 +2246,30 @@ impl App {
 
     pub fn daily_detail_date(&self) -> Option<NaiveDate> {
         self.selected_daily_detail_date
+    }
+
+    pub fn is_monthly_detail_active(&self) -> bool {
+        self.selected_monthly_detail_month.is_some()
+    }
+
+    pub fn monthly_detail_month(&self) -> Option<&str> {
+        self.selected_monthly_detail_month.as_deref()
+    }
+
+    pub fn get_sorted_monthly_detail_days(&self) -> Vec<&DailyUsage> {
+        let Some(month) = self.selected_monthly_detail_month.as_ref() else {
+            return Vec::new();
+        };
+        let Some((year, month)) = month.split_once('-').and_then(|(year, month)| {
+            Some((year.parse::<i32>().ok()?, month.parse::<u32>().ok()?))
+        }) else {
+            return Vec::new();
+        };
+
+        self.get_sorted_daily()
+            .into_iter()
+            .filter(|day| day.date.year() == year && day.date.month() == month)
+            .collect()
     }
 
     pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow<'_>> {
@@ -2321,6 +2445,43 @@ impl App {
             .collect()
     }
 
+    pub fn get_sorted_monthly(&self) -> Vec<&MonthlyUsage> {
+        let mut monthly: Vec<&MonthlyUsage> = self.data.monthly.iter().collect();
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => monthly.sort_by(|a, b| {
+                b.cost
+                    .total_cmp(&a.cost)
+                    .then_with(|| b.month.cmp(&a.month))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => monthly.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| a.month.cmp(&b.month))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => monthly.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| b.month.cmp(&a.month))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => monthly.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| a.month.cmp(&b.month))
+            }),
+            (SortField::Date, SortDirection::Descending) => {
+                monthly.sort_by(|a, b| b.month.cmp(&a.month))
+            }
+            (SortField::Date, SortDirection::Ascending) => {
+                monthly.sort_by(|a, b| a.month.cmp(&b.month))
+            }
+        }
+
+        monthly
+    }
+
     pub fn is_narrow(&self) -> bool {
         self.terminal_width < 80
     }
@@ -2344,15 +2505,16 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 8);
+        assert_eq!(tabs.len(), 9);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Usage);
         assert_eq!(tabs[2], Tab::Models);
         assert_eq!(tabs[3], Tab::Daily);
         assert_eq!(tabs[4], Tab::Hourly);
         assert_eq!(tabs[5], Tab::Minutely);
-        assert_eq!(tabs[6], Tab::Stats);
-        assert_eq!(tabs[7], Tab::Agents);
+        assert_eq!(tabs[6], Tab::Monthly);
+        assert_eq!(tabs[7], Tab::Stats);
+        assert_eq!(tabs[8], Tab::Agents);
     }
 
     #[test]
@@ -2362,7 +2524,8 @@ mod tests {
         assert_eq!(Tab::Models.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
         assert_eq!(Tab::Hourly.next(), Tab::Minutely);
-        assert_eq!(Tab::Minutely.next(), Tab::Stats);
+        assert_eq!(Tab::Minutely.next(), Tab::Monthly);
+        assert_eq!(Tab::Monthly.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
         assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
@@ -2375,7 +2538,8 @@ mod tests {
         assert_eq!(Tab::Daily.prev(), Tab::Models);
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
         assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
-        assert_eq!(Tab::Stats.prev(), Tab::Minutely);
+        assert_eq!(Tab::Monthly.prev(), Tab::Minutely);
+        assert_eq!(Tab::Stats.prev(), Tab::Monthly);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
@@ -2387,6 +2551,7 @@ mod tests {
         assert_eq!(Tab::Daily.as_str(), "Daily");
         assert_eq!(Tab::Hourly.as_str(), "Hourly");
         assert_eq!(Tab::Minutely.as_str(), "Minutely");
+        assert_eq!(Tab::Monthly.as_str(), "Monthly");
         assert_eq!(Tab::Stats.as_str(), "Stats");
     }
 
@@ -2398,6 +2563,7 @@ mod tests {
         assert_eq!(Tab::Daily.short_name(), "Day");
         assert_eq!(Tab::Hourly.short_name(), "Hr");
         assert_eq!(Tab::Minutely.short_name(), "Min");
+        assert_eq!(Tab::Monthly.short_name(), "Mon");
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
 
@@ -2952,6 +3118,193 @@ mod tests {
         );
     }
 
+    fn monthly_usage(month: &str, input_tokens: u64, cost: f64) -> MonthlyUsage {
+        MonthlyUsage {
+            month: month.to_string(),
+            tokens: TokenBreakdown {
+                input: input_tokens,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    #[test]
+    fn test_get_sorted_monthly_defaults_to_date_descending() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Monthly);
+        app.data.monthly = vec![
+            monthly_usage("2026-03", 100, 1.0),
+            monthly_usage("2026-05", 200, 2.0),
+            monthly_usage("2026-04", 300, 3.0),
+        ];
+
+        let sorted = app
+            .get_sorted_monthly()
+            .iter()
+            .map(|m| m.month.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sorted, vec!["2026-05", "2026-04", "2026-03"]);
+    }
+
+    #[test]
+    fn test_get_sorted_monthly_by_cost() {
+        let mut app = make_app();
+        app.current_tab = Tab::Monthly;
+        app.sort_field = SortField::Cost;
+        app.sort_direction = SortDirection::Ascending;
+        app.data.monthly = vec![
+            monthly_usage("2026-05", 100, 3.0),
+            monthly_usage("2026-04", 100, 1.0),
+            monthly_usage("2026-06", 100, 2.0),
+        ];
+
+        let sorted = app
+            .get_sorted_monthly()
+            .iter()
+            .map(|m| m.month.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sorted, vec!["2026-04", "2026-06", "2026-05"]);
+    }
+
+    #[test]
+    fn test_get_sorted_monthly_detail_days_filters_by_month() {
+        let mut app = make_app();
+        app.current_tab = Tab::Monthly;
+        app.selected_monthly_detail_month = Some("2026-05".to_string());
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("model-a", "openai", 1.0)]),
+            daily_usage("2026-05-20", 2.0, vec![("model-b", "anthropic", 2.0)]),
+            daily_usage("2026-06-01", 3.0, vec![("model-c", "google", 3.0)]),
+        ];
+
+        let days = app.get_sorted_monthly_detail_days();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].date.to_string(), "2026-05-20");
+        assert_eq!(days[1].date.to_string(), "2026-05-10");
+    }
+
+    #[test]
+    fn test_open_monthly_detail_shows_daily_breakdown() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Monthly);
+        app.data.monthly = vec![
+            monthly_usage("2026-05", 100, 1.0),
+            monthly_usage("2026-04", 200, 2.0),
+        ];
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("model-a", "openai", 1.0)]),
+            daily_usage("2026-04-05", 2.0, vec![("model-b", "anthropic", 2.0)]),
+        ];
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert!(app.is_monthly_detail_active());
+        assert_eq!(app.monthly_detail_month(), Some("2026-05"));
+        assert_eq!(app.get_sorted_monthly_detail_days().len(), 1);
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_esc_closes_monthly_detail_and_restores_selection() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Monthly);
+        app.data.monthly = vec![
+            monthly_usage("2026-05", 100, 1.0),
+            monthly_usage("2026-04", 200, 2.0),
+        ];
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("model-a", "openai", 1.0)]),
+            daily_usage("2026-04-05", 2.0, vec![("model-b", "anthropic", 2.0)]),
+        ];
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_monthly_detail_active());
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.is_monthly_detail_active());
+        assert_eq!(app.monthly_detail_month(), None);
+        assert_eq!(app.current_tab, Tab::Monthly);
+    }
+
+    #[test]
+    fn test_close_monthly_detail_restores_saved_viewport() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Monthly);
+        app.data.monthly = (1..=10)
+            .map(|month| monthly_usage(&format!("2026-{month:02}"), 100, 1.0))
+            .collect();
+        app.data.daily = vec![daily_usage(
+            "2026-03-10",
+            1.0,
+            vec![("model-a", "openai", 1.0)],
+        )];
+        app.max_visible_items = 4;
+        app.selected_index = 7;
+        app.scroll_offset = 6;
+
+        app.open_selected_monthly_detail();
+        assert_eq!(app.monthly_detail_month(), Some("2026-03"));
+        assert_eq!(app.scroll_offset, 0);
+
+        app.close_monthly_detail();
+
+        assert_eq!(app.selected_index, 7);
+        assert_eq!(app.scroll_offset, 6);
+    }
+
+    #[test]
+    fn test_switch_tab_clears_monthly_detail() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Monthly);
+        app.data.monthly = vec![monthly_usage("2026-05", 100, 1.0)];
+        app.data.daily = vec![daily_usage(
+            "2026-05-10",
+            1.0,
+            vec![("model-a", "openai", 1.0)],
+        )];
+
+        app.open_selected_monthly_detail();
+        assert!(app.is_monthly_detail_active());
+
+        app.switch_tab(Tab::Daily);
+
+        assert!(!app.is_monthly_detail_active());
+    }
+
+    #[test]
+    fn test_update_data_exits_monthly_detail_when_month_disappears() {
+        let mut app = make_app();
+        app.switch_tab(Tab::Monthly);
+        app.data.monthly = vec![monthly_usage("2026-05", 100, 1.0)];
+        app.data.daily = vec![daily_usage(
+            "2026-05-10",
+            1.0,
+            vec![("model-a", "openai", 1.0)],
+        )];
+
+        app.open_selected_monthly_detail();
+        assert!(app.is_monthly_detail_active());
+
+        app.update_data(UsageData {
+            monthly: vec![monthly_usage("2026-04", 200, 2.0)],
+            daily: vec![daily_usage(
+                "2026-04-05",
+                2.0,
+                vec![("model-b", "anthropic", 2.0)],
+            )],
+            ..Default::default()
+        });
+
+        assert!(!app.is_monthly_detail_active());
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -3016,6 +3369,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Hourly);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Monthly);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -3035,6 +3391,9 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Stats);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Monthly);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Hourly);
@@ -3064,6 +3423,7 @@ mod tests {
             Tab::Daily,
             Tab::Hourly,
             Tab::Minutely,
+            Tab::Monthly,
             Tab::Stats,
             Tab::Agents,
             Tab::Overview,

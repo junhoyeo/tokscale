@@ -15,8 +15,8 @@ use tokscale_core::{sessions, GroupBy, ModelPerformance};
 use crate::ClientFilter;
 
 use super::data::{
-    AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
-    HourlyModelInfo, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
+    aggregate_monthly_from_daily, AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo,
+    DailyUsage, GraphData, HourlyModelInfo, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
 };
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
@@ -625,16 +625,19 @@ impl TryFrom<CachedUsageData> for UsageData {
         let hourly: Result<Vec<HourlyUsage>, _> =
             u.hourly.into_iter().map(|h| h.try_into()).collect();
         let graph: Option<Result<GraphData, _>> = u.graph.map(|g| g.try_into());
+        let daily = daily?;
+        let monthly = aggregate_monthly_from_daily(&daily);
 
         Ok(Self {
             models: u.models.into_iter().map(|m| m.into()).collect(),
             agents: normalize_cached_agents(u.agents),
-            daily: daily?,
+            daily,
             hourly: hourly?,
             // Minutely data is recomputed on each load (high cardinality,
             // not worth round-tripping through the on-disk cache); the
             // first foreground refresh after cache hit will populate it.
             minutely: Vec::new(),
+            monthly,
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,

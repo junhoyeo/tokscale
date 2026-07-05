@@ -133,6 +133,15 @@ pub struct MinutelyUsage {
 }
 
 #[derive(Debug, Clone)]
+pub struct MonthlyUsage {
+    pub month: String,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub message_count: u32,
+    pub turn_count: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct ContributionDay {
     pub date: NaiveDate,
     pub tokens: u64,
@@ -152,6 +161,7 @@ pub struct UsageData {
     pub daily: Vec<DailyUsage>,
     pub hourly: Vec<HourlyUsage>,
     pub minutely: Vec<MinutelyUsage>,
+    pub monthly: Vec<MonthlyUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -896,6 +906,8 @@ impl DataLoader {
         let mut minutely: Vec<MinutelyUsage> = minutely_map.into_values().collect();
         minutely.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
+        let monthly = aggregate_monthly_from_daily(&daily);
+
         let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
         let total_cost: f64 = models
             .iter()
@@ -911,6 +923,7 @@ impl DataLoader {
             daily,
             hourly,
             minutely,
+            monthly,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -1052,6 +1065,42 @@ fn build_contribution_graph_for_today(daily: &[DailyUsage], today: NaiveDate) ->
 
 fn calculate_streaks(daily: &[DailyUsage]) -> (u32, u32) {
     calculate_streaks_for_today(daily, Local::now().date_naive())
+}
+
+pub fn aggregate_monthly_from_daily(daily: &[DailyUsage]) -> Vec<MonthlyUsage> {
+    let mut monthly_map: HashMap<String, MonthlyUsage> = HashMap::new();
+
+    for day in daily {
+        let month = day.date.format("%Y-%m").to_string();
+        let entry = monthly_map
+            .entry(month.clone())
+            .or_insert_with(|| MonthlyUsage {
+                month,
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                message_count: 0,
+                turn_count: 0,
+            });
+
+        entry.tokens.input = entry.tokens.input.saturating_add(day.tokens.input);
+        entry.tokens.output = entry.tokens.output.saturating_add(day.tokens.output);
+        entry.tokens.cache_read = entry
+            .tokens
+            .cache_read
+            .saturating_add(day.tokens.cache_read);
+        entry.tokens.cache_write = entry
+            .tokens
+            .cache_write
+            .saturating_add(day.tokens.cache_write);
+        entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(day.tokens.reasoning);
+        entry.cost += day.cost;
+        entry.message_count = entry.message_count.saturating_add(day.message_count);
+        entry.turn_count = entry.turn_count.saturating_add(day.turn_count);
+    }
+
+    let mut monthly: Vec<MonthlyUsage> = monthly_map.into_values().collect();
+    monthly.sort_by(|a, b| b.month.cmp(&a.month));
+    monthly
 }
 
 fn calculate_streaks_for_today(daily: &[DailyUsage], today: NaiveDate) -> (u32, u32) {
@@ -2645,5 +2694,116 @@ after"#,
         assert_eq!(bucket.tokens.input, 0);
         assert_eq!(bucket.tokens.output, 0);
         assert_eq!(bucket.cost, 0.0);
+    }
+
+    fn daily_usage(
+        date: NaiveDate,
+        input: u64,
+        output: u64,
+        cost: f64,
+        message_count: u32,
+    ) -> DailyUsage {
+        DailyUsage {
+            date,
+            tokens: TokenBreakdown {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            source_breakdown: BTreeMap::new(),
+            message_count,
+            turn_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_aggregate_monthly_from_daily_groups_by_month() {
+        let daily = vec![
+            daily_usage(
+                NaiveDate::from_ymd_opt(2026, 5, 10).unwrap(),
+                100,
+                50,
+                1.0,
+                2,
+            ),
+            daily_usage(
+                NaiveDate::from_ymd_opt(2026, 5, 20).unwrap(),
+                200,
+                100,
+                2.0,
+                3,
+            ),
+            daily_usage(
+                NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+                300,
+                150,
+                3.0,
+                4,
+            ),
+        ];
+
+        let monthly = aggregate_monthly_from_daily(&daily);
+        assert_eq!(monthly.len(), 2);
+
+        let may = monthly.iter().find(|m| m.month == "2026-05").unwrap();
+        assert_eq!(may.tokens.input, 300);
+        assert_eq!(may.tokens.output, 150);
+        assert_eq!(may.tokens.total(), 450);
+        assert_eq!(may.cost, 3.0);
+        assert_eq!(may.message_count, 5);
+
+        let june = monthly.iter().find(|m| m.month == "2026-06").unwrap();
+        assert_eq!(june.tokens.input, 300);
+        assert_eq!(june.tokens.output, 150);
+        assert_eq!(june.tokens.total(), 450);
+        assert_eq!(june.cost, 3.0);
+        assert_eq!(june.message_count, 4);
+    }
+
+    #[test]
+    fn test_aggregate_messages_populates_monthly() {
+        let loader = DataLoader::new(None);
+        let base_ms = 1_736_899_200_000_i64; // mid-January 2025 in UTC
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_msg(base_ms, 100, 50, 1.0),
+                    make_msg(base_ms + 86_400_000, 200, 100, 2.0), // +1 day
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.monthly.len(), 1);
+        assert_eq!(usage.monthly[0].month, "2025-01");
+        assert_eq!(usage.monthly[0].tokens.input, 300);
+        assert_eq!(usage.monthly[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_aggregate_monthly_sorts_descending() {
+        let daily = vec![
+            daily_usage(
+                NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+                100,
+                50,
+                1.0,
+                1,
+            ),
+            daily_usage(
+                NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+                200,
+                100,
+                2.0,
+                1,
+            ),
+        ];
+
+        let monthly = aggregate_monthly_from_daily(&daily);
+        assert_eq!(monthly[0].month, "2026-05");
+        assert_eq!(monthly[1].month, "2026-03");
     }
 }

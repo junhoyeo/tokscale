@@ -25,11 +25,15 @@ use std::time::UNIX_EPOCH;
 // token_usage, so invalidate them.
 // 24: UnifiedMessage now carries cost_source so cached provider-reported costs
 // are not repriced as if they were missing.
-// 25: Jcode journal corrections that only replace a snapshotted message are now
+// 25: Copilot trace-level fallback agent now prefers the invoke_agent span's
+// agent id over the first-exported span, so agentless turns are no longer
+// mis-attributed to a sub-agent under an out-of-order OTel export; schema-24
+// caches carry the mis-attributed agent, so invalidate them.
+// 26: Jcode journal corrections that only replace a snapshotted message are now
 // turn-neutral, so a following brand-new journal turn is no longer robbed of
-// its is_turn_start; schema-24 caches carry the under-counted turn flags, so
+// its is_turn_start; schema-25 caches carry the under-counted turn flags, so
 // invalidate them.
-const CACHE_SCHEMA_VERSION: u32 = 25;
+const CACHE_SCHEMA_VERSION: u32 = 26;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

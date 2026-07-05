@@ -1,6 +1,9 @@
 //! Pi (badlogic/pi-mono) session parser
 //!
-//! Parses JSONL files from ~/.pi/agent/sessions/<encoded-cwd>/*.jsonl
+//! Parses JSONL files from `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl` (and,
+//! via the `pi` client's OMP scan root, `~/.omp/agent/sessions/...`). Current
+//! OMP builds write a `title` metadata record before the `session` header in
+//! newly-created session files; see [`PRE_SESSION_METADATA_TYPES`].
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -21,6 +24,20 @@ pub struct PiSessionHeader {
     #[allow(dead_code)]
     pub cwd: Option<String>,
 }
+
+/// Loose type-only probe for a JSONL line, used to identify pre-session
+/// metadata records without requiring their full schema.
+#[derive(Debug, Deserialize)]
+struct PiEntryTypeProbe {
+    #[serde(rename = "type")]
+    entry_type: String,
+}
+
+/// Record types OMP may write before the `session` header (e.g. an
+/// auto-generated-title record). The parser skips these while looking for
+/// `session` rather than discarding the whole file. Any other unrecognized
+/// type before `session` is still treated as a malformed file.
+const PRE_SESSION_METADATA_TYPES: &[&str] = &["title"];
 
 /// Pi session entry (subsequent lines of JSONL)
 #[derive(Debug, Deserialize)]
@@ -85,14 +102,25 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
         if session_id.is_none() {
             buffer.clear();
             buffer.extend_from_slice(trimmed.as_bytes());
+            let entry_type = match simd_json::from_slice::<PiEntryTypeProbe>(&mut buffer) {
+                Ok(probe) => probe.entry_type,
+                Err(_) => return Vec::new(),
+            };
+
+            if entry_type != "session" {
+                if PRE_SESSION_METADATA_TYPES.contains(&entry_type.as_str()) {
+                    continue;
+                }
+                return Vec::new();
+            }
+
+            buffer.clear();
+            buffer.extend_from_slice(trimmed.as_bytes());
             let header = match simd_json::from_slice::<PiSessionHeader>(&mut buffer) {
                 Ok(h) => h,
                 Err(_) => return Vec::new(),
             };
 
-            if header.entry_type != "session" {
-                return Vec::new();
-            }
             session_id = Some(header.id);
             workspace_key = header.cwd.as_deref().and_then(normalize_workspace_key);
             workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
@@ -247,5 +275,62 @@ not valid json
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-4o-mini");
         assert_eq!(messages[0].provider_id, "openai");
+    }
+
+    #[test]
+    fn test_parse_pi_skips_leading_title_record() {
+        // given: current OMP builds write a `title` metadata record before
+        // `session` (tokscale#802) — the parser must skip it, not discard
+        // the whole file.
+        let content = r#"{"type":"title","v":1,"title":"Comment on GitHub issue","source":"auto","updatedAt":"2026-07-02T18:08:49.723Z"}
+{"type":"session","id":"pi_ses_005","timestamp":"2026-07-02T18:07:14.690Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-02T18:08:53.229Z","message":{"role":"assistant","model":"claude-sonnet-5","provider":"anthropic","usage":{"input":2,"output":180,"cacheRead":0,"cacheWrite":70844,"totalTokens":71026}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "pi_ses_005");
+        assert_eq!(messages[0].model_id, "claude-sonnet-5");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 2);
+        assert_eq!(messages[0].tokens.output, 180);
+        assert_eq!(messages[0].tokens.cache_write, 70844);
+    }
+
+    #[test]
+    fn test_parse_pi_skips_multiple_leading_title_records() {
+        // given: defensive against more than one pre-session metadata line
+        // in a row (e.g. a title record rewritten by a later auto-rename).
+        let content = r#"{"type":"title","v":1,"title":"first"}
+{"type":"title","v":1,"title":"renamed"}
+{"type":"session","id":"pi_ses_006","timestamp":"2026-07-02T18:07:14.690Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-02T18:08:53.229Z","message":{"role":"assistant","model":"gpt-4o-mini","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "pi_ses_006");
+    }
+
+    #[test]
+    fn test_parse_pi_rejects_unknown_leading_record_type() {
+        // given: an unrecognized type before `session` is still treated as
+        // a malformed file rather than silently scanned through.
+        let content = r#"{"type":"totally_unknown_thing","foo":"bar"}
+{"type":"session","id":"pi_ses_007","timestamp":"2026-07-02T18:07:14.690Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-07-02T18:08:53.229Z","message":{"role":"assistant","model":"gpt-4o-mini","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert!(messages.is_empty());
     }
 }
