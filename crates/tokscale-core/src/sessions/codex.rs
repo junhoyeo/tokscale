@@ -1,6 +1,13 @@
 //! Codex CLI session parser
 //!
-//! Parses JSONL files from ~/.codex/sessions/
+//! Parses JSONL files from `~/.codex/sessions/` and its sibling
+//! `~/.codex/archived_sessions/` (where Codex CLI moves older sessions). Both
+//! directories share an identical JSONL schema, so a single parser handles
+//! both; the scan-root wiring that discovers `archived_sessions` lives in
+//! `crate::scanner`. Session identity for dedup is derived from in-file
+//! `session_meta` content (not the file path), so a session that happens to
+//! be present in both directories at once is still counted only once — see
+//! `codex_token_count_dedup_key`.
 //! Note: This parser has stateful logic to track model and delta calculations.
 
 use super::utils::{

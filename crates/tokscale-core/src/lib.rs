@@ -5180,6 +5180,117 @@ mod tests {
         }
     }
 
+    /// Regression fixture for issue #779: Codex CLI moves aged sessions from
+    /// `~/.codex/sessions/` into a sibling `~/.codex/archived_sessions/`
+    /// directory. Three distinct scenarios are covered here:
+    /// - `live-only`: a session that only ever lived in `sessions/`.
+    /// - `archived-only`: a session that only exists in `archived_sessions/`
+    ///   (the case the collector was previously blind to, causing the
+    ///   undercount reported in #779).
+    /// - `shared`: the same upstream session content present in *both*
+    ///   directories at once (e.g. mid-archive), which must be counted once,
+    ///   not twice.
+    fn write_codex_sessions_and_archived_sessions_fixture(source_home: &std::path::Path) {
+        let sessions_dir = source_home.join(".codex/sessions");
+        let archived_dir = source_home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&archived_dir).unwrap();
+
+        std::fs::write(
+            sessions_dir.join("live-only.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-25T10:00:00Z","type":"session_meta","payload":{"id":"33333333-3333-7333-8333-333333333333","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-25T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55},"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        std::fs::write(
+            archived_dir.join("archived-only.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-20T09:00:00Z","type":"session_meta","payload":{"id":"44444444-4444-7444-8444-444444444444","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-20T09:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-20T09:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":70,"output_tokens":7,"total_tokens":77},"last_token_usage":{"input_tokens":70,"output_tokens":7,"total_tokens":77}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let shared_content = concat!(
+            r#"{"timestamp":"2026-06-22T08:00:00Z","type":"session_meta","payload":{"id":"55555555-5555-7555-8555-555555555555","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-22T08:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-22T08:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}"#,
+            "\n"
+        );
+        std::fs::write(
+            sessions_dir.join("shared-in-sessions.jsonl"),
+            shared_content,
+        )
+        .unwrap();
+        std::fs::write(
+            archived_dir.join("shared-in-archived.jsonl"),
+            shared_content,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_codex_scans_archived_sessions_without_double_counting()
+    {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_sessions_and_archived_sessions_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            // live-only + archived-only + shared (counted once, not twice).
+            assert_eq!(
+                messages.len(),
+                3,
+                "archived_sessions must be scanned (live-only + archived-only), and a session \
+                 present in both sessions/ and archived_sessions/ must be deduplicated to one \
+                 message, not counted twice"
+            );
+
+            let session_ids: HashSet<_> = messages
+                .iter()
+                .map(|message| message.session_id.as_str())
+                .collect();
+            assert!(session_ids.contains("live-only"));
+            assert!(
+                session_ids.contains("archived-only"),
+                "archived_sessions/archived-only.jsonl must be scanned and parsed"
+            );
+
+            // 50 (live-only) + 70 (archived-only) + 30 (shared, once) = 150.
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 150);
+            // 5 (live-only) + 7 (archived-only) + 3 (shared, once) = 15.
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 15);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
