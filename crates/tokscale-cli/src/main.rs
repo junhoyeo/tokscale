@@ -1919,8 +1919,12 @@ fn run_models_report(
                             .map(capitalize_client)
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let total_tokens =
-                            entry.input + entry.output + entry.cache_read + entry.cache_write;
+                        let total_tokens = saturating_token_total(
+                            entry.input,
+                            entry.output,
+                            entry.cache_read,
+                            entry.cache_write,
+                        );
                         table.add_row(vec![
                             Cell::new(capitalized_clients),
                             Cell::new(crate::tui::ui::widgets::get_provider_display_name(
@@ -1941,10 +1945,12 @@ fn run_models_report(
                         ]);
                     }
 
-                    let total_tokens = report.total_input
-                        + report.total_output
-                        + report.total_cache_read
-                        + report.total_cache_write;
+                    let total_tokens = saturating_token_total(
+                        report.total_input,
+                        report.total_output,
+                        report.total_cache_read,
+                        report.total_cache_write,
+                    );
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -1981,8 +1987,12 @@ fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total_tokens =
-                            entry.input + entry.output + entry.cache_read + entry.cache_write;
+                        let total_tokens = saturating_token_total(
+                            entry.input,
+                            entry.output,
+                            entry.cache_read,
+                            entry.cache_write,
+                        );
                         table.add_row(vec![
                             Cell::new(capitalize_client(&entry.client)),
                             Cell::new(crate::tui::ui::widgets::get_provider_display_name(
@@ -2003,10 +2013,12 @@ fn run_models_report(
                         ]);
                     }
 
-                    let total_tokens = report.total_input
-                        + report.total_output
-                        + report.total_cache_read
-                        + report.total_cache_write;
+                    let total_tokens = saturating_token_total(
+                        report.total_input,
+                        report.total_output,
+                        report.total_cache_read,
+                        report.total_cache_write,
+                    );
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -2045,8 +2057,12 @@ fn run_models_report(
                     table.set_header(header);
 
                     for entry in &report.entries {
-                        let total_tokens =
-                            entry.input + entry.output + entry.cache_read + entry.cache_write;
+                        let total_tokens = saturating_token_total(
+                            entry.input,
+                            entry.output,
+                            entry.cache_read,
+                            entry.cache_write,
+                        );
                         let session_label = entry
                             .session_id
                             .clone()
@@ -2066,10 +2082,12 @@ fn run_models_report(
                         table.add_row(row);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_read
-                        + report.total_cache_write;
+                    let total_all = saturating_token_total(
+                        report.total_input,
+                        report.total_output,
+                        report.total_cache_read,
+                        report.total_cache_write,
+                    );
                     let mut total_row = Vec::with_capacity(6);
                     if show_client {
                         total_row.push(
@@ -2149,8 +2167,12 @@ fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = saturating_token_total(
+                            entry.input,
+                            entry.output,
+                            entry.cache_read,
+                            entry.cache_write,
+                        );
 
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
                         let capitalized_clients = clients_str
@@ -2184,10 +2206,12 @@ fn run_models_report(
                         ]);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
+                    let total_all = saturating_token_total(
+                        report.total_input,
+                        report.total_output,
+                        report.total_cache_read,
+                        report.total_cache_write,
+                    );
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -2239,8 +2263,12 @@ fn run_models_report(
                     table.set_header(header);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = saturating_token_total(
+                            entry.input,
+                            entry.output,
+                            entry.cache_read,
+                            entry.cache_write,
+                        );
                         let session_label = entry
                             .session_id
                             .clone()
@@ -2270,10 +2298,12 @@ fn run_models_report(
                         table.add_row(row);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
+                    let total_all = saturating_token_total(
+                        report.total_input,
+                        report.total_output,
+                        report.total_cache_read,
+                        report.total_cache_write,
+                    );
                     let mut total_row: Vec<Cell> = Vec::with_capacity(9);
                     total_row.push(
                         Cell::new("Total")
@@ -2328,8 +2358,12 @@ fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = saturating_token_total(
+                            entry.input,
+                            entry.output,
+                            entry.cache_read,
+                            entry.cache_write,
+                        );
 
                         table.add_row(vec![
                             Cell::new(capitalize_client(&entry.client)),
@@ -2358,10 +2392,12 @@ fn run_models_report(
                         ]);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
+                    let total_all = saturating_token_total(
+                        report.total_input,
+                        report.total_output,
+                        report.total_cache_read,
+                        report.total_cache_write,
+                    );
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -2411,8 +2447,12 @@ fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = saturating_token_total(
+                            entry.input,
+                            entry.output,
+                            entry.cache_read,
+                            entry.cache_write,
+                        );
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
                         let capitalized_clients = clients_str
                             .split(", ")
@@ -2445,10 +2485,12 @@ fn run_models_report(
                         ]);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
+                    let total_all = saturating_token_total(
+                        report.total_input,
+                        report.total_output,
+                        report.total_cache_read,
+                        report.total_cache_write,
+                    );
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -2489,10 +2531,12 @@ fn run_models_report(
         println!("\n  \x1b[36m{}\x1b[0m\n", title);
         println!("{}", dim_borders(&table.to_string()));
 
-        let total_tokens = report.total_input
-            + report.total_output
-            + report.total_cache_write
-            + report.total_cache_read;
+        let total_tokens = saturating_token_total(
+            report.total_input,
+            report.total_output,
+            report.total_cache_read,
+            report.total_cache_write,
+        );
         println!(
             "\x1b[90m\n  Total: {} messages, {} tokens, \x1b[32m{}\x1b[90m\x1b[0m",
             format_tokens_with_commas(report.total_messages as i64),
@@ -2665,8 +2709,12 @@ fn run_monthly_report(
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                let total_tokens =
-                    entry.input + entry.output + entry.cache_read + entry.cache_write;
+                let total_tokens = saturating_token_total(
+                    entry.input,
+                    entry.output,
+                    entry.cache_read,
+                    entry.cache_write,
+                );
 
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
@@ -2681,11 +2729,14 @@ fn run_monthly_report(
                 ]);
             }
 
-            let total_input: i64 = report.entries.iter().map(|e| e.input).sum();
-            let total_output: i64 = report.entries.iter().map(|e| e.output).sum();
-            let total_cache_read: i64 = report.entries.iter().map(|e| e.cache_read).sum();
-            let total_cache_write: i64 = report.entries.iter().map(|e| e.cache_write).sum();
-            let total_tokens = total_input + total_output + total_cache_read + total_cache_write;
+            let (total_input, total_output, total_cache_read, total_cache_write) =
+                monthly_token_field_totals(&report.entries);
+            let total_tokens = saturating_token_total(
+                total_input,
+                total_output,
+                total_cache_read,
+                total_cache_write,
+            );
             table.add_row(vec![
                 Cell::new("Total")
                     .fg(Color::Yellow)
@@ -2735,7 +2786,12 @@ fn run_monthly_report(
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                let total = entry.input + entry.output + entry.cache_write + entry.cache_read;
+                let total = saturating_token_total(
+                    entry.input,
+                    entry.output,
+                    entry.cache_read,
+                    entry.cache_write,
+                );
 
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
@@ -2755,11 +2811,14 @@ fn run_monthly_report(
                 ]);
             }
 
-            let total_input: i64 = report.entries.iter().map(|e| e.input).sum();
-            let total_output: i64 = report.entries.iter().map(|e| e.output).sum();
-            let total_cache_write: i64 = report.entries.iter().map(|e| e.cache_write).sum();
-            let total_cache_read: i64 = report.entries.iter().map(|e| e.cache_read).sum();
-            let total_all = total_input + total_output + total_cache_write + total_cache_read;
+            let (total_input, total_output, total_cache_read, total_cache_write) =
+                monthly_token_field_totals(&report.entries);
+            let total_all = saturating_token_total(
+                total_input,
+                total_output,
+                total_cache_read,
+                total_cache_write,
+            );
 
             table.add_row(vec![
                 Cell::new("Total")
@@ -2961,8 +3020,12 @@ fn run_hourly_report(
                 } else {
                     "—".to_string()
                 };
-                let total_tokens =
-                    entry.input + entry.output + entry.cache_read + entry.cache_write;
+                let total_tokens = saturating_token_total(
+                    entry.input,
+                    entry.output,
+                    entry.cache_read,
+                    entry.cache_write,
+                );
                 table.add_row(vec![
                     Cell::new(&entry.hour).fg(Color::White),
                     Cell::new(&clients_col),
@@ -3035,8 +3098,12 @@ fn run_hourly_report(
                     "—".to_string()
                 };
 
-                let total_tokens =
-                    entry.input + entry.output + entry.cache_read + entry.cache_write;
+                let total_tokens = saturating_token_total(
+                    entry.input,
+                    entry.output,
+                    entry.cache_read,
+                    entry.cache_write,
+                );
 
                 table.add_row(vec![
                     Cell::new(&entry.hour).fg(Color::White),
@@ -3440,12 +3507,52 @@ fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
     }
 }
 
+/// Saturating sum of the four billable token buckets (input/output/cache
+/// read/cache write) used throughout the display layer for per-row and
+/// grand-total token counts. tokscale-core saturates these fields at the
+/// per-message and per-entry level (see `TokenBreakdown::total` and
+/// `model_report_token_totals`), so a corrupt/misbehaving source can
+/// legitimately clamp a bucket to `i64::MAX`; combining up to four such
+/// buckets with plain `+` can then overflow (debug panic / release wrap).
+/// `saturating_add` keeps this fold a no-op for real token counts and only
+/// changes behavior in that already-degraded case.
+fn saturating_token_total(input: i64, output: i64, cache_read: i64, cache_write: i64) -> i64 {
+    input
+        .saturating_add(output)
+        .saturating_add(cache_read)
+        .saturating_add(cache_write)
+}
+
+/// Sum the (input, output, cache_read, cache_write) token fields across
+/// monthly usage entries with saturating_add. `MonthlyReport` (unlike
+/// `ModelReport`) doesn't carry precomputed grand totals, so the display
+/// layer aggregates `report.entries` itself; a saturating fold keeps that
+/// aggregation safe against clamped (i64::MAX) entry buckets.
+fn monthly_token_field_totals(entries: &[tokscale_core::MonthlyUsage]) -> (i64, i64, i64, i64) {
+    entries.iter().fold(
+        (0, 0, 0, 0),
+        |(input, output, cache_read, cache_write), entry| {
+            (
+                input.saturating_add(entry.input),
+                output.saturating_add(entry.output),
+                cache_read.saturating_add(entry.cache_read),
+                cache_write.saturating_add(entry.cache_write),
+            )
+        },
+    )
+}
+
 fn model_entry_total_tokens(entry: &tokscale_core::ModelUsage) -> i64 {
-    entry.input.max(0)
-        + entry.output.max(0)
-        + entry.cache_read.max(0)
-        + entry.cache_write.max(0)
-        + entry.reasoning.max(0)
+    // saturating_add (mirrors tokscale_core::TokenBreakdown::total) so a
+    // clamped (i64::MAX) bucket from a corrupt source can't overflow the
+    // per-entry sum.
+    entry
+        .input
+        .max(0)
+        .saturating_add(entry.output.max(0))
+        .saturating_add(entry.cache_read.max(0))
+        .saturating_add(entry.cache_write.max(0))
+        .saturating_add(entry.reasoning.max(0))
 }
 
 fn aggregate_model_report_performance(
@@ -3463,7 +3570,13 @@ fn aggregate_model_report_performance(
             .sample_count
             .saturating_add(entry.performance.sample_count);
     }
-    let total_tokens = entries.iter().map(model_entry_total_tokens).sum();
+    // saturating fold: model_entry_total_tokens already saturates per entry,
+    // but two saturated (i64::MAX) entries folded with plain `.sum()` can
+    // still overflow the cross-entry total.
+    let total_tokens = entries
+        .iter()
+        .map(model_entry_total_tokens)
+        .fold(0i64, i64::saturating_add);
     performance.finalize(total_tokens);
     performance
 }
@@ -4783,7 +4896,9 @@ struct ExcludedTokenlessRow {
 }
 
 fn client_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
-    tokens.input + tokens.output + tokens.cache_read + tokens.cache_write + tokens.reasoning
+    // TokenBreakdown::total() already saturating_adds its fields so a clamped
+    // (i64::MAX) bucket from a corrupt source can't overflow this display fold.
+    tokens.total()
 }
 
 /// Cursor's pre-2025-05 exports include `premium-tool-call` rows billed per
@@ -5860,6 +5975,104 @@ mod tests {
     #[test]
     fn test_parse_variant_arg_rejects_empty_string() {
         assert!(parse_variant_arg(Some("")).is_err());
+    }
+
+    #[test]
+    fn saturating_token_total_saturates_instead_of_overflowing() {
+        // tokscale-core (PR #823) clamps corrupt per-field token buckets to
+        // i64::MAX. The CLI display layer combines up to four such buckets
+        // (input/output/cache_read/cache_write) into row and grand totals; a
+        // plain `+` fold would panic in debug builds / wrap in release once
+        // two clamped buckets are combined.
+        assert_eq!(saturating_token_total(i64::MAX, i64::MAX, 0, 0), i64::MAX);
+        assert_eq!(saturating_token_total(i64::MAX, 1, i64::MAX, 1), i64::MAX);
+        // Real, non-overflowing counts still combine normally.
+        assert_eq!(saturating_token_total(10, 20, 30, 40), 100);
+    }
+
+    #[test]
+    fn monthly_token_field_totals_saturate_across_entries() {
+        // MonthlyReport has no precomputed grand totals, so the display layer
+        // aggregates report.entries itself. Two entries each carrying a
+        // clamped (i64::MAX) input bucket must not overflow that aggregation.
+        let make = |input: i64| tokscale_core::MonthlyUsage {
+            month: "2026-07".to_string(),
+            models: vec![],
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            message_count: 1,
+            cost: 0.0,
+        };
+        let entries = vec![make(i64::MAX), make(i64::MAX)];
+        let (total_input, total_output, total_cache_read, total_cache_write) =
+            monthly_token_field_totals(&entries);
+        assert_eq!(total_input, i64::MAX);
+        assert_eq!(total_output, 0);
+        assert_eq!(total_cache_read, 0);
+        assert_eq!(total_cache_write, 0);
+    }
+
+    #[test]
+    fn model_entry_total_tokens_saturates_a_single_entrys_buckets() {
+        let entry = tokscale_core::ModelUsage {
+            client: "antigravity-cli".to_string(),
+            merged_clients: None,
+            workspace_key: None,
+            workspace_label: None,
+            session_id: None,
+            model: "gemini-3-pro".to_string(),
+            provider: "antigravity".to_string(),
+            input: i64::MAX,
+            output: 0,
+            cache_read: i64::MAX,
+            cache_write: 0,
+            reasoning: 0,
+            message_count: 1,
+            cost: 0.0,
+            performance: tokscale_core::ModelPerformance::default(),
+        };
+        assert_eq!(model_entry_total_tokens(&entry), i64::MAX);
+    }
+
+    #[test]
+    fn aggregate_model_report_performance_saturates_cross_entry_total() {
+        // model_entry_total_tokens already saturates each entry to i64::MAX;
+        // folding two such entries with plain `.sum()` would still overflow.
+        let make = || tokscale_core::ModelUsage {
+            client: "antigravity-cli".to_string(),
+            merged_clients: None,
+            workspace_key: None,
+            workspace_label: None,
+            session_id: None,
+            model: "gemini-3-pro".to_string(),
+            provider: "antigravity".to_string(),
+            input: i64::MAX,
+            output: 0,
+            cache_read: i64::MAX,
+            cache_write: 0,
+            reasoning: 0,
+            message_count: 1,
+            cost: 0.0,
+            performance: tokscale_core::ModelPerformance::default(),
+        };
+        let entries = vec![make(), make()];
+        // Must not panic (debug overflow) — the saturating fold caps at i64::MAX.
+        let performance = aggregate_model_report_performance(&entries);
+        assert_eq!(performance.timed_tokens, 0);
+    }
+
+    #[test]
+    fn client_token_total_saturates_instead_of_overflowing() {
+        let tokens = TokenBreakdown {
+            input: i64::MAX,
+            output: 0,
+            cache_read: i64::MAX,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        assert_eq!(client_token_total(&tokens), i64::MAX);
     }
 
     fn token_breakdown(total_tokens: i64) -> TokenBreakdown {
