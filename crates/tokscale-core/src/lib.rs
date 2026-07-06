@@ -6677,7 +6677,7 @@ mod tests {
     }
 
     #[test]
-    fn test_opencode_embedded_cost_reprices_when_pricing_exists() {
+    fn test_opencode_embedded_cost_survives_repricing_while_missing_cost_reprices() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let message_dir = temp_dir
             .path()
@@ -6720,8 +6720,13 @@ mod tests {
             .iter()
             .find(|message| message.dedup_key.as_deref() == Some("msg-missing"))
             .expect("missing-cost message should parse");
-        assert_eq!(embedded.cost, 0.2);
+        assert_eq!(
+            embedded.cost, 0.05,
+            "OpenCode computes cost at request time; the embedded value must not be overwritten by LiteLLM repricing"
+        );
+        assert_eq!(embedded.cost_source, crate::CostSource::ProviderReported);
         assert_eq!(missing.cost, 0.2);
+        assert_eq!(missing.cost_source, crate::CostSource::Estimated);
     }
 
     #[test]
