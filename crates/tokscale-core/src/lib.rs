@@ -1491,9 +1491,17 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Kiro)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kiro::parse_kiro_file(path)
-            })
+            // Kiro-aware fingerprint: IDE `sess_*/session.json` sources derive
+            // their token counts from the sibling `messages.jsonl`, so that
+            // file must participate in the cache key or an append landing
+            // after the last `session.json` write is ignored forever.
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_kiro_path,
+                sessions::kiro::parse_kiro_file,
+            )
         })
         .collect();
     // Collect Kiro file messages before extending so snapshot suppression can

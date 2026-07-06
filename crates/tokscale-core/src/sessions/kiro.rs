@@ -364,7 +364,7 @@ fn is_kiro_global_storage_path(path: &Path) -> bool {
 /// directory (`~/.kiro/sessions/<workspace>/sess_<uuid>/session.json`). The
 /// `sess_` parent requirement keeps this from matching the CLI layout, whose
 /// arbitrary `~/.kiro/sessions/cli/*.json` files share the same tree.
-fn is_kiro_ide_session_path(path: &Path) -> bool {
+pub(crate) fn is_kiro_ide_session_path(path: &Path) -> bool {
     let is_session_json = path
         .file_name()
         .and_then(|name| name.to_str())

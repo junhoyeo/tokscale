@@ -215,6 +215,22 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, related_paths)
     }
 
+    /// Fingerprint for a Kiro source file. Kiro IDE sessions anchor discovery
+    /// on `sess_*/session.json` but derive every token count from the sibling
+    /// `messages.jsonl`, so an append to `messages.jsonl` that lands after the
+    /// last `session.json` write must still invalidate the cache — a
+    /// `session.json`-only fingerprint would serve the stale counts forever.
+    /// Non-IDE Kiro files (CLI `cli/*.json`, globalStorage snapshots) have no
+    /// sidecar and use the plain single-file fingerprint.
+    pub(crate) fn from_kiro_path(path: &Path) -> Option<Self> {
+        if !crate::sessions::kiro::is_kiro_ide_session_path(path) {
+            return Self::from_path(path);
+        }
+        let messages = path.with_file_name("messages.jsonl");
+        let related_paths = std::iter::once(("messages.jsonl".to_string(), messages));
+        Self::from_path_with_related(path, related_paths)
+    }
+
     fn from_path_with_related<I>(path: &Path, related_paths: I) -> Option<Self>
     where
         I: IntoIterator<Item = (String, PathBuf)>,
@@ -957,6 +973,47 @@ mod tests {
         .unwrap();
         let updated_journal = SourceFingerprint::from_jcode_path(&session_path).unwrap();
         assert_ne!(with_journal, updated_journal);
+    }
+
+    #[test]
+    fn test_kiro_ide_fingerprint_tracks_messages_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let sess_dir = dir.path().join("workspace-a/sess_02f1c107");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let session_path = sess_dir.join("session.json");
+        std::fs::write(&session_path, br#"{"schemaVersion":"1.0.0"}"#).unwrap();
+
+        let base = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+
+        // messages.jsonl appearing (session.json untouched) must invalidate.
+        let messages_path = sess_dir.join("messages.jsonl");
+        std::fs::write(
+            &messages_path,
+            br#"{"role":"user","content":"hello"}
+"#,
+        )
+        .unwrap();
+        let with_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+        assert_ne!(base, with_messages);
+
+        // An append landing after the last session.json write must invalidate.
+        std::fs::write(
+            &messages_path,
+            br#"{"role":"user","content":"hello"}
+{"role":"assistant","content":"world"}
+"#,
+        )
+        .unwrap();
+        let updated_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+        assert_ne!(with_messages, updated_messages);
+
+        // Non-IDE Kiro files (no sess_* parent) use the plain fingerprint.
+        let cli_path = dir.path().join("cli-session.json");
+        std::fs::write(&cli_path, b"{}").unwrap();
+        assert_eq!(
+            SourceFingerprint::from_kiro_path(&cli_path),
+            SourceFingerprint::from_path(&cli_path)
+        );
     }
 
     #[test]
