@@ -33,7 +33,11 @@ use std::time::UNIX_EPOCH;
 // turn-neutral, so a following brand-new journal turn is no longer robbed of
 // its is_turn_start; schema-25 caches carry the under-counted turn flags, so
 // invalidate them.
-const CACHE_SCHEMA_VERSION: u32 = 26;
+// 27: Copilot trace-level fallback agent now prefers the ROOT invoke_agent span
+// (via parentSpanId hierarchy) over a nested task/sub-agent invoke, so agentless
+// turns in a trace with nested invokes are no longer mis-attributed to the
+// sub-agent; schema-26 caches carry the mis-attributed agent, so invalidate them.
+const CACHE_SCHEMA_VERSION: u32 = 27;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
