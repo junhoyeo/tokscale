@@ -2795,6 +2795,32 @@ mod tests {
         assert!(result.get(ClientId::OpenCode).is_empty());
     }
 
+    /// Regression for #815: nested-layout subagent/workflow transcripts
+    /// (`<session>/subagents/workflows/<wf>/agent-*.jsonl`) must be discovered by
+    /// the recursive project-dir walk, so their usage is counted. The sibling
+    /// `journal.jsonl` orchestration metadata is discovered too, but the parser
+    /// drops it (covered in the claudecode parser tests).
+    #[test]
+    fn test_scan_all_clients_claude_nested_workflow_agents() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let wf = home.join(".claude/projects/myproject/sess-uuid/subagents/workflows/wf_abc");
+        fs::create_dir_all(&wf).unwrap();
+        let agent = wf.join("agent-a123.jsonl");
+        File::create(&agent).unwrap().write_all(b"{}\n").unwrap();
+        File::create(wf.join("journal.jsonl"))
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        assert!(
+            result.get(ClientId::Claude).iter().any(|p| p == &agent),
+            "nested workflow agent transcript must be discovered, got {:?}",
+            result.get(ClientId::Claude)
+        );
+    }
+
     #[test]
     fn test_scan_all_clients_claude_transcripts() {
         let dir = TempDir::new().unwrap();
