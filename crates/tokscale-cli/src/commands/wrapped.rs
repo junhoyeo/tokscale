@@ -271,10 +271,14 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                         tokens: 0,
                     });
             model_entry.cost += client_contrib.cost;
-            model_entry.tokens += client_contrib.tokens.input
-                + client_contrib.tokens.output
-                + client_contrib.tokens.cache_read
-                + client_contrib.tokens.cache_write;
+            model_entry.tokens = model_entry
+                .tokens
+                .saturating_add(crate::saturating_token_total(
+                    client_contrib.tokens.input,
+                    client_contrib.tokens.output,
+                    client_contrib.tokens.cache_read,
+                    client_contrib.tokens.cache_write,
+                ));
 
             let client_name = client_display_name(&client_contrib.client)
                 .unwrap_or(client_contrib.client.as_str())
@@ -288,10 +292,15 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                         tokens: 0,
                     });
             client_entry.cost += client_contrib.cost;
-            client_entry.tokens += client_contrib.tokens.input
-                + client_contrib.tokens.output
-                + client_contrib.tokens.cache_read
-                + client_contrib.tokens.cache_write;
+            client_entry.tokens =
+                client_entry
+                    .tokens
+                    .saturating_add(crate::saturating_token_total(
+                        client_contrib.tokens.input,
+                        client_contrib.tokens.output,
+                        client_contrib.tokens.cache_read,
+                        client_contrib.tokens.cache_write,
+                    ));
         }
     }
 
@@ -366,11 +375,14 @@ fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentE
         };
 
         let normalized = tokscale_core::sessions::normalize_opencode_agent_name(agent);
-        let tokens = message.input
-            + message.output
-            + message.cache_read
-            + message.cache_write
-            + message.reasoning;
+        // saturating: per-message token fields from a corrupt source can be
+        // clamped to i64::MAX (see tokscale-core), so plain `+` can overflow.
+        let tokens = message
+            .input
+            .saturating_add(message.output)
+            .saturating_add(message.cache_read)
+            .saturating_add(message.cache_write)
+            .saturating_add(message.reasoning);
 
         let entry = agent_map
             .entry(normalized.clone())
@@ -379,7 +391,7 @@ fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentE
                 tokens: 0,
                 messages: 0,
             });
-        entry.tokens += tokens;
+        entry.tokens = entry.tokens.saturating_add(tokens);
         entry.messages += 1;
     }
 

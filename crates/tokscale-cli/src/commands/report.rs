@@ -140,9 +140,11 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
 
         agg.last_active = agg.last_active.max(msg.timestamp);
         agg.created_at = agg.created_at.min(msg.timestamp);
-        agg.total_input += msg.input;
-        agg.total_output += msg.output;
-        agg.total_cache_read += msg.cache_read;
+        // saturating: per-message token fields from a corrupt source can be
+        // clamped to i64::MAX (see tokscale-core), so plain `+=` can overflow.
+        agg.total_input = agg.total_input.saturating_add(msg.input);
+        agg.total_output = agg.total_output.saturating_add(msg.output);
+        agg.total_cache_read = agg.total_cache_read.saturating_add(msg.cache_read);
         agg.total_cost += compute_msg_cost(msg, pricing.as_deref());
         *agg.models.entry(msg.model_id.clone()).or_insert(0) += 1;
         agg.message_count += msg.message_count;
@@ -211,7 +213,7 @@ fn run_summarizer(
                 "workspace": entry.workspace.unwrap_or_default(),
                 "first_user_message": content.first_user_message,
                 "models_used": entry.models_used,
-                "total_tokens": entry.total_input_tokens + entry.total_output_tokens,
+                "total_tokens": entry.total_input_tokens.saturating_add(entry.total_output_tokens),
                 "duration_minutes": entry.duration_minutes,
                 "message_count": entry.message_count,
             }));
@@ -999,8 +1001,8 @@ fn print_report_table(
     let total_cost: f64 = entries.iter().map(|e| e.total_cost).sum();
     let total_tokens: i64 = entries
         .iter()
-        .map(|e| e.total_input_tokens + e.total_output_tokens)
-        .sum();
+        .map(|e| e.total_input_tokens.saturating_add(e.total_output_tokens))
+        .fold(0i64, i64::saturating_add);
     let total_sessions = entries.len();
     let summarized = entries.iter().filter(|e| e.title.is_some()).count();
 
@@ -1022,8 +1024,12 @@ fn print_report_table(
         for model in &entry.models_used {
             let agg = by_model.entry(model.as_str()).or_insert((0.0, 0, 0));
             agg.0 += entry.total_cost / entry.models_used.len() as f64;
-            agg.1 += (entry.total_input_tokens + entry.total_output_tokens)
-                / entry.models_used.len() as i64;
+            agg.1 = agg.1.saturating_add(
+                entry
+                    .total_input_tokens
+                    .saturating_add(entry.total_output_tokens)
+                    / entry.models_used.len() as i64,
+            );
             agg.2 += 1;
         }
     }
@@ -1064,7 +1070,11 @@ fn print_report_table(
         let title = entry.title.as_deref().unwrap_or("(unsummarized)");
         let agg = by_group.entry(group).or_insert((0.0, 0, 0, Vec::new()));
         agg.0 += entry.total_cost;
-        agg.1 += entry.total_input_tokens + entry.total_output_tokens;
+        agg.1 = agg.1.saturating_add(
+            entry
+                .total_input_tokens
+                .saturating_add(entry.total_output_tokens),
+        );
         agg.2 += 1;
         if !agg.3.contains(&title) {
             agg.3.push(title);
@@ -1143,7 +1153,11 @@ fn print_daily_breakdown(entries: &[WikiEntry], full: bool) {
 
         let agg = by_date.entry(date_key).or_insert((0.0, 0, 0, Vec::new()));
         agg.0 += entry.total_cost;
-        agg.1 += entry.total_input_tokens + entry.total_output_tokens;
+        agg.1 = agg.1.saturating_add(
+            entry
+                .total_input_tokens
+                .saturating_add(entry.total_output_tokens),
+        );
         agg.2 += 1;
         agg.3.push(entry);
     }

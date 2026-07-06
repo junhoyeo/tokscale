@@ -200,11 +200,16 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
 }
 
 fn positive_unified_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
-    tokens.input.max(0)
-        + tokens.output.max(0)
-        + tokens.cache_read.max(0)
-        + tokens.cache_write.max(0)
-        + tokens.reasoning.max(0)
+    // saturating_add (mirrors tokscale_core::TokenBreakdown::total) so a
+    // clamped (i64::MAX) bucket from a corrupt source can't overflow the
+    // per-message sum.
+    tokens
+        .input
+        .max(0)
+        .saturating_add(tokens.output.max(0))
+        .saturating_add(tokens.cache_read.max(0))
+        .saturating_add(tokens.cache_write.max(0))
+        .saturating_add(tokens.reasoning.max(0))
 }
 
 fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
@@ -1258,6 +1263,20 @@ mod tests {
     use tokscale_core::parse_local_unified_messages_with_pricing;
     use tokscale_core::pricing::{ModelPricing, PricingService};
     use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
+
+    #[test]
+    fn positive_unified_token_total_saturates_instead_of_overflowing() {
+        // tokscale-core clamps corrupt per-field token buckets to i64::MAX; a
+        // plain `+` fold over two clamped buckets would panic in debug builds.
+        let tokens = CoreTokenBreakdown {
+            input: i64::MAX,
+            output: 0,
+            cache_read: i64::MAX,
+            cache_write: -5,
+            reasoning: 0,
+        };
+        assert_eq!(positive_unified_token_total(&tokens), i64::MAX);
+    }
 
     fn test_pricing_service() -> PricingService {
         let mut litellm = HashMap::new();
