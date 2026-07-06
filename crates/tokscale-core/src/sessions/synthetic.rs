@@ -3,6 +3,7 @@
 //! Detects synthetic.new API usage across existing agent sessions by model/provider patterns,
 //! and parses Octofriend's SQLite database when token data is available.
 
+use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use std::path::Path;
@@ -109,12 +110,8 @@ pub fn matches_synthetic_filter(client: &str, model_id: &str, provider_id: &str)
 /// This function checks for token-related tables and parses them when available,
 /// making it future-proof for when Octofriend adds token persistence.
 pub fn parse_octofriend_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
+    let Some(conn) = open_readonly_sqlite(db_path) else {
+        return Vec::new();
     };
 
     // Check if a token-tracking table exists (future-proofing)

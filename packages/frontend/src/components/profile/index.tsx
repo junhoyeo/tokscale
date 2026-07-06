@@ -1,14 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import Image from "next/image";
 import styled, { css } from "styled-components";
 import { toast } from "react-toastify";
 import { GraphContainer } from "@/components/GraphContainer";
 import type { TokenContributionData } from "@/lib/types";
-import { formatNumber, formatCurrency } from "@/lib/utils";
+import { formatNumber, formatCurrency, formatDuration } from "@/lib/utils";
 import { legacy } from "@/lib/responsive";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
+import { ListCard, ListHeader, ListMetricCell, ListRow } from "./listStyles";
+import { getModelColor } from "./modelColors";
+
+export { ProfileDevices } from "./ProfileDevices";
+export type { ProfileDevice } from "./ProfileDevices";
 
 export interface ProfileUser {
   username: string;
@@ -26,6 +31,8 @@ export interface ProfileStatsData {
   cacheWriteTokens: number;
   activeDays: number;
   submissionCount?: number;
+  totalActiveTimeMs?: number;
+  sessionCount?: number;
 }
 
 export interface ProfileHeaderProps {
@@ -133,12 +140,15 @@ const UserDetails = styled.div`
 `;
 
 const RankBadge = styled.div`
-  width: 2rem;
+  min-width: 2rem;
   height: 2rem;
+  padding: 0 0.375rem;
   border-radius: 0.5rem;
   display: flex;
   align-items: center;
   justify-content: center;
+  white-space: nowrap;
+  align-self: flex-start;
 `;
 
 const RankText = styled.span`
@@ -308,6 +318,11 @@ const actionButtonStyles = css`
   transition: opacity 150ms ease-in-out;
   cursor: pointer;
 
+  background-color: var(--color-btn-bg);
+  border-color: var(--color-border-default);
+
+  color: var(--color-fg-default);
+
   &:hover {
     opacity: 0.8;
   }
@@ -320,6 +335,16 @@ const actionButtonStyles = css`
 
 const ActionButton = styled.button`
   ${actionButtonStyles}
+`;
+
+const PrimaryActionButton = styled(ActionButton)`
+  background: linear-gradient(135deg, #169AFF 0%, #0A84FF 100%);
+  border-color: color-mix(in srgb, #9FD4FB 45%, var(--color-border-default));
+  color: #F8FBFF;
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--color-bg-default), 0 0 0 4px #169AFF;
+  }
 `;
 
 const ActionLink = styled.a`
@@ -438,38 +463,25 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
           <LastUpdatedText
             style={{ color: "var(--color-fg-muted)" }}
           >
-            Last Updated: {new Date(lastUpdated).toLocaleString()}
+            Last Updated: {new Date(lastUpdated).toLocaleString("en-US", { timeZone: "UTC" })}
           </LastUpdatedText>
         )}
 
         <ActionButtons>
-          <ActionButton
+          <PrimaryActionButton
             onClick={() => setIsEmbedDialogOpen(true)}
             aria-label={`Open GitHub README embed options for ${user.displayName || user.username}`}
-            style={{
-              background: "linear-gradient(135deg, rgba(22, 154, 255, 0.14) 0%, rgba(133, 202, 255, 0.08) 100%)",
-              borderColor: "rgba(133, 202, 255, 0.22)",
-            }}
           >
             <EmbedIcon />
-            <ActionText
-              style={{ color: "var(--color-fg-default)" }}
-            >
-              Embed
-            </ActionText>
-          </ActionButton>
+            <ActionText>Embed</ActionText>
+          </PrimaryActionButton>
 
           <ActionButton
             onClick={handleShareClick}
             aria-label={`Share ${user.displayName || user.username}'s profile`}
-            style={{ backgroundColor: "var(--color-btn-bg)", borderColor: "var(--color-border-default)" }}
           >
             <Image src="/icons/icon-share.svg" alt="" width={20} height={20} aria-hidden="true" />
-            <ActionText
-              style={{ color: "var(--color-fg-default)" }}
-            >
-              Share
-            </ActionText>
+            <ActionText>Share</ActionText>
           </ActionButton>
 
           <ActionLink
@@ -477,14 +489,9 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
             target="_blank"
             rel="noopener noreferrer"
             aria-label={`View ${user.username}'s GitHub profile (opens in new tab)`}
-            style={{ backgroundColor: "var(--color-btn-bg)", borderColor: "var(--color-border-default)" }}
           >
             <Image src="/icons/icon-github.svg" alt="" width={20} height={20} aria-hidden="true" />
-            <ActionText
-              style={{ color: "var(--color-fg-default)" }}
-            >
-              GitHub
-            </ActionText>
+            <ActionText>GitHub</ActionText>
           </ActionLink>
         </ActionButtons>
       </FooterRow>
@@ -499,40 +506,39 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
   );
 }
 
-function EmbedIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      width="20"
-      height="20"
-      viewBox="0 0 24 24"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <path
-        d="M8 8L4 12L8 16"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M16 8L20 12L16 16"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M13.5 5L10.5 19"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
+const EmbedIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+  <svg
+    aria-hidden="true"
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    {...props}
+  >
+    <path
+      d="M8 8L4 12L8 16"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M16 8L20 12L16 16"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M13.5 5L10.5 19"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
 
 export type ProfileTab = "activity" | "breakdown" | "models";
 
@@ -653,6 +659,7 @@ export function ProfileTabBar({ activeTab, onTabChange }: ProfileTabBarProps) {
         return (
           <TabButton
             key={tab.id}
+            id={`tab-${tab.id}`}
             role="tab"
             aria-selected={isActive}
             aria-controls={`tabpanel-${tab.id}`}
@@ -860,6 +867,12 @@ export function ProfileStats({ stats, favoriteModel }: ProfileStatsProps) {
   const statItems = [
     { label: "Submits", value: (stats.submissionCount ?? 0).toString(), color: "var(--color-primary)" },
     { label: "Favorite Model", value: favoriteModel ?? "N/A", color: "var(--color-primary)" },
+    ...(stats.totalActiveTimeMs && stats.totalActiveTimeMs > 0
+      ? [{ label: "Active Time", value: formatDuration(stats.totalActiveTimeMs), color: "var(--color-primary)" }]
+      : []),
+    ...(stats.sessionCount && stats.sessionCount > 0
+      ? [{ label: "Sessions", value: stats.sessionCount.toString(), color: "var(--color-primary)" }]
+      : []),
   ];
 
   return (
@@ -882,29 +895,6 @@ export function ProfileStats({ stats, favoriteModel }: ProfileStatsProps) {
   );
 }
 
-const MODEL_COLORS: Record<string, string> = {
-  "claude": "#D97706",
-  "sonnet": "#D97706",
-  "opus": "#DC2626",
-  "haiku": "#059669",
-  "gpt": "#10B981",
-  "o1": "#6366F1",
-  "o3": "#8B5CF6",
-  "gemini": "#3B82F6",
-  "deepseek": "#06B6D4",
-  "codex": "#F59E0B",
-  "kimi": "#A855F7",
-  "qwen": "#1A73E8",
-};
-
-function getModelColor(modelName: string): string {
-  const lowerName = modelName.toLowerCase();
-  for (const [key, color] of Object.entries(MODEL_COLORS)) {
-    if (lowerName.includes(key)) return color;
-  }
-  return "#6B7280";
-}
-
 export interface ModelUsage {
   model: string;
   tokens: number;
@@ -917,63 +907,11 @@ export interface ProfileModelsProps {
   modelUsage?: ModelUsage[];
 }
 
-const ModelsListContainer = styled.div`
-  border-radius: 1rem;
-  border-width: 1px;
-  border-style: solid;
-  overflow: hidden;
-`;
-
-const ModelsListHeader = styled.div`
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 0.75rem;
-  padding-left: 0.75rem;
-  padding-right: 0.75rem;
-  padding-top: 0.75rem;
-  padding-bottom: 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-bottom-width: 1px;
-  border-bottom-style: solid;
-
-  @media (min-width: 480px) {
-    grid-template-columns: 1fr auto auto auto;
-    gap: 1rem;
-    padding-left: 1rem;
-    padding-right: 1rem;
-  }
-
-  @media (min-width: 640px) {
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
-  }
-`;
-
-const ModelsListRow = styled.div`
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 0.75rem;
-  padding-left: 0.75rem;
-  padding-right: 0.75rem;
-  padding-top: 0.75rem;
-  padding-bottom: 0.75rem;
-  align-items: center;
-
-  @media (min-width: 480px) {
-    grid-template-columns: 1fr auto auto auto;
-    gap: 1rem;
-    padding-left: 1rem;
-    padding-right: 1rem;
-  }
-
-  @media (min-width: 640px) {
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
-  }
-`;
+// Card/header/row/metric-cell primitives are shared with ProfileDevices via
+// ./listStyles so the two profile tables stay visually in sync.
+const ModelsListContainer = ListCard;
+const ModelsListHeader = ListHeader;
+const ModelsListRow = ListRow;
 
 const ModelNameCell = styled.div`
   display: flex;
@@ -1005,20 +943,7 @@ const ModelNameText = styled.span`
   }
 `;
 
-const ModelMetricCell = styled.div<{ $width: string; $smWidth: string; $hideOnMobile?: boolean }>`
-  text-align: right;
-  width: ${props => props.$width};
-
-  ${props => props.$hideOnMobile && css`
-    @media (max-width: 479px) {
-      display: none;
-    }
-  `}
-
-  @media (min-width: 640px) {
-    width: ${props => props.$smWidth};
-  }
-`;
+const ModelMetricCell = ListMetricCell;
 
 const MetricText = styled.span`
   font-size: 0.8125rem;
@@ -1145,6 +1070,9 @@ export function ProfileModels({ models, modelUsage }: ProfileModelsProps) {
 
 export interface ProfileActivityProps {
   data: TokenContributionData;
+  totalActiveTimeMs?: number | null;
+  sessionCount?: number | null;
+  mcpServers?: string[];
 }
 
 const ActivityContainer = styled.div`
@@ -1170,11 +1098,11 @@ const ActivityInner = styled.div`
   }
 `;
 
-export function ProfileActivity({ data }: ProfileActivityProps) {
+export function ProfileActivity({ data, totalActiveTimeMs, sessionCount, mcpServers }: ProfileActivityProps) {
   return (
     <ActivityContainer>
       <ActivityInner>
-        <GraphContainer data={data} />
+        <GraphContainer data={data} totalActiveTimeMs={totalActiveTimeMs} sessionCount={sessionCount} mcpServers={mcpServers} />
       </ActivityInner>
     </ActivityContainer>
   );

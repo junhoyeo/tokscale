@@ -13,6 +13,32 @@ When updating AGENTS.md files, follow these principles:
 - **Verify before documenting** — Grep/read the code to confirm claims are accurate
 - **Delete outdated info** — Outdated docs are worse than no docs
 
+## Authoring PR/Issue Content via `gh` CLI
+
+When writing PR bodies, issue bodies, or comments through `gh pr create`, `gh issue comment`, etc.: **prefer `--body-file` with a written-out file over inline `--body` heredocs.**
+
+Why: inline `--body "$(cat <<'EOF' ... EOF)"` patterns lead to recurring mistakes where backticks are written as `` \` `` (incorrectly escaping them inside a single-quoted heredoc where no escaping is needed). The literal `` \` `` then renders in GitHub markdown as backslash + backtick instead of inline code formatting.
+
+**DO:**
+
+- Write the body to `/tmp/pr-body.md` (or similar) with the `Write` tool, then `gh pr create --body-file /tmp/pr-body.md`
+- For comment edits: `gh api -X PATCH repos/<owner>/<repo>/issues/comments/<id> -F body=@/tmp/comment.md`
+
+**DON'T:**
+
+- Use `gh pr create --body "$(cat <<'EOF' ... \` ... \` ... EOF)"` — single-quoted heredoc means backticks are already literal; escaping with `` \` `` is wrong and renders incorrectly.
+- Use double-quoted heredoc for bodies containing backticks unless you intend command substitution.
+- Hard-wrap paragraphs at ~80 columns inside PR/issue/comment bodies. GitHub's markdown collapses single newlines into spaces so the rendered output looks fine, but the **raw markdown view is what reviewers and authors edit in**, and mid-sentence line breaks read as if the prose was chopped. Write each paragraph as one continuous line and let the renderer wrap it. Same rule for blockquotes, list items that span multiple lines, and table cells. Hard wraps are still fine inside fenced code blocks where preserving line layout matters.
+
+This applies to all GitHub-content authoring through the CLI — PR bodies, issue bodies, comments, edits. Commit message bodies should also follow this rule: write prose paragraphs as continuous lines, not hard-wrapped at 80 columns.
+
+## Git Identity & Merge Discipline
+
+- Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
+- Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
+- When merging pull requests through `gh`, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
+- Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
+
 ## Commit Message Convention
 
 ```
@@ -42,7 +68,9 @@ refactor: extract streaming logic to separate module
 docs: update README with new CLI options
 ```
 
-### Commit Message Rules (CRITICAL)
+### Commit Message & PR Title Rules (CRITICAL)
+
+> These rules apply to **both commit messages AND pull request titles**. PR titles become the squash-merge commit message, so they must follow the same conventions.
 
 **DO:**
 - Describe the actual change in plain, technical terms
@@ -50,8 +78,9 @@ docs: update README with new CLI options
 - Use the format: `<type>(<scope>): <what changed and why>`
 
 **DON'T:**
-- Reference internal review labels (P0, P1, P2, etc.)
-- Mention "Oracle", "audit", "review findings" in commit messages
+- Reference internal review labels (P0, P1, P2, etc.) in commits or PR titles
+- Mention "Oracle", "audit", "review findings", "hardening" in commits or PR titles
+- Use agent-internal jargon: "wave", "hardening", "compliance", "verification pass"
 - Bundle multiple unrelated fixes into one commit
 - Use vague messages like "fix issues" or "address feedback"
 
@@ -69,7 +98,20 @@ fix: address P0 issues from Oracle review      ❌
 fix(hardening): Oracle Round 4 fixes           ❌
 fix: audit findings                            ❌
 fix: various improvements                      ❌
+fix(tui): harden unreleased changes — P0-P3    ❌  (PR title)
+fix: hardening wave 1 compliance fixes         ❌  (PR title)
 ```
+
+## Migration journal hygiene
+
+Never hand-edit `drizzle/meta/_journal.json` timestamps or sequence numbers. Always run `drizzle-kit generate` to claim a migration slot — the tool assigns the correct monotonic index and timestamp atomically.
+
+Migrations 0010 and 0011 have round-number hand-edited timestamps (`"when": 1780000000000` and `"when": 1780086400000`) as a one-time historical exception made during the 2026-05-25 schema audit. No future migration should follow this pattern; use `drizzle-kit generate` exclusively.
+
+
+If two branches generate migrations with the same index, resolve the conflict by re-running `drizzle-kit generate` on the branch that was merged later — do not manually renumber files or edit `_journal.json`.
+
+**Never edit the SQL of a migration file after it has been applied to any database.** drizzle stores the SHA256 of the migration content in `drizzle.__drizzle_migrations` on first apply. If the local file content changes (even just a comment), the local hash diverges from the stored hash and drizzle-kit migrate will treat the migration as missing and attempt to re-apply it — which fails on idempotent-unsafe DDL. If you need to document a migration after the fact (lock-window risk, rollback notes, anything), put the commentary in a sidecar `0NNN_*.md` next to the .sql, in `schema.ts`, or in this file — never as comments inside the applied .sql.
 
 ## Agent Command Execution
 
@@ -91,17 +133,19 @@ Releases are published to npm via a GitHub Actions `workflow_dispatch` pipeline,
 **Inputs:**
 - `bump`: Version bump type — `patch (x.x.X)` | `minor (x.X.0)` | `major (X.0.0)`
 - `version` (optional): Override string (e.g., `2.0.0-beta.1`), takes precedence over bump
+- `recovery` (optional): Retry an already committed release version. Requires `version` and reuses the current release commit when the manifests already match.
 
 **Stages (sequential):**
 
-| # | Job | Description |
-|---|-----|-------------|
-| 1 | `bump-versions` | Reads current version from `packages/cli/package.json`, calculates new version, updates all platform package.json files + CLI + wrapper, uploads as artifact |
-| 2 | `build-cli-binary` | 8-target parallel native Rust builds (macOS x86/arm64, Linux glibc/musl x86/arm64, Windows x86/arm64) |
-| 3 | `publish-platform-packages` | Publishes platform-specific packages (`@tokscale/cli-darwin-arm64`, etc.) containing native binaries to npm |
-| 4 | `publish-cli` | Publishes `@tokscale/cli` to npm (binary dispatcher + optionalDependencies) |
-| 5 | `publish-alias` | Publishes `tokscale` wrapper package to npm |
-| 6 | `finalize` | Commits bumped `package.json` files back to repo as `chore: bump version to X.Y.Z` (authored by `github-actions[bot]`) |
+| Job | Description |
+|-----|-------------|
+| `bump-versions` | Reads current version from `packages/cli/package.json`, calculates new version, updates the Rust workspace version plus `Cargo.lock`, the CLI, wrapper, and platform package manifests, then uploads the bumped release files as an artifact |
+| `build-cli-binary` | Builds the native Rust binaries defined by the workflow matrix |
+| `prepare-release-provenance` | Checks npm auth/release state, then commits and pushes the release provenance files as `chore: bump version to X.Y.Z`. In recovery mode, reuses the already committed release SHA when there are no manifest diffs. |
+| `publish-platform-packages` | Publishes platform-specific packages (`@tokscale/cli-darwin-arm64`, etc.) containing native binaries to npm, skipping package versions that already exist only during recovery |
+| `publish-cli` | Publishes `@tokscale/cli` to npm (binary dispatcher + optionalDependencies) |
+| `publish-alias` | Publishes `tokscale` wrapper package to npm |
+| `finalize` | Creates or updates tag `vX.Y.Z` and the GitHub Release after npm publishing succeeds |
 
 **Duration:** ~15-20 minutes end-to-end.
 
@@ -109,15 +153,11 @@ Releases are published to npm via a GitHub Actions `workflow_dispatch` pipeline,
 
 ### Post-Pipeline: Git Tag & GitHub Release
 
-The CI pipeline does **NOT** create the git tag or GitHub Release. After the workflow completes successfully:
+The CI pipeline creates or updates the git tag and GitHub Release after npm publishing succeeds. After the workflow completes successfully:
 
-1. Verify the `chore: bump version to X.Y.Z` commit was pushed by CI
-2. Create a GitHub Release manually:
-   - **Tag:** `vX.Y.Z` (e.g., `v1.2.1`)
-   - **Target:** The `chore: bump version to X.Y.Z` commit
-   - **Title:** See [Release Notes Style](#release-notes-style) below
-   - **Body:** See [Release Notes Template](#release-notes-template) below
-3. Publish the release (not as draft, not as prerelease)
+1. Verify the `chore: bump version to X.Y.Z` commit was pushed by CI or reused by recovery
+2. Verify tag `vX.Y.Z` targets the release provenance commit
+3. Verify the GitHub Release exists and follows the release notes style below
 
 ### Versioning Conventions
 
@@ -127,10 +167,12 @@ The CI pipeline does **NOT** create the git tag or GitHub Release. After the wor
 | `minor` | New client support, significant features, UI overhauls | `1.1.2` → `1.2.0` |
 | `major` | Breaking changes (never used so far) | `1.2.1` → `2.0.0` |
 
-Version is stored in 3 places (all updated by CI):
-- `packages/cli/package.json` — source of truth
-- Platform packages (`packages/cli-*/package.json`) — version synced
-- `packages/tokscale/package.json` — version + `@tokscale/cli` dependency version
+Release version is stored in the Rust workspace and the npm package manifests, and CI updates them together:
+- `Cargo.toml` (`[workspace.package].version`) — Rust binary and exported metadata version
+- `Cargo.lock` — local workspace package versions for `tokscale-cli` and `tokscale-core`
+- `packages/cli/package.json` — CLI package version and platform optional dependency versions
+- Platform packages (`packages/cli-*/package.json`) — native package versions
+- `packages/tokscale/package.json` — wrapper version plus `@tokscale/cli` dependency version
 
 ### CI-Only Workflow
 
@@ -208,12 +250,12 @@ Add a short bullet list summary (before "What's Changed") when:
 3. [ ] No open blocker bugs (regressions from changes being released)
 4. [ ] Run "Publish" workflow via GitHub Actions UI
    - Select bump type (patch/minor/major)
-   - Wait for all 6 stages to complete
+   - For a failed publish retry, set `version` to the already committed release version and enable `recovery`
+   - Wait for all stages to complete
 5. [ ] Verify `chore: bump version to X.Y.Z` commit was pushed
 6. [ ] Verify packages on npm: @tokscale/cli, tokscale
-7. [ ] Create GitHub Release
+7. [ ] Verify GitHub Release
    - Tag: vX.Y.Z targeting the bump commit
-   - Write release notes following the template above
-   - Publish (not draft, not prerelease)
+   - Release notes follow the template above
 8. [ ] Smoke test: `bunx tokscale@latest --version`
 ```

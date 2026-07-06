@@ -11,13 +11,20 @@ const INITIAL_BACKOFF_MS: u64 = 200;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelPricing {
     pub input_cost_per_token: Option<f64>,
+    pub input_cost_per_token_above_128k_tokens: Option<f64>,
     pub input_cost_per_token_above_200k_tokens: Option<f64>,
+    pub input_cost_per_token_above_256k_tokens: Option<f64>,
+    pub input_cost_per_token_above_272k_tokens: Option<f64>,
     pub output_cost_per_token: Option<f64>,
+    pub output_cost_per_token_above_128k_tokens: Option<f64>,
     pub output_cost_per_token_above_200k_tokens: Option<f64>,
+    pub output_cost_per_token_above_256k_tokens: Option<f64>,
+    pub output_cost_per_token_above_272k_tokens: Option<f64>,
     pub cache_creation_input_token_cost: Option<f64>,
     pub cache_creation_input_token_cost_above_200k_tokens: Option<f64>,
     pub cache_read_input_token_cost: Option<f64>,
     pub cache_read_input_token_cost_above_200k_tokens: Option<f64>,
+    pub cache_read_input_token_cost_above_272k_tokens: Option<f64>,
 }
 
 pub type PricingDataset = HashMap<String, ModelPricing>;
@@ -172,5 +179,36 @@ mod tests {
         );
         assert_eq!(pricing.cache_read_input_token_cost, Some(0.000000125));
         assert_eq!(pricing.cache_read_input_token_cost_above_200k_tokens, None);
+    }
+
+    #[test]
+    fn test_deserialize_model_pricing_with_above_272k_fields() {
+        let pricing: ModelPricing = serde_json::from_str(
+            r#"{
+                "input_cost_per_token": 0.000005,
+                "input_cost_per_token_above_272k_tokens": 0.000010,
+                "output_cost_per_token": 0.000030,
+                "output_cost_per_token_above_272k_tokens": 0.000045,
+                "cache_read_input_token_cost": 0.0000005,
+                "cache_read_input_token_cost_above_272k_tokens": 0.000001
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(0.000005));
+        assert_eq!(
+            pricing.input_cost_per_token_above_272k_tokens,
+            Some(0.000010)
+        );
+        assert_eq!(pricing.output_cost_per_token, Some(0.000030));
+        assert_eq!(
+            pricing.output_cost_per_token_above_272k_tokens,
+            Some(0.000045)
+        );
+        assert_eq!(pricing.cache_read_input_token_cost, Some(0.0000005));
+        assert_eq!(
+            pricing.cache_read_input_token_cost_above_272k_tokens,
+            Some(0.000001)
+        );
     }
 }

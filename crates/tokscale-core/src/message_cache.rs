@@ -1,7 +1,6 @@
 use crate::sessions::codex::CodexParseState;
 use crate::UnifiedMessage;
 use bincode::Options;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -11,7 +10,30 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_SCHEMA_VERSION: u32 = 5;
+// 22: Codex fork-replay gate now recognizes a same-millisecond user-fork
+// (`thread_source:"user"`) turn without a `task_started`, adding
+// CodexParseState.forked_child_is_user_fork to the cached incremental state;
+// older cached entries must reparse.
+// 21: Codex fork-replay gate now disambiguates a same-millisecond turn via a
+// `task_started` turn_id, adding CodexParseState.forked_child_task_started_turn_ids
+// to the cached incremental state; older cached entries must reparse.
+// 20: Codex fork replay parsing now keeps user-fork turns after repeated child
+// session_meta rows; cached Codex entries from older parser logic can be empty.
+// (19 was the jcode parser change in #718 — bump again so those caches reparse.)
+// 23: Jcode parser now does journal-wins merge (first-occurrence-targeted) and
+// timezone-less timestamp parsing; schema-22 caches return stale snapshot
+// token_usage, so invalidate them.
+// 24: UnifiedMessage now carries cost_source so cached provider-reported costs
+// are not repriced as if they were missing.
+// 25: Copilot trace-level fallback agent now prefers the invoke_agent span's
+// agent id over the first-exported span, so agentless turns are no longer
+// mis-attributed to a sub-agent under an out-of-order OTel export; schema-24
+// caches carry the mis-attributed agent, so invalidate them.
+// 26: Jcode journal corrections that only replace a snapshotted message are now
+// turn-neutral, so a following brand-new journal turn is no longer robbed of
+// its is_turn_start; schema-25 caches carry the under-counted turn flags, so
+// invalidate them.
+const CACHE_SCHEMA_VERSION: u32 = 26;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -20,9 +42,14 @@ const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir()
-        .map(|path| path.join("tokscale"))
-        .or_else(fallback_cache_dir)
+    if crate::paths::is_config_dir_overridden()
+        || dirs::config_dir().is_some()
+        || cfg!(target_os = "macos") && dirs::home_dir().is_some()
+    {
+        Some(crate::paths::get_cache_dir())
+    } else {
+        fallback_cache_dir()
+    }
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -31,6 +58,20 @@ fn cache_path() -> Option<PathBuf> {
 
 fn cache_lock_path() -> Option<PathBuf> {
     Some(cache_dir()?.join(CACHE_LOCK_FILENAME))
+}
+
+fn legacy_cache_paths() -> Vec<PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return Vec::new();
+    }
+
+    [
+        crate::paths::legacy_dirs_cache_dir().map(|d| d.join(CACHE_FILENAME)),
+        crate::paths::legacy_dot_cache_tokscale_dir().map(|d| d.join(CACHE_FILENAME)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn fallback_cache_dir() -> Option<PathBuf> {
@@ -109,6 +150,68 @@ impl SourceFingerprint {
         let related_paths = ["-wal"]
             .into_iter()
             .map(|suffix| (suffix.to_string(), append_path_suffix(path, suffix)));
+        Self::from_path_with_related(path, related_paths)
+    }
+
+    /// Fingerprint for a Jcode session snapshot and its append-only journal
+    /// sidecar. Jcode persists recent changes in `session_*.journal.jsonl`
+    /// until the next checkpoint rewrites the snapshot, so the source-message
+    /// cache must invalidate when either file changes.
+    pub(crate) fn from_jcode_path(path: &Path) -> Option<Self> {
+        let related_paths = std::iter::once((
+            ".journal.jsonl".to_string(),
+            crate::sessions::jcode::jcode_journal_path(path),
+        ));
+        Self::from_path_with_related(path, related_paths)
+    }
+
+    /// Fingerprint for a Roo-family task (`ui_messages.json`) and its sibling
+    /// `api_conversation_history.json`. `parse_roo_kilo_file` reads the history
+    /// sibling for the model and agent, so a history-only rewrite (the UI file
+    /// unchanged) must still invalidate the cache or reports keep stale
+    /// model/agent/pricing.
+    pub(crate) fn from_roo_path(path: &Path) -> Option<Self> {
+        let history = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("api_conversation_history.json");
+        let related_paths = std::iter::once(("api_conversation_history.json".to_string(), history));
+        Self::from_path_with_related(path, related_paths)
+    }
+
+    /// Fingerprint for a Claude Code JSONL file that may have a sibling `.meta.json`
+    /// sidecar. When the sidecar appears or changes (e.g. after a Claude Code upgrade),
+    /// the fingerprint changes and the cache invalidates.
+    pub(crate) fn from_claude_code_path_with_home(
+        path: &Path,
+        home_dir: Option<&Path>,
+    ) -> Option<Self> {
+        let mut related = Vec::new();
+
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let meta_filename = format!("{}.meta.json", stem);
+            related.push((".meta.json".to_string(), path.with_file_name(meta_filename)));
+        }
+
+        if let Some(variant_path) = crate::cc_mirror::variant_file_for_session_path(path, home_dir)
+        {
+            related.push(("cc-mirror/variant.json".to_string(), variant_path));
+        }
+
+        Self::from_path_with_related(path, related)
+    }
+
+    /// Fingerprint for a Grok `updates.jsonl` session and its sibling
+    /// `signals.json` rollup. `parse_grok_updates_file` reconciles session totals
+    /// from `signals.json` (compaction), so a rollup that is written or rewritten
+    /// after the last `updates.jsonl` write must still invalidate the cache — an
+    /// `updates.jsonl`-only fingerprint would ignore late/updated signals forever.
+    pub(crate) fn from_grok_path(path: &Path) -> Option<Self> {
+        let signals = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("signals.json");
+        let related_paths = std::iter::once(("signals.json".to_string(), signals));
         Self::from_path_with_related(path, related_paths)
     }
 
@@ -260,6 +363,11 @@ impl SourceMessageCache {
         let Some(lock_path) = cache_lock_path() else {
             return Self::default();
         };
+        if let Some(lock_dir) = lock_path.parent() {
+            if ensure_cache_dir(lock_dir).is_err() {
+                return Self::default();
+            }
+        }
         let lock_file = match OpenOptions::new()
             .read(true)
             .write(true)
@@ -270,13 +378,19 @@ impl SourceMessageCache {
             Ok(file) => file,
             Err(_) => return Self::default(),
         };
-        if lock_file.lock_shared().is_err() {
+        if fs2::FileExt::lock_shared(&lock_file).is_err() {
             return Self::default();
         }
 
-        let store = match read_store_from_path(&path) {
-            Some(store) => store,
-            None => return Self::default(),
+        let store = match read_store_from_path_status(&path) {
+            CacheReadStatus::Loaded(store) => Some(store),
+            CacheReadStatus::Missing => legacy_cache_paths()
+                .into_iter()
+                .find_map(|path| read_store_from_path(&path)),
+            CacheReadStatus::Invalid => None,
+        };
+        let Some(store) = store else {
+            return Self::default();
         };
 
         let entries = store
@@ -304,6 +418,15 @@ impl SourceMessageCache {
     pub(crate) fn get(&self, path: &Path) -> Option<&CachedSourceEntry> {
         let key = CachedPath::from_path(path);
         self.entries.get(&key)
+    }
+
+    pub(crate) fn remove(&mut self, path: &Path) {
+        let key = CachedPath::from_path(path);
+        if self.entries.remove(&key).is_some() {
+            self.dirty_keys.remove(&key);
+            self.deleted_paths.insert(key);
+            self.dirty = true;
+        }
     }
 
     pub(crate) fn prune_missing_files(&mut self) {
@@ -353,7 +476,7 @@ impl SourceMessageCache {
             Ok(file) => file,
             Err(_) => return,
         };
-        if lock_file.lock_exclusive().is_err() {
+        if fs2::FileExt::lock_exclusive(&lock_file).is_err() {
             return;
         }
 
@@ -369,7 +492,9 @@ impl SourceMessageCache {
                 .unwrap_or_default();
 
         for path in &self.deleted_paths {
-            merged_entries.remove(path);
+            if !path.to_path_buf().exists() {
+                merged_entries.remove(path);
+            }
         }
         for path in &self.dirty_keys {
             if let Some(entry) = self.entries.get(path) {
@@ -393,6 +518,10 @@ impl SourceMessageCache {
             nanos
         ));
 
+        // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
+        // the canonical cache file before writing — a partial save or process
+        // crash between delete and rename would lose the cache. The temp-file
+        // pattern makes corruption-on-crash impossible.
         let write_result = (|| -> std::io::Result<()> {
             let file = File::create(&tmp_path)?;
             let mut writer = BufWriter::new(file);
@@ -402,12 +531,9 @@ impl SourceMessageCache {
                 .map_err(std::io::Error::other)?;
             writer.flush()?;
             writer.get_ref().sync_all()?;
-            if fs::rename(&tmp_path, &final_path).is_err() {
-                fs::copy(&tmp_path, &final_path)?;
-                let final_file = File::open(&final_path)?;
-                final_file.sync_all()?;
-                let _ = fs::remove_file(&tmp_path);
-            }
+            crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
+            let final_file = File::open(&final_path)?;
+            final_file.sync_all()?;
             Ok(())
         })();
 
@@ -439,6 +565,40 @@ fn read_store_from_path(path: &Path) -> Option<CachedSourceStore> {
         return None;
     }
     Some(store)
+}
+
+enum CacheReadStatus {
+    Missing,
+    Invalid,
+    Loaded(CachedSourceStore),
+}
+
+fn read_store_from_path_status(path: &Path) -> CacheReadStatus {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheReadStatus::Missing,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    if metadata.len() > MAX_CACHE_FILE_BYTES {
+        return CacheReadStatus::Invalid;
+    }
+
+    let reader = BufReader::new(file);
+    let store: CachedSourceStore = match bincode::options()
+        .with_limit(MAX_CACHE_FILE_BYTES)
+        .deserialize_from(reader)
+    {
+        Ok(store) => store,
+        Err(_) => return CacheReadStatus::Invalid,
+    };
+    if store.schema_version != CACHE_SCHEMA_VERSION {
+        return CacheReadStatus::Invalid;
+    }
+    CacheReadStatus::Loaded(store)
 }
 
 fn read_sample_hash(file: &mut File, offset: u64, len: usize) -> Option<FileSampleHash> {
@@ -554,10 +714,15 @@ pub(crate) fn build_codex_incremental_cache(
     consumed_offset: u64,
     state: CodexParseState,
 ) -> Option<CodexIncrementalCache> {
+    let ends_with_newline = consumed_offset == 0 || file_ends_with_newline(path, consumed_offset);
+    if !ends_with_newline {
+        return None;
+    }
+
     Some(CodexIncrementalCache {
         state,
         consumed_offset,
-        ends_with_newline: consumed_offset == 0 || file_ends_with_newline(path, consumed_offset),
+        ends_with_newline,
         prefix_hash: hash_prefix(path, consumed_offset)?,
     })
 }
@@ -590,12 +755,105 @@ pub(crate) fn codex_prefix_matches(path: &Path, cached: &CodexIncrementalCache) 
     }
 }
 
+pub(crate) fn codex_cache_entry_matches_fingerprint(
+    cached: &CachedSourceEntry,
+    fingerprint: &SourceFingerprint,
+) -> bool {
+    let Some(codex_incremental) = cached.codex_incremental.as_ref() else {
+        return false;
+    };
+
+    codex_incremental.consumed_offset == fingerprint.size
+        && codex_incremental.ends_with_newline
+        && codex_incremental.prefix_hash == fingerprint.content_hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[test]
+    fn from_roo_path_invalidates_on_history_only_change() {
+        // parse_roo_kilo_file reads model/agent from the sibling
+        // api_conversation_history.json, so a history-only rewrite (ui_messages
+        // byte-identical) must change the fingerprint or the cache serves stale
+        // model/agent/pricing.
+        let dir = TempDir::new().unwrap();
+        let ui = dir.path().join("ui_messages.json");
+        std::fs::write(&ui, b"[]").unwrap();
+        let history = dir.path().join("api_conversation_history.json");
+        std::fs::write(&history, b"<model>claude-sonnet-4</model>").unwrap();
+
+        let roo_before = SourceFingerprint::from_roo_path(&ui).unwrap();
+        let plain_before = SourceFingerprint::from_path(&ui).unwrap();
+
+        // Rewrite the history only; leave ui_messages.json byte-identical.
+        std::fs::write(&history, b"<model>claude-opus-4</model>").unwrap();
+
+        let roo_after = SourceFingerprint::from_roo_path(&ui).unwrap();
+        let plain_after = SourceFingerprint::from_path(&ui).unwrap();
+
+        assert_ne!(
+            roo_before, roo_after,
+            "a history-only change must alter the roo fingerprint"
+        );
+        assert_eq!(
+            plain_before, plain_after,
+            "from_path ignores the history sibling (control)"
+        );
+    }
+
+    fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    /// Pin every env var the cache resolvers consult so the test stays
+    /// inside `temp_home`. CI runners can leak `XDG_CONFIG_HOME` /
+    /// `XDG_CACHE_HOME` from the host, in which case `paths::get_cache_dir`
+    /// resolves outside the sandbox and the legacy fallback never gets
+    /// exercised. Returns the previous values so the caller can restore.
+    fn sandbox_cache_env(
+        temp_home: &std::path::Path,
+    ) -> (
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+    ) {
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let prev_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("HOME", temp_home);
+            std::env::set_var("XDG_CONFIG_HOME", temp_home.join(".config"));
+            std::env::set_var("XDG_CACHE_HOME", temp_home.join(".cache"));
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+        (prev_home, prev_xdg_config, prev_xdg_cache, prev_override)
+    }
+
+    fn restore_cache_env(
+        prev: (
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+        ),
+    ) {
+        restore_env_var("HOME", prev.0);
+        restore_env_var("XDG_CONFIG_HOME", prev.1);
+        restore_env_var("XDG_CACHE_HOME", prev.2);
+        restore_env_var("TOKSCALE_CONFIG_DIR", prev.3);
+    }
 
     fn write_temp_file(content: &[u8]) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -674,6 +932,171 @@ mod tests {
     }
 
     #[test]
+    fn test_jcode_fingerprint_tracks_journal_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let session_path = dir.path().join("session_fixture.json");
+        std::fs::write(&session_path, br#"{"messages":[]}"#).unwrap();
+
+        let base = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+
+        let journal_path = dir.path().join("session_fixture.journal.jsonl");
+        std::fs::write(
+            &journal_path,
+            br#"{"append_messages":[]}
+"#,
+        )
+        .unwrap();
+        let with_journal = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+        assert_ne!(base, with_journal);
+
+        std::fs::write(
+            &journal_path,
+            br#"{"append_messages":[{"id":"assistant_1"}]}
+"#,
+        )
+        .unwrap();
+        let updated_journal = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+        assert_ne!(with_journal, updated_journal);
+    }
+
+    #[test]
+    fn test_claude_code_fingerprint_tracks_meta_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let jsonl_path = dir.path().join("agent-abc123.jsonl");
+        std::fs::write(&jsonl_path, b"jsonl-content").unwrap();
+
+        // No meta sidecar → baseline fingerprint
+        let base = SourceFingerprint::from_claude_code_path_with_home(&jsonl_path, None).unwrap();
+
+        // Add meta sidecar → fingerprint changes
+        let meta_path = dir.path().join("agent-abc123.meta.json");
+        std::fs::write(&meta_path, br#"{"agentType":"explore"}"#).unwrap();
+        let with_meta =
+            SourceFingerprint::from_claude_code_path_with_home(&jsonl_path, None).unwrap();
+        assert_ne!(
+            base, with_meta,
+            "Adding meta sidecar should change fingerprint"
+        );
+
+        // Update meta sidecar → fingerprint changes again
+        std::fs::write(&meta_path, br#"{"agentType":"executor"}"#).unwrap();
+        let updated_meta =
+            SourceFingerprint::from_claude_code_path_with_home(&jsonl_path, None).unwrap();
+        assert_ne!(
+            with_meta, updated_meta,
+            "Updating meta sidecar should change fingerprint"
+        );
+
+        // Main session file (no agent- prefix) → unaffected by unrelated meta files
+        let main_path = dir.path().join("session-uuid.jsonl");
+        std::fs::write(&main_path, b"main-session").unwrap();
+        let main_fp1 =
+            SourceFingerprint::from_claude_code_path_with_home(&main_path, None).unwrap();
+        // Create a meta file with the main session stem (unlikely in practice)
+        let main_meta = dir.path().join("session-uuid.meta.json");
+        std::fs::write(&main_meta, br#"{"agentType":"x"}"#).unwrap();
+        let main_fp2 =
+            SourceFingerprint::from_claude_code_path_with_home(&main_path, None).unwrap();
+        assert_ne!(
+            main_fp1, main_fp2,
+            "Claude Code fingerprints always track .meta.json if it exists"
+        );
+    }
+
+    #[test]
+    fn test_claude_code_fingerprint_tracks_cc_mirror_variant_metadata_changes() {
+        let dir = TempDir::new().unwrap();
+        let variant_dir = dir.path().join(".cc-mirror/kimi-code");
+        let config_dir = variant_dir.join("config");
+        let project_dir = config_dir.join("projects/project-one");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let jsonl_path = project_dir.join("session.jsonl");
+        std::fs::write(&jsonl_path, b"jsonl-content").unwrap();
+
+        let variant_path = variant_dir.join("variant.json");
+        std::fs::write(
+            &variant_path,
+            format!(
+                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
+        )
+        .unwrap();
+        let with_kimi =
+            SourceFingerprint::from_claude_code_path_with_home(&jsonl_path, None).unwrap();
+
+        std::fs::write(
+            &variant_path,
+            format!(
+                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
+        )
+        .unwrap();
+        let with_minimax =
+            SourceFingerprint::from_claude_code_path_with_home(&jsonl_path, None).unwrap();
+
+        assert_ne!(
+            with_kimi, with_minimax,
+            "Changing cc-mirror provider metadata should invalidate parsed Claude cache entries"
+        );
+    }
+
+    #[test]
+    fn test_claude_code_fingerprint_tracks_cc_mirror_custom_config_dir_metadata_changes() {
+        let dir = TempDir::new().unwrap();
+        let variant_dir = dir.path().join(".cc-mirror/kimi-code");
+        let config_dir = dir.path().join("mirror-configs/kimi-code");
+        let project_dir = config_dir.join("projects/project-one");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let jsonl_path = project_dir.join("session.jsonl");
+        std::fs::write(&jsonl_path, b"jsonl-content").unwrap();
+
+        std::fs::create_dir_all(&variant_dir).unwrap();
+        let variant_path = variant_dir.join("variant.json");
+        std::fs::write(
+            &variant_path,
+            format!(
+                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
+        )
+        .unwrap();
+        let with_kimi =
+            SourceFingerprint::from_claude_code_path_with_home(&jsonl_path, Some(dir.path()))
+                .unwrap();
+
+        std::fs::write(
+            &variant_path,
+            format!(
+                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
+        )
+        .unwrap();
+        let with_minimax =
+            SourceFingerprint::from_claude_code_path_with_home(&jsonl_path, Some(dir.path()))
+                .unwrap();
+
+        assert_ne!(
+            with_kimi, with_minimax,
+            "Changing cc-mirror metadata should invalidate cache entries for custom configDir layouts"
+        );
+    }
+
+    #[test]
+    fn test_codex_incremental_cache_requires_newline_boundary() {
+        let file = write_temp_file(b"line-1\nline-2");
+
+        assert!(build_codex_incremental_cache(
+            file.path(),
+            file.as_file().metadata().unwrap().len(),
+            CodexParseState::default(),
+        )
+        .is_none());
+    }
+
+    #[test]
     fn test_codex_prefix_matches_rejects_middle_rewrite_with_same_tail() {
         let file = write_temp_file(b"aaaa\nbbbb\ncccc\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
@@ -714,8 +1137,7 @@ mod tests {
     #[serial_test::serial]
     fn test_source_message_cache_round_trip() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        let prev_env = sandbox_cache_env(temp_home.path());
 
         let file = write_temp_file(b"{}\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
@@ -749,10 +1171,7 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         assert!(loaded.get(file.path()).is_some());
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -781,7 +1200,7 @@ mod tests {
     fn test_load_ignores_oversized_cache_file() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         {
             let cache_file = cache_path().unwrap();
@@ -793,10 +1212,7 @@ mod tests {
             assert!(loaded.entries.is_empty());
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var("HOME", original_home);
     }
 
     #[test]
@@ -804,7 +1220,7 @@ mod tests {
     fn test_load_ignores_stale_schema_version() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         {
             let cache_file = cache_path().unwrap();
@@ -821,10 +1237,7 @@ mod tests {
             assert!(loaded.entries.is_empty());
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var("HOME", original_home);
     }
 
     #[test]
@@ -832,7 +1245,7 @@ mod tests {
     fn test_fallback_cache_dir_prefers_runtime_dir() {
         let runtime_dir = TempDir::new().unwrap();
         let original_xdg_runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
-        std::env::set_var("XDG_RUNTIME_DIR", runtime_dir.path());
+        restore_env_var("XDG_RUNTIME_DIR", Some(runtime_dir.path()));
 
         {
             assert_eq!(
@@ -841,10 +1254,7 @@ mod tests {
             );
         }
 
-        match original_xdg_runtime_dir {
-            Some(path) => std::env::set_var("XDG_RUNTIME_DIR", path),
-            None => std::env::remove_var("XDG_RUNTIME_DIR"),
-        }
+        restore_env_var("XDG_RUNTIME_DIR", original_xdg_runtime_dir);
     }
 
     #[test]
@@ -852,7 +1262,7 @@ mod tests {
     fn test_save_if_dirty_marks_cache_clean() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         let mut cache = SourceMessageCache::default();
         assert!(!cache.dirty);
@@ -873,10 +1283,7 @@ mod tests {
             assert!(!cache.dirty);
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var("HOME", original_home);
     }
 
     #[test]
@@ -884,7 +1291,7 @@ mod tests {
     fn test_save_if_dirty_merges_concurrent_writers() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        restore_env_var("HOME", Some(temp_home.path()));
 
         {
             let file_one = write_temp_file(b"{\"id\":1}\n");
@@ -916,10 +1323,170 @@ mod tests {
             assert!(loaded.get(file_two.path()).is_some());
         }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
+        restore_env_var("HOME", original_home);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_save_if_dirty_preserves_recreated_path_from_concurrent_writer() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        {
+            let source_dir = TempDir::new().unwrap();
+            let path = source_dir.path().join("session.jsonl");
+            std::fs::write(&path, b"{\"id\":\"old\"}\n").unwrap();
+
+            let mut seed = SourceMessageCache::default();
+            seed.insert(CachedSourceEntry::new(
+                &path,
+                SourceFingerprint::from_path(&path).unwrap(),
+                vec![UnifiedMessage::new(
+                    "client",
+                    "gpt-5",
+                    "provider",
+                    "old-session",
+                    1,
+                    TokenBreakdown {
+                        input: 1,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                )],
+                Vec::new(),
+                None,
+            ));
+            seed.save_if_dirty();
+
+            let mut stale_deleter = SourceMessageCache::load();
+            std::fs::remove_file(&path).unwrap();
+            stale_deleter.prune_missing_files();
+
+            std::fs::write(&path, b"{\"id\":\"fresh\"}\n").unwrap();
+            let mut fresh_writer = SourceMessageCache::load();
+            fresh_writer.insert(CachedSourceEntry::new(
+                &path,
+                SourceFingerprint::from_path(&path).unwrap(),
+                vec![UnifiedMessage::new(
+                    "client",
+                    "gpt-5",
+                    "provider",
+                    "fresh-session",
+                    2,
+                    TokenBreakdown {
+                        input: 2,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                )],
+                Vec::new(),
+                None,
+            ));
+            fresh_writer.save_if_dirty();
+
+            stale_deleter.save_if_dirty();
+
+            let loaded = SourceMessageCache::load();
+            let entry = loaded
+                .get(&path)
+                .expect("recreated source cache entry should survive stale delete");
+            assert_eq!(entry.messages[0].session_id, "fresh-session");
         }
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_falls_back_to_legacy_dirs_cache_path() {
+        let temp_home = TempDir::new().unwrap();
+        let temp_xdg_cache = TempDir::new().unwrap();
+        let original_home = std::env::var_os("HOME");
+        let original_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let original_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let original_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
+
+        restore_env_var("HOME", Some(temp_home.path()));
+        restore_env_var("XDG_CACHE_HOME", Some(temp_xdg_cache.path()));
+        restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
+        restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
+
+        let source = write_temp_file(b"legacy-dirs\n");
+        let entry = CachedSourceEntry::new(
+            source.path(),
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        let legacy_path = crate::paths::legacy_dirs_cache_dir()
+            .unwrap()
+            .join(CACHE_FILENAME);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+        let store = CachedSourceStore {
+            schema_version: CACHE_SCHEMA_VERSION,
+            entries: vec![entry],
+        };
+        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
+        bincode::options().serialize_into(writer, &store).unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(source.path()).is_some());
+
+        restore_env_var("HOME", original_home);
+        restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
+        restore_env_var("XDG_CONFIG_HOME", original_xdg_config);
+        restore_env_var("TOKSCALE_CONFIG_DIR", original_override);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_falls_back_to_legacy_dot_cache_path() {
+        let temp_home = TempDir::new().unwrap();
+        let original_home = std::env::var_os("HOME");
+        let original_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let original_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let original_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
+
+        restore_env_var("HOME", Some(temp_home.path()));
+        restore_env_var("XDG_CACHE_HOME", None::<&str>);
+        restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
+        restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
+
+        let source = write_temp_file(b"legacy-dot\n");
+        let entry = CachedSourceEntry::new(
+            source.path(),
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        let legacy_path = crate::paths::legacy_dot_cache_tokscale_dir()
+            .unwrap()
+            .join(CACHE_FILENAME);
+        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
+        let store = CachedSourceStore {
+            schema_version: CACHE_SCHEMA_VERSION,
+            entries: vec![entry],
+        };
+        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
+        bincode::options().serialize_into(writer, &store).unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(source.path()).is_some());
+
+        restore_env_var("HOME", original_home);
+        restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
+        restore_env_var("XDG_CONFIG_HOME", original_xdg_config);
+        restore_env_var("TOKSCALE_CONFIG_DIR", original_override);
     }
 
     #[cfg(unix)]

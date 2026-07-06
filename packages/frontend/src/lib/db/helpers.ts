@@ -13,6 +13,12 @@ export interface ModelBreakdownData {
   messages: number;
 }
 
+export interface ClientBreakdownProvenanceData {
+  schemaVersion: number;
+  messageCount: number;
+  modelCount: number;
+}
+
 export interface ClientBreakdownData {
   tokens: number;
   cost: number;
@@ -23,8 +29,14 @@ export interface ClientBreakdownData {
   reasoning: number;
   messages: number;
   models: Record<string, ModelBreakdownData>;
+  provenance?: ClientBreakdownProvenanceData;
   /** @deprecated Legacy field for backward compat - use models instead */
   modelId?: string;
+}
+
+export interface MergeClientBreakdownsResult {
+  merged: Record<string, ClientBreakdownData>;
+  warnings: string[];
 }
 
 export interface DayTotals {
@@ -69,6 +81,37 @@ export function recalculateDayTotals(
   };
 }
 
+function formatTokens(value: number): string {
+  return Math.round(value).toLocaleString("en-US");
+}
+
+export function deriveClientBreakdownProvenance(
+  breakdown: ClientBreakdownData
+): ClientBreakdownProvenanceData {
+  const modelCount = breakdown.models
+    ? Object.keys(breakdown.models).length
+    : breakdown.modelId
+    ? 1
+    : 0;
+
+  return {
+    schemaVersion: Math.max(1, breakdown.provenance?.schemaVersion ?? 1),
+    messageCount: Math.max(
+      0,
+      breakdown.provenance?.messageCount ?? 0,
+      breakdown.messages ?? 0
+    ),
+    modelCount: Math.max(0, breakdown.provenance?.modelCount ?? 0, modelCount),
+  };
+}
+
+function withDerivedProvenance(breakdown: ClientBreakdownData): ClientBreakdownData {
+  return {
+    ...breakdown,
+    provenance: deriveClientBreakdownProvenance(breakdown),
+  };
+}
+
 export function mergeClientBreakdowns(
   existing: Record<string, ClientBreakdownData> | null | undefined,
   incoming: Record<string, ClientBreakdownData>,
@@ -87,22 +130,50 @@ export function mergeClientBreakdowns(
   return merged;
 }
 
-export function buildModelBreakdown(
-  clientBreakdown: Record<string, ClientBreakdownData>
-): Record<string, number> {
-  const result: Record<string, number> = {};
+export function mergeClientBreakdownsWithRegressionGuard(
+  existing: Record<string, ClientBreakdownData> | null | undefined,
+  incoming: Record<string, ClientBreakdownData>,
+  incomingClients: Set<string>
+): MergeClientBreakdownsResult {
+  const merged: Record<string, ClientBreakdownData> = { ...(existing || {}) };
+  const warnings: string[] = [];
 
-  for (const client of Object.values(clientBreakdown)) {
-    if (client.models) {
-      for (const [modelId, modelData] of Object.entries(client.models)) {
-        result[modelId] = (result[modelId] || 0) + modelData.tokens;
+  for (const clientName of incomingClients) {
+    const existingClient = existing?.[clientName];
+    const incomingClient = incoming[clientName];
+
+    if (!incomingClient) {
+      if (existingClient && existingClient.tokens > 0) {
+        merged[clientName] = withDerivedProvenance(existingClient);
+        warnings.push(
+          `Preserved ${clientName} because it disappeared from this same-device resubmit; kept ${formatTokens(existingClient.tokens)} tokens.`
+        );
+      } else {
+        delete merged[clientName];
       }
-    } else if (client.modelId) {
-      result[client.modelId] = (result[client.modelId] || 0) + client.tokens;
+      continue;
     }
+
+    const nextClient = withDerivedProvenance(incomingClient);
+    if (existingClient && nextClient.tokens < existingClient.tokens) {
+      // A token decrease alone signals a parser regression (e.g. the CLI
+      // re-parsed only a subset of history). Preserve the existing row even
+      // when coverage metrics are equal, because equal coverage + fewer tokens
+      // still indicates data loss. The old AND-gate (tokens < existing AND lower
+      // coverage) let equal-coverage regressions slip through undetected.
+      merged[clientName] = withDerivedProvenance(existingClient);
+      const existingTokens = formatTokens(existingClient.tokens);
+      const nextTokens = formatTokens(nextClient.tokens);
+      warnings.push(
+        `Preserved ${clientName} because this same-device resubmit would reduce ${existingTokens} tokens to ${nextTokens}.`
+      );
+      continue;
+    }
+
+    merged[clientName] = nextClient;
   }
 
-  return result;
+  return { merged, warnings };
 }
 
 export function clientContributionToBreakdownData(

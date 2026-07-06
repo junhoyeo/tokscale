@@ -8,12 +8,17 @@ import { SquircleBorder } from "../components";
 export function QuickstartSection() {
   const tui = useCopy("bunx tokscale@latest");
   const submit = useCopy("bunx tokscale@latest submit");
-  const cardsRow = useSquircleClip<HTMLDivElement>(32, 0.6, true, 1);
+  const {
+    setElementRef: setCardsRowRef,
+    clipPath: cardsRowClipPath,
+    svgDef: cardsRowSvgDef,
+    borderDef: cardsRowBorderDef,
+  } = useSquircleClip<HTMLDivElement>(32, 0.6, true, 1);
 
   return (
     <>
       {/* SVG clip-path def for cards */}
-      {cardsRow.svgDef && (
+      {cardsRowSvgDef && (
         <svg
           width="0"
           height="0"
@@ -22,10 +27,10 @@ export function QuickstartSection() {
           role="presentation"
         >
           <defs>
-            <clipPath id={cardsRow.svgDef.id}>
+            <clipPath id={cardsRowSvgDef.id}>
               <path
-                d={cardsRow.svgDef.path}
-                transform={`translate(0, -${cardsRow.svgDef.cornerRadius})`}
+                d={cardsRowSvgDef.path}
+                transform={`translate(0, -${cardsRowSvgDef.cornerRadius})`}
               />
             </clipPath>
           </defs>
@@ -43,12 +48,12 @@ export function QuickstartSection() {
       {/* Quickstart Cards */}
       <QuickstartCardsWrapper>
         <QuickstartCardsRow
-          ref={cardsRow.ref}
+          ref={setCardsRowRef}
           style={{
-            clipPath: cardsRow.clipPath || undefined,
+            clipPath: cardsRowClipPath || undefined,
           }}
         >
-          <SquircleBorder def={cardsRow.borderDef} />
+          <SquircleBorder def={cardsRowBorderDef} />
           {/* Left Card */}
           <QuickstartCard $position="left">
             <CardPatternOverlay $position="left" />

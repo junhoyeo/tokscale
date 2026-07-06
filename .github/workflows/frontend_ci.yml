@@ -1,0 +1,78 @@
+name: Frontend CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+    paths:
+      - "packages/frontend/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/frontend_ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "packages/frontend/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/frontend_ci.yml"
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.3.10
+
+jobs:
+  vitest:
+    name: Frontend Vitest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run frontend tests
+        run: bun run --cwd packages/frontend test
+
+  migration-replay:
+    name: Frontend Migration Replay
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tokscale_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tokscale_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tokscale_ci
+      NODE_ENV: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Replay frontend database migrations
+        run: bun run --cwd packages/frontend test:migrations

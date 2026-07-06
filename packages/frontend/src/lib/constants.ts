@@ -1,3 +1,5 @@
+import type { ClientType } from "./types";
+
 // 2D Canvas
 export const BOX_WIDTH = 10;
 export const BOX_MARGIN = 2;
@@ -24,15 +26,18 @@ export const DAY_LABELS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 export const MONTH_LABELS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // Source configuration
-export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
+export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   opencode: "OpenCode",
   claude: "Claude Code",
   codex: "Codex CLI",
+  copilot: "Copilot",
   gemini: "Gemini CLI",
   cursor: "Cursor",
   amp: "Amp",
+  codebuff: "Codebuff",
   droid: "Droid",
   openclaw: "OpenClaw",
+  hermes: "Hermes Agent",
   pi: "Pi",
   kimi: "Kimi",
   qwen: "Qwen",
@@ -40,20 +45,42 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   kilocode: "Kilo",
   kilo: "Kilo",
   mux: "Mux",
+  kiro: "Kiro",
+  crush: "Crush",
+  goose: "Goose",
+  antigravity: "Antigravity",
+  "antigravity-cli": "Antigravity CLI",
+  zed: "Zed Agent",
+  trae: "Trae",
+  warp: "Warp",
+  cline: "Cline",
   synthetic: "Synthetic",
+  gjc: "Gajae Code",
+  grok: "Grok Build",
+  jcode: "Jcode",
+  commandcode: "Command Code",
+  micode: "MiMo Code",
+  junie: "Junie",
+  zcode: "ZCode",
+  opencodereview: "OpenCodeReview",
+  codebuddy: "CodeBuddy",
+  workbuddy: "WorkBuddy",
 };
 
 // Client logos from GitHub CDN (public repo)
 const GITHUB_CDN_BASE = "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets";
-export const SOURCE_LOGOS: Record<string, string> = {
+export const SOURCE_LOGOS: Record<ClientType, string> = {
   opencode: `${GITHUB_CDN_BASE}/client-opencode.png`,
   claude: `${GITHUB_CDN_BASE}/client-claude.jpg`,
   codex: `${GITHUB_CDN_BASE}/client-openai.jpg`,
+  copilot: `${GITHUB_CDN_BASE}/client-copilot.jpg`,
   gemini: `${GITHUB_CDN_BASE}/client-gemini.png`,
   cursor: `${GITHUB_CDN_BASE}/client-cursor.jpg`,
   amp: `${GITHUB_CDN_BASE}/client-amp.png`,
+  codebuff: `${GITHUB_CDN_BASE}/client-codebuff.png`,
   droid: `${GITHUB_CDN_BASE}/client-droid.png`,
   openclaw: `${GITHUB_CDN_BASE}/client-openclaw.jpg`,
+  hermes: `${GITHUB_CDN_BASE}/client-hermes.png`,
   pi: `${GITHUB_CDN_BASE}/client-pi.png`,
   kimi: `${GITHUB_CDN_BASE}/client-kimi.png`,
   qwen: `${GITHUB_CDN_BASE}/client-qwen.png`,
@@ -61,18 +88,43 @@ export const SOURCE_LOGOS: Record<string, string> = {
   kilocode: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   kilo: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   mux: `${GITHUB_CDN_BASE}/client-mux.png`,
+  kiro: "https://github.com/kirodotdev.png",
+  crush: `${GITHUB_CDN_BASE}/client-crush.png`,
+  goose: `${GITHUB_CDN_BASE}/client-goose.png`,
+  antigravity: `${GITHUB_CDN_BASE}/client-antigravity.png`,
+  "antigravity-cli": `${GITHUB_CDN_BASE}/client-antigravity.png`,
+  zed: `${GITHUB_CDN_BASE}/client-zed.webp`,
+  trae: `${GITHUB_CDN_BASE}/client-trae.png`,
+  warp: "https://github.com/warpdotdev.png",
+  cline: "https://github.com/cline.png",
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
+  gjc: "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
+  grok: "https://github.com/xai-org.png",
+  jcode: `${GITHUB_CDN_BASE}/client-jcode.png`,
+  commandcode:
+    "https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png",
+  micode: "https://github.com/XiaomiMiMo.png",
+  junie: "https://github.com/JetBrains.png",
+  zcode: "https://github.com/zai-org.png",
+  opencodereview: "https://github.com/alibaba.png",
+  codebuddy:
+    "https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png",
+  workbuddy:
+    "https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png",
 };
 
-export const SOURCE_COLORS: Record<string, string> = {
+export const SOURCE_COLORS: Record<ClientType, string> = {
   opencode: "#00A8E8",
   claude: "#f97316",
   codex: "#3b82f6",
+  copilot: "#24292F",
   gemini: "#8b5cf6",
   cursor: "#22c55e",
   amp: "#EC4899",
+  codebuff: "#7C3AED",
   droid: "#1F1D1C",
   openclaw: "#EF4444",
+  hermes: "#FFD700",
   pi: "#6366F1",
   kimi: "#8B5CF6",
   qwen: "#1A73E8",
@@ -80,11 +132,26 @@ export const SOURCE_COLORS: Record<string, string> = {
   kilocode: "#F59E0B",
   kilo: "#F59E0B",
   mux: "#171717",
+  kiro: "#00A67D",
+  crush: "#DC2626",
+  goose: "#64B4DC",
+  antigravity: "#6366F1",
+  "antigravity-cli": "#6366F1",
+  zed: "#084CCF",
+  trae: "#00BFA5",
+  warp: "#01A4A4",
+  cline: "#5B8DEF",
   synthetic: "#4ADE80",
-};
-
-export const SOURCE_TEXT_COLORS: Record<string, string> = {
-  droid: "#FFFFFF",
+  gjc: "#FF6B6B",
+  grok: "#171717",
+  jcode: "#F59E0B",
+  commandcode: "#A855F7",
+  micode: "#FF6900",
+  junie: "#7B61FF",
+  zcode: "#3B5BDB",
+  opencodereview: "#FF6A00",
+  codebuddy: "#00A4FF",
+  workbuddy: "#2563EB",
 };
 
 // Derived values

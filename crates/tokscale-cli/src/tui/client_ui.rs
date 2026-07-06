@@ -70,6 +70,90 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         display_name: "Crush",
         hotkey: 'h',
     },
+    ClientUi {
+        display_name: "Hermes Agent",
+        hotkey: 'e',
+    },
+    ClientUi {
+        display_name: "Copilot",
+        hotkey: 'c',
+    },
+    ClientUi {
+        display_name: "Goose",
+        hotkey: 'o',
+    },
+    ClientUi {
+        display_name: "Codebuff",
+        hotkey: 'b',
+    },
+    ClientUi {
+        display_name: "Antigravity",
+        hotkey: 'a',
+    },
+    ClientUi {
+        display_name: "Zed Agent",
+        hotkey: 'z',
+    },
+    ClientUi {
+        display_name: "Kiro",
+        hotkey: 'i',
+    },
+    ClientUi {
+        display_name: "Trae",
+        hotkey: 'y',
+    },
+    ClientUi {
+        display_name: "Warp",
+        hotkey: 'v',
+    },
+    ClientUi {
+        display_name: "Cline",
+        hotkey: 'n',
+    },
+    ClientUi {
+        display_name: "Gajae-Code",
+        hotkey: 'g',
+    },
+    ClientUi {
+        display_name: "Grok Build",
+        hotkey: 'u',
+    },
+    ClientUi {
+        display_name: "Jcode",
+        hotkey: 'j',
+    },
+    ClientUi {
+        display_name: "Command Code",
+        hotkey: 'd',
+    },
+    ClientUi {
+        display_name: "MiMo Code",
+        hotkey: 'm',
+    },
+    ClientUi {
+        display_name: "Antigravity CLI",
+        hotkey: 'f',
+    },
+    ClientUi {
+        display_name: "Junie",
+        hotkey: 'p',
+    },
+    ClientUi {
+        display_name: "ZCode",
+        hotkey: 'q',
+    },
+    ClientUi {
+        display_name: "OpenCodeReview",
+        hotkey: 'O',
+    },
+    ClientUi {
+        display_name: "CodeBuddy",
+        hotkey: 'C',
+    },
+    ClientUi {
+        display_name: "WorkBuddy",
+        hotkey: 'B',
+    },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

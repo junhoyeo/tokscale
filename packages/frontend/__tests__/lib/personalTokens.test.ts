@@ -24,7 +24,6 @@ const mockState = vi.hoisted(() => {
       username: "users.username",
       displayName: "users.displayName",
       avatarUrl: "users.avatarUrl",
-      isAdmin: "users.isAdmin",
     },
   };
 
@@ -331,7 +330,6 @@ describe("personal token service", () => {
         username: "alice",
         displayName: "Alice",
         avatarUrl: null,
-        isAdmin: false,
         expiresAt: new Date("2026-03-01T00:00:00.000Z"),
       },
     ]);
@@ -355,7 +353,6 @@ describe("personal token service", () => {
         username: "alice",
         displayName: "Alice",
         avatarUrl: null,
-        isAdmin: false,
         expiresAt: now,
       },
     ]);
@@ -375,7 +372,6 @@ describe("personal token service", () => {
         username: "alice",
         displayName: "Alice",
         avatarUrl: null,
-        isAdmin: false,
         expiresAt: null,
       },
     ]);
@@ -402,7 +398,6 @@ describe("personal token service", () => {
         username: "alice",
         displayName: "Alice",
         avatarUrl: null,
-        isAdmin: false,
         expiresAt: null,
       },
     ]);

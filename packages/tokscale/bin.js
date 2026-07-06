@@ -1,2 +1,2 @@
 #!/usr/bin/env node
-await import('@tokscale/cli');
+await import("@tokscale/cli");

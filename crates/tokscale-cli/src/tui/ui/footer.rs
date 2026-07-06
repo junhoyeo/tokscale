@@ -136,10 +136,7 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Current list count
     if !is_very_narrow {
-        let count_label = match app.current_tab {
-            Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
-            _ => format!(" ({} models)", app.data.models.len()),
-        };
+        let count_label = current_count_label(app);
         right_spans.push(Span::styled(
             count_label,
             Style::default().fg(app.theme.muted),
@@ -149,6 +146,24 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
     let right_line = Line::from(right_spans);
     let right_para = Paragraph::new(right_line).alignment(Alignment::Right);
     frame.render_widget(right_para, chunks[1]);
+}
+
+fn current_count_label(app: &App) -> String {
+    match app.current_tab {
+        Tab::Overview | Tab::Models => format!(" ({} models)", app.data.models.len()),
+        Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
+        Tab::Daily if app.is_daily_detail_active() => {
+            format!(" ({} models)", app.get_sorted_daily_detail_rows().len())
+        }
+        Tab::Daily => format!(" ({} days)", app.data.daily.len()),
+        Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
+        Tab::Minutely => format!(" ({} minutes)", app.data.minutely.len()),
+        Tab::Monthly if app.is_monthly_detail_active() => {
+            format!(" ({} days)", app.get_sorted_monthly_detail_days().len())
+        }
+        Tab::Monthly => format!(" ({} months)", app.data.monthly.len()),
+        Tab::Stats | Tab::Usage => String::new(),
+    }
 }
 
 fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -174,7 +189,25 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         ];
         if app.current_tab == Tab::Daily {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
+            if app.is_daily_detail_active() {
+                spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
+            } else {
+                spans.push(Span::styled("↵", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+                spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
+            }
+        }
+        if app.current_tab == Tab::Monthly {
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            if app.is_monthly_detail_active() {
+                spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
+            } else {
+                spans.push(Span::styled("↵", Style::default().fg(Color::Yellow)));
+            }
+        }
+        if app.current_tab == Tab::Hourly {
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            spans.push(Span::styled("v", Style::default().fg(Color::Yellow)));
         }
         spans
     } else {
@@ -187,8 +220,41 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" • ", Style::default().fg(app.theme.muted)),
         ];
         if app.current_tab == Tab::Daily {
+            if app.is_daily_detail_active() {
+                spans.push(Span::styled(
+                    "[esc:back]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "[enter:details]",
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::styled(" ", Style::default()));
+                spans.push(Span::styled(
+                    "[j:today]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+        }
+        if app.current_tab == Tab::Monthly {
+            if app.is_monthly_detail_active() {
+                spans.push(Span::styled(
+                    "[esc:back]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "[enter:details]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+        }
+        if app.current_tab == Tab::Hourly {
             spans.push(Span::styled(
-                "[j:today]",
+                "[v:profile]",
                 Style::default().fg(Color::Yellow),
             ));
             spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
@@ -237,11 +303,48 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+/// Data-source indicator label (#699): "local" when only this machine's
+/// data is on screen, or "local+remote (N devices)" when server-side
+/// aggregated stats are available for cross-checking.
+fn data_source_label(app: &App) -> String {
+    match app.remote_stats {
+        Some(ref remote) => {
+            let devices = if remote.device_count == 1 {
+                "1 device".to_string()
+            } else {
+                format!("{} devices", remote.device_count)
+            };
+            format!("local+remote ({})", devices)
+        }
+        None => "local".to_string(),
+    }
+}
+
 fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
 
+    // Always-visible data-source indicator, so it is clear whether the
+    // numbers on screen are local-only or backed by server-side aggregates.
+    spans.push(Span::styled(
+        data_source_label(app),
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if let Some(ref remote) = app.remote_stats {
+        spans.push(Span::styled(
+            format!(
+                " all devices: {} · {}",
+                format_tokens(remote.total_tokens),
+                format_cost(remote.total_cost)
+            ),
+            Style::default().fg(app.theme.muted),
+        ));
+    }
+    spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+
     if app.data.loading {
-        let scanner_spans = get_scanner_spans(app.spinner_frame);
+        let scanner_spans = get_scanner_spans(app.spinner_frame, &app.theme);
         spans.extend(scanner_spans);
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
@@ -255,7 +358,7 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(app.theme.muted),
             ));
         } else {
-            let scanner_spans = get_scanner_spans(app.spinner_frame);
+            let scanner_spans = get_scanner_spans(app.spinner_frame, &app.theme);
             spans.extend(scanner_spans);
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
@@ -295,4 +398,79 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::UsageData;
+
+    fn make_app_on(tab: Tab) -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(tab),
+        };
+        App::new_with_cached_data(config, Some(UsageData::default())).unwrap()
+    }
+
+    #[test]
+    fn test_current_count_label_matches_active_tab() {
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Models)),
+            " (0 models)"
+        );
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Agents)),
+            " (0 agents)"
+        );
+        assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
+        assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Monthly)),
+            " (0 months)"
+        );
+        assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+    }
+
+    #[test]
+    fn test_current_count_label_minutely_when_flag_enabled() {
+        let mut app = make_app_on(Tab::Models);
+        app.settings.minutely_tab_enabled = true;
+        app.current_tab = Tab::Minutely;
+        assert_eq!(current_count_label(&app), " (0 minutes)");
+    }
+
+    #[test]
+    fn test_data_source_label_local_without_remote_stats() {
+        let app = make_app_on(Tab::Models);
+        assert_eq!(data_source_label(&app), "local");
+    }
+
+    #[test]
+    fn test_data_source_label_with_remote_stats() {
+        let mut app = make_app_on(Tab::Models);
+        app.remote_stats = Some(crate::tui::remote::RemoteStats {
+            schema_version: 1,
+            total_tokens: 1250,
+            total_cost: 1.75,
+            device_count: 2,
+            last_submitted_at: None,
+            days: Vec::new(),
+            devices: Vec::new(),
+            fetched_at_secs: 0,
+            cached_for_user: "alice".to_string(),
+            cached_for_api_url: "https://tokscale.ai".to_string(),
+        });
+        assert_eq!(data_source_label(&app), "local+remote (2 devices)");
+
+        app.remote_stats.as_mut().unwrap().device_count = 1;
+        assert_eq!(data_source_label(&app), "local+remote (1 device)");
+    }
 }

@@ -5,6 +5,7 @@ import {
   getGitHubUser,
   getGitHubUserEmail,
 } from "@/lib/auth/github";
+import { sanitizeAuthReturnTo } from "@/lib/auth/returnTo";
 import { createSession, setSessionCookie } from "@/lib/auth/session";
 import { db, users } from "@/lib/db";
 import { eq } from "drizzle-orm";
@@ -105,8 +106,8 @@ export async function GET(request: Request) {
     await setSessionCookie(sessionToken);
 
     // Redirect to return URL
-    const returnTo = storedState.returnTo || "/leaderboard";
-    return NextResponse.redirect(`${baseUrl}${returnTo}`);
+    const returnTo = sanitizeAuthReturnTo(storedState.returnTo);
+    return NextResponse.redirect(new URL(returnTo, baseUrl));
   } catch (err) {
     console.error("GitHub OAuth callback error:", err);
     return NextResponse.redirect(`${baseUrl}/leaderboard?error=auth_failed`);

@@ -169,14 +169,19 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .cloned()
         .collect();
     let include_cursor = clients.iter().any(|src| src == ClientId::Cursor.as_str());
+    let explicit_cursor = options
+        .clients
+        .as_ref()
+        .is_some_and(|sources| sources.iter().any(|src| src == ClientId::Cursor.as_str()));
 
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
 
     let has_cursor_cache = cursor::has_cursor_usage_cache();
+    let cursor_logged_in = cursor::is_cursor_logged_in();
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
-    if include_cursor && cursor::is_cursor_logged_in() {
+    if include_cursor && cursor_logged_in {
         cursor_sync_result = Some(cursor::sync_cursor_cache().await);
     }
 
@@ -202,6 +207,11 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     } else {
         false
     };
+    if let Some(warning) =
+        cursor_setup_warning_for_wrapped(explicit_cursor, include_cursor_in_graph, cursor_logged_in)
+    {
+        eprintln!("{}", format!("  Warning: {warning}").yellow());
+    }
 
     let graph_clients = if include_cursor && !include_cursor_in_graph {
         clients
@@ -222,6 +232,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 since: Some(since.clone()),
                 until: Some(until.clone()),
                 year: Some(year.clone()),
+                scanner_settings: crate::tui::settings::load_scanner_settings(),
             })
             .map_err(anyhow::Error::msg)?,
         )
@@ -237,6 +248,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         until: Some(until),
         year: Some(year.clone()),
         group_by: GroupBy::default(),
+        scanner_settings: crate::tui::settings::load_scanner_settings(),
     })
     .await
     .map_err(anyhow::Error::msg)?;
@@ -389,7 +401,7 @@ fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentE
             .position(|name| *name == agent.name)
             .unwrap_or(usize::MAX)
     });
-    unpinned.sort_by(|a, b| b.messages.cmp(&a.messages));
+    unpinned.sort_by_key(|b| std::cmp::Reverse(b.messages));
 
     let mut combined = Vec::new();
     combined.extend(pinned);
@@ -1095,22 +1107,25 @@ async fn ensure_fonts_loaded(client: &reqwest::Client) -> Result<FontSet> {
     let regular_path = cache_dir.join(FIGTREE_REGULAR_FILE);
     let bold_path = cache_dir.join(FIGTREE_BOLD_FILE);
 
-    if !regular_path.exists() {
+    let regular_source = resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &regular_path);
+    let bold_source = resolve_wrapped_cache_path("fonts", FIGTREE_BOLD_FILE, &bold_path);
+
+    if regular_source == regular_path && !regular_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_REGULAR_URL, &regular_path).await;
     }
-    if !bold_path.exists() {
+    if bold_source == bold_path && !bold_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_BOLD_URL, &bold_path).await;
     }
 
-    let regular_font = if regular_path.exists() {
-        fs::read(&regular_path)
+    let regular_font = if regular_source.exists() {
+        fs::read(&regular_source)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
         None
     };
-    let bold_font = if bold_path.exists() {
-        fs::read(&bold_path)
+    let bold_font = if bold_source.exists() {
+        fs::read(&bold_source)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
@@ -1140,6 +1155,12 @@ async fn fetch_and_cache_image(
     ensure_cache_dir(&cache_dir)?;
 
     let cached_path = cache_dir.join(filename);
+    if cached_path.exists() {
+        return Ok(cached_path);
+    }
+    if let Some(legacy_path) = first_existing_legacy_wrapped_cache_file("images", filename) {
+        return Ok(legacy_path);
+    }
     if !cached_path.exists() {
         fetch_to_file(client, url, &cached_path).await?;
     }
@@ -1159,6 +1180,9 @@ async fn fetch_svg_and_convert_to_png(
     let cached_path = cache_dir.join(filename);
     if cached_path.exists() {
         return Ok(cached_path);
+    }
+    if let Some(legacy_path) = first_existing_legacy_wrapped_cache_file("images", filename) {
+        return Ok(legacy_path);
     }
 
     let response = client
@@ -1189,7 +1213,7 @@ async fn fetch_svg_and_convert_to_png(
     let png = pixmap
         .encode_png()
         .map_err(|err| anyhow::anyhow!("Failed to encode PNG: {err:?}"))?;
-    fs::write(&cached_path, png)?;
+    atomic_write_bytes(&cached_path, &png)?;
 
     Ok(cached_path)
 }
@@ -1206,7 +1230,7 @@ async fn fetch_to_file(client: &reqwest::Client, url: &str, path: &Path) -> Resu
     }
 
     let bytes = response.bytes().await?;
-    fs::write(path, &bytes)?;
+    atomic_write_bytes(path, &bytes)?;
     Ok(())
 }
 
@@ -1229,13 +1253,70 @@ fn load_rgba_image(path: &Path) -> Result<RgbaImage> {
 }
 
 fn get_image_cache_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".cache").join("tokscale").join("images"))
+    Ok(crate::paths::get_cache_dir().join("images"))
 }
 
 fn get_font_cache_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".cache").join("tokscale").join("fonts"))
+    Ok(crate::paths::get_cache_dir().join("fonts"))
+}
+
+fn resolve_wrapped_cache_path(subdir: &str, filename: &str, canonical_path: &Path) -> PathBuf {
+    if canonical_path.exists() {
+        canonical_path.to_path_buf()
+    } else {
+        first_existing_legacy_wrapped_cache_file(subdir, filename)
+            .unwrap_or_else(|| canonical_path.to_path_buf())
+    }
+}
+
+fn first_existing_legacy_wrapped_cache_file(subdir: &str, filename: &str) -> Option<PathBuf> {
+    if crate::paths::is_config_dir_overridden() {
+        return None;
+    }
+
+    [
+        crate::paths::legacy_dirs_cache_dir().map(|dir| dir.join(subdir).join(filename)),
+        crate::paths::legacy_dot_cache_tokscale_dir().map(|dir| dir.join(subdir).join(filename)),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.exists())
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cache path has no parent: {}", path.display()))?;
+    ensure_cache_dir(dir)?;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let tmp_name = format!(
+        ".{}.{}.{:x}.tmp",
+        path.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("wrapped.cache"),
+        std::process::id(),
+        nanos
+    );
+    let tmp_path = dir.join(tmp_name);
+
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::File::create(&tmp_path)?;
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        tokscale_core::fs_atomic::replace_file(&tmp_path, path)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    write_result
 }
 
 fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
@@ -1352,11 +1433,14 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "opencode" => Some("OpenCode"),
         "claude" => Some("Claude Code"),
         "codex" => Some("Codex CLI"),
+        "copilot" => Some("Copilot CLI"),
         "gemini" => Some("Gemini CLI"),
         s if s == ClientId::Cursor.as_str() => Some("Cursor IDE"),
         "amp" => Some("Amp"),
+        "codebuff" => Some("Codebuff"),
         "droid" => Some("Droid"),
         "openclaw" => Some("OpenClaw"),
+        "hermes" => Some("Hermes Agent"),
         "pi" => Some("Pi"),
         "kimi" => Some("Kimi CLI"),
         "qwen" => Some("Qwen CLI"),
@@ -1365,6 +1449,15 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "kilo" => Some("Kilo CLI"),
         "mux" => Some("Mux"),
         "crush" => Some("Crush"),
+        "goose" => Some("Goose"),
+        "antigravity" => Some("Antigravity"),
+        "antigravity-cli" => Some("Antigravity CLI"),
+        "zed" => Some("Zed Agent"),
+        "warp" => Some("Warp"),
+        "cline" => Some("Cline"),
+        "gjc" => Some("Gajae-Code"),
+        "jcode" => Some("Jcode"),
+        "junie" => Some("Junie"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -1375,11 +1468,18 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "OpenCode" => Some("https://tokscale.ai/assets/logos/opencode.png"),
         "Claude Code" => Some("https://tokscale.ai/assets/logos/claude.jpg"),
         "Codex CLI" => Some("https://tokscale.ai/assets/logos/openai.jpg"),
+        "Copilot CLI" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",
+        ),
         "Gemini CLI" => Some("https://tokscale.ai/assets/logos/gemini.png"),
         "Cursor IDE" => Some("https://tokscale.ai/assets/logos/cursor.jpg"),
         "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
+        "Codebuff" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png",
+        ),
         "Droid" => Some("https://tokscale.ai/assets/logos/droid.png"),
         "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
+        "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
         "Pi" => Some("https://tokscale.ai/assets/logos/pi.png"),
         "Kimi CLI" => Some("https://tokscale.ai/assets/logos/kimi.png"),
         "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
@@ -1390,6 +1490,17 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Crush" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png",
         ),
+        "Goose" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
+        ),
+        "Antigravity" | "Antigravity CLI" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
+        ),
+        "Zed Agent" => Some(
+            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
+        ),
+        "Jcode" => Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),
+        "Junie" => Some("https://github.com/JetBrains.png"),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
     }
@@ -1460,6 +1571,10 @@ fn format_model_name(model: &str) -> String {
     }
 
     cleaned = strip_date_suffix(cleaned);
+
+    if let Some(display) = format_gpt_5_series_model_name(&cleaned, &suffix) {
+        return display;
+    }
 
     let normalized = cleaned
         .to_lowercase()
@@ -1613,6 +1728,49 @@ fn format_model_name(model: &str) -> String {
     }
 }
 
+fn format_gpt_5_series_model_name(model: &str, suffix: &str) -> Option<String> {
+    let lower = model.to_lowercase();
+    let model_part = lower
+        .rsplit(['/', ':'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(&lower);
+
+    let mut parts = model_part.split(['-', '_']).filter(|part| !part.is_empty());
+
+    if parts.next()? != "gpt" {
+        return None;
+    }
+
+    let version = parts.next()?;
+    if version != "5" && !version.starts_with("5.") {
+        return None;
+    }
+
+    let mut display = format!("GPT-{}", version);
+    for part in parts {
+        if part.starts_with("20") && part.chars().all(|ch| ch.is_ascii_digit()) {
+            break;
+        }
+
+        match part {
+            "pro" => display.push_str(" Pro"),
+            "mini" => display.push_str(" Mini"),
+            "nano" => display.push_str(" Nano"),
+            "codex" => display.push_str(" Codex"),
+            "max" => display.push_str(" Max"),
+            "spark" => display.push_str(" Spark"),
+            "chat" => display.push_str(" Chat"),
+            "preview" => display.push_str(" Preview"),
+            "latest" => display.push_str(" Latest"),
+            _ if part.chars().all(|ch| ch.is_ascii_digit()) => break,
+            _ => {}
+        }
+    }
+
+    display.push_str(suffix);
+    Some(display)
+}
+
 fn exact_model_display_name(model: &str) -> Option<&'static str> {
     match model {
         "claude-sonnet-4-20250514" => Some("Claude Sonnet 4"),
@@ -1642,6 +1800,8 @@ fn split_quality_suffix(model: &str) -> (String, String) {
     let lower = model.to_lowercase();
 
     for (needle, label) in [
+        ("-xhigh", " XHigh"),
+        ("_xhigh", " XHigh"),
         ("-high", " High"),
         ("_high", " High"),
         ("-medium", " Medium"),
@@ -1727,11 +1887,14 @@ fn default_clients() -> Vec<String> {
         "opencode".to_string(),
         "claude".to_string(),
         "codex".to_string(),
+        "copilot".to_string(),
         "gemini".to_string(),
         ClientId::Cursor.as_str().to_string(),
         "amp".to_string(),
+        "codebuff".to_string(),
         "droid".to_string(),
         "openclaw".to_string(),
+        "hermes".to_string(),
         "pi".to_string(),
     ]
 }
@@ -1739,6 +1902,18 @@ fn default_clients() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
+
+    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+        unsafe {
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
 
     // ========== format_tokens_short tests ==========
 
@@ -1921,6 +2096,14 @@ mod tests {
     }
 
     #[test]
+    fn test_split_quality_suffix_xhigh() {
+        assert_eq!(
+            split_quality_suffix("model-xhigh"),
+            ("model".to_string(), " XHigh".to_string())
+        );
+    }
+
+    #[test]
     fn test_split_quality_suffix_medium() {
         assert_eq!(
             split_quality_suffix("model-medium"),
@@ -1948,6 +2131,38 @@ mod tests {
         );
     }
 
+    #[test]
+    #[serial]
+    fn font_cache_reads_legacy_path_when_canonical_missing() {
+        let temp_home = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        let previous_xdg_config = env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            env::set_var("HOME", temp_home.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+            env::remove_var("XDG_CONFIG_HOME");
+        }
+
+        let legacy_path = temp_home
+            .path()
+            .join(".cache/tokscale/fonts")
+            .join(FIGTREE_REGULAR_FILE);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, b"legacy-font-bytes").unwrap();
+
+        let canonical_path = get_font_cache_dir().unwrap().join(FIGTREE_REGULAR_FILE);
+        let resolved = resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &canonical_path);
+
+        assert_eq!(resolved, legacy_path);
+        assert!(!canonical_path.exists());
+        assert_eq!(fs::read(&resolved).unwrap(), b"legacy-font-bytes");
+
+        restore_env_var("HOME", previous_home);
+        restore_env_var("TOKSCALE_CONFIG_DIR", previous_override);
+        restore_env_var("XDG_CONFIG_HOME", previous_xdg_config);
+    }
+
     // ========== format_model_name tests ==========
 
     #[test]
@@ -1968,6 +2183,12 @@ mod tests {
         assert_eq!(format_model_name("gpt-4o"), "GPT-4o");
         assert_eq!(format_model_name("gpt-4o-mini"), "GPT-4o Mini");
         assert_eq!(format_model_name("gpt-5"), "GPT-5");
+        assert_eq!(format_model_name("gpt-5.5"), "GPT-5.5");
+        assert_eq!(
+            format_model_name("openai/gpt-5.5-pro-20260423"),
+            "GPT-5.5 Pro"
+        );
+        assert_eq!(format_model_name("gpt-5.5-xhigh"), "GPT-5.5 XHigh");
     }
 
     #[test]
@@ -2162,6 +2383,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_copilot() {
+        assert_eq!(client_display_name("copilot"), Some("Copilot CLI"));
+    }
+
+    #[test]
     fn test_client_display_name_gemini() {
         assert_eq!(client_display_name("gemini"), Some("Gemini CLI"));
     }
@@ -2187,6 +2413,16 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_hermes() {
+        assert_eq!(client_display_name("hermes"), Some("Hermes Agent"));
+    }
+
+    #[test]
+    fn test_client_display_name_codebuff() {
+        assert_eq!(client_display_name("codebuff"), Some("Codebuff"));
+    }
+
+    #[test]
     fn test_client_display_name_pi() {
         assert_eq!(client_display_name("pi"), Some("Pi"));
     }
@@ -2202,10 +2438,53 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_goose() {
+        assert_eq!(client_display_name("goose"), Some("Goose"));
+    }
+
+    #[test]
+    fn test_client_display_name_antigravity() {
+        assert_eq!(client_display_name("antigravity"), Some("Antigravity"));
+    }
+
+    #[test]
+    fn test_client_display_name_zed() {
+        assert_eq!(client_display_name("zed"), Some("Zed Agent"));
+    }
+
+    #[test]
+    fn test_client_display_name_jcode() {
+        assert_eq!(client_display_name("jcode"), Some("Jcode"));
+    }
+
+    #[test]
+    fn test_client_display_name_junie() {
+        assert_eq!(client_display_name("junie"), Some("Junie"));
+    }
+
+    #[test]
     fn test_client_display_name_unknown() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
         assert_eq!(client_display_name("Claude"), None); // case-sensitive
+    }
+
+    #[test]
+    fn test_default_clients_includes_hermes() {
+        let clients = default_clients();
+        assert!(clients.iter().any(|client| client == "hermes"));
+    }
+
+    #[test]
+    fn test_default_clients_includes_codebuff() {
+        let clients = default_clients();
+        assert!(clients.iter().any(|client| client == "codebuff"));
+    }
+
+    #[test]
+    fn test_default_clients_includes_copilot() {
+        let clients = default_clients();
+        assert!(clients.iter().any(|client| client == "copilot"));
     }
 
     // ========== client_logo_url tests ==========
@@ -2231,6 +2510,16 @@ mod tests {
         assert_eq!(
             client_logo_url("Codex CLI"),
             Some("https://tokscale.ai/assets/logos/openai.jpg")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_copilot_cli() {
+        assert_eq!(
+            client_logo_url("Copilot CLI"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",
+            )
         );
     }
 
@@ -2275,6 +2564,24 @@ mod tests {
     }
 
     #[test]
+    fn test_client_logo_url_hermes() {
+        assert_eq!(
+            client_logo_url("Hermes Agent"),
+            Some("https://tokscale.ai/assets/logos/hermes.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_codebuff() {
+        assert_eq!(
+            client_logo_url("Codebuff"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png"
+            )
+        );
+    }
+
+    #[test]
     fn test_client_logo_url_pi() {
         assert_eq!(
             client_logo_url("Pi"),
@@ -2297,6 +2604,52 @@ mod tests {
             Some(
                 "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png"
             )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_goose() {
+        assert_eq!(
+            client_logo_url("Goose"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png"
+            )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_antigravity() {
+        assert_eq!(
+            client_logo_url("Antigravity"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"
+            )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_zed() {
+        assert_eq!(
+            client_logo_url("Zed Agent"),
+            Some(
+                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp"
+            )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_jcode() {
+        assert_eq!(
+            client_logo_url("Jcode"),
+            Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_junie() {
+        assert_eq!(
+            client_logo_url("Junie"),
+            Some("https://github.com/JetBrains.png")
         );
     }
 
@@ -2670,5 +3023,50 @@ mod tests {
         ];
         let (_current, longest) = calculate_streaks(&dates);
         assert_eq!(longest, 4);
+    }
+}
+
+fn cursor_setup_warning_for_wrapped(
+    explicit_cursor: bool,
+    include_cursor_in_graph: bool,
+    cursor_logged_in: bool,
+) -> Option<String> {
+    if !explicit_cursor || include_cursor_in_graph {
+        return None;
+    }
+
+    let action = if cursor_logged_in {
+        "run `tokscale cursor sync --json`"
+    } else {
+        "run `tokscale cursor login` and `tokscale cursor sync --json`"
+    };
+
+    Some(format!(
+        "Cursor usage requires Tokscale's Cursor API cache at `~/.config/tokscale/cursor-cache/usage*.csv`; {action}. Tokscale does not parse local `~/.cursor` session data."
+    ))
+}
+
+#[cfg(test)]
+mod cursor_setup_warning_tests {
+    use super::cursor_setup_warning_for_wrapped;
+
+    #[test]
+    fn wrapped_cursor_warning_suggests_login_when_not_authenticated() {
+        let warning = cursor_setup_warning_for_wrapped(true, false, false).unwrap();
+        assert!(warning.contains("tokscale cursor login"));
+        assert!(warning.contains("tokscale cursor sync --json"));
+    }
+
+    #[test]
+    fn wrapped_cursor_warning_suggests_sync_only_when_authenticated() {
+        let warning = cursor_setup_warning_for_wrapped(true, false, true).unwrap();
+        assert!(!warning.contains("tokscale cursor login"));
+        assert!(warning.contains("tokscale cursor sync --json"));
+    }
+
+    #[test]
+    fn wrapped_cursor_warning_is_suppressed_without_explicit_missing_cursor() {
+        assert!(cursor_setup_warning_for_wrapped(false, false, false).is_none());
+        assert!(cursor_setup_warning_for_wrapped(true, true, false).is_none());
     }
 }

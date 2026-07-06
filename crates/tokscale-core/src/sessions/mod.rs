@@ -3,25 +3,57 @@
 //! Each client has its own parser that converts to a unified message format.
 
 pub mod amp;
+pub mod antigravity;
+pub mod antigravity_cli;
 pub mod claudecode;
+pub mod cline;
+pub mod codebuddy;
+pub mod codebuff;
 pub mod codex;
+pub mod commandcode;
+pub mod copilot;
+pub mod copilot_desktop;
 pub mod crush;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod gjc;
+pub mod goose;
+pub mod grok;
+pub mod hermes;
+pub mod jcode;
+pub mod junie;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
+pub mod kiro;
+pub mod micode;
 pub mod mux;
 pub mod openclaw;
 pub mod opencode;
+pub mod opencodereview;
 pub mod pi;
 pub mod qwen;
 pub mod roocode;
 pub mod synthetic;
+pub(crate) mod tencent_buddy;
+pub mod trae;
 pub(crate) mod utils;
+pub mod warp;
+pub mod workbuddy;
+pub mod zcode;
+pub mod zed;
 
 use crate::TokenBreakdown;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CostSource {
+    #[default]
+    Unknown,
+    ProviderReported,
+    Estimated,
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
@@ -35,10 +67,18 @@ pub struct UnifiedMessage {
     pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    #[serde(default)]
+    pub cost_source: CostSource,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
     #[serde(default = "default_message_count")]
     pub message_count: i32,
     pub agent: Option<String>,
     pub dedup_key: Option<String>,
+    /// True if this message is the first assistant response after a user turn.
+    /// Used to count user interaction turns (as opposed to API message count).
+    #[serde(default)]
+    pub is_turn_start: bool,
 }
 
 const fn default_message_count() -> i32 {
@@ -46,15 +86,17 @@ const fn default_message_count() -> i32 {
 }
 
 pub fn normalize_agent_name(agent: &str) -> String {
-    let trimmed = agent.trim();
+    let cleaned = strip_zero_width_chars(agent);
+    let trimmed = cleaned.trim();
     let stripped = strip_agent_prefix(trimmed);
-    let agent_lower = stripped.to_lowercase();
+    let canonical = canonicalize_agent_name(stripped);
+    let agent_lower = canonical.to_lowercase();
 
     if agent_lower.contains("plan") {
         if agent_lower.contains("omo") || agent_lower.contains("sisyphus") {
             return "Planner-Sisyphus".to_string();
         }
-        return titlecase_agent(stripped);
+        return titlecase_agent(&canonical);
     }
 
     if agent_lower == "omo" || agent_lower == "sisyphus" {
@@ -65,36 +107,106 @@ pub fn normalize_agent_name(agent: &str) -> String {
         return "Atlas".to_string();
     }
 
-    titlecase_agent(stripped)
+    titlecase_agent(&canonical)
 }
 
 pub fn normalize_opencode_agent_name(agent: &str) -> String {
-    let trimmed = agent.trim();
+    let cleaned = strip_zero_width_chars(agent);
+    let trimmed = cleaned.trim();
     let stripped = strip_agent_prefix(trimmed);
-    let agent_lower = stripped.to_lowercase();
+    let canonical = canonicalize_agent_name(stripped);
+    let agent_lower = canonical.to_lowercase();
 
     if let Some(normalized) = normalize_oh_my_opencode_agent_name(&agent_lower) {
         return normalized;
     }
 
-    normalize_agent_name(stripped)
+    normalize_agent_name(&canonical)
+}
+
+pub fn normalize_copilot_agent_name(agent: &str) -> String {
+    // Hardcoded brand name for the default native agent
+    if agent.eq_ignore_ascii_case("github.copilot.default") {
+        return "GitHub Copilot".to_string();
+    }
+
+    // Native github.copilot.* agents: strip prefix, titlecase remainder
+    const GITHUB_COPILOT_PREFIX: &str = "github.copilot.";
+    if agent
+        .get(..GITHUB_COPILOT_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(GITHUB_COPILOT_PREFIX))
+    {
+        let remainder = &agent[GITHUB_COPILOT_PREFIX.len()..];
+        let hyphenated = remainder.replace('.', "-");
+        return titlecase_agent(&hyphenated);
+    }
+
+    // Plugin:team:slug format — titlecase each colon-separated part, join with ": "
+    const PLUGIN_PREFIX: &str = "Plugin:";
+    if agent
+        .get(..PLUGIN_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(PLUGIN_PREFIX))
+    {
+        let rest = &agent[PLUGIN_PREFIX.len()..];
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let team = titlecase_agent(parts[0]);
+            let slug = titlecase_agent(parts[1]);
+            return format!("{}: {}", team, slug);
+        }
+        return titlecase_agent(rest);
+    }
+
+    normalize_agent_name(agent)
 }
 
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     let normalized = match agent_lower {
-        "sisyphus (ultraworker)" | "sisyphus" => "Sisyphus",
+        // Parenthesized format and dash format
+        "sisyphus (ultraworker)"
+        | "sisyphus - ultraworker"
+        | "sisyphus ultraworker"
+        | "sisyphus" => "Sisyphus",
+        "hephaestus (deep agent)"
+        | "hephaestus - deep agent"
+        | "hephaestus deep agent"
+        | "hephaestus" => "Hephaestus",
+        "prometheus (plan builder)"
+        | "prometheus - plan builder"
+        | "prometheus plan builder"
+        | "prometheus (planner)"
+        | "prometheus" => "Prometheus",
+        "atlas (plan executor)" | "atlas - plan executor" | "atlas plan executor" | "atlas" => {
+            "Atlas"
+        }
+        "metis (plan consultant)"
+        | "metis - plan consultant"
+        | "metis plan consultant"
+        | "metis" => "Metis",
+        "momus (plan critic)"
+        | "momus - plan critic"
+        | "momus plan critic"
+        | "momus (plan reviewer)"
+        | "momus" => "Momus",
         "orchestrator-sisyphus" => "Atlas",
-        "hephaestus (deep agent)" | "hephaestus" => "Hephaestus",
-        "prometheus (plan builder)" | "prometheus (planner)" | "prometheus" => "Prometheus",
-        "atlas (plan executor)" | "atlas" => "Atlas",
-        "metis (plan consultant)" | "metis" => "Metis",
-        "momus (plan critic)" | "momus (plan reviewer)" | "momus" => "Momus",
         "sisyphus-junior" => "Sisyphus-Junior",
         "planner-sisyphus" => "Planner-Sisyphus",
         _ => return None,
     };
 
     Some(normalized.to_string())
+}
+
+/// Strip zero-width Unicode characters that oh-my-openagent uses as
+/// invisible sort-order prefixes (U+200B ZERO WIDTH SPACE, U+200C ZERO
+/// WIDTH NON-JOINER, U+200D ZERO WIDTH JOINER, U+FEFF BOM/ZWNBSP).
+fn strip_zero_width_chars(s: &str) -> String {
+    if !s.contains(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}']) {
+        return s.to_string();
+    }
+    s.chars()
+        .filter(|c| !matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
+        .collect()
 }
 
 fn strip_agent_prefix(name: &str) -> &str {
@@ -107,6 +219,10 @@ fn strip_agent_prefix(name: &str) -> &str {
         }
     }
     name
+}
+
+fn canonicalize_agent_name(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn titlecase_word(word: &str) -> String {
@@ -132,6 +248,7 @@ fn titlecase_agent(name: &str) -> String {
         return String::new();
     }
     name.split('-')
+        .flat_map(|part| part.split_whitespace())
         .map(titlecase_word)
         .collect::<Vec<_>>()
         .join(" ")
@@ -232,9 +349,12 @@ impl UnifiedMessage {
             date,
             tokens,
             cost,
+            cost_source: CostSource::Unknown,
+            duration_ms: None,
             message_count: default_message_count(),
             agent,
             dedup_key,
+            is_turn_start: false,
         }
     }
 
@@ -254,6 +374,18 @@ impl UnifiedMessage {
     pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
         self.timestamp = timestamp;
         self.refresh_derived_fields();
+    }
+
+    pub fn mark_provider_reported_cost(&mut self) {
+        self.cost_source = CostSource::ProviderReported;
+    }
+
+    pub(crate) fn mark_estimated_cost(&mut self) {
+        self.cost_source = CostSource::Estimated;
+    }
+
+    pub(crate) fn has_authoritative_cost(&self) -> bool {
+        self.cost_source == CostSource::ProviderReported
     }
 }
 
@@ -317,6 +449,72 @@ where
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn warp_cache_parser_preserves_requests_and_spend_without_tokens() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{
+  "version": 1,
+  "syncedAt": "2026-05-29T12:00:00Z",
+  "usage": {
+    "requestsUsed": 42,
+    "requestLimit": 100,
+    "spendCents": 1234,
+    "nextRefreshTime": "2026-06-01T00:00:00Z"
+  },
+  "workspaces": [
+    {
+      "id": "workspace-1",
+      "name": "Personal",
+      "requestsUsed": 12,
+      "spendCents": 345
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let messages = crate::sessions::warp::parse_warp_file(file.path());
+        assert_eq!(messages.len(), 1);
+
+        let workspace = messages
+            .iter()
+            .find(|message| message.session_id == "warp-aggregate-workspace-1")
+            .unwrap();
+        assert_eq!(workspace.client, "warp");
+        assert_eq!(workspace.model_id, "aggregate-requests");
+        assert_eq!(workspace.provider_id, "warp");
+        assert_eq!(workspace.workspace_label.as_deref(), Some("Personal"));
+        assert_eq!(workspace.message_count, 12);
+        assert_eq!(workspace.tokens, TokenBreakdown::default());
+        assert!((workspace.cost - 3.45).abs() < 1e-9);
+
+        std::fs::write(
+            file.path(),
+            r#"{
+  "version": 1,
+  "syncedAt": "2026-05-29T12:00:00Z",
+  "usage": {
+    "requestsUsed": 42,
+    "requestLimit": 100,
+    "spendCents": 1234,
+    "nextRefreshTime": "2026-06-01T00:00:00Z"
+  },
+  "workspaces": []
+}"#,
+        )
+        .unwrap();
+
+        let messages = crate::sessions::warp::parse_warp_file(file.path());
+        assert_eq!(messages.len(), 1);
+        let account = &messages[0];
+        assert_eq!(account.session_id, "warp-aggregate-account");
+        assert_eq!(account.message_count, 42);
+        assert_eq!(account.tokens, TokenBreakdown::default());
+        assert!((account.cost - 12.34).abs() < 1e-9);
+    }
 
     #[test]
     fn test_timestamp_to_date_with_positive_offset() {
@@ -495,6 +693,35 @@ mod tests {
             normalize_agent_name("oh-my-claudecode:code-reviewer"),
             "Code Reviewer"
         );
+    }
+
+    #[test]
+    fn test_normalize_copilot_agent_name() {
+        assert_eq!(
+            normalize_copilot_agent_name("github.copilot.default"),
+            "GitHub Copilot"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("GITHUB.COPILOT.DEFAULT"),
+            "GitHub Copilot"
+        );
+        assert_eq!(normalize_copilot_agent_name("github.copilot.chat"), "Chat");
+        assert_eq!(
+            normalize_copilot_agent_name("Plugin:software-engineering-team:se-ux-ui-designer"),
+            "Software Engineering Team: Se UX UI Designer"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("plugin:my-team:my-agent"),
+            "My Team: My Agent"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("Plugin:code-review-team:api-reviewer"),
+            "Code Review Team: API Reviewer"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("some-custom-agent"),
+            "Some Custom Agent"
+        );
         assert_eq!(normalize_agent_name("oh-my-codex:librarian"), "Librarian");
         assert_eq!(normalize_agent_name("astrape:executor"), "Executor");
         assert_eq!(normalize_agent_name("plan-reviewer"), "Plan Reviewer");
@@ -507,6 +734,83 @@ mod tests {
         assert_eq!(
             normalize_opencode_agent_name("oh-my-claudecode:executor"),
             "Executor"
+        );
+
+        // New dash format (oh-my-openagent current)
+        assert_eq!(
+            normalize_opencode_agent_name("Sisyphus - Ultraworker"),
+            "Sisyphus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Hephaestus - Deep Agent"),
+            "Hephaestus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Prometheus - Plan Builder"),
+            "Prometheus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Atlas - Plan Executor"),
+            "Atlas"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Metis - Plan Consultant"),
+            "Metis"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("Momus - Plan Critic"),
+            "Momus"
+        );
+
+        // ZWSP-prefixed names (oh-my-openagent sort-order prefixes)
+        assert_eq!(
+            normalize_opencode_agent_name("\u{200B}Sisyphus - Ultraworker"),
+            "Sisyphus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("\u{200B}\u{200B}\u{200B}Prometheus - Plan Builder"),
+            "Prometheus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("\u{200B}\u{200B}\u{200B}\u{200B}Atlas - Plan Executor"),
+            "Atlas"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("\u{FEFF}Momus - Plan Critic"),
+            "Momus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("\u{200B}sisyphus-junior"),
+            "Sisyphus-Junior"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("\u{200B}sisyphus"),
+            "Sisyphus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("\u{200B}  Sisyphus   -   Ultraworker  "),
+            "Sisyphus"
+        );
+        assert_eq!(
+            normalize_opencode_agent_name("\u{200B}\u{200B}\u{200B}   Prometheus    Plan Builder"),
+            "Prometheus"
+        );
+    }
+
+    #[test]
+    fn test_strip_zero_width_chars() {
+        assert_eq!(strip_zero_width_chars("hello"), "hello");
+        assert_eq!(strip_zero_width_chars("\u{200B}hello"), "hello");
+        assert_eq!(
+            strip_zero_width_chars("\u{200B}\u{200B}\u{200B}hello"),
+            "hello"
+        );
+        assert_eq!(strip_zero_width_chars("\u{FEFF}hello"), "hello");
+        assert_eq!(strip_zero_width_chars("\u{200C}hello\u{200D}"), "hello");
+        assert_eq!(strip_zero_width_chars(""), "");
+        assert_eq!(
+            strip_zero_width_chars("no special chars"),
+            "no special chars"
         );
     }
 }

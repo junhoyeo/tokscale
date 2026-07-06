@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
@@ -12,12 +13,16 @@ import {
   ProfileActivity,
   ProfileEmptyActivity,
   ProfileStats,
+  ProfileDevices,
+  type ProfileDevice,
   type ProfileUser,
   type ProfileStatsData,
   type ProfileTab,
   type ModelUsage,
 } from "@/components/profile";
 import type { TokenContributionData, DailyContribution, ClientType } from "@/lib/types";
+
+type ProfilePeriod = "all" | "week" | "month";
 
 interface ProfileData {
   user: {
@@ -37,6 +42,8 @@ interface ProfileData {
     cacheWriteTokens: number;
     submissionCount: number;
     activeDays: number;
+    totalActiveTimeMs: number;
+    sessionCount: number;
   };
   dateRange: {
     start: string | null;
@@ -45,18 +52,22 @@ interface ProfileData {
   updatedAt: string | null;
   clients: string[];
   models: string[];
+  mcpServers?: string[];
   modelUsage?: ModelUsage[];
   contributions: DailyContribution[];
+  period?: ProfilePeriod;
 }
 
 interface ProfilePageClientProps {
   initialData: ProfileData;
+  initialDevices?: ProfileDevice[];
   username: string;
 }
 
-export default function ProfilePageClient({ initialData, username }: ProfilePageClientProps) {
+export default function ProfilePageClient({ initialData, initialDevices, username }: ProfilePageClientProps) {
   const [activeTab, setActiveTab] = useState<ProfileTab>("activity");
   const data = initialData;
+  const period = data.period ?? "all";
 
   const graphData: TokenContributionData | null = useMemo(() => {
     if (!data || data.contributions.length === 0) return null;
@@ -134,13 +145,15 @@ export default function ProfilePageClient({ initialData, username }: ProfilePage
     cacheWriteTokens: data.stats.cacheWriteTokens,
     activeDays: data.stats.activeDays,
     submissionCount: data.stats.submissionCount,
+    totalActiveTimeMs: data.stats.totalActiveTimeMs,
+    sessionCount: data.stats.sessionCount,
   }), [data]);
 
 const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
   const showResubmitBanner = EARLY_ADOPTERS.includes(data.user.username) && data.stats.submissionCount === 1;
 
   return (
-    <PageContainer style={{ backgroundColor: "#10121C" }}>
+    <PageContainer style={{ backgroundColor: "var(--color-bg-default)" }}>
       <Navigation />
 
       {showResubmitBanner && (
@@ -164,23 +177,54 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
             lastUpdated={data.updatedAt || undefined}
           />
 
+          <ProfilePeriodSelector username={username} current={period} />
+
           <ProfileTabBar activeTab={activeTab} onTabChange={setActiveTab} />
 
           {activeTab === "activity" && (
-            graphData ? (
-              <ActivitySection>
-                <ProfileActivity data={graphData} />
-                <ProfileStats
-                  stats={stats}
-                  favoriteModel={
-                    data.modelUsage?.reduce((max, current) => current.cost > max.cost ? current : max, data.modelUsage[0])?.model
-                  }
-                />
-              </ActivitySection>
-            ) : <ProfileEmptyActivity />
+            <div
+              role="tabpanel"
+              id="tabpanel-activity"
+              aria-labelledby="tab-activity"
+            >
+              {graphData ? (
+                <ActivitySection>
+                  <ProfileActivity
+                    data={graphData}
+                    totalActiveTimeMs={data.stats.totalActiveTimeMs}
+                    sessionCount={data.stats.sessionCount}
+                    mcpServers={data.mcpServers}
+                  />
+                  <ProfileStats
+                    stats={stats}
+                    favoriteModel={
+                      data.modelUsage?.reduce((max, current) => current.cost > max.cost ? current : max, data.modelUsage[0])?.model
+                    }
+                  />
+                </ActivitySection>
+              ) : <ProfileEmptyActivity />}
+            </div>
           )}
-          {activeTab === "breakdown" && <TokenBreakdown stats={stats} />}
-          {activeTab === "models" && <ProfileModels models={data.models} modelUsage={data.modelUsage} />}
+          {activeTab === "breakdown" && (
+            <div
+              role="tabpanel"
+              id="tabpanel-breakdown"
+              aria-labelledby="tab-breakdown"
+            >
+              <TokenBreakdown stats={stats} />
+            </div>
+          )}
+          {activeTab === "models" && (
+            <div
+              role="tabpanel"
+              id="tabpanel-models"
+              aria-labelledby="tab-models"
+            >
+              <ProfileModels models={data.models} modelUsage={data.modelUsage} />
+            </div>
+          )}
+
+          <ProfileDevices devices={initialDevices ?? []} />
         </ContentWrapper>
       </MainContent>
 
@@ -266,4 +310,82 @@ const ActivitySection = styled.div`
   display: flex;
   flex-direction: column;
   gap: 24px;
+`;
+
+const PERIOD_OPTIONS: Array<{ value: ProfilePeriod; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "week", label: "7d" },
+  { value: "month", label: "30d" },
+];
+
+function buildProfilePeriodHref(username: string, period: ProfilePeriod): string {
+  const basePath = `/u/${encodeURIComponent(username)}`;
+  if (period === "all") {
+    return basePath;
+  }
+
+  return `${basePath}?period=${period}`;
+}
+
+function ProfilePeriodSelector({ username, current }: { username: string; current: ProfilePeriod }) {
+  return (
+    <PeriodSelectorContainer aria-label="Overview range">
+      {PERIOD_OPTIONS.map((option) => {
+        const isActive = current === option.value;
+
+        return (
+          <PeriodLink
+            key={option.value}
+            href={buildProfilePeriodHref(username, option.value)}
+            $active={isActive}
+            aria-current={isActive ? "page" : undefined}
+          >
+            {option.label}
+          </PeriodLink>
+        );
+      })}
+    </PeriodSelectorContainer>
+  );
+}
+
+const PeriodSelectorContainer = styled.nav`
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-bg-subtle);
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+`;
+
+const PeriodLink = styled(Link)<{ $active: boolean }>`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  color: ${({ $active }) => ($active ? "var(--color-fg-default)" : "var(--color-fg-muted)")};
+  background: ${({ $active }) => ($active ? "var(--color-bg-default)" : "transparent")};
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.12s, color 0.12s;
+
+  &:hover {
+    color: var(--color-fg-default);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 `;

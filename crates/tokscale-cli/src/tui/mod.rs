@@ -1,15 +1,23 @@
 mod app;
 mod cache;
 pub mod client_ui;
+pub(crate) mod codex_login;
+mod colors;
 pub mod config;
 pub mod data;
 mod event;
+mod export;
+mod keymap;
+pub(crate) mod privacy;
+pub mod remote;
 pub mod settings;
 mod themes;
-mod ui;
+pub(crate) mod ui;
 
 pub use app::{App, Tab, TuiConfig};
-pub use cache::{load_cache, save_cached_data, CacheResult};
+pub use cache::{
+    load_cache, save_cached_data, CacheReportScope, CacheResult, TUI_DEFAULT_GROUP_BY,
+};
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
 
@@ -31,10 +39,40 @@ use anyhow::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    },
 };
 use ratatui::prelude::*;
 use tokscale_core::ClientId;
+
+use crate::ClientFilter;
+
+fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
+    let cached_data = match load_result {
+        CacheResult::Fresh(data) | CacheResult::Stale(data) => Some(data),
+        CacheResult::Miss => None,
+    };
+
+    (cached_data, true)
+}
+
+fn background_data_loader(
+    since: Option<String>,
+    until: Option<String>,
+    year: Option<String>,
+    minutely_enabled: bool,
+) -> DataLoader {
+    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
+}
+
+fn background_cache_scope(
+    since: &Option<String>,
+    until: &Option<String>,
+    year: &Option<String>,
+) -> CacheReportScope {
+    CacheReportScope::new(since.clone(), until.clone(), year.clone())
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -64,31 +102,32 @@ pub fn run(
         initial_tab,
     };
 
-    let mut enabled_clients = HashSet::new();
-    let mut include_synthetic = false;
-    if let Some(ref cli_clients) = clients {
-        for client_str in cli_clients {
-            if client_str.eq_ignore_ascii_case("synthetic") {
-                include_synthetic = true;
-            } else if let Some(client) = ClientId::from_str(client_str) {
-                enabled_clients.insert(client);
-            }
-        }
+    // Build the unified filter set used by the cache key, the App
+    // constructor, and the background loader. We mirror the same
+    // resolution rules App::new_with_cached_data uses so the cache
+    // lookup and the in-app state always agree. Drift between them
+    // makes every launch a stale-cache hit instead of a fresh one.
+    let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = clients {
+        cli_clients
+            .iter()
+            .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+            .collect()
     } else {
-        for client in ClientId::iter() {
-            enabled_clients.insert(client);
-        }
-    }
+        ClientFilter::default_set()
+    };
 
-    // Single file read: load cache and check freshness in one pass
-    let initial_group_by = tokscale_core::GroupBy::Model;
-    let (cached_data, cache_is_stale) =
-        match load_cache(&enabled_clients, include_synthetic, &initial_group_by) {
-            CacheResult::Fresh(data) => (Some(data), false),
-            CacheResult::Stale(data) => (Some(data), true),
-            CacheResult::Miss => (None, true),
-        };
-    let has_cached_data = cached_data.is_some();
+    // Single file read: load cache and check freshness in one pass.
+    // The key MUST be `cache::TUI_DEFAULT_GROUP_BY` — any code path that
+    // writes the TUI cache (notably `run_warm_tui_cache` in main.rs) keys
+    // on the same constant. Hard-coding a different value here would
+    // silently invalidate the cache on every launch after `submit`.
+    let initial_group_by = TUI_DEFAULT_GROUP_BY;
+    let initial_report_scope = background_cache_scope(&since, &until, &year);
+    let (cached_data, needs_background_load) = decide_initial_data(load_cache(
+        &enabled_clients,
+        &initial_group_by,
+        &initial_report_scope,
+    ));
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -99,8 +138,11 @@ pub fn run(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
+    let _ = execute!(stdout, SetTitle("Tokscale"));
+
     if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
         let _ = disable_raw_mode();
+        let _ = execute!(stdout, SetTitle(""));
         return Err(e.into());
     }
 
@@ -122,32 +164,40 @@ pub fn run(
         }
     };
 
+    // Cache-first load of server-side aggregated multi-device stats. The
+    // background refresh (when the cache is stale or missing) is driven by
+    // App::on_tick, and every failure path degrades silently to local-only.
+    app.init_remote_stats();
+
     let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
-    let needs_background_load = !has_cached_data || cache_is_stale;
 
     if needs_background_load {
         app.set_background_loading(true);
 
         let tx = bg_tx.clone();
-        let bg_clients: Vec<ClientId> = enabled_clients.iter().copied().collect();
+        // Project the filter set into the (clients, include_synthetic)
+        // pair the loader still consumes. Keeping the projection here
+        // (instead of inside DataLoader) avoids touching tokscale-core's
+        // public API in this PR.
+        let bg_clients: Vec<ClientId> = enabled_clients
+            .iter()
+            .filter_map(|f| f.to_client_id())
+            .collect();
+        let bg_include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
         let bg_since = since.clone();
         let bg_until = until.clone();
         let bg_year = year.clone();
         let bg_enabled_clients = enabled_clients.clone();
-        let bg_include_synthetic = include_synthetic;
         let bg_group_by = app.group_by.borrow().clone();
+        let bg_report_scope = background_cache_scope(&since, &until, &year);
+        let bg_minutely_enabled = app.settings.minutely_tab_enabled;
 
         thread::spawn(move || {
-            let loader = DataLoader::with_filters(None, bg_since, bg_until, bg_year);
+            let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
             let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
 
             if let Ok(ref data) = result {
-                save_cached_data(
-                    data,
-                    &bg_enabled_clients,
-                    bg_include_synthetic,
-                    &bg_group_by,
-                );
+                save_cached_data(data, &bg_enabled_clients, &bg_group_by, &bg_report_scope);
             }
 
             let _ = tx.send(result);
@@ -173,13 +223,22 @@ pub fn run(
         &sigcont_flag,
     );
 
+    // Don't orphan a `codex login` child (it would keep holding the OAuth
+    // port after the TUI exits).
+    app.kill_codex_login_child();
+
     restore_terminal(&mut terminal);
 
     result
 }
 
 fn restore_terminal_best_effort() {
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        SetTitle("")
+    );
     let _ = disable_raw_mode();
 }
 
@@ -188,7 +247,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        SetTitle("")
     );
     let _ = terminal.show_cursor();
 }
@@ -244,19 +304,22 @@ fn run_loop_with_background(
             app.set_background_loading(true);
 
             let tx = bg_tx.clone();
-            let clients: Vec<ClientId> = app.enabled_clients.borrow().iter().copied().collect();
+            // Boundary projection: see [`run`] above for the shape rationale.
+            let clients = app.scan_clients();
+            let include_synthetic = app.include_synthetic();
             let since = app.data_loader.since.clone();
             let until = app.data_loader.until.clone();
             let year = app.data_loader.year.clone();
             let enabled_clients = app.enabled_clients.borrow().clone();
-            let include_synthetic = *app.include_synthetic.borrow();
             let group_by = app.group_by.borrow().clone();
+            let report_scope = background_cache_scope(&since, &until, &year);
+            let minutely_enabled = app.settings.minutely_tab_enabled;
 
             thread::spawn(move || {
-                let loader = DataLoader::with_filters(None, since, until, year);
+                let loader = background_data_loader(since, until, year, minutely_enabled);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
-                    save_cached_data(data, &enabled_clients, include_synthetic, &group_by);
+                    save_cached_data(data, &enabled_clients, &group_by, &report_scope);
                 }
                 let _ = tx.send(result);
             });
@@ -307,6 +370,8 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Kilo,
         ClientId::Mux,
         ClientId::Crush,
+        ClientId::Hermes,
+        ClientId::Codebuff,
     ];
 
     let data = loader.load(&all_clients, &tokscale_core::GroupBy::default(), false)?;
@@ -329,4 +394,53 @@ pub fn test_data_loading() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launches_with_24h_old_cache_renders_immediately() {
+        let (cached_data, needs_background_load) =
+            decide_initial_data(CacheResult::Stale(UsageData::default()));
+
+        assert!(cached_data.is_some());
+        assert!(needs_background_load);
+    }
+
+    #[test]
+    fn miss_renders_empty_until_background_completes() {
+        let (cached_data, needs_background_load) = decide_initial_data(CacheResult::Miss);
+
+        assert!(cached_data.is_none());
+        assert!(needs_background_load);
+    }
+
+    #[test]
+    fn background_loader_preserves_minutely_toggle() {
+        let enabled = background_data_loader(None, None, None, true);
+        assert!(enabled.minutely_enabled);
+
+        let disabled = background_data_loader(None, None, None, false);
+        assert!(!disabled.minutely_enabled);
+    }
+
+    #[test]
+    fn background_cache_scope_uses_date_filters() {
+        let scope = background_cache_scope(
+            &Some("2026-05-01".to_string()),
+            &Some("2026-05-07".to_string()),
+            &Some("2026".to_string()),
+        );
+
+        assert_eq!(
+            scope,
+            crate::tui::cache::CacheReportScope::new(
+                Some("2026-05-01".to_string()),
+                Some("2026-05-07".to_string()),
+                Some("2026".to_string()),
+            )
+        );
+    }
 }

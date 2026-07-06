@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     widgets::{Block, Clear},
     Frame,
 };
@@ -17,11 +17,11 @@ pub fn centered_rect(viewport: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// Render a semi-transparent dark backdrop over the viewport
-pub fn render_backdrop(frame: &mut Frame, viewport: Rect) {
+pub fn render_backdrop(frame: &mut Frame, viewport: Rect, theme: &Theme) {
     // Clear the area first
     frame.render_widget(Clear, viewport);
     // Render dark backdrop
-    let backdrop = Block::default().style(Style::default().bg(Color::Rgb(0, 0, 0)));
+    let backdrop = Block::default().style(Style::default().bg(theme.background));
     frame.render_widget(backdrop, viewport);
 }
 

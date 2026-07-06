@@ -2,6 +2,7 @@
 //!
 //! Parses JSON files from ~/.factory/sessions/
 
+use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -134,9 +135,8 @@ fn extract_model_from_jsonl(jsonl_path: &Path) -> Option<String> {
 
 /// Parse a Droid settings.json file
 pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
+    let Some(data) = read_file_or_none(path) else {
+        return Vec::new();
     };
 
     let mut bytes = data;
@@ -192,26 +192,15 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     };
 
-    // Get timestamp from providerLockTimestamp or file mtime
+    // Get timestamp from providerLockTimestamp, falling back to file mtime
+    // (which itself falls back to now()). Never drop a record with real token
+    // usage just because the timestamp could not be resolved.
     let timestamp = settings
         .provider_lock_timestamp
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
         .map(|dt| dt.timestamp_millis())
-        .or_else(|| {
-            std::fs::metadata(path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0)
-                })
-        })
-        .unwrap_or(0);
-
-    if timestamp == 0 {
-        return Vec::new();
-    }
+        .filter(|&ts| ts != 0)
+        .unwrap_or_else(|| file_modified_timestamp_ms(path));
 
     vec![UnifiedMessage::new(
         "droid",

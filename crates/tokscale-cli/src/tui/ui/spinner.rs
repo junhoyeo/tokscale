@@ -1,5 +1,7 @@
 use ratatui::prelude::*;
 
+use crate::tui::themes::Theme;
+
 const WIDTH: usize = 8;
 const HOLD_START: usize = 30;
 const HOLD_END: usize = 9;
@@ -47,7 +49,7 @@ pub fn get_scanner_state(frame: usize) -> ScannerState {
     }
 }
 
-pub fn get_scanner_spans(frame: usize) -> Vec<Span<'static>> {
+pub fn get_scanner_spans(frame: usize, theme: &Theme) -> Vec<Span<'static>> {
     let state = get_scanner_state(frame);
     let mut spans = Vec::with_capacity(WIDTH);
 
@@ -70,7 +72,10 @@ pub fn get_scanner_spans(frame: usize) -> Vec<Span<'static>> {
             ('⬝', INACTIVE_COLOR)
         };
 
-        spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+        spans.push(Span::styled(
+            ch.to_string(),
+            Style::default().fg(theme.color(color)),
+        ));
     }
 
     spans

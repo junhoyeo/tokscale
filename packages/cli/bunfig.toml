@@ -1,4 +1,1 @@
-# Bun configuration for token-tracker CLI
-# This enables the OpenTUI Solid.js plugin for JSX transformation
-
-preload = ["@opentui/solid/preload"]
+# packages/cli is a plain wrapper entrypoint and does not require Bun preloads.
