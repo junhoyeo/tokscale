@@ -3184,6 +3184,8 @@ mod tests {
     fn test_discover_crush_dbs_honors_crush_global_data_env() {
         let previous_global = std::env::var("CRUSH_GLOBAL_DATA").ok();
         let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+        let previous_local_app_data = std::env::var("LOCALAPPDATA").ok();
+        unsafe { std::env::remove_var("LOCALAPPDATA") };
 
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("home");
@@ -3213,6 +3215,7 @@ mod tests {
 
         restore_env("CRUSH_GLOBAL_DATA", previous_global);
         restore_env("XDG_DATA_HOME", previous_xdg);
+        restore_env("LOCALAPPDATA", previous_local_app_data);
     }
 
     #[test]
@@ -3251,6 +3254,8 @@ mod tests {
     fn test_discover_crush_dbs_dedups_across_registry_candidates() {
         let previous_global = std::env::var("CRUSH_GLOBAL_DATA").ok();
         let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+        let previous_local_app_data = std::env::var("LOCALAPPDATA").ok();
+        unsafe { std::env::remove_var("LOCALAPPDATA") };
 
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("home");
@@ -3281,6 +3286,7 @@ mod tests {
 
         restore_env("CRUSH_GLOBAL_DATA", previous_global);
         restore_env("XDG_DATA_HOME", previous_xdg);
+        restore_env("LOCALAPPDATA", previous_local_app_data);
     }
 
     #[test]
