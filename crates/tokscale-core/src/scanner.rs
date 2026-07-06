@@ -618,13 +618,48 @@ fn scan_crush_registry(registry_path: &Path) -> Vec<CrushDbSource> {
         .collect()
 }
 
-fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource> {
-    let registry_path = PathBuf::from(
+/// Candidate locations for Crush's `projects.json` registry, mirroring
+/// Crush's own resolution order (`internal/config/load.go::GlobalConfigData`):
+/// `$CRUSH_GLOBAL_DATA` first, then `$XDG_DATA_HOME/crush`, then
+/// `%LOCALAPPDATA%\crush` on Windows, then `~/.local/share/crush`.
+fn crush_registry_candidates(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if use_env_roots {
+        if let Some(global_data) =
+            std::env::var_os("CRUSH_GLOBAL_DATA").filter(|value| !value.is_empty())
+        {
+            candidates.push(PathBuf::from(global_data).join("projects.json"));
+        }
+    }
+
+    candidates.push(PathBuf::from(
         ClientId::Crush
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots),
-    );
-    let mut dbs = scan_crush_registry(&registry_path);
+    ));
+
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(local_app_data) =
+            std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
+        {
+            candidates.push(
+                PathBuf::from(local_app_data)
+                    .join("crush")
+                    .join("projects.json"),
+            );
+        }
+    }
+    candidates.push(PathBuf::from(home_dir).join("AppData/Local/crush/projects.json"));
+
+    candidates
+}
+
+fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource> {
+    let mut dbs = Vec::new();
+    for registry_path in crush_registry_candidates(home_dir, use_env_roots) {
+        dbs.extend(scan_crush_registry(&registry_path));
+    }
     dbs.sort_by(|a, b| a.db_path.cmp(&b.db_path));
     dbs.dedup_by(|a, b| a.db_path == b.db_path);
     dbs
@@ -3141,6 +3176,110 @@ mod tests {
         assert!(result.is_empty());
 
         restore_current_dir(&previous_dir);
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_discover_crush_dbs_honors_crush_global_data_env() {
+        let previous_global = std::env::var("CRUSH_GLOBAL_DATA").ok();
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let global_data = dir.path().join("crush-global");
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join(".crush")).unwrap();
+        File::create(project.join(".crush").join("crush.db")).unwrap();
+
+        let projects_json = format!(
+            r#"{{ "projects": [ {{ "path": "{}", "data_dir": ".crush" }} ] }}"#,
+            project.display()
+        );
+        setup_mock_crush_registry(&global_data.join("projects.json"), &projects_json);
+
+        unsafe { std::env::set_var("CRUSH_GLOBAL_DATA", &global_data) };
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+
+        let result = discover_crush_dbs(home.to_str().unwrap(), true);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].db_path, project.join(".crush").join("crush.db"));
+
+        let without_env_roots = discover_crush_dbs(home.to_str().unwrap(), false);
+        assert!(
+            without_env_roots.is_empty(),
+            "CRUSH_GLOBAL_DATA must be ignored when env roots are disabled"
+        );
+
+        restore_env("CRUSH_GLOBAL_DATA", previous_global);
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_discover_crush_dbs_scans_windows_local_appdata_under_home() {
+        let previous_global = std::env::var("CRUSH_GLOBAL_DATA").ok();
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::remove_var("CRUSH_GLOBAL_DATA") };
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join(".crush")).unwrap();
+        File::create(project.join(".crush").join("crush.db")).unwrap();
+
+        let projects_json = format!(
+            r#"{{ "projects": [ {{ "path": "{}", "data_dir": ".crush" }} ] }}"#,
+            project.display()
+        );
+        setup_mock_crush_registry(
+            &home.join("AppData/Local/crush/projects.json"),
+            &projects_json,
+        );
+
+        let result = discover_crush_dbs(home.to_str().unwrap(), false);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].db_path, project.join(".crush").join("crush.db"));
+
+        restore_env("CRUSH_GLOBAL_DATA", previous_global);
+        restore_env("XDG_DATA_HOME", previous_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn test_discover_crush_dbs_dedups_across_registry_candidates() {
+        let previous_global = std::env::var("CRUSH_GLOBAL_DATA").ok();
+        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let xdg = dir.path().join("xdg");
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join(".crush")).unwrap();
+        File::create(project.join(".crush").join("crush.db")).unwrap();
+
+        let projects_json = format!(
+            r#"{{ "projects": [ {{ "path": "{}", "data_dir": ".crush" }} ] }}"#,
+            project.display()
+        );
+        setup_mock_crush_registry(&xdg.join("crush/projects.json"), &projects_json);
+        setup_mock_crush_registry(
+            &home.join("AppData/Local/crush/projects.json"),
+            &projects_json,
+        );
+
+        unsafe { std::env::remove_var("CRUSH_GLOBAL_DATA") };
+        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
+
+        let result = discover_crush_dbs(home.to_str().unwrap(), true);
+        assert_eq!(
+            result.len(),
+            1,
+            "same crush.db reachable via multiple registries must be deduplicated"
+        );
+
+        restore_env("CRUSH_GLOBAL_DATA", previous_global);
         restore_env("XDG_DATA_HOME", previous_xdg);
     }
 
