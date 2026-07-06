@@ -1,10 +1,13 @@
 //! Kiro session parser
 //!
-//! Parses session data from three sources:
-//! 1. File-based: ~/.kiro/sessions/cli/*.json + *.jsonl
+//! Parses session data from four sources:
+//! 1. File-based (Kiro CLI): ~/.kiro/sessions/cli/*.json + *.jsonl
 //! 2. Kiro IDE globalStorage snapshots
 //! 3. SQLite-based: ~/Library/Application Support/kiro-cli/data.sqlite3
 //!    (conversations_v2 table with history[*].request_metadata)
+//! 4. File-based (Kiro IDE): ~/.kiro/sessions/<workspace>/sess_<uuid>/
+//!    session.json (metadata) + messages.jsonl (conversation). This is the
+//!    VS Code-based Kiro IDE layout, distinct from the CLI's cli/*.json layout.
 //!
 //! Turn-level token counts are currently zero in both sources, so usage is
 //! estimated from context_usage_percentage * context_window (input) and
@@ -95,7 +98,22 @@ struct KiroMessageContent {
     prompt_timestamp_ms: Option<i64>,
 }
 
+/// Metadata half of the Kiro IDE session layout (`session.json`, schemaVersion
+/// 1.0.0). The conversation itself lives in the sibling `messages.jsonl`.
+#[derive(Debug, Deserialize)]
+struct KiroIdeSession {
+    id: Option<String>,
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
+    #[serde(rename = "lastModifiedAt")]
+    last_modified_at: Option<String>,
+}
+
 pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
+    if is_kiro_ide_session_path(path) {
+        return parse_kiro_ide_session_file(path);
+    }
+
     if is_kiro_global_storage_path(path)
         || path
             .extension()
@@ -340,6 +358,150 @@ fn session_id_from_path(path: &Path) -> String {
 fn is_kiro_global_storage_path(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     path_str.contains("globalStorage") && path_str.contains("kiro.kiroagent")
+}
+
+/// A Kiro IDE session file is `session.json` sitting inside a `sess_<uuid>`
+/// directory (`~/.kiro/sessions/<workspace>/sess_<uuid>/session.json`). The
+/// `sess_` parent requirement keeps this from matching the CLI layout, whose
+/// arbitrary `~/.kiro/sessions/cli/*.json` files share the same tree.
+fn is_kiro_ide_session_path(path: &Path) -> bool {
+    let is_session_json = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == "session.json")
+        .unwrap_or(false);
+    if !is_session_json {
+        return false;
+    }
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("sess_"))
+        .unwrap_or(false)
+}
+
+/// Parse the Kiro IDE session layout: `session.json` (metadata) plus the
+/// sibling `messages.jsonl` (conversation).
+///
+/// The IDE does NOT record per-turn token usage in these files (confirmed
+/// against issue #813's sample, which carries only session metadata), so — like
+/// every other Kiro path — token counts here are ESTIMATED from message text
+/// (chars / 4), never measured. `messages.jsonl`'s exact schema is not
+/// documented, so each line is parsed as generic JSON and fed through the
+/// role-tolerant snapshot text collector (user/assistant/human/bot/prompt/
+/// response). Lines with no role-tagged text contribute nothing rather than
+/// being guessed at, so a session with no recognizable content is dropped
+/// instead of fabricating usage.
+fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
+    let fallback_timestamp = file_modified_timestamp_ms(path);
+
+    let session_json = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return Vec::new(),
+    };
+    let session: KiroIdeSession = match serde_json::from_str(&session_json) {
+        Ok(session) => session,
+        Err(_) => return Vec::new(),
+    };
+
+    // Directory name is `sess_<uuid>`; its parent is the workspace folder:
+    // ~/.kiro/sessions/<workspace>/sess_<uuid>/session.json
+    let sess_dir = path.parent();
+    let sess_dir_name = sess_dir
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str());
+    let session_id = session
+        .id
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| sess_dir_name.map(|name| name.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let workspace = sess_dir
+        .and_then(|dir| dir.parent())
+        .and_then(|ws_dir| ws_dir.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string());
+    let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
+    let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+
+    let messages_path = path.with_file_name("messages.jsonl");
+    let mut counts = KiroSnapshotTextCounts::default();
+    let mut model_id: Option<String> = None;
+    let mut assistant_turns: i32 = 0;
+
+    if let Ok(file) = std::fs::File::open(&messages_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if model_id.is_none() {
+                model_id = find_kiro_snapshot_model_id(&value);
+            }
+            let assistant_before = counts.assistant_chars;
+            collect_kiro_snapshot_text(&value, &mut counts, None);
+            if counts.assistant_chars > assistant_before {
+                assistant_turns += 1;
+            }
+        }
+    }
+
+    let input = estimate_tokens(counts.prompt_chars);
+    let output = estimate_tokens(counts.assistant_chars);
+    if input + output == 0 {
+        return Vec::new();
+    }
+
+    // schemaVersion 1.0.0 stores createdAt/lastModifiedAt as RFC3339 strings.
+    let created_value = session
+        .created_at
+        .as_deref()
+        .map(|s| Value::String(s.to_string()));
+    let created_ms = parse_timestamp_value(created_value.as_ref());
+    let modified_value = session
+        .last_modified_at
+        .as_deref()
+        .map(|s| Value::String(s.to_string()));
+    let modified_ms = parse_timestamp_value(modified_value.as_ref());
+
+    let timestamp = created_ms.or(modified_ms).unwrap_or(fallback_timestamp);
+    let duration_ms = duration_between_ms(created_ms, modified_ms);
+    let model_id = model_id
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| "auto".to_string());
+
+    let mut message = UnifiedMessage::new_with_dedup(
+        CLIENT_ID,
+        model_id,
+        PROVIDER_ID,
+        session_id.clone(),
+        timestamp,
+        TokenBreakdown {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        // Distinct from the globalStorage `:globalstorage`/`execution:` keys, so
+        // suppress_snapshots_covered_by_executions leaves IDE sessions untouched.
+        Some(format!("{}:ide-session", session_id)),
+    );
+    message.message_count = assistant_turns.max(1);
+    message.duration_ms = duration_ms;
+    message.is_turn_start = true;
+    message.set_workspace(workspace_key, workspace_label);
+    vec![message]
 }
 
 /// Extract the workspace folder name from a Kiro globalStorage path.
@@ -1730,5 +1892,169 @@ not valid json at all
             find_kiro_snapshot_model_id(&prompt_value),
             Some("claude-sonnet-4".to_string())
         );
+    }
+
+    /// Build the Kiro IDE session layout on disk:
+    /// `<base>/.kiro/sessions/<workspace>/<sess_dir>/{session.json,messages.jsonl}`
+    /// and return the path to `session.json`.
+    fn create_ide_session_files(
+        dir: &TempDir,
+        workspace: &str,
+        sess_dir: &str,
+        session_json: &str,
+        messages_jsonl: &str,
+    ) -> std::path::PathBuf {
+        let sess_path = dir
+            .path()
+            .join(".kiro/sessions")
+            .join(workspace)
+            .join(sess_dir);
+        fs::create_dir_all(&sess_path).unwrap();
+        let session_path = sess_path.join("session.json");
+        fs::write(&session_path, session_json).unwrap();
+        fs::write(sess_path.join("messages.jsonl"), messages_jsonl).unwrap();
+        session_path
+    }
+
+    #[test]
+    fn test_parse_kiro_ide_session_estimates_tokens_from_messages_jsonl() {
+        // session.json is the schemaVersion 1.0.0 sample from issue #813.
+        let session_json = r#"{
+            "schemaVersion": "1.0.0",
+            "dataModelVersion": 1,
+            "id": "sess_02f1c107-37e8-4398-8b95-c3847bf59335",
+            "title": "Writing README docs for projects",
+            "agentMode": "vibe",
+            "createdAt": "2026-06-30T12:57:10.991Z",
+            "lastModifiedAt": "2026-06-30T12:57:12.991Z",
+            "status": "completed"
+        }"#;
+        let messages_jsonl = "{\"role\":\"user\",\"content\":\"hello world\"}\n{\"role\":\"assistant\",\"content\":\"response text\"}\n";
+
+        let dir = TempDir::new().unwrap();
+        let path = create_ide_session_files(
+            &dir,
+            "my-project",
+            "sess_02f1c107-37e8-4398-8b95-c3847bf59335",
+            session_json,
+            messages_jsonl,
+        );
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "kiro");
+        assert_eq!(messages[0].provider_id, "amazon-bedrock");
+        assert_eq!(
+            messages[0].session_id,
+            "sess_02f1c107-37e8-4398-8b95-c3847bf59335"
+        );
+        // "hello world" = 11 chars -> ceil(11/4) = 3; "response text" = 13 -> 4.
+        assert_eq!(messages[0].tokens.input, 3);
+        assert_eq!(messages[0].tokens.output, 4);
+        assert!(messages[0].is_turn_start);
+        // Workspace is the folder holding the sess_* dir.
+        assert_eq!(messages[0].workspace_key, Some("my-project".to_string()));
+        assert_eq!(messages[0].workspace_label, Some("my-project".to_string()));
+        // createdAt -> ms; duration = lastModifiedAt - createdAt = 2000ms.
+        assert_eq!(messages[0].timestamp, 1782824230991);
+        assert_eq!(messages[0].duration_ms, Some(2000));
+        assert!(messages[0].date.starts_with("2026-"));
+        // No model in session.json/messages.jsonl -> "auto" so pricing can resolve.
+        assert_eq!(messages[0].model_id, "auto");
+        // Dedup key is IDE-session-scoped and survives execution suppression.
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("sess_02f1c107-37e8-4398-8b95-c3847bf59335:ide-session".to_string())
+        );
+        // One assistant response -> message_count 1.
+        assert_eq!(messages[0].message_count, 1);
+    }
+
+    #[test]
+    fn test_parse_kiro_ide_session_extracts_model_and_counts_turns() {
+        let session_json = r#"{
+            "schemaVersion": "1.0.0",
+            "id": "sess_abc",
+            "createdAt": "2026-06-30T12:57:10.000Z",
+            "lastModifiedAt": "2026-06-30T12:57:10.000Z"
+        }"#;
+        // Two assistant turns and a Kiro IDE model codename embedded in a line.
+        let messages_jsonl = concat!(
+            "{\"role\":\"user\",\"content\":\"first question here\"}\n",
+            "{\"role\":\"assistant\",\"model\":\"big-pickle\",\"content\":\"first answer\"}\n",
+            "{\"role\":\"user\",\"content\":\"second question\"}\n",
+            "{\"role\":\"assistant\",\"content\":\"second answer\"}\n"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let path = create_ide_session_files(&dir, "ws", "sess_abc", session_json, messages_jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        // Model codename is picked up from messages.jsonl (not a Kiro-internal id).
+        assert_eq!(messages[0].model_id, "big-pickle");
+        // Two assistant responses -> message_count 2.
+        assert_eq!(messages[0].message_count, 2);
+        assert!(messages[0].tokens.input > 0);
+        assert!(messages[0].tokens.output > 0);
+    }
+
+    #[test]
+    fn test_parse_kiro_ide_session_dropped_when_no_recognizable_content() {
+        let session_json = r#"{"schemaVersion":"1.0.0","id":"sess_empty"}"#;
+        // Only tool/system noise with no role-tagged conversation text.
+        let messages_jsonl = "{\"kind\":\"toolCall\",\"name\":\"read_file\"}\n";
+
+        let dir = TempDir::new().unwrap();
+        let path = create_ide_session_files(&dir, "ws", "sess_empty", session_json, messages_jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        // No estimable usage -> no fabricated message.
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_kiro_ide_session_falls_back_to_dir_name_and_mtime() {
+        // session.json with no id and no timestamps: session id falls back to the
+        // sess_* directory name and timestamp to the file mtime.
+        let session_json = r#"{"schemaVersion":"1.0.0"}"#;
+        let messages_jsonl = "{\"role\":\"user\",\"content\":\"hello\"}\n";
+
+        let dir = TempDir::new().unwrap();
+        let path =
+            create_ide_session_files(&dir, "ws", "sess_no_meta", session_json, messages_jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "sess_no_meta");
+        assert_eq!(
+            messages[0].dedup_key,
+            Some("sess_no_meta:ide-session".to_string())
+        );
+        assert!(messages[0].timestamp > 0);
+    }
+
+    #[test]
+    fn suppress_snapshots_leaves_ide_sessions_untouched() {
+        // An IDE-session message must never be dropped by execution suppression,
+        // even when a globalStorage execution is present in the same batch.
+        let messages = vec![
+            make_globalstorage_message("chat-abc", "execution:exec-1", Some("ws")),
+            make_globalstorage_message("sess_abc", "sess_abc:ide-session", Some("ws")),
+        ];
+
+        let kept = suppress_snapshots_covered_by_executions(messages);
+
+        let keys: Vec<&str> = kept
+            .iter()
+            .filter_map(|message| message.dedup_key.as_deref())
+            .collect();
+        assert_eq!(kept.len(), 2);
+        assert!(keys.contains(&"sess_abc:ide-session"));
+        assert!(keys.contains(&"execution:exec-1"));
     }
 }

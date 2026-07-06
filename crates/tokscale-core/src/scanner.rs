@@ -340,6 +340,22 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                         || file_name.ends_with(".json")
                         || path.extension().is_none()
                 }
+                // Kiro IDE (VS Code-based) session layout on disk:
+                //   ~/.kiro/sessions/<workspace>/sess_<uuid>/session.json
+                //   ~/.kiro/sessions/<workspace>/sess_<uuid>/messages.jsonl
+                // Anchor discovery on `session.json` (the metadata file); the
+                // parser reads the sibling `messages.jsonl` itself. Requiring a
+                // `sess_*` parent keeps this from colliding with the CLI layout
+                // (`~/.kiro/sessions/cli/*.json`) that shares the same tree.
+                "kiro-ide-session" => {
+                    file_name == "session.json"
+                        && path
+                            .parent()
+                            .and_then(|parent| parent.file_name())
+                            .and_then(|name| name.to_str())
+                            .map(|name| name.starts_with("sess_"))
+                            .unwrap_or(false)
+                }
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "updates.jsonl" => file_name == "updates.jsonl",
@@ -1332,6 +1348,20 @@ fn scan_all_clients_with_env_strategy_inner(
             );
         }
 
+        // Kiro IDE (VS Code-based) writes per-workspace sessions under
+        // ~/.kiro/sessions/<workspace>/sess_<uuid>/ (session.json + messages.jsonl),
+        // NOT the ~/.kiro/sessions/cli/*.json layout the base client path targets.
+        // Scan the sessions root and match session.json inside sess_* dirs. This
+        // resolves via home_dir on Windows too (Kiro IDE uses ~/.kiro there).
+        let kiro_ide_sessions_root = PathBuf::from(format!("{}/.kiro/sessions", home_dir));
+        push_unique_scan_task_with_pattern(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Kiro,
+            kiro_ide_sessions_root,
+            "kiro-ide-session",
+        );
+
         let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
         if xdg_path.is_file() {
             result.kiro_db = Some(xdg_path);
@@ -1780,6 +1810,42 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec!["execution", "execution.chat", "session.json"]);
+    }
+
+    #[test]
+    fn test_scan_directory_kiro_ide_session_pattern() {
+        let dir = TempDir::new().unwrap();
+        let sessions_root = dir.path().join(".kiro/sessions");
+
+        // IDE layout: <workspace>/sess_<uuid>/{session.json,messages.jsonl}.
+        let sess_dir = sessions_root.join("workspace-a/sess_02f1c107");
+        fs::create_dir_all(&sess_dir).unwrap();
+        File::create(sess_dir.join("session.json")).unwrap();
+        File::create(sess_dir.join("messages.jsonl")).unwrap();
+
+        // CLI layout under the same tree must NOT be matched by this pattern
+        // (it is scanned separately as *.json), and a stray session.json outside
+        // a sess_* dir must be ignored.
+        let cli_dir = sessions_root.join("cli");
+        fs::create_dir_all(&cli_dir).unwrap();
+        File::create(cli_dir.join("session-001.json")).unwrap();
+        File::create(sessions_root.join("workspace-a/session.json")).unwrap();
+
+        let files = scan_directory(sessions_root.to_str().unwrap(), "kiro-ide-session");
+        let names: Vec<_> = files
+            .iter()
+            .map(|path| {
+                path.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+
+        // Exactly one match: the session.json inside sess_02f1c107.
+        assert_eq!(files.len(), 1);
+        assert_eq!(names, vec!["sess_02f1c107"]);
     }
 
     #[test]
@@ -3034,6 +3100,28 @@ mod tests {
             .get(ClientId::Kiro)
             .iter()
             .any(|p| p.ends_with("execution")));
+    }
+
+    #[test]
+    fn test_scan_all_clients_kiro_includes_ide_sessions() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let sess_dir = home.join(".kiro/sessions/workspace-a/sess_02f1c107");
+        fs::create_dir_all(&sess_dir).unwrap();
+        File::create(sess_dir.join("session.json")).unwrap();
+        File::create(sess_dir.join("messages.jsonl")).unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["kiro".to_string()]);
+        assert!(result
+            .get(ClientId::Kiro)
+            .iter()
+            .any(|p| p.ends_with("sess_02f1c107/session.json")));
+        // The sibling messages.jsonl is read by the parser, not scanned directly.
+        assert!(!result
+            .get(ClientId::Kiro)
+            .iter()
+            .any(|p| p.ends_with("messages.jsonl")));
     }
 
     #[test]
