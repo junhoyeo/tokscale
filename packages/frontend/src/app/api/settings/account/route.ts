@@ -1,21 +1,45 @@
 import { revalidatePath, revalidateTag } from "next/cache";
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { getSession, clearSession } from "@/lib/auth/session";
+import { clearSession } from "@/lib/auth/session";
+import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { db, users } from "@/lib/db";
+import {
+  normalizeUsernameCacheKey,
+  revalidateUsernamePaths,
+} from "@/lib/db/usernameLookup";
+import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   try {
-    const session = await getSession();
+    // Session-cookie auth routed through getSessionFromRequest so the CSRF
+    // Origin allowlist applies — the same gate every other cookie-mutating
+    // settings route uses. Account deletion deliberately has no Bearer
+    // personal-token path: it is a web Settings UI action, so session-only
+    // auth is the conservative default.
+    const session = await getSessionFromRequest(request);
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
     const username = session.username;
+    const usernameCacheKey = normalizeUsernameCacheKey(username);
+
+    // Group leaderboard invalidation must run BEFORE the user row delete:
+    // the helper resolves the user's group membership rows, and the delete
+    // below cascades those rows away. Best-effort like all revalidation.
+    try {
+      await revalidateUserGroupLeaderboards(session.id);
+    } catch (cacheError) {
+      console.error(
+        "Group cache invalidation failed before account deletion:",
+        cacheError
+      );
+    }
 
     // Delete the user row — all related data (sessions, apiTokens,
-    // submissions → dailyBreakdown, deviceCodes) cascades automatically
-    // via ON DELETE CASCADE foreign keys.
+    // submissions → dailyBreakdown, deviceCodes, group memberships)
+    // cascades automatically via ON DELETE CASCADE foreign keys.
     const deletedRows = await db
       .delete(users)
       .where(eq(users.id, session.id))
@@ -36,18 +60,16 @@ export async function DELETE() {
 
     try {
       revalidateTag("leaderboard", "max");
-      revalidateTag(`user:${username}`, "max");
+      revalidateTag(`user:${usernameCacheKey}`, "max");
       revalidateTag("user-rank", "max");
-      revalidateTag(`user-rank:${username}`, "max");
-      revalidateTag(`embed-user:${username}`, "max");
-      revalidateTag(`embed-user:${username}:tokens`, "max");
-      revalidateTag(`embed-user:${username}:cost`, "max");
+      revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+      revalidateTag(`embed-user:${usernameCacheKey}`, "max");
+      revalidateTag(`embed-user:${usernameCacheKey}:tokens`, "max");
+      revalidateTag(`embed-user:${usernameCacheKey}:cost`, "max");
 
       revalidatePath("/leaderboard");
       revalidatePath("/profile");
-      revalidatePath(`/u/${username}`);
-      revalidatePath(`/api/users/${username}`);
-      revalidatePath(`/api/embed/${username}/svg`);
+      revalidateUsernamePaths(username);
     } catch {
       // Cache invalidation is best-effort.
     }
