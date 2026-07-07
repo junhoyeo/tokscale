@@ -34,3 +34,4 @@ self-host/
 .next/
 .vercel
 .env*.local
+.omp/
