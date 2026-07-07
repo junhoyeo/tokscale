@@ -381,10 +381,14 @@ pub struct App {
 impl App {
     pub fn new_with_cached_data(config: TuiConfig, cached_data: Option<UsageData>) -> Result<Self> {
         let settings = Settings::load();
-        let theme_name: ThemeName = config
-            .theme
-            .parse()
-            .unwrap_or_else(|_| settings.theme_name());
+        let theme_name: ThemeName = if config.theme.is_empty() {
+            settings.theme_name()
+        } else {
+            config
+                .theme
+                .parse()
+                .unwrap_or_else(|_| settings.theme_name())
+        };
         let theme = Theme::from_name_for_current_terminal(theme_name);
 
         let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
@@ -2501,6 +2505,7 @@ mod tests {
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
     use chrono::{NaiveDate, NaiveDateTime};
     use std::collections::{BTreeMap, BTreeSet};
+    use std::{env, fs};
 
     #[test]
     fn test_tab_all() {
@@ -2779,6 +2784,76 @@ mod tests {
         let app = App::new_with_cached_data(config, None).unwrap();
 
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn app_uses_saved_theme_when_cli_theme_is_absent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_config_dir = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("TOKSCALE_CONFIG_DIR", temp.path());
+        }
+        fs::write(
+            temp.path().join("settings.json"),
+            r#"{"colorPalette":"halloween"}"#,
+        )
+        .unwrap();
+
+        let config = TuiConfig {
+            theme: String::new(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let app = App::new_with_cached_data(config, None).unwrap();
+
+        unsafe {
+            match previous_config_dir {
+                Some(value) => env::set_var("TOKSCALE_CONFIG_DIR", value),
+                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
+            }
+        }
+        assert_eq!(app.theme.name, ThemeName::Halloween);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn app_explicit_cli_theme_overrides_saved_theme() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_config_dir = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("TOKSCALE_CONFIG_DIR", temp.path());
+        }
+        fs::write(
+            temp.path().join("settings.json"),
+            r#"{"colorPalette":"halloween"}"#,
+        )
+        .unwrap();
+
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let app = App::new_with_cached_data(config, None).unwrap();
+
+        unsafe {
+            match previous_config_dir {
+                Some(value) => env::set_var("TOKSCALE_CONFIG_DIR", value),
+                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
+            }
+        }
+        assert_eq!(app.theme.name, ThemeName::Blue);
     }
 
     // ── Helper ──────────────────────────────────────────────────────
