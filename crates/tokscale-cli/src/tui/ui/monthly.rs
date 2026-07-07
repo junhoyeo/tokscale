@@ -4,7 +4,7 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, total_tokens_cell,
     viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
@@ -54,7 +54,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
     let metric_cache_write_style = app.theme.metric_cache_write_style();
-    let metric_total_style = app.theme.metric_total_style();
     let striped_row_style = app.theme.striped_row_style();
 
     let full_layout_width: u16 = if has_turn_data { 112 } else { 105 };
@@ -154,7 +153,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 cells.extend([
                     Cell::from(month.message_count.to_string()),
-                    Cell::from(format_tokens(month.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(month.tokens.total(), &app.theme),
                     Cell::from(format_cost(month.cost)).style(Style::default().fg(Color::Green)),
                 ]);
                 cells
@@ -182,7 +181,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         month.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(month.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(month.tokens.total(), &app.theme),
                     Cell::from(format_cost(month.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(month.cost, month.tokens.total()))
                         .style(Style::default().fg(Color::Rgb(150, 200, 150))),
@@ -318,7 +317,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
     let metric_cache_write_style = app.theme.metric_cache_write_style();
-    let metric_total_style = app.theme.metric_total_style();
     let striped_row_style = app.theme.striped_row_style();
 
     let full_layout_width: u16 = if has_turn_data { 112 } else { 105 };
@@ -425,7 +423,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 cells.extend([
                     Cell::from(day.message_count.to_string()),
-                    Cell::from(format_tokens(day.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
                 ]);
                 cells
@@ -452,7 +450,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         day.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(day.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
                         .style(Style::default().fg(Color::Rgb(150, 200, 150))),

@@ -4,7 +4,7 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cost, format_tokens, get_client_display_name, viewport_scrollbar_state,
+    format_cost, get_client_display_name, total_tokens_cell, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
@@ -36,7 +36,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
-    let metric_total_style = app.theme.metric_total_style();
     let striped_row_style = app.theme.striped_row_style();
 
     let agents = app.get_sorted_agents();
@@ -117,7 +116,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 vec![
                     Cell::from(truncate(&agent.agent, 18))
                         .style(Style::default().fg(app.theme.foreground)),
-                    Cell::from(format_tokens(agent.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(agent.tokens.total(), &app.theme),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else {
@@ -130,7 +129,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ),
                     Cell::from(truncate(&client_labels(&agent.clients), 24))
                         .style(Style::default().fg(theme_muted)),
-                    Cell::from(format_tokens(agent.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(agent.tokens.total(), &app.theme),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(agent.message_count.to_string())
                         .style(Style::default().fg(theme_muted)),

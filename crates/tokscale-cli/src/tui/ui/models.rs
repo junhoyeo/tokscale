@@ -5,7 +5,8 @@ use ratatui::widgets::{
 
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
-    get_client_display_name, get_provider_display_name, viewport_scrollbar_state,
+    get_client_display_name, get_provider_display_name, total_tokens_cell,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -57,7 +58,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
     let metric_cache_write_style = app.theme.metric_cache_write_style();
-    let metric_total_style = app.theme.metric_total_style();
     let striped_row_style = app.theme.striped_row_style();
 
     let models = app.get_sorted_models();
@@ -160,7 +160,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             } else if is_narrow {
                 vec![
                     Cell::from(truncate(&display_name, 25)).style(Style::default().fg(model_color)),
-                    Cell::from(format_tokens(model.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if group_by == GroupBy::WorkspaceModel {
@@ -185,7 +185,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         .style(metric_cache_read_style),
                     Cell::from(format_tokens(model.tokens.cache_write))
                         .style(metric_cache_write_style),
-                    Cell::from(format_tokens(model.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
                         .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
@@ -215,7 +215,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         model.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(model.tokens.total())).style(metric_total_style),
+                    total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
                         .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),

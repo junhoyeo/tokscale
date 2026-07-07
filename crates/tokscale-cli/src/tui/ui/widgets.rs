@@ -1,9 +1,10 @@
 use ratatui::prelude::*;
-use ratatui::widgets::ScrollbarState;
+use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::ClientId;
 
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
+use crate::tui::themes::Theme;
 
 pub fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000_000 {
@@ -19,6 +20,10 @@ pub fn format_tokens_compact(tokens: u64) -> String {
 
 pub fn format_tokens(tokens: u64) -> String {
     format_tokens_compact(tokens)
+}
+
+pub(crate) fn total_tokens_cell(total_tokens: u64, theme: &Theme) -> Cell<'static> {
+    Cell::from(format_tokens(total_tokens)).style(theme.metric_total_style())
 }
 
 pub fn format_tokens_with_commas(n: u64) -> String {
