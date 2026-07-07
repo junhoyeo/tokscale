@@ -61,6 +61,12 @@ struct Cli {
     )]
     no_write_cache: bool,
 
+    #[arg(
+        long = "hide-zero",
+        help = "Hide entries whose token counts, cost, and duration are all zero. Report totals still include them."
+    )]
+    hide_zero: bool,
+
     #[command(flatten)]
     clients: ClientFlags,
 
@@ -125,6 +131,11 @@ enum Commands {
             help = "Skip cache write even if settings.json `light.writeCache` is true. Only valid with --light."
         )]
         no_write_cache: bool,
+        #[arg(
+            long = "hide-zero",
+            help = "Hide entries whose token counts, cost, and duration are all zero. Report totals still include them."
+        )]
+        hide_zero: bool,
         #[arg(long, help = "Disable spinner")]
         no_spinner: bool,
     },
@@ -140,6 +151,11 @@ enum Commands {
         date: DateRangeFlags,
         #[arg(long, help = "Show processing time")]
         benchmark: bool,
+        #[arg(
+            long = "hide-zero",
+            help = "Hide entries whose token counts and cost are all zero. Report totals still include them."
+        )]
+        hide_zero: bool,
         #[arg(long, help = "Disable spinner")]
         no_spinner: bool,
     },
@@ -155,6 +171,11 @@ enum Commands {
         date: DateRangeFlags,
         #[arg(long, help = "Show processing time")]
         benchmark: bool,
+        #[arg(
+            long = "hide-zero",
+            help = "Hide entries whose token counts and cost are all zero. Report totals still include them."
+        )]
+        hide_zero: bool,
         #[arg(long, help = "Disable spinner")]
         no_spinner: bool,
     },
@@ -502,6 +523,7 @@ fn main() -> Result<()> {
             group_by,
             write_cache,
             no_write_cache,
+            hide_zero,
             no_spinner,
         }) => {
             use tokscale_core::GroupBy;
@@ -522,6 +544,7 @@ fn main() -> Result<()> {
                     group_by,
                     write_cache,
                     no_write_cache,
+                    hide_zero,
                 )
             } else {
                 let (since, until) = build_date_filter(&date);
@@ -546,6 +569,7 @@ fn main() -> Result<()> {
             clients,
             date,
             benchmark,
+            hide_zero,
             no_spinner,
         }) => {
             let clients = build_client_filter(clients, &cli.home);
@@ -557,6 +581,7 @@ fn main() -> Result<()> {
                     &date,
                     benchmark,
                     no_spinner || !can_use_tui,
+                    hide_zero,
                 )
             } else {
                 let (since, until) = build_date_filter(&date);
@@ -581,6 +606,7 @@ fn main() -> Result<()> {
             clients,
             date,
             benchmark,
+            hide_zero,
             no_spinner,
         }) => {
             let clients = build_client_filter(clients, &cli.home);
@@ -592,6 +618,7 @@ fn main() -> Result<()> {
                     &date,
                     benchmark,
                     no_spinner || !can_use_tui,
+                    hide_zero,
                 )
             } else {
                 let (since, until) = build_date_filter(&date);
@@ -830,6 +857,7 @@ fn main() -> Result<()> {
                     group_by,
                     cli.write_cache,
                     cli.no_write_cache,
+                    cli.hide_zero,
                 )
             } else if cli.light || !can_use_tui {
                 run_models_report(
@@ -842,6 +870,7 @@ fn main() -> Result<()> {
                     group_by,
                     cli.write_cache,
                     cli.no_write_cache,
+                    cli.hide_zero,
                 )
             } else {
                 let (since, until) = build_date_filter(&cli.date);
@@ -1719,6 +1748,7 @@ fn run_models_report(
     group_by: tokscale_core::GroupBy,
     cli_write_cache: bool,
     cli_no_write_cache: bool,
+    hide_zero: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
@@ -1756,6 +1786,21 @@ fn run_models_report(
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
+    let mut report = report;
+    if hide_zero {
+        // Display-only filter: totals were computed in core over the full
+        // entry set and intentionally still include the hidden rows.
+        report.entries.retain(|e| {
+            e.input != 0
+                || e.output != 0
+                || e.cache_read != 0
+                || e.cache_write != 0
+                || e.reasoning != 0
+                || e.cost != 0.0
+                || e.performance.total_duration_ms != 0
+        });
+    }
+    let report = report;
 
     if let Some(spinner) = spinner {
         spinner.stop();
@@ -2570,6 +2615,7 @@ fn run_monthly_report(
     date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
+    hide_zero: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
@@ -2606,6 +2652,18 @@ fn run_monthly_report(
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
+    let mut report = report;
+    if hide_zero {
+        // Display-only filter: totals still include the hidden rows.
+        report.entries.retain(|e| {
+            e.input != 0
+                || e.output != 0
+                || e.cache_read != 0
+                || e.cache_write != 0
+                || e.cost != 0.0
+        });
+    }
+    let report = report;
 
     if let Some(spinner) = spinner {
         spinner.stop();
@@ -2880,6 +2938,7 @@ fn run_hourly_report(
     date: &DateRangeFlags,
     benchmark: bool,
     no_spinner: bool,
+    hide_zero: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
@@ -2916,6 +2975,19 @@ fn run_hourly_report(
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
+    let mut report = report;
+    if hide_zero {
+        // Display-only filter: totals still include the hidden rows.
+        report.entries.retain(|e| {
+            e.input != 0
+                || e.output != 0
+                || e.cache_read != 0
+                || e.cache_write != 0
+                || e.reasoning != 0
+                || e.cost != 0.0
+        });
+    }
+    let report = report;
 
     if let Some(spinner) = spinner {
         spinner.stop();

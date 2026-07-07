@@ -549,6 +549,33 @@ fn add_uncosted_opencode_message(base: &Path) {
     fs::write(session2.join("msg_d.json"), msg_d).unwrap();
 }
 
+/// Add an assistant message whose usage is entirely zero (tokens, cost, no
+/// duration) in its own month/hour, for `--hide-zero` tests. Uses a distinct
+/// model and a 2023-03-15 timestamp so it forms an all-zero row in the
+/// models, monthly, and hourly reports without touching other buckets.
+fn add_zero_usage_opencode_message(base: &Path) {
+    let session3 = base.join(".local/share/opencode/storage/message/session3");
+    fs::create_dir_all(&session3).unwrap();
+
+    // 2023-03-15 12:00:00 UTC = 1678881600000 ms
+    let msg_z = r#"{
+        "id": "msg_z",
+        "sessionID": "session3",
+        "role": "assistant",
+        "modelID": "zero-model",
+        "providerID": "openai",
+        "cost": 0.0,
+        "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1678881600000.0 }
+    }"#;
+    fs::write(session3.join("msg_z.json"), msg_z).unwrap();
+}
+
 fn write_fireworks_pricing_cache(base: &Path) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1955,6 +1982,71 @@ fn test_empty_report_total_cost_is_positive_zero() {
             "{subcmd} totalCost serialized as -0.0"
         );
     }
+}
+
+#[test]
+fn test_hide_zero_drops_all_zero_entries_but_keeps_totals() {
+    let tmp = create_temp_fixture_dir_without_pricing_cache();
+    add_zero_usage_opencode_message(tmp.path());
+
+    let run = |args: &[&str]| -> serde_json::Value {
+        let output = offline_cmd_with_home(tmp.path())
+            .args(args)
+            .args(["--json", "--client", "opencode", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // models: the all-zero (opencode, zero-model) row disappears with the flag
+    let full = run(&["models"]);
+    let filtered = run(&["models", "--hide-zero"]);
+    let has_zero_model = |json: &serde_json::Value| {
+        json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["model"] == "zero-model")
+    };
+    assert!(has_zero_model(&full), "zero row must show without the flag");
+    assert!(!has_zero_model(&filtered), "--hide-zero must drop the row");
+    assert!(filtered["entries"].as_array().unwrap().iter().all(|e| {
+        e["input"].as_i64().unwrap() != 0
+            || e["output"].as_i64().unwrap() != 0
+            || e["cost"].as_f64().unwrap() != 0.0
+    }));
+    // totals are display-independent: hidden rows still count
+    assert_eq!(full["totalMessages"], filtered["totalMessages"]);
+    assert_eq!(full["totalCost"], filtered["totalCost"]);
+
+    // monthly: the all-zero 2023-03 bucket disappears with the flag
+    let full = run(&["monthly"]);
+    let filtered = run(&["monthly", "--hide-zero"]);
+    let months = |json: &serde_json::Value| -> Vec<String> {
+        json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["month"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(months(&full).contains(&"2023-03".to_string()));
+    assert!(!months(&filtered).contains(&"2023-03".to_string()));
+    assert_eq!(full["totalCost"], filtered["totalCost"]);
+
+    // hourly: exactly one all-zero hour bucket disappears with the flag
+    let full = run(&["hourly"]);
+    let filtered = run(&["hourly", "--hide-zero"]);
+    assert_eq!(
+        full["entries"].as_array().unwrap().len(),
+        filtered["entries"].as_array().unwrap().len() + 1
+    );
+    assert_eq!(full["totalCost"], filtered["totalCost"]);
 }
 
 #[test]
