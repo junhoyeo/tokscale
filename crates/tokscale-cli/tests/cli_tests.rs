@@ -521,6 +521,34 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     }
 }
 
+/// Add an assistant message with NO embedded cost to the OpenCode fixture.
+///
+/// Provider-reported OpenCode costs are preserved verbatim (never repriced),
+/// so the stale-pricing-cache tests need an uncosted message to prove the
+/// cache is actually consulted: 1000 input * 0.0000025 + 400 output *
+/// 0.00001 = 0.0065 on top of the 0.10 embedded total.
+fn add_uncosted_opencode_message(base: &Path) {
+    let session2 = base.join(".local/share/opencode/storage/message/session2");
+    fs::create_dir_all(&session2).unwrap();
+
+    // Same hour as msg_c (2025-01-10 12:01 UTC) so hourly bucket counts hold
+    let msg_d = r#"{
+        "id": "msg_d",
+        "sessionID": "session2",
+        "role": "assistant",
+        "modelID": "gpt-4o",
+        "providerID": "openai",
+        "tokens": {
+            "input": 1000,
+            "output": 400,
+            "reasoning": 0,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1736510460000.0 }
+    }"#;
+    fs::write(session2.join("msg_d.json"), msg_d).unwrap();
+}
+
 fn write_fireworks_pricing_cache(base: &Path) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1789,6 +1817,7 @@ fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
 fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
@@ -1803,7 +1832,7 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
 }
@@ -1812,6 +1841,7 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
 fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
         .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
@@ -1826,7 +1856,7 @@ fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
 }
@@ -1835,6 +1865,7 @@ fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
 fn test_graph_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
         .args(["graph", "--client", "opencode", "--no-spinner"])
@@ -1849,7 +1880,7 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
 }
@@ -1858,6 +1889,7 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
 fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     write_pricing_cache(tmp.path(), 1);
+    add_uncosted_opencode_message(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
         .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
@@ -1877,18 +1909,18 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
             .iter()
             .map(|entry| entry["input"].as_i64().unwrap())
             .sum::<i64>(),
-        2400
+        3400
     );
     assert_eq!(
         entries
             .iter()
             .map(|entry| entry["output"].as_i64().unwrap())
             .sum::<i64>(),
-        1000
+        1400
     );
     let total_cost = json["totalCost"].as_f64().unwrap();
     assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
+        (total_cost - 0.1065).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
     );
 }
