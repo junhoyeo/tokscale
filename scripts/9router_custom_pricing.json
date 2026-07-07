@@ -1,0 +1,47 @@
+{
+  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
+  "models": {
+    "deepseek-ai/deepseek-v4-flash": {
+      "input_cost_per_million_tokens": 0.14,
+      "output_cost_per_million_tokens": 0.28,
+      "cache_read_input_token_cost_per_million_tokens": 0.0,
+      "source": "LiteLLM / tensormesh/deepseek-ai/DeepSeek-V4-Flash"
+    },
+    "stepfun-ai/step-3.7-flash": {
+      "input_cost_per_million_tokens": 0.20,
+      "output_cost_per_million_tokens": 1.15,
+      "cache_read_input_token_cost_per_million_tokens": 0.04,
+      "source": "Models.dev"
+    },
+    "mimo-v2.5": {
+      "input_cost_per_million_tokens": 0.14,
+      "output_cost_per_million_tokens": 0.28,
+      "cache_read_input_token_cost_per_million_tokens": 0.0,
+      "source": "Models.dev / xiaomi/mimo-v2.5"
+    },
+    "kimi-k2.5": {
+      "input_cost_per_million_tokens": 0.60,
+      "output_cost_per_million_tokens": 3.00,
+      "cache_read_input_token_cost_per_million_tokens": 0.10,
+      "source": "OpenRouter / moonshotai/kimi-k2.5"
+    },
+    "gpt-oss-120b": {
+      "input_cost_per_million_tokens": 0.03,
+      "output_cost_per_million_tokens": 0.15,
+      "cache_read_input_token_cost_per_million_tokens": 0.0,
+      "source": "OpenRouter / openai/gpt-oss-120b"
+    },
+    "@cf/moonshotai/kimi-k2.5": {
+      "input_cost_per_million_tokens": 0.95,
+      "output_cost_per_million_tokens": 4.00,
+      "cache_read_input_token_cost_per_million_tokens": 0.19,
+      "source": "LiteLLM / cloudflare/@cf/moonshotai/kimi-k2.7-code (closest match)"
+    },
+    "openai/gpt-oss-120b": {
+      "input_cost_per_million_tokens": 0.03,
+      "output_cost_per_million_tokens": 0.15,
+      "cache_read_input_token_cost_per_million_tokens": 0.0,
+      "source": "OpenRouter"
+    }
+  }
+}
