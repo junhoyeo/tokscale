@@ -63,7 +63,7 @@ struct Cli {
 
     #[arg(
         long = "hide-zero",
-        help = "Hide entries whose token counts, cost, and duration are all zero. Report totals still include them."
+        help = "Hide entries whose token counts, cost, and duration are all zero. Report totals still include them. Implies the static report view instead of the interactive TUI."
     )]
     hide_zero: bool,
 
@@ -133,7 +133,7 @@ enum Commands {
         no_write_cache: bool,
         #[arg(
             long = "hide-zero",
-            help = "Hide entries whose token counts, cost, and duration are all zero. Report totals still include them."
+            help = "Hide entries whose token counts, cost, and duration are all zero. Report totals still include them. Implies the static report view instead of the interactive TUI."
         )]
         hide_zero: bool,
         #[arg(long, help = "Disable spinner")]
@@ -153,7 +153,7 @@ enum Commands {
         benchmark: bool,
         #[arg(
             long = "hide-zero",
-            help = "Hide entries whose token counts and cost are all zero. Report totals still include them."
+            help = "Hide entries whose token counts and cost are all zero. Report totals still include them. Implies the static report view instead of the interactive TUI."
         )]
         hide_zero: bool,
         #[arg(long, help = "Disable spinner")]
@@ -173,7 +173,7 @@ enum Commands {
         benchmark: bool,
         #[arg(
             long = "hide-zero",
-            help = "Hide entries whose token counts and cost are all zero. Report totals still include them."
+            help = "Hide entries whose token counts and cost are all zero. Report totals still include them. Implies the static report view instead of the interactive TUI."
         )]
         hide_zero: bool,
         #[arg(long, help = "Disable spinner")]
@@ -533,7 +533,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             });
             let clients = build_client_filter(clients, &cli.home);
-            if json || light || !can_use_tui {
+            if json || light || hide_zero || !can_use_tui {
                 run_models_report(
                     json,
                     cli.home.clone(),
@@ -573,7 +573,7 @@ fn main() -> Result<()> {
             no_spinner,
         }) => {
             let clients = build_client_filter(clients, &cli.home);
-            if json || light || !can_use_tui {
+            if json || light || hide_zero || !can_use_tui {
                 run_monthly_report(
                     json,
                     cli.home.clone(),
@@ -610,7 +610,7 @@ fn main() -> Result<()> {
             no_spinner,
         }) => {
             let clients = build_client_filter(clients, &cli.home);
-            if json || light || !can_use_tui {
+            if json || light || hide_zero || !can_use_tui {
                 run_hourly_report(
                     json,
                     cli.home.clone(),
@@ -859,7 +859,7 @@ fn main() -> Result<()> {
                     cli.no_write_cache,
                     cli.hide_zero,
                 )
-            } else if cli.light || !can_use_tui {
+            } else if cli.light || cli.hide_zero || !can_use_tui {
                 run_models_report(
                     false,
                     cli.home.clone(),
