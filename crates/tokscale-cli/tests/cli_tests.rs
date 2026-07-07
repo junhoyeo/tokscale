@@ -1926,6 +1926,38 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
 }
 
 #[test]
+fn test_empty_report_total_cost_is_positive_zero() {
+    // f64's Sum identity is -0.0; without normalization an empty report
+    // serializes as "totalCost": -0.0.
+    let tmp = TempDir::new().unwrap();
+    for subcmd in ["models", "monthly", "hourly"] {
+        let output = offline_cmd_with_home(tmp.path())
+            .args([subcmd, "--json", "--client", "crush", "--no-spinner"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{subcmd} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("-0.0"),
+            "{subcmd} JSON contains negative zero: {stdout}"
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let total_cost = json["totalCost"].as_f64().unwrap();
+        assert_eq!(total_cost, 0.0, "{subcmd} totalCost should be zero");
+        assert!(
+            total_cost.is_sign_positive(),
+            "{subcmd} totalCost serialized as -0.0"
+        );
+    }
+}
+
+#[test]
 fn test_models_json_total_consistency() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())

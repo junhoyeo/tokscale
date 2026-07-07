@@ -1964,7 +1964,10 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     let (total_input, total_output, total_cache_read, total_cache_write) =
         model_report_token_totals(&entries);
     let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    // f64's Sum identity is -0.0, so an empty report would serialize as
+    // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
+    // any non-zero total.
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
     Ok(ModelReport {
         entries,
@@ -2054,7 +2057,10 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 
     entries.sort_by(|a, b| a.month.cmp(&b.month));
 
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    // f64's Sum identity is -0.0, so an empty report would serialize as
+    // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
+    // any non-zero total.
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
     Ok(MonthlyReport {
         entries,
@@ -2168,7 +2174,10 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 
     entries.sort_by(|a, b| a.hour.cmp(&b.hour));
 
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    // f64's Sum identity is -0.0, so an empty report would serialize as
+    // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
+    // any non-zero total.
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
     Ok(HourlyReport {
         entries,
