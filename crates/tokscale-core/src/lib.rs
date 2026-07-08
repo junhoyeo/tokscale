@@ -123,6 +123,8 @@ fn retain_for_requested_clients(
 ) -> bool {
     requested.contains(client)
         || (requested.contains("claude") && client.starts_with("cc-mirror/"))
+        || (requested.contains("gjc") && client == "9router")
+        || (requested.contains("9router") && client == "gjc")
         || (requested.contains("synthetic")
             && sessions::synthetic::matches_synthetic_filter(client, model_id, provider_id))
 }
@@ -2300,6 +2302,7 @@ fn filter_messages_for_report(
     if let Some(until) = &options.until {
         filtered.retain(|m| m.date.as_str() <= until.as_str());
     }
+    filtered.retain(|m| !(m.client == "pi" && m.provider_id == "9router"));
 
     filtered
 }
@@ -3178,6 +3181,7 @@ fn filter_parsed_messages(
     if let Some(until) = &options.until {
         filtered.retain(|m| m.date.as_str() <= until.as_str());
     }
+    filtered.retain(|m| !(m.client == "pi" && m.provider_id == "9router"));
 
     filtered
 }
@@ -3213,11 +3217,12 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        generate_graph_with_loaded_pricing, message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
-        ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        filter_messages_for_report, generate_graph_with_loaded_pricing, message_cache,
+        normalize_model_for_grouping, parse_all_messages_with_pricing,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
+        pricing, retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -7728,4 +7733,64 @@ mod tests {
         assert!(dates.contains(&local_date(thread_created + 2000)));
         assert!(dates.contains(&local_date(ledger_timestamp)));
     }
+    #[test]
+    fn test_retain_for_requested_clients_aliases_9router_and_gjc() {
+        let gjc_requested: HashSet<&str> = HashSet::from(["gjc"]);
+        // Bridge messages carry client="9router"; default filter requests "gjc".
+        assert!(retain_for_requested_clients(
+            "9router",
+            "deepseek-ai/deepseek-v4-flash",
+            "nvidia",
+            &gjc_requested
+        ));
+        // Real gjc messages carry client="gjc"; --client 9router requests "9router".
+        let ninerouter_requested: HashSet<&str> = HashSet::from(["9router"]);
+        assert!(retain_for_requested_clients(
+            "gjc",
+            "claude-sonnet-4",
+            "anthropic",
+            &ninerouter_requested
+        ));
+        // Unrelated clients still filtered out.
+        assert!(!retain_for_requested_clients(
+            "claude",
+            "gpt-4o",
+            "openai",
+            &gjc_requested
+        ));
+    }
+
+    #[test]
+    fn test_filter_messages_drops_pi_9router_combos() {
+        let messages = vec![
+            UnifiedMessage::new(
+                "pi",
+                "deepseek_v4_flash_free",
+                "9router",
+                "session-1",
+                1783412353188,
+                TokenBreakdown::default(),
+                0.0,
+            ),
+            UnifiedMessage::new(
+                "9router",
+                "deepseek-ai/deepseek-v4-flash",
+                "nvidia",
+                "session-2",
+                1783412353188,
+                TokenBreakdown {
+                    input: 100,
+                    output: 50,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.05,
+            ),
+        ];
+        let filtered = filter_messages_for_report(messages, &ReportOptions::default());
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].client, "9router");
+    }
+
 }
