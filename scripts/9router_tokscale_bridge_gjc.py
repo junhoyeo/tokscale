@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bridge 9Router usage into tokscale via gjc-format JSONL files.
 
-Reads 9Router request details from ~/.9router/db/data.sqlite and writes
-JSONL files that tokscale's gjc client parser can consume.
+Reads 9Router request details from ~/.9router/db/data.sqlite (and all
+backup DBs from previous upgrades) and writes JSONL files that tokscale's
+gjc client parser can consume.
 
 Usage:
     python3 scripts/9router_tokscale_bridge_gjc.py
@@ -28,6 +29,25 @@ ROUTER_DB = Path.home() / ".9router" / "db" / "data.sqlite"
 BRIDGE_DIR = Path.home() / ".local" / "share" / "9router-tokscale" / "sessions"
 
 
+def discover_router_dbs() -> list[Path]:
+    """Discover the current 9Router DB and all backup DBs.
+
+    Backups live in ~/.9router/db/backups/<upgrade-info>/data.sqlite.
+    Returns paths sorted newest-first (by mtime), so the current DB
+    (most recently written) is queried first and its request IDs win
+    dedup against older backups.
+    """
+    dbs = [ROUTER_DB]
+    backup_glob = ROUTER_DB.parent / "backups"
+    if backup_glob.exists():
+        dbs.extend(sorted(
+            backup_glob.glob("*/data.sqlite"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ))
+    return [db for db in dbs if db.exists()]
+
+
 def ensure_bridge_dir():
     """Create output directory. Existing files are NOT deleted — each date's
     file is overwritten individually by the write loop, preserving historical
@@ -44,34 +64,36 @@ def parse_iso_timestamp(ts: str) -> int:
         return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
-
-
 def run():
-    if not ROUTER_DB.exists():
+    dbs = discover_router_dbs()
+    if not dbs:
         print(f"9Router DB not found: {ROUTER_DB}")
         return
 
     ensure_bridge_dir()
-    router_conn = sqlite3.connect(ROUTER_DB)
-    router_conn.row_factory = sqlite3.Row
 
-    cursor = router_conn.execute(
-        """
-        SELECT
-            id,
-            timestamp,
-            provider,
-            model,
-            connectionId,
-            data
-        FROM requestDetails
-        WHERE status = 'success'
-        ORDER BY timestamp
-        """
-    )
+    seen_ids: set[str] = set()
+    all_rows: list[sqlite3.Row] = []
+
+    for db_path in dbs:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            """
+            SELECT id, timestamp, provider, model, connectionId, data
+            FROM requestDetails
+            WHERE status = 'success'
+            ORDER BY timestamp
+            """
+        )
+        for row in cursor:
+            if row["id"] not in seen_ids:
+                seen_ids.add(row["id"])
+                all_rows.append(row)
+        conn.close()
 
     messages_by_date: dict[str, list] = {}
-    for row in cursor:
+    for row in all_rows:
         req_data = json.loads(row["data"])
         tokens = req_data.get("tokens", {})
 
@@ -119,8 +141,6 @@ def run():
 
         messages_by_date.setdefault(date_str, []).append(entry)
 
-    router_conn.close()
-
     total_entries = 0
     for date_str, entries in sorted(messages_by_date.items()):
         filepath = BRIDGE_DIR / f"9router-{date_str}.jsonl"
@@ -153,7 +173,7 @@ def run():
         )
     )
     print()
-    print("Then run: tokscale graph --client gjc")
+    print("Then run: tokscale graph --client 9router")
 
 
 if __name__ == "__main__":
