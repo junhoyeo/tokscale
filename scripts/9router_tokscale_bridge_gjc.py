@@ -29,10 +29,10 @@ BRIDGE_DIR = Path.home() / ".local" / "share" / "9router-tokscale" / "sessions"
 
 
 def ensure_bridge_dir():
-    """Create output directory and remove stale files."""
+    """Create output directory. Existing files are NOT deleted — each date's
+    file is overwritten individually by the write loop, preserving historical
+    data from previous bridge runs."""
     BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
-    for f in BRIDGE_DIR.glob("*.jsonl"):
-        f.unlink()
 
 
 def parse_iso_timestamp(ts: str) -> int:
