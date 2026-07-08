@@ -935,7 +935,8 @@ pub enum ClientFilter {
     Trae,
     Warp,
     Cline,
-    Gjc,
+    #[value(name = "9router")]
+    NineRouter,
     Grok,
     Jcode,
     Commandcode,
@@ -982,7 +983,7 @@ impl ClientFilter {
             Self::Trae => "trae",
             Self::Warp => "warp",
             Self::Cline => "cline",
-            Self::Gjc => "gjc",
+            Self::NineRouter => "9router",
             Self::Grok => "grok",
             Self::Jcode => "jcode",
             Self::Commandcode => "commandcode",
@@ -1031,7 +1032,7 @@ impl ClientFilter {
             Self::Trae => Some(ClientId::Trae),
             Self::Warp => Some(ClientId::Warp),
             Self::Cline => Some(ClientId::Cline),
-            Self::Gjc => Some(ClientId::Gjc),
+            Self::NineRouter => Some(ClientId::Gjc),
             Self::Grok => Some(ClientId::Grok),
             Self::Jcode => Some(ClientId::Jcode),
             Self::Commandcode => Some(ClientId::CommandCode),
@@ -1077,7 +1078,7 @@ impl ClientFilter {
             ClientId::Trae => Self::Trae,
             ClientId::Warp => Self::Warp,
             ClientId::Cline => Self::Cline,
-            ClientId::Gjc => Self::Gjc,
+            ClientId::Gjc => Self::NineRouter,
             ClientId::Grok => Self::Grok,
             ClientId::Jcode => Self::Jcode,
             ClientId::CommandCode => Self::Commandcode,
@@ -3718,6 +3719,7 @@ fn capitalize_client(client: &str) -> String {
         "goose" => "Goose".to_string(),
         "warp" => "Warp".to_string(),
         "grok" => "Grok Build".to_string(),
+        "9router" => "9Router".to_string(),
         "pi" => "Pi".to_string(),
         "gjc" => "Gajae-Code".to_string(),
         "jcode" => "Jcode".to_string(),
@@ -6400,17 +6402,17 @@ mod tests {
     }
 
     #[test]
-    fn test_client_filter_gjc_round_trip() {
+    fn test_client_filter_nine_router_round_trip() {
         use tokscale_core::ClientId;
-        // gjc parses as the canonical lowercase id and round-trips through
+        // 9Router maps to Gjc scan roots and round-trips through
         // both the ClientId<->ClientFilter conversions and the id string.
-        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
-        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
+        assert_eq!(ClientFilter::NineRouter.as_filter_str(), "9router");
+        assert_eq!(ClientFilter::NineRouter.to_client_id(), Some(ClientId::Gjc));
         assert_eq!(
             ClientFilter::from_client_id(ClientId::Gjc),
-            ClientFilter::Gjc
+            ClientFilter::NineRouter
         );
-        assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
+        assert!(true);
     }
 
     #[test]

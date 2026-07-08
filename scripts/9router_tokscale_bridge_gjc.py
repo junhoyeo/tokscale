@@ -44,23 +44,6 @@ def parse_iso_timestamp(ts: str) -> int:
         return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
-def derive_provider_from_model(model: str) -> str:
-    """Derive provider from model ID for tokscale pricing lookup.
-
-    Tokscale's pricing lookup uses provider hints to match provider-scoped
-    model paths. For model IDs like 'deepseek-ai/deepseek-v4-flash', the
-    provider hint should be 'deepseek-ai' so the lookup succeeds.
-    For non-scoped models (no slash), return empty string.
-
-    Special case: @cf/moonshotai/kimi-k2.5 -> 'moonshotai' (skip Cloudflare prefix).
-    """
-    if "/" in model:
-        parts = model.split("/")
-        # @cf/moonshotai/kimi-k2.5: first segment is Cloudflare prefix
-        if parts[0].startswith("@") and len(parts) >= 3:
-            return parts[1]
-        return parts[0]
-    return ""
 
 
 def run():
@@ -107,27 +90,31 @@ def run():
 
         ts_ms = parse_iso_timestamp(row["timestamp"])
         model = req_data.get("model", row["model"]) or "unknown"
-        provider = derive_provider_from_model(model)
+        provider = row["provider"] or None
         date_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
         total = prompt + completion
 
+        msg = {
+            "role": "assistant",
+            "model": model,
+            "source": "9router",
+            "timestamp": ts_ms,
+            "usage": {
+                "input": prompt,
+                "output": completion,
+                "cacheRead": cached,
+                "cacheWrite": 0,
+                "totalTokens": total,
+            },
+        }
+        if provider:
+            msg["provider"] = provider
+            msg["api"] = provider
+
         entry = {
             "type": "message",
-            "message": {
-                "role": "assistant",
-                "model": model,
-                "provider": provider,
-                "api": provider,
-                "timestamp": ts_ms,
-                "usage": {
-                    "input": prompt,
-                    "output": completion,
-                    "cacheRead": cached,
-                    "cacheWrite": 0,
-                    "totalTokens": total
-                }
-            }
+            "message": msg,
         }
 
         messages_by_date.setdefault(date_str, []).append(entry)

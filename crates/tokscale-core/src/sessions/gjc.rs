@@ -50,6 +50,8 @@ struct GjcMessage {
     #[allow(dead_code)]
     api: Option<String>,
     /// Unix-ms timestamp (preferred for ordering/date).
+    /// Optional source client override (e.g. "9Router"). If absent, defaults to "gjc".
+    source: Option<String>,
     timestamp: Option<i64>,
     usage: Option<GjcUsage>,
 }
@@ -183,8 +185,8 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
         // (and fall back to "gjc") rather than dropping a message that carries
         // valid tokens.
         let provider = match message.provider {
-            Some(p) => p,
-            None => inferred_provider_from_model(&model)
+            Some(p) if !p.is_empty() => p,
+            _ => inferred_provider_from_model(&model)
                 .unwrap_or("gjc")
                 .to_string(),
         };
@@ -230,8 +232,9 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             None => derive_dedup_key(&session, timestamp, &model, &provider, &tokens, trimmed),
         };
 
+        let client = message.source.as_deref().unwrap_or("gjc");
         let mut unified = UnifiedMessage::new_with_dedup(
-            "gjc",
+            client,
             model,
             provider,
             session,

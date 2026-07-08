@@ -881,7 +881,18 @@ fn scan_all_clients_with_env_strategy_inner(
     } else {
         clients
             .iter()
-            .filter_map(|s| ClientId::from_str(s))
+            .filter_map(|s| {
+                ClientId::from_str(s).or_else(|| {
+                    // "9Router" is a gjc-format bridge client overseen by the
+                    // 9Router bridge script. Map it to Gjc so the scanner
+                    // discovers files under gjc scan roots.
+                    if s.eq_ignore_ascii_case("9router") {
+                        Some(ClientId::Gjc)
+                    } else {
+                        None
+                    }
+                })
+            })
             .collect()
     };
 

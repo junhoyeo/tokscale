@@ -35,3 +35,4 @@ self-host/
 .vercel
 .env*.local
 .omp/
+.claude/skills/

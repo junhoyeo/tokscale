@@ -161,8 +161,8 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
         // (and fall back to "pi") rather than dropping a message that carries
         // valid tokens.
         let provider = match message.provider {
-            Some(p) => p,
-            None => inferred_provider_from_model(&model)
+            Some(p) if !p.is_empty() => p,
+            _ => inferred_provider_from_model(&model)
                 .unwrap_or("pi")
                 .to_string(),
         };
