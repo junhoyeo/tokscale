@@ -458,6 +458,31 @@ pub fn built_in_extra_scan_paths_for(
     paths
 }
 
+/// Discover Hermes profile databases under a Hermes home directory.
+///
+/// Hermes stores the default profile at `<hermes-home>/state.db` and named
+/// profiles at `<hermes-home>/profiles/<profile>/state.db`. `read_dir` keeps
+/// this intentionally shallow: each immediate child of `profiles/` is treated
+/// as one profile directory, matching Hermes' profile layout without walking
+/// arbitrary user data.
+pub(crate) fn discover_hermes_profile_state_dbs(hermes_home: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(hermes_home.join("profiles")) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut dbs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let state_db = entry.path().join("state.db");
+            state_db.is_file().then_some(state_db)
+        })
+        .collect();
+    dbs.sort_unstable();
+    dbs.dedup();
+    dbs
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct CrushProjectList {
     #[serde(default)]
@@ -1266,8 +1291,14 @@ fn scan_all_clients_with_env_strategy_inner(
         let hermes_db_path = ClientId::Hermes
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        if std::path::Path::new(&hermes_db_path).exists() {
-            result.hermes_db = Some(PathBuf::from(hermes_db_path));
+        let hermes_db_path = PathBuf::from(hermes_db_path);
+        if hermes_db_path.exists() {
+            result.hermes_db = Some(hermes_db_path.clone());
+        }
+        if let Some(hermes_home) = hermes_db_path.parent() {
+            result
+                .get_mut(ClientId::Hermes)
+                .extend(discover_hermes_profile_state_dbs(hermes_home));
         }
     }
 
@@ -2568,9 +2599,102 @@ mod tests {
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
             &["hermes".to_string()],
-            true,
+            false,
             &settings,
         );
+
+        assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
+        assert_eq!(result.hermes_db_paths(), vec![default_db, profile_db]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_auto_discovers_hermes_profile_dbs() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_dir = home.join(".hermes");
+        fs::create_dir_all(&default_dir).unwrap();
+        let default_db = default_dir.join("state.db");
+        File::create(&default_db).unwrap();
+
+        let profile_a_dir = home.join(".hermes/profiles/director_planning");
+        fs::create_dir_all(&profile_a_dir).unwrap();
+        let profile_a_db = profile_a_dir.join("state.db");
+        File::create(&profile_a_db).unwrap();
+
+        let profile_b_dir = home.join(".hermes/profiles/research");
+        fs::create_dir_all(&profile_b_dir).unwrap();
+        let profile_b_db = profile_b_dir.join("state.db");
+        File::create(&profile_b_db).unwrap();
+
+        // Shallow discovery should not pick up arbitrary nested state.db files.
+        let nested_dir = home.join(".hermes/profiles/research/archive");
+        fs::create_dir_all(&nested_dir).unwrap();
+        File::create(nested_dir.join("state.db")).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
+        assert_eq!(
+            result.hermes_db_paths(),
+            vec![default_db, profile_a_db, profile_b_db]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_auto_discovers_hermes_profiles_without_default_db(
+    ) {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let profile_dir = home.join(".hermes/profiles/research");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        File::create(&profile_db).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        assert_eq!(result.hermes_db, None);
+        assert_eq!(result.hermes_db_paths(), vec![profile_db]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_auto_discovers_hermes_profiles_under_env_home() {
+        let previous = std::env::var("HERMES_HOME").ok();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let hermes_home = home.join("custom-hermes-home");
+
+        fs::create_dir_all(&hermes_home).unwrap();
+        let default_db = hermes_home.join("state.db");
+        File::create(&default_db).unwrap();
+
+        let profile_dir = hermes_home.join("profiles/research");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        File::create(&profile_db).unwrap();
+
+        unsafe { std::env::set_var("HERMES_HOME", &hermes_home) };
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            true,
+            &ScannerSettings::default(),
+        );
+        restore_env("HERMES_HOME", previous);
 
         assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
         assert_eq!(result.hermes_db_paths(), vec![default_db, profile_db]);
@@ -2632,7 +2756,7 @@ mod tests {
         let hermes_only = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
             &["hermes".to_string()],
-            true,
+            false,
             &settings,
         );
         assert_eq!(hermes_only.hermes_db_paths(), vec![profile_db]);

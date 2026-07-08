@@ -60,7 +60,7 @@
 | <img width="48px" src=".github/assets/client-openai.jpg" alt="Codex" /> | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/` | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-sakana.png" alt="Sakana Fugu" /> | [Sakana Fugu](https://sakana.ai/fugu/) | Codex를 통해 추적 — `~/.codex/sessions/*.jsonl` (`model_provider: sakana`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ 지원 |
-| <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` (폴백: `~/.hermes/state.db`) | ✅ 지원 |
+| <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 및 `$HERMES_HOME/profiles/*/state.db` (폴백: `~/.hermes/...`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (폴백: `~/.gemini/tmp/*/chats/*.json`) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 내보내기를 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱 (`~/.cursor` 아님) | ✅ 지원 |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ 지원 |
@@ -830,7 +830,7 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 | `minutelyTabEnabled` | boolean | `false` | TUI에 분 단위 Minutely 탭을 표시하고 데이터 로딩 중에 분 단위 집계를 수행합니다. 대부분의 사용자에게 분 단위 세분화는 틈새/진단 뷰이며, 대규모 데이터셋에서는 분 단위 버케팅에 무시할 수 없는 비용이 들기 때문에 기본적으로 비활성화되어 있습니다. |
 | `scanner.extraScanPaths` | object | `{}` | Tokscale의 기본 home-root 위치 밖에 있는 세션을 위한 클라이언트별 추가 스캔 루트 |
 
-`scanner.extraScanPaths`는 프로젝트 단위 `.codex` 디렉터리, 가져온 Gemini/OpenClaw 히스토리, Hermes 프로필 데이터베이스 같은 영구적인 추가 루트에 사용하세요. Hermes 항목은 `state.db`를 포함하는 프로필 디렉터리를 가리키거나 `state.db` 파일을 직접 가리킬 수 있습니다. Tokscale은 매 실행마다 이 경로들을 기본 스캔 루트와 병합하고, 겹치는 루트는 정규 경로(canonical path) 기준으로 중복 제거합니다.
+`scanner.extraScanPaths`는 프로젝트 단위 `.codex` 디렉터리나 가져온 Gemini/OpenClaw 히스토리 같은 영구적인 추가 루트에 사용하세요. Tokscale은 `$HERMES_HOME/profiles/*/state.db` 아래의 Hermes 프로필 데이터베이스를 자동으로 발견합니다(`HERMES_HOME`이 없으면 `~/.hermes/profiles/*/state.db`). 비표준 Hermes 프로필 위치에만 `scanner.extraScanPaths.hermes`를 사용하세요. Hermes 항목은 `state.db`를 포함하는 프로필 디렉터리를 가리키거나 `state.db` 파일을 직접 가리킬 수 있습니다. Tokscale은 매 실행마다 이 경로들을 기본 스캔 루트와 병합하고, 겹치는 루트는 정규 경로(canonical path) 기준으로 중복 제거합니다.
 
 `defaultClients`로 개인 기본값을 고정할 수 있습니다 — 예를 들어 OpenCode와 Claude만 사용한다면 `["opencode", "claude"]`로 설정하면, `tokscale`(플래그 없이)은 모든 리포트를 자동으로 해당 클라이언트로 범위를 좁힙니다. 단일 실행에 대해 재정의하려면 명령줄에서 `--client`를 전달하세요.
 

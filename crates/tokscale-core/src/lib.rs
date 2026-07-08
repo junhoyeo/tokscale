@@ -7117,7 +7117,7 @@ mod tests {
     #[test]
     fn test_parse_local_clients_honors_scanner_extra_scan_paths_for_hermes_profile_db() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
+        let profile_dir = temp_dir.path().join("external-hermes/director_planning");
         std::fs::create_dir_all(&profile_dir).unwrap();
         let profile_db = profile_dir.join("state.db");
         let conn = create_hermes_sqlite_db(&profile_db);
