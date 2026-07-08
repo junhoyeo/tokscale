@@ -26,7 +26,7 @@ use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
 const PROVIDER_ID: &str = "amazon-bedrock";
-const UNKNOWN_MODEL: &str = "unknown";
+const UNKNOWN_MODEL: &str = "auto";
 
 #[derive(Debug, Deserialize)]
 struct KiroSessionHeader {
@@ -103,6 +103,10 @@ struct KiroMessageContent {
 #[derive(Debug, Deserialize)]
 struct KiroIdeSession {
     id: Option<String>,
+    #[serde(rename = "modelId")]
+    model_id: Option<String>,
+    #[serde(rename = "workspacePaths")]
+    workspace_paths: Option<Vec<String>>,
     #[serde(rename = "createdAt")]
     created_at: Option<String>,
     #[serde(rename = "lastModifiedAt")]
@@ -404,8 +408,6 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
-    // Directory name is `sess_<uuid>`; its parent is the workspace folder:
-    // ~/.kiro/sessions/<workspace>/sess_<uuid>/session.json
     let sess_dir = path.parent();
     let sess_dir_name = sess_dir
         .and_then(|dir| dir.file_name())
@@ -416,52 +418,233 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
         .or_else(|| sess_dir_name.map(|name| name.to_string()))
         .unwrap_or_else(|| "unknown".to_string());
 
-    let workspace = sess_dir
+    let session_model_id = session
+        .model_id
+        .filter(|m| !m.trim().is_empty());
+
+    let workspace_path = session
+        .workspace_paths
+        .as_ref()
+        .and_then(|paths| paths.first())
+        .map(|s| s.as_str());
+    let workspace_from_dir = sess_dir
         .and_then(|dir| dir.parent())
         .and_then(|ws_dir| ws_dir.file_name())
         .and_then(|name| name.to_str())
         .map(|name| name.to_string());
-    let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
+    let ws_str = workspace_path
+        .map(|s| s.to_string())
+        .or(workspace_from_dir);
+    let workspace_key = ws_str.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
     let messages_path = path.with_file_name("messages.jsonl");
-    let mut counts = KiroSnapshotTextCounts::default();
-    let mut model_id: Option<String> = None;
-    let mut assistant_turns: i32 = 0;
+    if !messages_path.is_file() {
+        return Vec::new();
+    }
 
-    if let Ok(file) = std::fs::File::open(&messages_path) {
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+    let jsonl_file = match std::fs::File::open(&messages_path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let reader = BufReader::new(jsonl_file);
+
+    const DEFAULT_CONTEXT_WINDOW: i64 = 200_000;
+
+    #[derive(Default)]
+    struct IdeTurn {
+        prompt_chars: usize,
+        assistant_chars: usize,
+        prompt_timestamp_ms: Option<i64>,
+        end_timestamp_ms: Option<i64>,
+        context_usage_percentage: f64,
+        elapsed_ms: Option<i64>,
+    }
+
+    let mut turns: Vec<IdeTurn> = Vec::new();
+    let mut current_turn: Option<IdeTurn> = None;
+    let mut has_structured_format = false;
+
+    // Fallback accumulators for flat-JSON messages.jsonl (no payload wrapper)
+    let mut flat_counts = KiroSnapshotTextCounts::default();
+    let mut flat_model_id: Option<String> = None;
+    let mut flat_assistant_turns: i32 = 0;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let entry: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Structured format: each line has `payload.type`
+        if let Some(payload) = entry.get("payload") {
+            if let Some(msg_type) = payload.get("type").and_then(|v| v.as_str()) {
+                has_structured_format = true;
+
+                let timestamp_ms = entry
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.timestamp_millis());
+
+                match msg_type {
+                    "user" => {
+                        let chars = payload
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.chars().count())
+                            .unwrap_or(0);
+                        let turn = current_turn.get_or_insert_with(IdeTurn::default);
+                        turn.prompt_chars += chars;
+                        if turn.prompt_timestamp_ms.is_none() {
+                            turn.prompt_timestamp_ms = timestamp_ms;
+                        }
+                    }
+                    "assistant" => {
+                        let chars = payload
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.chars().count())
+                            .unwrap_or(0);
+                        if let Some(turn) = current_turn.as_mut() {
+                            turn.assistant_chars += chars;
+                        }
+                    }
+                    "tool_call" => {
+                        let args_chars = payload
+                            .get("args")
+                            .map(|v| match v {
+                                Value::String(s) => s.chars().count(),
+                                other => other.to_string().len(),
+                            })
+                            .unwrap_or(0);
+                        if let Some(turn) = current_turn.as_mut() {
+                            turn.assistant_chars += args_chars;
+                        }
+                    }
+                    "session_metadata" => {
+                        if payload.get("key").and_then(|v| v.as_str()) == Some("contextUsage") {
+                            if let Some(pct) = payload
+                                .get("value")
+                                .and_then(|v| v.get("usagePercentage"))
+                                .and_then(|v| v.as_f64())
+                            {
+                                if let Some(turn) = current_turn.as_mut() {
+                                    turn.context_usage_percentage = pct;
+                                }
+                            }
+                        }
+                    }
+                    "usage_summary" => {
+                        if let Some(elapsed) = payload.get("elapsedTime").and_then(|v| v.as_i64())
+                        {
+                            if let Some(turn) = current_turn.as_mut() {
+                                turn.elapsed_ms = Some(elapsed);
+                            }
+                        }
+                    }
+                    "turn_end" => {
+                        if let Some(turn) = current_turn.as_mut() {
+                            turn.end_timestamp_ms = timestamp_ms;
+                        }
+                        if let Some(turn) = current_turn.take() {
+                            if turn.prompt_chars > 0 || turn.assistant_chars > 0 {
+                                turns.push(turn);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
-            let value: Value = match serde_json::from_str(trimmed) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-            if model_id.is_none() {
-                model_id = find_kiro_snapshot_model_id(&value);
-            }
-            let assistant_before = counts.assistant_chars;
-            collect_kiro_snapshot_text(&value, &mut counts, None);
-            if counts.assistant_chars > assistant_before {
-                assistant_turns += 1;
-            }
+        }
+
+        // Flat format fallback: lines like {"role":"user","content":"..."}
+        if flat_model_id.is_none() {
+            flat_model_id = find_kiro_snapshot_model_id(&entry);
+        }
+        let assistant_before = flat_counts.assistant_chars;
+        collect_kiro_snapshot_text(&entry, &mut flat_counts, None);
+        if flat_counts.assistant_chars > assistant_before {
+            flat_assistant_turns += 1;
         }
     }
 
-    let input = estimate_tokens(counts.prompt_chars);
-    let output = estimate_tokens(counts.assistant_chars);
+    // Flush any in-flight structured turn
+    if let Some(turn) = current_turn.take() {
+        if turn.prompt_chars > 0 || turn.assistant_chars > 0 {
+            turns.push(turn);
+        }
+    }
+
+    if has_structured_format && !turns.is_empty() {
+        // Per-turn structured output
+        let model_id = session_model_id.unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+        return turns
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, turn)| {
+                let input = if turn.context_usage_percentage > 0.0 {
+                    ((DEFAULT_CONTEXT_WINDOW as f64) * turn.context_usage_percentage / 100.0)
+                        as i64
+                } else {
+                    estimate_tokens(turn.prompt_chars)
+                };
+                let output = estimate_tokens(turn.assistant_chars);
+
+                if input + output == 0 {
+                    return None;
+                }
+
+                let timestamp = turn
+                    .prompt_timestamp_ms
+                    .or(turn.end_timestamp_ms)
+                    .unwrap_or(fallback_timestamp);
+                let duration_ms = turn.elapsed_ms.or_else(|| {
+                    duration_between_ms(turn.prompt_timestamp_ms, turn.end_timestamp_ms)
+                });
+
+                let mut message = UnifiedMessage::new_with_dedup(
+                    CLIENT_ID,
+                    model_id.clone(),
+                    PROVIDER_ID,
+                    session_id.clone(),
+                    timestamp,
+                    TokenBreakdown {
+                        input,
+                        output,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                    Some(format!("{}:ide:{}", session_id, index)),
+                );
+                message.message_count = 1;
+                message.is_turn_start = true;
+                message.duration_ms = duration_ms;
+                message.set_workspace(workspace_key.clone(), workspace_label.clone());
+                Some(message)
+            })
+            .collect();
+    }
+
+    // Flat format fallback: single aggregated message (original behavior)
+    let input = estimate_tokens(flat_counts.prompt_chars);
+    let output = estimate_tokens(flat_counts.assistant_chars);
     if input + output == 0 {
         return Vec::new();
     }
 
-    // schemaVersion 1.0.0 stores createdAt/lastModifiedAt as RFC3339 strings.
     let created_value = session
         .created_at
         .as_deref()
@@ -475,9 +658,10 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let timestamp = created_ms.or(modified_ms).unwrap_or(fallback_timestamp);
     let duration_ms = duration_between_ms(created_ms, modified_ms);
-    let model_id = model_id
+    let model_id = session_model_id
+        .or(flat_model_id)
         .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| "auto".to_string());
+        .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
 
     let mut message = UnifiedMessage::new_with_dedup(
         CLIENT_ID,
@@ -493,11 +677,9 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
             reasoning: 0,
         },
         0.0,
-        // Distinct from the globalStorage `:globalstorage`/`execution:` keys, so
-        // suppress_snapshots_covered_by_executions leaves IDE sessions untouched.
         Some(format!("{}:ide-session", session_id)),
     );
-    message.message_count = assistant_turns.max(1);
+    message.message_count = flat_assistant_turns.max(1);
     message.duration_ms = duration_ms;
     message.is_turn_start = true;
     message.set_workspace(workspace_key, workspace_label);
