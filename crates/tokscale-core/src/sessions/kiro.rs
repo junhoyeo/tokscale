@@ -418,9 +418,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
         .or_else(|| sess_dir_name.map(|name| name.to_string()))
         .unwrap_or_else(|| "unknown".to_string());
 
-    let session_model_id = session
-        .model_id
-        .filter(|m| !m.trim().is_empty());
+    let session_model_id = session.model_id.filter(|m| !m.trim().is_empty());
 
     let workspace_path = session
         .workspace_paths
@@ -432,9 +430,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
         .and_then(|ws_dir| ws_dir.file_name())
         .and_then(|name| name.to_str())
         .map(|name| name.to_string());
-    let ws_str = workspace_path
-        .map(|s| s.to_string())
-        .or(workspace_from_dir);
+    let ws_str = workspace_path.map(|s| s.to_string()).or(workspace_from_dir);
     let workspace_key = ws_str.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
@@ -532,8 +528,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
                         }
                     }
                     "session_metadata"
-                        if payload.get("key").and_then(|v| v.as_str())
-                            == Some("contextUsage") =>
+                        if payload.get("key").and_then(|v| v.as_str()) == Some("contextUsage") =>
                     {
                         if let Some(pct) = payload
                             .get("value")
@@ -546,8 +541,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
                         }
                     }
                     "usage_summary" => {
-                        if let Some(elapsed) = payload.get("elapsedTime").and_then(|v| v.as_i64())
-                        {
+                        if let Some(elapsed) = payload.get("elapsedTime").and_then(|v| v.as_i64()) {
                             if let Some(turn) = current_turn.as_mut() {
                                 turn.elapsed_ms = Some(elapsed);
                             }
@@ -595,8 +589,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
             .enumerate()
             .filter_map(|(index, turn)| {
                 let input = if turn.context_usage_percentage > 0.0 {
-                    ((DEFAULT_CONTEXT_WINDOW as f64) * turn.context_usage_percentage / 100.0)
-                        as i64
+                    ((DEFAULT_CONTEXT_WINDOW as f64) * turn.context_usage_percentage / 100.0) as i64
                 } else {
                     estimate_tokens(turn.prompt_chars)
                 };
