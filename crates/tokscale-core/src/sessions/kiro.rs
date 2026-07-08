@@ -524,23 +524,24 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
                             .get("args")
                             .map(|v| match v {
                                 Value::String(s) => s.chars().count(),
-                                other => other.to_string().len(),
+                                other => other.to_string().chars().count(),
                             })
                             .unwrap_or(0);
                         if let Some(turn) = current_turn.as_mut() {
                             turn.assistant_chars += args_chars;
                         }
                     }
-                    "session_metadata" => {
-                        if payload.get("key").and_then(|v| v.as_str()) == Some("contextUsage") {
-                            if let Some(pct) = payload
-                                .get("value")
-                                .and_then(|v| v.get("usagePercentage"))
-                                .and_then(|v| v.as_f64())
-                            {
-                                if let Some(turn) = current_turn.as_mut() {
-                                    turn.context_usage_percentage = pct;
-                                }
+                    "session_metadata"
+                        if payload.get("key").and_then(|v| v.as_str())
+                            == Some("contextUsage") =>
+                    {
+                        if let Some(pct) = payload
+                            .get("value")
+                            .and_then(|v| v.get("usagePercentage"))
+                            .and_then(|v| v.as_f64())
+                        {
+                            if let Some(turn) = current_turn.as_mut() {
+                                turn.context_usage_percentage = pct;
                             }
                         }
                     }
