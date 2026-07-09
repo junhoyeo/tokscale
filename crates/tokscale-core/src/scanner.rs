@@ -471,7 +471,7 @@ pub fn built_in_extra_scan_paths_for(
 /// `profiles/` directory is treated as one profile directory, matching Hermes'
 /// profile layout without walking arbitrary user data.
 pub(crate) fn discover_hermes_profile_state_dbs(hermes_home: &Path) -> Vec<PathBuf> {
-    let mut profile_roots = vec![hermes_home.join("profiles")];
+    let mut profile_roots = Vec::new();
     let mut dbs = Vec::new();
 
     if let Some(parent) = hermes_home.parent() {
@@ -483,7 +483,11 @@ pub(crate) fn discover_hermes_profile_state_dbs(hermes_home: &Path) -> Vec<PathB
                     dbs.push(default_db);
                 }
             }
+        } else {
+            profile_roots.push(hermes_home.join("profiles"));
         }
+    } else {
+        profile_roots.push(hermes_home.join("profiles"));
     }
 
     dbs.extend(
@@ -2741,8 +2745,9 @@ mod tests {
         let research_db = research_dir.join("state.db");
         File::create(&research_db).unwrap();
 
-        // Shallow sibling discovery should not descend into nested directories.
-        let nested_dir = research_dir.join("profiles/archived");
+        // Shallow sibling discovery should not descend into nested directories,
+        // and profile-scoped homes should not scan `<active-profile>/profiles`.
+        let nested_dir = coder_dir.join("profiles/archived");
         fs::create_dir_all(&nested_dir).unwrap();
         File::create(nested_dir.join("state.db")).unwrap();
 
