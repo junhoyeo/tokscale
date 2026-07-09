@@ -461,18 +461,27 @@ pub fn built_in_extra_scan_paths_for(
 /// Discover Hermes profile databases under a Hermes home directory.
 ///
 /// Hermes stores the default profile at `<hermes-home>/state.db` and named
-/// profiles at `<hermes-home>/profiles/<profile>/state.db`. `read_dir` keeps
-/// this intentionally shallow: each immediate child of `profiles/` is treated
-/// as one profile directory, matching Hermes' profile layout without walking
-/// arbitrary user data.
+/// profiles at `<hermes-home>/profiles/<profile>/state.db`.
+///
+/// When `HERMES_HOME` points at an active named profile (for example
+/// `<root>/profiles/coder`), sibling profiles live one directory up under
+/// `<root>/profiles/*/state.db`; include that profile root as well. `read_dir`
+/// keeps discovery intentionally shallow: each immediate child of a `profiles/`
+/// directory is treated as one profile directory, matching Hermes' profile
+/// layout without walking arbitrary user data.
 pub(crate) fn discover_hermes_profile_state_dbs(hermes_home: &Path) -> Vec<PathBuf> {
-    let entries = match std::fs::read_dir(hermes_home.join("profiles")) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
+    let mut profile_roots = vec![hermes_home.join("profiles")];
 
-    let mut dbs: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
+    if let Some(parent) = hermes_home.parent() {
+        if parent.file_name().is_some_and(|name| name == "profiles") {
+            profile_roots.push(parent.to_path_buf());
+        }
+    }
+
+    let mut dbs: Vec<PathBuf> = profile_roots
+        .into_iter()
+        .filter_map(|profile_root| std::fs::read_dir(profile_root).ok())
+        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
         .filter_map(|entry| {
             let state_db = entry.path().join("state.db");
             state_db.is_file().then_some(state_db)
@@ -2698,6 +2707,43 @@ mod tests {
 
         assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
         assert_eq!(result.hermes_db_paths(), vec![default_db, profile_db]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_auto_discovers_sibling_hermes_profiles_from_profile_scoped_env_home(
+    ) {
+        let previous = std::env::var("HERMES_HOME").ok();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let profile_root = home.join(".hermes/profiles");
+        let coder_dir = profile_root.join("coder");
+        fs::create_dir_all(&coder_dir).unwrap();
+        let coder_db = coder_dir.join("state.db");
+        File::create(&coder_db).unwrap();
+
+        let research_dir = profile_root.join("research");
+        fs::create_dir_all(&research_dir).unwrap();
+        let research_db = research_dir.join("state.db");
+        File::create(&research_db).unwrap();
+
+        // Shallow sibling discovery should not descend into nested directories.
+        let nested_dir = research_dir.join("profiles/archived");
+        fs::create_dir_all(&nested_dir).unwrap();
+        File::create(nested_dir.join("state.db")).unwrap();
+
+        unsafe { std::env::set_var("HERMES_HOME", &coder_dir) };
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            true,
+            &ScannerSettings::default(),
+        );
+        restore_env("HERMES_HOME", previous);
+
+        assert_eq!(result.hermes_db.as_ref(), Some(&coder_db));
+        assert_eq!(result.hermes_db_paths(), vec![coder_db, research_db]);
     }
 
     #[test]
