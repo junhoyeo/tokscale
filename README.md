@@ -1614,7 +1614,7 @@ Session JSONL format with model_change events and assistant messages:
 
 ### Hermes Agent
 
-Location: `$HERMES_HOME/state.db` (fallback: `~/.hermes/state.db`)
+Location: `$HERMES_HOME/state.db` (fallback: `~/.hermes/state.db`) plus standard profile databases at `$HERMES_HOME/profiles/*/state.db` (or sibling `~/.hermes/profiles/*/state.db` when `HERMES_HOME` points at an active profile)
 
 Hermes stores session-level usage in a SQLite `sessions` table. Tokscale imports rows where `model` is present and token or cost totals are non-zero, uses `started_at` as the timestamp, preserves `message_count`, and prefers `actual_cost_usd` over `estimated_cost_usd`.
 

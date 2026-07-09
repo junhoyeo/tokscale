@@ -1568,7 +1568,7 @@ model_change 이벤트와 어시스턴트 메시지가 포함된 세션 JSONL �
 
 ### Hermes Agent
 
-위치: `$HERMES_HOME/state.db` (폴백: `~/.hermes/state.db`)
+위치: `$HERMES_HOME/state.db` (폴백: `~/.hermes/state.db`) 및 표준 프로필 데이터베이스 `$HERMES_HOME/profiles/*/state.db` (`HERMES_HOME`이 활성 프로필을 가리키는 경우 형제 `~/.hermes/profiles/*/state.db`)
 
 Hermes는 세션 수준 사용량을 SQLite `sessions` 테이블에 저장합니다. Tokscale은 `model`이 존재하고 토큰 또는 비용 합계가 0이 아닌 행을 가져오며, `started_at`을 타임스탬프로 사용하고, `message_count`를 보존하며, `actual_cost_usd`를 `estimated_cost_usd`보다 우선합니다.
 
