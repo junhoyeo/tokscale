@@ -168,10 +168,8 @@ fn parse_entry_timestamp(ts: Option<&Value>) -> Option<i64> {
         s.to_string()
     } else if let Some(i) = value.as_i64() {
         i.to_string()
-    } else if let Some(u) = value.as_u64() {
-        u.to_string()
     } else {
-        return None;
+        value.as_u64()?.to_string()
     };
 
     parse_timestamp_str(&ts_str)
