@@ -7,6 +7,7 @@ pub mod content_extractor;
 pub mod fs_atomic;
 pub mod mcp;
 mod message_cache;
+pub mod model_alias;
 mod parser;
 pub mod paths;
 pub mod pricing;
@@ -18,6 +19,7 @@ pub mod wiki;
 
 pub use aggregator::*;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
+pub use model_alias::ModelAliasMap;
 pub use parser::*;
 pub use scanner::*;
 pub use sessionize::{
@@ -59,6 +61,23 @@ pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str>
 }
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
+    // Every model-grouping path routes through this function, so folding the
+    // user-configured model aliases here (after syntactic normalization) applies
+    // them uniformly to the models report, every `--group-by`, monthly, hourly,
+    // the graph, and the TUI. An empty/unset alias config is a strict identity
+    // no-op, so behavior is byte-for-byte unchanged unless aliases are set.
+    model_alias::global().apply(normalize_syntactic(model_id))
+}
+
+/// Structural-only model-name normalization: lowercase, strip a
+/// `(reasoning-tier)` suffix, strip a trailing `-YYYYMMDD` date, rewrite `.`→`-`
+/// inside claude version numbers, and fold an `anthropic/claude-…` prefix.
+///
+/// This is the syntactic half of [`normalize_model_for_grouping`]. It is also
+/// used by [`model_alias::ModelAliasResolver`] to normalize configured alias
+/// keys and values into the same space, so a configured alias matches its model
+/// regardless of case, dated suffix, or `.`-vs-`-` spelling.
+pub(crate) fn normalize_syntactic(model_id: &str) -> String {
     let mut name = model_id.to_lowercase();
 
     if let Some(base_model) = strip_parenthesized_reasoning_tier(&name) {

@@ -507,6 +507,11 @@ fn main() -> Result<()> {
     use std::io::IsTerminal;
 
     let cli = Cli::parse();
+    // Install user-configured model aliases once, before any report/graph/TUI
+    // path runs, so model-name variants fold consistently across every command.
+    // Honors the global `--home` override exactly like scanner settings; an
+    // empty or absent config is a strict no-op.
+    tokscale_core::model_alias::set_global(&tui::settings::load_model_aliases_for_home(&cli.home));
     let can_use_tui = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     if cli.test_data {

@@ -2341,6 +2341,191 @@ fn test_models_json_with_group_by_model() {
     }
 }
 
+/// Adds a third OpenCode session whose single message reports the same physical
+/// model as session 1 (claude sonnet 4) under a channel-variant name string
+/// (`claude-sonnet-4-cc`), so model-alias folding can be exercised end to end.
+fn add_alias_variant_message(tmp: &Path) {
+    let session3 = tmp.join(".local/share/opencode/storage/message/session3");
+    fs::create_dir_all(&session3).unwrap();
+    let msg = r#"{
+        "id": "msg_d",
+        "sessionID": "session3",
+        "role": "assistant",
+        "modelID": "claude-sonnet-4-cc",
+        "providerID": "anthropic",
+        "cost": 0.04,
+        "tokens": {
+            "input": 400,
+            "output": 100,
+            "reasoning": 0,
+            "cache": { "read": 0, "write": 0 }
+        },
+        "time": { "created": 1718460000000.0, "completed": 1718460002000.0 }
+    }"#;
+    fs::write(session3.join("msg_d.json"), msg).unwrap();
+}
+
+/// Writes a tokscale `settings.json` with the given `modelAliases` object into
+/// the sandbox config dir that `cmd_with_home` points at
+/// (`XDG_CONFIG_HOME/tokscale`). `cmd_with_home` clears `TOKSCALE_CONFIG_DIR`, so
+/// the config must live under the pinned XDG path to be read.
+fn write_model_aliases(tmp: &Path, aliases_json: &str) {
+    let config_dir = tmp.join(".config/tokscale");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("settings.json"),
+        format!(r#"{{"modelAliases": {aliases_json}}}"#),
+    )
+    .unwrap();
+}
+
+fn models_by_name(tmp: &Path) -> serde_json::Value {
+    let output = cmd_with_home(tmp)
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
+        .args(["--group-by", "model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {output:?}");
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn test_models_alias_folds_variants_into_one_row() {
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    write_model_aliases(tmp.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+
+    let json = models_by_name(tmp.path());
+    let entries = json["entries"].as_array().unwrap();
+    let models: Vec<&str> = entries
+        .iter()
+        .map(|e| e["model"].as_str().unwrap())
+        .collect();
+
+    // The -cc variant folded into the canonical model: exactly one
+    // claude-sonnet-4 row and no claude-sonnet-4-cc row.
+    assert!(
+        models.contains(&"claude-sonnet-4"),
+        "expected folded model, got {models:?}"
+    );
+    assert!(
+        !models.contains(&"claude-sonnet-4-cc"),
+        "variant should have folded away, got {models:?}"
+    );
+
+    // The variant's tokens merged INTO the canonical row — the fold-sensitive
+    // check: session1 (input 1000 + 800) plus the folded -cc variant (400) =
+    // 2200. A no-op fold would leave this row at 1800 and emit a separate
+    // claude-sonnet-4-cc row instead.
+    let folded = entries
+        .iter()
+        .find(|e| e["model"] == "claude-sonnet-4")
+        .unwrap();
+    assert_eq!(
+        folded["input"].as_i64().unwrap(),
+        2200,
+        "folded row must include the variant's tokens, got {folded:?}"
+    );
+    assert!(
+        folded.get("mergedClients").is_some(),
+        "folded entry should retain mergedClients"
+    );
+
+    // Per-entry sums still reconcile with report totals — the fold must not
+    // double-count or drop tokens.
+    let sum_input: i64 = entries.iter().map(|e| e["input"].as_i64().unwrap()).sum();
+    assert_eq!(sum_input, json["totalInput"].as_i64().unwrap());
+}
+
+#[test]
+fn test_models_alias_folds_in_monthly_report() {
+    // The fold happens inside normalize_model_for_grouping, so it must apply at
+    // every grouping call site, not only the models report. Prove it on the
+    // monthly report (a distinct call site) too.
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    write_model_aliases(tmp.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+
+    let output = cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let models: Vec<&str> = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["models"].as_array().unwrap())
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert!(
+        models.contains(&"claude-sonnet-4"),
+        "monthly models should include the canonical name, got {models:?}"
+    );
+    assert!(
+        !models.contains(&"claude-sonnet-4-cc"),
+        "monthly report must fold the -cc variant too, got {models:?}"
+    );
+}
+
+#[test]
+fn test_models_alias_absent_is_noop() {
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    // No settings.json / no modelAliases configured.
+
+    let json = models_by_name(tmp.path());
+    let models: Vec<&str> = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["model"].as_str().unwrap())
+        .collect();
+
+    // Without aliases the variant stays a separate row (opt-in default off).
+    assert!(
+        models.contains(&"claude-sonnet-4"),
+        "expected base model, got {models:?}"
+    );
+    assert!(
+        models.contains(&"claude-sonnet-4-cc"),
+        "variant should remain separate without aliases, got {models:?}"
+    );
+}
+
+#[test]
+fn test_models_alias_totals_unchanged() {
+    // Folding relabels/merges buckets whose costs were already computed
+    // per-message, so grand totals must be identical with and without aliases.
+    let without = create_temp_fixture_dir();
+    add_alias_variant_message(without.path());
+    let base = models_by_name(without.path());
+
+    let with = create_temp_fixture_dir();
+    add_alias_variant_message(with.path());
+    write_model_aliases(with.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+    let aliased = models_by_name(with.path());
+
+    assert_eq!(
+        base["totalInput"].as_i64(),
+        aliased["totalInput"].as_i64(),
+        "totalInput must be unchanged by aliasing"
+    );
+    assert_eq!(
+        base["totalOutput"].as_i64(),
+        aliased["totalOutput"].as_i64(),
+        "totalOutput must be unchanged by aliasing"
+    );
+    let base_cost = base["totalCost"].as_f64().unwrap();
+    let aliased_cost = aliased["totalCost"].as_f64().unwrap();
+    assert!(
+        (base_cost - aliased_cost).abs() < 1e-9,
+        "totalCost must be unchanged by aliasing: {base_cost} vs {aliased_cost}"
+    );
+}
+
 #[test]
 fn test_models_group_by_session_emits_session_id_per_entry() {
     let tmp = create_temp_fixture_dir();

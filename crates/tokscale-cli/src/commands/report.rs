@@ -146,6 +146,15 @@ fn populate_wiki_from_sessions(db: &WikiDb, opts: &ReportOptions) -> Result<()> 
         agg.total_output = agg.total_output.saturating_add(msg.output);
         agg.total_cache_read = agg.total_cache_read.saturating_add(msg.cache_read);
         agg.total_cost += compute_msg_cost(msg, pricing.as_deref());
+        // NOTE: the wiki `report` view intentionally groups on the raw model_id
+        // and does not apply `modelAliases` folding (nor the grouping
+        // normalization every other report uses). Wiki entries are persisted
+        // append-only — previously-recorded sessions are not rewritten (see the
+        // `existing.contains` skip below) — so folding here would leave a mix of
+        // raw and canonical names across sessions recorded before vs after
+        // aliases were configured. To fold in a future change, wrap the key with
+        // `tokscale_core::normalize_model_for_grouping(&msg.model_id)` here and in
+        // the by-model/daily/session/JSON surfaces.
         *agg.models.entry(msg.model_id.clone()).or_insert(0) += 1;
         agg.message_count += msg.message_count;
     }

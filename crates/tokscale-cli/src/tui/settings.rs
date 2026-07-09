@@ -151,6 +151,16 @@ pub struct Settings {
     pub minutely_tab_enabled: bool,
     #[serde(default)]
     pub autosubmit: AutosubmitSettings,
+    /// User-defined model-name aliases folded at grouping time. Different
+    /// name-strings for one physical model (e.g. `claude-opus-4-8-cc`,
+    /// `anthropic/claude-opus-4-8`) map to a single canonical name so usage
+    /// stats do not split across rows. Keys and values are matched
+    /// case-insensitively against the normalized model name.
+    ///
+    /// `#[serde(default)]` keeps settings.json files written before the field
+    /// existed loading cleanly; an absent or empty map means no folding.
+    #[serde(default)]
+    pub model_aliases: tokscale_core::ModelAliasMap,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -201,6 +211,7 @@ impl Default for Settings {
             light: LightSettings::default(),
             minutely_tab_enabled: false,
             autosubmit: AutosubmitSettings::default(),
+            model_aliases: tokscale_core::ModelAliasMap::default(),
         }
     }
 }
@@ -218,6 +229,13 @@ pub fn load_scanner_settings() -> ScannerSettings {
 
 pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> ScannerSettings {
     Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).scanner
+}
+
+/// Loads the user's configured model aliases, honoring a `--home` override the
+/// same way [`load_scanner_settings_for_home`] does. A missing or malformed
+/// settings.json yields an empty map (no folding); this never errors.
+pub fn load_model_aliases_for_home(home_dir: &Option<String>) -> tokscale_core::ModelAliasMap {
+    Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).model_aliases
 }
 
 /// Returns the user's configured `defaultClients` list as raw lowercase
@@ -561,6 +579,35 @@ mod tests {
             AutosubmitSettings::default().interval_minutes,
             DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
         );
+    }
+
+    #[test]
+    fn settings_backfills_model_aliases_when_missing_from_json() {
+        // Older settings.json files predate the `modelAliases` key; they must
+        // still deserialize cleanly and default to an empty (no-op) alias map.
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.model_aliases.entries.is_empty());
+    }
+
+    #[test]
+    fn settings_malformed_model_aliases_does_not_wipe_other_fields() {
+        // A malformed `modelAliases` (not an object, or non-string values) must
+        // degrade to an empty map without failing the whole settings load, so
+        // unrelated settings survive.
+        let json = r#"{
+            "colorPalette": "custom",
+            "modelAliases": ["oops", 5]
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.model_aliases.entries.is_empty());
+        assert_eq!(parsed.color_palette, "custom");
     }
 
     #[test]
