@@ -465,28 +465,37 @@ pub fn built_in_extra_scan_paths_for(
 ///
 /// When `HERMES_HOME` points at an active named profile (for example
 /// `<root>/profiles/coder`), sibling profiles live one directory up under
-/// `<root>/profiles/*/state.db`; include that profile root as well. `read_dir`
-/// keeps discovery intentionally shallow: each immediate child of a `profiles/`
-/// directory is treated as one profile directory, matching Hermes' profile
-/// layout without walking arbitrary user data.
+/// `<root>/profiles/*/state.db`, while the default profile remains at
+/// `<root>/state.db`; include both locations as well. `read_dir` keeps
+/// profile discovery intentionally shallow: each immediate child of a
+/// `profiles/` directory is treated as one profile directory, matching Hermes'
+/// profile layout without walking arbitrary user data.
 pub(crate) fn discover_hermes_profile_state_dbs(hermes_home: &Path) -> Vec<PathBuf> {
     let mut profile_roots = vec![hermes_home.join("profiles")];
+    let mut dbs = Vec::new();
 
     if let Some(parent) = hermes_home.parent() {
         if parent.file_name().is_some_and(|name| name == "profiles") {
             profile_roots.push(parent.to_path_buf());
+            if let Some(root_home) = parent.parent() {
+                let default_db = root_home.join("state.db");
+                if default_db.is_file() {
+                    dbs.push(default_db);
+                }
+            }
         }
     }
 
-    let mut dbs: Vec<PathBuf> = profile_roots
-        .into_iter()
-        .filter_map(|profile_root| std::fs::read_dir(profile_root).ok())
-        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
-        .filter_map(|entry| {
-            let state_db = entry.path().join("state.db");
-            state_db.is_file().then_some(state_db)
-        })
-        .collect();
+    dbs.extend(
+        profile_roots
+            .into_iter()
+            .filter_map(|profile_root| std::fs::read_dir(profile_root).ok())
+            .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
+            .filter_map(|entry| {
+                let state_db = entry.path().join("state.db");
+                state_db.is_file().then_some(state_db)
+            }),
+    );
     dbs.sort_unstable();
     dbs.dedup();
     dbs
@@ -2718,6 +2727,10 @@ mod tests {
         let home = dir.path();
 
         let profile_root = home.join(".hermes/profiles");
+        let default_db = home.join(".hermes/state.db");
+        fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        File::create(&default_db).unwrap();
+
         let coder_dir = profile_root.join("coder");
         fs::create_dir_all(&coder_dir).unwrap();
         let coder_db = coder_dir.join("state.db");
@@ -2743,7 +2756,10 @@ mod tests {
         restore_env("HERMES_HOME", previous);
 
         assert_eq!(result.hermes_db.as_ref(), Some(&coder_db));
-        assert_eq!(result.hermes_db_paths(), vec![coder_db, research_db]);
+        assert_eq!(
+            result.hermes_db_paths(),
+            vec![coder_db, research_db, default_db]
+        );
     }
 
     #[test]
