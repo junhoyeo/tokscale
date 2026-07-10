@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useMemo, useSyncExternalStore } from "react";
 import Image from "next/image";
 import styled, { css } from "styled-components";
 import { toast } from "react-toastify";
@@ -357,16 +357,48 @@ const ActionText = styled.span`
   line-height: 1;
 `;
 
+// No-op subscription for `useSyncExternalStore`: the "is this the client?"
+// signal never changes after hydration, so there is nothing to subscribe to.
+const subscribeNoop = () => () => {};
+
+/**
+ * Formats the "last updated" timestamp for display.
+ *
+ * Derived purely from its arguments so the rendered value always reflects the
+ * CURRENT `lastUpdated` prop — there is no one-render lag from stashing the
+ * formatted string in state and updating it from an effect. Before the component
+ * has mounted on the client (`isMounted === false`) we format in UTC so the
+ * first client render matches the server-rendered markup and no hydration
+ * mismatch occurs; once mounted we switch to the viewer's local timezone.
+ */
+export function formatLastUpdated(
+  lastUpdated: string | null | undefined,
+  isMounted: boolean,
+): string | null {
+  if (!lastUpdated) return null;
+  const date = new Date(lastUpdated);
+  return isMounted
+    ? date.toLocaleString("en-US")
+    : date.toLocaleString("en-US", { timeZone: "UTC" });
+}
+
 export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) {
   const [isEmbedDialogOpen, setIsEmbedDialogOpen] = useState(false);
-  const [localUpdatedAt, setLocalUpdatedAt] = useState<string | null>(null);
   const avatarUrl = user.avatarUrl || `https://github.com/${user.username}.png`;
 
-  useEffect(() => {
-    if (lastUpdated) {
-      setLocalUpdatedAt(new Date(lastUpdated).toLocaleString("en-US"));
-    }
-  }, [lastUpdated]);
+  // Reports the server value (false) during SSR and the first hydration render,
+  // then the client value (true) afterwards — flipping us from UTC to local
+  // time without a hydration mismatch and without a setState-in-effect.
+  const isMounted = useSyncExternalStore(
+    subscribeNoop,
+    () => true,
+    () => false,
+  );
+
+  const formattedLastUpdated = useMemo(
+    () => formatLastUpdated(lastUpdated, isMounted),
+    [lastUpdated, isMounted],
+  );
 
   const handleShareClick = async () => {
     try {
@@ -471,7 +503,7 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
             style={{ color: "var(--color-fg-muted)" }}
             suppressHydrationWarning
           >
-            Last Updated: {localUpdatedAt ?? new Date(lastUpdated).toLocaleString("en-US", { timeZone: "UTC" })}
+            Last Updated: {formattedLastUpdated}
           </LastUpdatedText>
         )}
 
