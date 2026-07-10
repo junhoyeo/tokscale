@@ -570,11 +570,10 @@ impl App {
     }
 
     pub fn model_color_for(&self, provider: &str, model: &str) -> Color {
-        let provider = if provider.is_empty() || provider.contains(", ") {
-            get_provider_from_model(model)
-        } else {
-            provider
-        };
+        // Same key derivation as `build_model_shade_map`, so gateway providers
+        // (e.g. `github-copilot`) resolve to the model's own vendor ramp and the
+        // lookup never misses into the fallback for a model we've ranked.
+        let provider = super::colors::provider_color_key(provider, model);
         let lookup_key = super::colors::model_shade_key(provider, model);
         let color = self
             .model_shade_map
@@ -5016,6 +5015,53 @@ mod tests {
         assert_ne!(
             app.model_color_for("anthropic", "sonnet-shared"),
             app.model_color_for("openai", "sonnet-shared")
+        );
+    }
+
+    #[test]
+    fn test_gateway_provider_model_uses_model_vendor_color() {
+        // Regression: a Claude model served through the github-copilot gateway
+        // must render in the Anthropic ramp, not the neutral "unknown" gray.
+        // The gateway has no vendor palette of its own, so the model's own
+        // vendor decides the color.
+        let mut app = make_app();
+        let copilot_fable = ModelUsage {
+            model: "claude-fable-5".to_string(),
+            provider: "github-copilot".to_string(),
+            client: "opencode".to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: TokenBreakdown::default(),
+            cost: 3.0,
+            performance: Default::default(),
+            session_count: 1,
+        };
+        app.data.models = vec![
+            ModelUsage {
+                provider: "anthropic".to_string(),
+                cost: 5.0,
+                ..copilot_fable.clone()
+            },
+            copilot_fable,
+        ];
+        app.build_model_shade_map();
+
+        // Fable is the flagship tier -> base Anthropic shade.
+        let anthropic_base = app.theme.color(get_provider_shade("anthropic", 0));
+        assert_eq!(
+            app.model_color_for("github-copilot", "claude-fable-5"),
+            anthropic_base,
+            "copilot-served Claude must use the Anthropic ramp, not unknown gray"
+        );
+        // Identical to the natively-served model.
+        assert_eq!(
+            app.model_color_for("anthropic", "claude-fable-5"),
+            app.model_color_for("github-copilot", "claude-fable-5")
+        );
+        // And definitively not the neutral gray a raw github-copilot key yields.
+        assert_ne!(
+            app.model_color_for("github-copilot", "claude-fable-5"),
+            app.theme.color(get_provider_shade("github-copilot", 0))
         );
     }
 }

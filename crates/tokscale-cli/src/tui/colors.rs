@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use ratatui::style::Color;
 
 use super::data::ModelUsage;
-use super::ui::widgets::{get_provider_from_model, get_provider_shade};
+use super::ui::widgets::{get_provider_from_model, get_provider_shade, provider_has_palette};
 
 pub fn model_shade_key(provider: &str, model: &str) -> String {
     format!("{provider}\0{model}")
@@ -54,8 +54,16 @@ pub fn build_model_shade_map(models: &[ModelUsage]) -> HashMap<String, Color> {
     map
 }
 
-fn provider_color_key<'a>(provider: &'a str, model: &'a str) -> &'a str {
-    if provider.is_empty() || provider.contains(", ") {
+/// Resolves the provider whose color ramp a model's name should render in.
+///
+/// Empty or mixed (`", "`-joined) providers color by the model's own vendor.
+/// So do gateway providers that resell other vendors' models (e.g.
+/// `github-copilot`, `openrouter`): they have no vendor palette of their own, so
+/// a Claude model served through Copilot still gets the Anthropic ramp instead
+/// of the neutral "unknown" gray. Both the shade-map build and the per-cell
+/// lookup route through this, so their keys always agree.
+pub(crate) fn provider_color_key<'a>(provider: &'a str, model: &'a str) -> &'a str {
+    if provider.is_empty() || provider.contains(", ") || !provider_has_palette(provider) {
         get_provider_from_model(model)
     } else {
         provider
@@ -150,6 +158,52 @@ mod tests {
 
     fn shade(map: &HashMap<String, Color>, provider: &str, model: &str) -> Color {
         map.get(&model_shade_key(provider, model)).copied().unwrap()
+    }
+
+    #[test]
+    fn provider_color_key_routes_gateways_to_model_vendor() {
+        // Known vendor providers keep their own identity.
+        assert_eq!(
+            provider_color_key("anthropic", "claude-opus-4-8"),
+            "anthropic"
+        );
+        assert_eq!(provider_color_key("openai", "gpt-5.4"), "openai");
+        // Gateway providers with no vendor palette color by the model's vendor.
+        assert_eq!(
+            provider_color_key("github-copilot", "claude-fable-5"),
+            "anthropic"
+        );
+        assert_eq!(
+            provider_color_key("github-copilot", "gpt-5.3-codex"),
+            "openai"
+        );
+        // Empty / mixed providers also defer to the model.
+        assert_eq!(provider_color_key("", "claude-fable-5"), "anthropic");
+        assert_eq!(
+            provider_color_key("anthropic, github-copilot", "claude-fable-5"),
+            "anthropic"
+        );
+    }
+
+    #[test]
+    fn gateway_and_native_claude_share_one_shade_bucket() {
+        // Regression: the same Claude model served natively and via the
+        // github-copilot gateway must fold into one Anthropic-ramp bucket and
+        // rank by family tier, not split into a separate "unknown" gray key.
+        let map = build_model_shade_map(&[
+            usage("claude-fable-5", "github-copilot", 3.0),
+            usage("claude-opus-4-8", "anthropic", 100.0),
+        ]);
+        assert_eq!(
+            shade(&map, "anthropic", "claude-fable-5"),
+            get_provider_shade("anthropic", 0),
+            "copilot fable takes the flagship Anthropic shade"
+        );
+        assert_eq!(
+            shade(&map, "anthropic", "claude-opus-4-8"),
+            get_provider_shade("anthropic", 1),
+            "opus ranks below fable in the shared bucket"
+        );
     }
 
     #[test]

@@ -161,6 +161,36 @@ pub fn get_model_color(model: &str) -> Color {
     get_provider_shade(get_provider_from_model(model), 0)
 }
 
+/// Maps a lowercased provider id to its built-in vendor shade ramp, or `None`
+/// when the provider has no known vendor palette. Kept as the single source of
+/// truth so [`get_provider_shade`] and [`provider_has_palette`] never drift.
+fn known_provider_palette(provider_lower: &str) -> Option<&'static [(u8, u8, u8)]> {
+    let palette: &[(u8, u8, u8)] = match provider_lower {
+        s if s.contains("anthropic") => &ANTHROPIC_SHADES,
+        s if s.contains("openai") => &OPENAI_SHADES,
+        s if s.contains("google") || s.contains("gemini") => &GOOGLE_SHADES,
+        s if s.contains("deepseek") => &DEEPSEEK_SHADES,
+        s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
+        s if s.contains("meta") || s.contains("llama") => &META_SHADES,
+        s if s.contains("cursor") => &CURSOR_SHADES,
+        s if s.contains("sakana") || s.contains("fugu") => &SAKANA_SHADES,
+        _ => return None,
+    };
+    Some(palette)
+}
+
+/// Whether `provider` resolves to a known vendor color — either a built-in
+/// shade ramp or a user `[colors.providers]` override. Gateway providers that
+/// resell other vendors' models (e.g. `github-copilot`, `openrouter`) have no
+/// vendor palette of their own and return `false`, so callers can color by the
+/// model's own vendor instead of the neutral "unknown" gray.
+pub fn provider_has_palette(provider: &str) -> bool {
+    TokscaleConfig::load()
+        .get_provider_color(provider)
+        .is_some()
+        || known_provider_palette(&provider.to_lowercase()).is_some()
+}
+
 /// Returns the shade for a given `(provider, rank)` pair.
 /// Honors `[colors.providers]` config overrides at every rank by deriving
 /// a 7-step lighten-to-white palette from the override base color.
@@ -170,17 +200,7 @@ pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
     }
 
     let p = provider.to_lowercase();
-    let palette: &[(u8, u8, u8)] = match p.as_str() {
-        s if s.contains("anthropic") => &ANTHROPIC_SHADES,
-        s if s.contains("openai") => &OPENAI_SHADES,
-        s if s.contains("google") || s.contains("gemini") => &GOOGLE_SHADES,
-        s if s.contains("deepseek") => &DEEPSEEK_SHADES,
-        s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
-        s if s.contains("meta") || s.contains("llama") => &META_SHADES,
-        s if s.contains("cursor") => &CURSOR_SHADES,
-        s if s.contains("sakana") || s.contains("fugu") => &SAKANA_SHADES,
-        _ => &UNKNOWN_SHADES,
-    };
+    let palette = known_provider_palette(&p).unwrap_or(&UNKNOWN_SHADES);
 
     let idx = rank.min(palette.len() - 1);
     let (r, g, b) = palette[idx];
@@ -763,5 +783,19 @@ mod tests {
             get_provider_shade("meta-llama-endpoint", 0),
             get_provider_shade("meta", 0)
         );
+    }
+
+    #[test]
+    fn provider_has_palette_flags_only_known_vendors() {
+        // Known vendors (and fuzzy substrings of them) have their own ramp.
+        assert!(provider_has_palette("anthropic"));
+        assert!(provider_has_palette("openai"));
+        assert!(provider_has_palette("openrouter-gemini-prod"));
+        // Gateway/reseller providers do not — callers must color by the
+        // model's own vendor instead of the neutral "unknown" gray.
+        assert!(!provider_has_palette("github-copilot"));
+        assert!(!provider_has_palette("openrouter"));
+        assert!(!provider_has_palette("unknown"));
+        assert!(!provider_has_palette(""));
     }
 }
