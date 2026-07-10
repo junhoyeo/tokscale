@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import styled, { css } from "styled-components";
 import { toast } from "react-toastify";
@@ -359,7 +359,14 @@ const ActionText = styled.span`
 
 export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) {
   const [isEmbedDialogOpen, setIsEmbedDialogOpen] = useState(false);
+  const [localUpdatedAt, setLocalUpdatedAt] = useState<string | null>(null);
   const avatarUrl = user.avatarUrl || `https://github.com/${user.username}.png`;
+
+  useEffect(() => {
+    if (lastUpdated) {
+      setLocalUpdatedAt(new Date(lastUpdated).toLocaleString("en-US"));
+    }
+  }, [lastUpdated]);
 
   const handleShareClick = async () => {
     try {
@@ -462,8 +469,9 @@ export function ProfileHeader({ user, stats, lastUpdated }: ProfileHeaderProps) 
         {lastUpdated && (
           <LastUpdatedText
             style={{ color: "var(--color-fg-muted)" }}
+            suppressHydrationWarning
           >
-            Last Updated: {new Date(lastUpdated).toLocaleString("en-US", { timeZone: "UTC" })}
+            Last Updated: {localUpdatedAt ?? new Date(lastUpdated).toLocaleString("en-US", { timeZone: "UTC" })}
           </LastUpdatedText>
         )}
 
