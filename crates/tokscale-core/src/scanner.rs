@@ -463,46 +463,86 @@ pub fn built_in_extra_scan_paths_for(
 /// Hermes stores the default profile at `<hermes-home>/state.db` and named
 /// profiles at `<hermes-home>/profiles/<profile>/state.db`.
 ///
-/// When `HERMES_HOME` points at an active named profile (for example
-/// `<root>/profiles/coder`), sibling profiles live one directory up under
-/// `<root>/profiles/*/state.db`, while the default profile remains at
-/// `<root>/state.db`; include both locations as well. `read_dir` keeps
-/// profile discovery intentionally shallow: each immediate child of a
-/// `profiles/` directory is treated as one profile directory, matching Hermes'
-/// profile layout without walking arbitrary user data.
+/// Data-isolation rule: sibling and default profiles are ONLY discovered when
+/// scanning from the *root* Hermes home. When `HERMES_HOME` points at a
+/// specific named profile (for example `<root>/profiles/coder`, i.e. its parent
+/// directory is `profiles/`), the user has expressed intent to isolate that one
+/// profile, so we scan ONLY that profile. We deliberately do NOT climb up to
+/// sibling profiles under `<root>/profiles/*` or the default profile at
+/// `<root>/state.db`. Auto-discovering (and therefore making uploadable via
+/// `tokscale submit`) sibling/default profiles from a profile-scoped
+/// `HERMES_HOME` would silently break the isolation boundary the user set up.
+/// The active profile's own `state.db` is resolved separately as the primary
+/// Hermes database, so this function returns no extra paths in that case.
+///
+/// `read_dir` keeps profile discovery intentionally shallow: each immediate
+/// child of the root home's `profiles/` directory is treated as one profile
+/// directory, matching Hermes' profile layout without walking arbitrary user
+/// data.
 pub(crate) fn discover_hermes_profile_state_dbs(hermes_home: &Path) -> Vec<PathBuf> {
-    let mut profile_roots = Vec::new();
-    let mut dbs = Vec::new();
-
-    if let Some(parent) = hermes_home.parent() {
-        if parent.file_name().is_some_and(|name| name == "profiles") {
-            profile_roots.push(parent.to_path_buf());
-            if let Some(root_home) = parent.parent() {
-                let default_db = root_home.join("state.db");
-                if default_db.is_file() {
-                    dbs.push(default_db);
-                }
-            }
-        } else {
-            profile_roots.push(hermes_home.join("profiles"));
-        }
-    } else {
-        profile_roots.push(hermes_home.join("profiles"));
+    // Profile-scoped `HERMES_HOME` (parent directory is `profiles/`): isolate to
+    // this single profile and perform no sibling/default discovery.
+    if hermes_home
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "profiles")
+    {
+        return Vec::new();
     }
 
-    dbs.extend(
-        profile_roots
-            .into_iter()
-            .filter_map(|profile_root| std::fs::read_dir(profile_root).ok())
-            .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
-            .filter_map(|entry| {
-                let state_db = entry.path().join("state.db");
-                state_db.is_file().then_some(state_db)
-            }),
-    );
+    // Root Hermes home: discover every named profile under `profiles/`.
+    let mut dbs: Vec<PathBuf> = std::fs::read_dir(hermes_home.join("profiles"))
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
+        .filter_map(|entry| {
+            let state_db = entry.path().join("state.db");
+            state_db.is_file().then_some(state_db)
+        })
+        .collect();
     dbs.sort_unstable();
     dbs.dedup();
     dbs
+}
+
+/// Candidate Hermes home directories to scan for `state.db` and profiles.
+///
+/// Resolution order mirrors the Crush discovery's Windows rigor
+/// ([`crush_registry_candidates`]):
+/// 1. `HERMES_HOME` when set, otherwise `~/.hermes` — the `PathRoot::EnvVar`
+///    strategy for [`ClientId::Hermes`].
+/// 2. `%LOCALAPPDATA%\hermes` on native Windows (env roots enabled).
+/// 3. `<home>/AppData/Local/hermes` — the literal Windows fallback, always
+///    appended so it is exercised cross-platform (matching Crush's
+///    `AppData/Local` fallback).
+///
+/// The native Windows roots are only consulted when `HERMES_HOME` is *not* set:
+/// an explicit `HERMES_HOME` is authoritative and may be profile-scoped for data
+/// isolation, so widening discovery to the default Windows home in that case
+/// would reintroduce the isolation leak that the profile-scoping rule prevents.
+fn hermes_home_candidates(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut homes = vec![PathBuf::from(
+        ClientId::Hermes
+            .data()
+            .root
+            .resolve_with_env_strategy(home_dir, use_env_roots),
+    )];
+
+    let hermes_home_set = use_env_roots
+        && std::env::var("HERMES_HOME")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    if !hermes_home_set {
+        if cfg!(target_os = "windows") && use_env_roots {
+            if let Some(local_app_data) =
+                std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
+            {
+                homes.push(PathBuf::from(local_app_data).join("hermes"));
+            }
+        }
+        homes.push(PathBuf::from(home_dir).join("AppData/Local/hermes"));
+    }
+
+    homes
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1310,18 +1350,26 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Hermes) {
-        let hermes_db_path = ClientId::Hermes
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        let hermes_db_path = PathBuf::from(hermes_db_path);
-        if hermes_db_path.exists() {
-            result.hermes_db = Some(hermes_db_path.clone());
+        // Scan each candidate Hermes home (primary root plus native Windows
+        // fallbacks). The first candidate whose `state.db` exists becomes the
+        // primary `hermes_db`; every other default/profile db is collected as an
+        // extra path. Profile-scoped homes contribute only their own profile
+        // (see `discover_hermes_profile_state_dbs`).
+        let mut extra_dbs: Vec<PathBuf> = Vec::new();
+        for hermes_home in hermes_home_candidates(home_dir, use_env_roots) {
+            let default_db = hermes_home.join("state.db");
+            if default_db.is_file() {
+                if result.hermes_db.is_none() {
+                    result.hermes_db = Some(default_db);
+                } else if result.hermes_db.as_ref() != Some(&default_db) {
+                    extra_dbs.push(default_db);
+                }
+            }
+            extra_dbs.extend(discover_hermes_profile_state_dbs(&hermes_home));
         }
-        if let Some(hermes_home) = hermes_db_path.parent() {
-            result
-                .get_mut(ClientId::Hermes)
-                .extend(discover_hermes_profile_state_dbs(hermes_home));
-        }
+        extra_dbs.sort_unstable();
+        extra_dbs.dedup();
+        result.get_mut(ClientId::Hermes).extend(extra_dbs);
     }
 
     if enabled.contains(&ClientId::Goose) {
@@ -2724,8 +2772,11 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_scan_all_clients_with_scanner_settings_auto_discovers_sibling_hermes_profiles_from_profile_scoped_env_home(
+    fn test_scan_all_clients_with_scanner_settings_profile_scoped_hermes_home_isolates_to_own_profile(
     ) {
+        // Data-isolation guarantee: a profile-scoped `HERMES_HOME` must NOT pull
+        // in sibling profiles under `<root>/profiles/*` or the default profile at
+        // `<root>/state.db`. Only the scoped profile's own `state.db` is scanned.
         let previous = std::env::var("HERMES_HOME").ok();
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -2745,8 +2796,7 @@ mod tests {
         let research_db = research_dir.join("state.db");
         File::create(&research_db).unwrap();
 
-        // Shallow sibling discovery should not descend into nested directories,
-        // and profile-scoped homes should not scan `<active-profile>/profiles`.
+        // Profile-scoped homes must also not scan `<active-profile>/profiles`.
         let nested_dir = coder_dir.join("profiles/archived");
         fs::create_dir_all(&nested_dir).unwrap();
         File::create(nested_dir.join("state.db")).unwrap();
@@ -2761,10 +2811,54 @@ mod tests {
         restore_env("HERMES_HOME", previous);
 
         assert_eq!(result.hermes_db.as_ref(), Some(&coder_db));
-        assert_eq!(
-            result.hermes_db_paths(),
-            vec![coder_db, research_db, default_db]
+        assert_eq!(result.hermes_db_paths(), vec![coder_db.clone()]);
+        assert!(
+            !result.hermes_db_paths().contains(&research_db),
+            "profile-scoped HERMES_HOME must not discover sibling profiles"
         );
+        assert!(
+            !result.hermes_db_paths().contains(&default_db),
+            "profile-scoped HERMES_HOME must not discover the default profile"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_discovers_hermes_windows_local_appdata_home() {
+        // Native Windows root: Hermes stores its home under
+        // `%LOCALAPPDATA%\hermes` (literal `<home>/AppData/Local/hermes`). Run
+        // with env roots disabled so this exercises the cross-platform
+        // `AppData/Local` fallback, mirroring the Crush LOCALAPPDATA tests.
+        let previous_hermes_home = std::env::var("HERMES_HOME").ok();
+        let previous_local_app_data = std::env::var("LOCALAPPDATA").ok();
+        unsafe { std::env::remove_var("HERMES_HOME") };
+        unsafe { std::env::remove_var("LOCALAPPDATA") };
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let windows_home = home.join("AppData/Local/hermes");
+        fs::create_dir_all(&windows_home).unwrap();
+        let default_db = windows_home.join("state.db");
+        File::create(&default_db).unwrap();
+
+        let profile_dir = windows_home.join("profiles/research");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        File::create(&profile_db).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        restore_env("HERMES_HOME", previous_hermes_home);
+        restore_env("LOCALAPPDATA", previous_local_app_data);
+
+        assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
+        assert_eq!(result.hermes_db_paths(), vec![default_db, profile_db]);
     }
 
     #[test]
