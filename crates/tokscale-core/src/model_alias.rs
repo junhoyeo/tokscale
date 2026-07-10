@@ -8,8 +8,12 @@
 //! model.
 //!
 //! The fold runs as the terminal step of [`crate::normalize_model_for_grouping`],
-//! so it applies uniformly to the models report, every `--group-by`, monthly and
-//! hourly reports, the graph, and the TUI. It is deliberately **not** applied
+//! so it applies uniformly to the local models report, every `--group-by`,
+//! monthly and hourly reports, and the TUI. It is **presentation only**: the
+//! submit/upload/export/persist path uses [`crate::canonical_model_id`] (the
+//! same syntactic normalization *without* the alias fold), so a machine-local
+//! alias config can never rewrite the model identity that leaves the machine or
+//! fragment history across a user's devices. It is deliberately **not** applied
 //! before pricing (per-message cost is computed on the raw model id upstream), so
 //! folding can only relabel and merge already-costed buckets and can never change
 //! a cost total. It is orthogonal to the pricing alias table
@@ -85,12 +89,19 @@ impl ModelAliasResolver {
             if map.len() >= MAX_MODEL_ALIASES {
                 break;
             }
-            let alias = crate::normalize_syntactic(raw_alias);
+            // Store keys under a separator-insensitive match key so matching is
+            // provider-agnostic (not claude-only): `gpt-5-5` and `gpt-5.5` share
+            // the key `gpt-5-5`. The stored canonical value keeps its
+            // `normalize_syntactic` spelling — it is the label shown verbatim.
+            let alias_norm = crate::normalize_syntactic(raw_alias);
             let canonical = crate::normalize_syntactic(raw_canonical);
-            if alias.is_empty() || canonical.is_empty() || alias == canonical {
+            // Self-map drop compares the *exact* normalized forms, not the match
+            // keys: `{gpt-5-5: gpt-5.5}` is a real separator relabel that must be
+            // kept, whereas `{gpt-5.5: gpt-5.5}` is a genuine no-op to drop.
+            if alias_norm.is_empty() || canonical.is_empty() || alias_norm == canonical {
                 continue;
             }
-            map.insert(alias, canonical);
+            map.insert(match_key(&alias_norm), canonical);
         }
         Self { map }
     }
@@ -101,11 +112,21 @@ impl ModelAliasResolver {
     /// alias chains collapse one step and cycles are structurally impossible.
     /// Returns `name` unchanged on a miss.
     pub(crate) fn apply(&self, name: String) -> String {
-        match self.map.get(&name) {
+        match self.map.get(&match_key(&name)) {
             Some(canonical) => canonical.clone(),
             None => name,
         }
     }
+}
+
+/// Reduce an already-`normalize_syntactic`'d model name to a separator-
+/// insensitive match key by rewriting every `.` to `-`. This generalizes alias
+/// matching beyond claude: `normalize_syntactic` only rewrites `.`→`-` inside
+/// *claude* version numbers, so without this a `gpt-5-5` alias would miss
+/// `gpt-5.5`. Folding on the match key alone keeps the displayed canonical form
+/// (e.g. `gpt-5.5`) untouched for models that were never aliased.
+fn match_key(normalized: &str) -> String {
+    normalized.replace('.', "-")
 }
 
 static GLOBAL: OnceLock<ModelAliasResolver> = OnceLock::new();
@@ -187,6 +208,32 @@ mod tests {
         let r = resolver(&[("model-a", "model-b"), ("model-b", "model-c")]);
         assert_eq!(r.apply("model-a".to_string()), "model-b");
         assert_eq!(r.apply("model-b".to_string()), "model-c");
+    }
+
+    #[test]
+    fn separator_insensitive_match_is_provider_agnostic() {
+        // Finding A: `normalize_syntactic` rewrites `.`→`-` only for claude, so
+        // the resolver must fold separators itself for every other provider. The
+        // regression is when the CONFIGURED alias key and the model string the
+        // provider actually reports use different separators — the old exact
+        // HashMap lookup missed and left the variant unfolded.
+
+        // Dashed alias key (`gpt-5-5-cc`), dotted model spelling (`gpt-5.5-cc`):
+        // must still fold to the canonical `gpt-5.5`.
+        let dashed_key = resolver(&[("gpt-5-5-cc", "gpt-5.5")]);
+        assert_eq!(
+            dashed_key.apply(crate::normalize_syntactic("gpt-5.5-cc")),
+            "gpt-5.5",
+            "a dashed alias key must match the dotted model spelling (gpt-5-5 ↔ gpt-5.5)"
+        );
+
+        // Mirror: dotted alias key, dashed model spelling.
+        let dotted_key = resolver(&[("gpt-5.5-cc", "gpt-5.5")]);
+        assert_eq!(
+            dotted_key.apply(crate::normalize_syntactic("gpt-5-5-cc")),
+            "gpt-5.5",
+            "a dotted alias key must match the dashed model spelling"
+        );
     }
 
     #[test]

@@ -2527,6 +2527,68 @@ fn test_models_alias_totals_unchanged() {
 }
 
 #[test]
+fn test_alias_folds_local_report_but_not_submitted_payload() {
+    // Finding B: a machine-local `modelAliases` config must fold ONLY local
+    // presentation/grouping. The model identity that leaves the machine
+    // (submit/upload/export payload) must stay raw, or a per-device alias config
+    // would rewrite and fragment uploaded history across a user's machines. The
+    // `graph` command emits the exact byte shape that `submit` POSTs, so it is
+    // the faithful stand-in for the submitted payload.
+    let tmp = create_temp_fixture_dir();
+    add_alias_variant_message(tmp.path());
+    write_model_aliases(tmp.path(), r#"{"claude-sonnet-4-cc": "claude-sonnet-4"}"#);
+
+    // Local models report: the alias DOES fold (canonical name only, no variant).
+    let models = models_by_name(tmp.path());
+    let displayed: Vec<&str> = models["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["model"].as_str().unwrap())
+        .collect();
+    assert!(
+        displayed.contains(&"claude-sonnet-4"),
+        "local report must show the canonical name, got {displayed:?}"
+    );
+    assert!(
+        !displayed.contains(&"claude-sonnet-4-cc"),
+        "local report must fold the -cc variant away, got {displayed:?}"
+    );
+
+    // Submit/export payload (`graph` prints the submit shape to stdout): the raw
+    // variant MUST survive unfolded, both in the models summary and per-day.
+    let output = cmd_with_home(tmp.path())
+        .args(["graph", "--client", "opencode", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "graph command failed: {output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let submitted_models: Vec<&str> = payload["summary"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert!(
+        submitted_models.contains(&"claude-sonnet-4-cc"),
+        "submitted payload must keep the RAW model id (alias must not leak), got {submitted_models:?}"
+    );
+
+    let per_contribution_models: Vec<&str> = payload["contributions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["clients"].as_array().unwrap())
+        .map(|s| s["modelId"].as_str().unwrap())
+        .collect();
+    assert!(
+        per_contribution_models.contains(&"claude-sonnet-4-cc"),
+        "submitted per-day contributions must carry the RAW model id, got {per_contribution_models:?}"
+    );
+}
+
+#[test]
 fn test_models_group_by_session_emits_session_id_per_entry() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())

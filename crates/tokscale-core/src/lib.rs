@@ -60,12 +60,32 @@ pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str>
     Some(base_model)
 }
 
+/// Canonical model identity — the model id that leaves the machine.
+///
+/// This is [`normalize_syntactic`] with **no alias folding**: purely structural
+/// canonicalization (lowercase, strip a `(reasoning-tier)` suffix, strip a
+/// trailing `-YYYYMMDD` date, rewrite `.`→`-` inside claude version numbers, and
+/// fold an `anthropic/claude-…` prefix). It never consults the user's
+/// machine-local `modelAliases`.
+///
+/// Every path that submits, uploads, exports as raw data, or persists a model id
+/// MUST use this, not [`normalize_model_for_grouping`]. A machine-local alias
+/// config must never rewrite the model identity persisted server-side, or usage
+/// history would fragment and fork across a user's devices.
+pub fn canonical_model_id(model_id: &str) -> String {
+    normalize_syntactic(model_id)
+}
+
+/// Local display/grouping model name: [`canonical_model_id`] plus the user's
+/// configured `modelAliases` fold. Every local report-grouping surface — the
+/// models report, every `--group-by`, monthly, hourly, and the TUI — routes
+/// through this so name variants fold uniformly for presentation.
+///
+/// The alias fold is **presentation only** and must never reach the
+/// submit/upload/export/persist path (those use [`canonical_model_id`]), or a
+/// machine-local alias config would rewrite the uploaded model identity. An
+/// empty/unset alias config makes this identical to [`canonical_model_id`].
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
-    // Every model-grouping path routes through this function, so folding the
-    // user-configured model aliases here (after syntactic normalization) applies
-    // them uniformly to the models report, every `--group-by`, monthly, hourly,
-    // the graph, and the TUI. An empty/unset alias config is a strict identity
-    // no-op, so behavior is byte-for-byte unchanged unless aliases are set.
     model_alias::global().apply(normalize_syntactic(model_id))
 }
 
@@ -73,10 +93,11 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
 /// `(reasoning-tier)` suffix, strip a trailing `-YYYYMMDD` date, rewrite `.`→`-`
 /// inside claude version numbers, and fold an `anthropic/claude-…` prefix.
 ///
-/// This is the syntactic half of [`normalize_model_for_grouping`]. It is also
-/// used by [`model_alias::ModelAliasResolver`] to normalize configured alias
-/// keys and values into the same space, so a configured alias matches its model
-/// regardless of case, dated suffix, or `.`-vs-`-` spelling.
+/// This is the syntactic half of [`normalize_model_for_grouping`] /
+/// [`canonical_model_id`]. It is also used by [`model_alias::ModelAliasResolver`]
+/// to normalize configured alias keys and values into the same space, so a
+/// configured alias matches its model regardless of case, dated suffix, or
+/// `.`-vs-`-` spelling.
 pub(crate) fn normalize_syntactic(model_id: &str) -> String {
     let mut name = model_id.to_lowercase();
 

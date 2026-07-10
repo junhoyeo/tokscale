@@ -274,17 +274,20 @@ impl DayAccumulator {
             .saturating_add(msg.tokens.reasoning);
 
         // Update client contribution
+        // Canonical (alias-free) id: this contribution is serialized into the
+        // submit/upload/export payload, so a machine-local `modelAliases` config
+        // must not rewrite the model identity that leaves the machine.
         let key = format!(
             "{}:{}",
             msg.client,
-            crate::normalize_model_for_grouping(&msg.model_id)
+            crate::canonical_model_id(&msg.model_id)
         );
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client: msg.client.clone(),
-                model_id: crate::normalize_model_for_grouping(&msg.model_id),
+                model_id: crate::canonical_model_id(&msg.model_id),
                 provider_id: msg.provider_id.clone(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
@@ -509,7 +512,9 @@ impl SessionAccumulator {
             .saturating_add(msg.tokens.reasoning);
 
         // Track tightest (client, provider, model) by cost contribution.
-        let normalized_model = crate::normalize_model_for_grouping(&msg.model_id);
+        // Canonical (alias-free) id — this feeds the submitted/exported payload,
+        // so machine-local aliases must not rewrite it (see `add_message`).
+        let normalized_model = crate::canonical_model_id(&msg.model_id);
         let key = format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model);
         let client_entry = self
             .clients
