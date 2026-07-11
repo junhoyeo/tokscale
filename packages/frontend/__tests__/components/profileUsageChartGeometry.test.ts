@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createNonCrossingStackGeometry,
+  pointToChartPercent,
   sampleCubicValueSegment,
   type NonCrossingStackGeometry,
 } from "../../src/components/profile/usageChartGeometry";
@@ -150,6 +151,17 @@ function expectSafeStack(geometry: NonCrossingStackGeometry): void {
 }
 
 describe("non-crossing usage chart geometry", () => {
+  it("maps chart coordinates to CSS percentages without inheriting SVG stretch", () => {
+    expect(pointToChartPercent(424, 128, 848, 256)).toEqual({
+      left: 50,
+      top: 50,
+    });
+    expect(pointToChartPercent(-1, 300, 848, 256)).toEqual({
+      left: 0,
+      top: 100,
+    });
+  });
+
   it("keeps a zero-thickness interval coincident when adjacent spikes would make cumulative curves cross", () => {
     const geometry = createNonCrossingStackGeometry([
       [0, 10, 20, 30],

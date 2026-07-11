@@ -57,6 +57,22 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
+export function pointToChartPercent(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): { left: number; top: number } {
+  const safeWidth = Number.isFinite(width) && width > 0 ? width : 1;
+  const safeHeight = Number.isFinite(height) && height > 0 ? height : 1;
+  const safeX = Number.isFinite(x) ? x : 0;
+  const safeY = Number.isFinite(y) ? y : 0;
+  return {
+    left: clamp((safeX / safeWidth) * 100, 0, 100),
+    top: clamp((safeY / safeHeight) * 100, 0, 100),
+  };
+}
+
 /**
  * Smooth one nonnegative series with a Fritsch-Carlson monotone cubic.
  *

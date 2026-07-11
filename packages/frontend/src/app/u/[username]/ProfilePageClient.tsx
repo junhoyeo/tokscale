@@ -185,27 +185,31 @@ export default function ProfilePageClient({
                           : "Model activity for the last 7 days, grouped by provider."
                     }
                   />
-                  <ProfileContributionGraph
-                    contributions={data.contributions}
-                    rangeStart={chartRange.start}
-                    rangeEnd={chartRange.end}
-                    description={
-                      period === "all"
-                        ? "Daily contribution density across the latest 12 months."
-                        : period === "month"
-                          ? "Daily contribution density across the last 30 days."
-                          : "Daily contribution density across the last 7 days."
-                    }
-                  />
-                  <TokenBreakdown stats={stats} />
-                  <ProfileInsights
-                    stats={stats}
-                    favoriteModel={favoriteModel}
-                    clients={data.clients}
-                    models={data.models}
-                    mcpServers={data.mcpServers ?? []}
-                    period={period}
-                  />
+                  <ActivityDetailsGrid>
+                    <ActivityMainColumn>
+                      <ProfileContributionGraph
+                        contributions={data.contributions}
+                        rangeStart={chartRange.start}
+                        rangeEnd={chartRange.end}
+                        description={
+                          period === "all"
+                            ? "Daily contribution density across the latest 12 months."
+                            : period === "month"
+                              ? "Daily contribution density across the last 30 days."
+                              : "Daily contribution density across the last 7 days."
+                        }
+                      />
+                      <TokenBreakdown stats={stats} />
+                    </ActivityMainColumn>
+                    <ProfileInsights
+                      stats={stats}
+                      favoriteModel={favoriteModel}
+                      clients={data.clients}
+                      models={data.models}
+                      mcpServers={data.mcpServers ?? []}
+                      period={period}
+                    />
+                  </ActivityDetailsGrid>
                 </ActivityLayout>
               ) : (
                 <EmptyState>
@@ -403,12 +407,14 @@ const PageContainer = styled.div`
 
 const MainContent = styled.main`
   width: 100%;
-  max-width: 896px;
+  max-width: 1280px;
   flex: 1;
   margin: 0 auto;
-  padding: 96px 24px 40px;
+  padding: 96px 32px 40px;
 
   @media (max-width: 520px) {
+    padding-right: 16px;
+    padding-left: 16px;
     padding-top: 88px;
     padding-bottom: 40px;
   }
@@ -527,6 +533,23 @@ const ActivityLayout = styled.div`
   gap: 14px;
 `;
 
+const ActivityDetailsGrid = styled.div`
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+
+  @media (min-width: 1060px) {
+    grid-template-columns: minmax(0, 2.15fr) minmax(280px, 0.85fr);
+    align-items: start;
+  }
+`;
+
+const ActivityMainColumn = styled.div`
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+`;
+
 const EmptyState = styled.div`
   padding: 40px 24px;
   border: 1px solid var(--service-border);
@@ -558,6 +581,7 @@ const InsightsPanel = styled.section`
   overflow: hidden;
   border-top: 1px solid var(--service-border);
   border-bottom: 1px solid var(--service-border);
+  container-type: inline-size;
 `;
 
 const InsightsHeader = styled.div`
@@ -568,7 +592,7 @@ const InsightsHeader = styled.div`
   padding: 12px 0;
   border-bottom: 1px solid var(--service-border);
 
-  @media (max-width: 560px) {
+  @container (max-width: 28rem) {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
@@ -594,7 +618,7 @@ const InsightsGrid = styled.dl`
   margin: 0;
   padding: 0;
 
-  @media (min-width: 720px) {
+  @container (min-width: 42rem) {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 `;
@@ -617,7 +641,7 @@ const InsightItem = styled.div`
     border-left: 1px solid var(--service-border);
   }
 
-  @media (min-width: 720px) {
+  @container (min-width: 42rem) {
     padding: 14px;
     border-top: 0;
     border-left: 1px solid var(--service-border);
@@ -664,7 +688,7 @@ const MetadataRow = styled.div`
   padding: 10px 0;
   border-top: 1px solid var(--service-border);
 
-  @media (max-width: 560px) {
+  @container (max-width: 28rem) {
     grid-template-columns: 1fr;
     gap: 8px;
   }
@@ -703,13 +727,18 @@ const ServiceFooter = styled.footer`
 
 const ServiceFooterInner = styled.div`
   width: 100%;
-  max-width: 896px;
+  max-width: 1280px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   margin: 0 auto;
-  padding: 20px 24px;
+  padding: 20px 32px;
+
+  @media (max-width: 520px) {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
 `;
 
 const FooterProduct = styled.span`

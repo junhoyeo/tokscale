@@ -29,6 +29,7 @@ import {
 } from "./usageChartData";
 import {
   createNonCrossingStackGeometry,
+  pointToChartPercent,
   type CubicValueBoundary,
 } from "./usageChartGeometry";
 
@@ -538,11 +539,22 @@ const ActiveRule = styled.line`
   vector-effect: non-scaling-stroke;
 `;
 
-const ActivePoint = styled.circle<{ $color: string }>`
-  fill: var(--service-surface);
-  stroke: ${(props) => props.$color};
-  stroke-width: 2;
-  vector-effect: non-scaling-stroke;
+const ActivePoint = styled.span<{
+  $color: string;
+  $left: number;
+  $top: number;
+}>`
+  position: absolute;
+  z-index: 2;
+  top: ${(props) => props.$top}%;
+  left: ${(props) => props.$left}%;
+  width: 10px;
+  height: 10px;
+  background: var(--service-surface);
+  border: 2px solid ${(props) => props.$color};
+  border-radius: 50%;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
 `;
 
 const DateRange = styled.div`
@@ -1258,22 +1270,28 @@ export function ProfileUsageChart({
                   y2={PLOT_TOP + PLOT_HEIGHT}
                 />
               )}
-              {isInspecting &&
-                layers.map((layer) =>
-                  (layer.series.values[activeIndex] ?? 0) > 0 ? (
-                    <ActivePoint
-                      key={layer.series.id}
-                      cx={activeX}
-                      cy={yForValue(
-                        layer.upperValues[activeIndex] ?? 0,
-                        chartMaximum,
-                      )}
-                      r={4}
-                      $color={layer.series.color}
-                    />
-                  ) : null,
-                )}
             </ChartSvg>
+
+            {isInspecting &&
+              layers.map((layer) => {
+                if ((layer.series.values[activeIndex] ?? 0) <= 0) return null;
+                const position = pointToChartPercent(
+                  activeX,
+                  yForValue(layer.upperValues[activeIndex] ?? 0, chartMaximum),
+                  VIEWBOX_WIDTH,
+                  VIEWBOX_HEIGHT,
+                );
+                return (
+                  <ActivePoint
+                    key={layer.series.id}
+                    aria-hidden="true"
+                    data-profile-usage-point
+                    $color={layer.series.color}
+                    $left={position.left}
+                    $top={position.top}
+                  />
+                );
+              })}
 
             <DateRange aria-label="Chart date range">
               <span>{formatDate(chartData.dates[0])}</span>

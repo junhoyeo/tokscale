@@ -45,7 +45,7 @@
 
 - Color: Dark zinc-neutral canvas; raised surfaces only slightly lighter; translucent white borders; white/default/muted text with WCAG AA contrast; Tokscale blue for the single primary action and selected data emphasis; provider colors only in chart/legend context.
 - Typography: Existing Figtree UI font and JetBrains Mono for code only. Page title 20–24px medium/semibold, section title 16–18px medium, body 14–16px, metadata 12–13px where it is supplementary rather than body copy. Numeric values use tabular figures.
-- Spacing/layout rhythm: 4px base; common gaps 8/12/16/20/24px; profile analytics canvas max-width 896px (848px usable on desktop) with 24px gutters.
+- Spacing/layout rhythm: 4px base; common gaps 8/12/16/20/24px; profile analytics canvas max-width 1280px (1216px usable on wide desktop) with responsive 16–32px gutters.
 - Shape/radius/elevation: 8px controls, 12px panels, full radius only for badges/avatars where semantically appropriate. Dark application surfaces use borders, not shadows.
 - Motion: Immediate color/background state changes; 120–160ms transform only for pressed controls; honor `prefers-reduced-motion`.
 - Imagery/iconography: GitHub avatar with subtle dark-surface outline. Reuse existing 16px application icons and source assets; avoid decorative icon containers.
@@ -71,7 +71,7 @@
 ## Responsive behavior
 
 - Supported breakpoints/devices: 320px mobile through wide desktop; primary checks at 390, 768, and 1024+ CSS pixels. The usage chart targets 224px height on mobile and 256px on desktop.
-- Layout adaptations: Four metric cells become two columns; identity/actions wrap; controls wrap; the area chart and seven-row contribution grid compress within their component containers without forcing page overflow; tables expose secondary detail instead of silently dropping it.
+- Layout adaptations: Four metric cells become two columns; identity/actions wrap; controls wrap; the area chart remains full-width; on wide desktop, Contributions and Token mix stay vertically paired in the main activity column while Usage details occupies a compact side rail. Tablet and mobile collapse back to the same single-column reading order. The area chart and seven-row contribution grid compress within their component containers without forcing page overflow; tables expose secondary detail instead of silently dropping it.
 - Touch/hover differences: Coarse pointers receive at least 44px effective targets; chart selection works by tap and keyboard, with a compact detail panel below the chart. Fine pointers receive a clamped, internally scrollable floating tooltip; contribution cells expose the same value on hover and focus.
 
 ## Interaction states
