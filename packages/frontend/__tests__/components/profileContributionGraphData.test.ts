@@ -250,6 +250,37 @@ describe("profile contribution calendar", () => {
     expect(getContributionDayMessageCount(day, details)).toBe(11);
   });
 
+  it("reconciles stale nested model totals with their token breakdown", () => {
+    const day = contribution("2026-07-05", 250, 10);
+    day.clients = [
+      {
+        client: "claude",
+        cost: 10,
+        messages: 4,
+        modelId: "",
+        providerId: "anthropic",
+        tokens: day.tokenBreakdown,
+        models: {
+          "claude-opus-4-7": {
+            cacheRead: 140,
+            cacheWrite: 0,
+            cost: 10,
+            input: 80,
+            messages: 4,
+            output: 30,
+            reasoning: 0,
+            tokens: 50,
+          },
+        },
+      },
+    ];
+
+    const details = createContributionClientDetails(day);
+
+    expect(details[0].models[0].totalTokens).toBe(250);
+    expect(details[0].totalTokens).toBe(250);
+  });
+
   it("moves one roving contribution focus by day, week, and boundary", () => {
     const calendar = createContributionCalendar(
       [contribution("2026-07-06", 200, 1)],

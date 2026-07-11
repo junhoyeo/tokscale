@@ -303,7 +303,10 @@ function modelsForClient(
         modelId,
         providerId: contribution.providerId?.trim() || null,
         tokens,
-        totalTokens: safeTokens(model.tokens) || totalBreakdownTokens(tokens),
+        totalTokens: Math.max(
+          safeTokens(model.tokens),
+          totalBreakdownTokens(tokens),
+        ),
       };
     });
   }
