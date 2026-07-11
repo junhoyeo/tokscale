@@ -7,7 +7,7 @@ use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Droid settings.json structure
 #[derive(Debug, Deserialize)]
@@ -133,6 +133,15 @@ fn extract_model_from_jsonl(jsonl_path: &Path) -> Option<String> {
     None
 }
 
+/// Return the fallback JSONL consulted when a settings snapshot omits its
+/// model. The cache watches this path even when it is currently absent so a
+/// later-created transcript invalidates the stored fallback model.
+pub(crate) fn droid_jsonl_path(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".settings.json")?;
+    Some(path.with_file_name(format!("{stem}.jsonl")))
+}
+
 /// Parse a Droid settings.json file
 pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
     let Some(data) = read_file_or_none(path) else {
@@ -179,10 +188,7 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         normalize_model_name(&m)
     } else {
         // Try to extract from JSONL file
-        let jsonl_path = path
-            .to_str()
-            .map(|s| s.replace(".settings.json", ".jsonl"))
-            .map(std::path::PathBuf::from);
+        let jsonl_path = droid_jsonl_path(path);
 
         if let Some(ref jsonl) = jsonl_path {
             extract_model_from_jsonl(jsonl)

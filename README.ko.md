@@ -853,7 +853,7 @@ Minutely 탭은 토큰 사용량을 분 단위로 표시하며, 버스트 패턴
 재생성 가능한 CLI/TUI/가격/Wrapped 캐시는 `~/.config/tokscale/cache/` 아래에 저장됩니다 (`TOKSCALE_CONFIG_DIR`를 설정한 경우 `${TOKSCALE_CONFIG_DIR}/cache/`). 통합 동기화 아티팩트는 `~/.config/tokscale/antigravity-cache/` 및 `~/.config/tokscale/trae-cache/` 같은 클라이언트별 캐시 루트에 저장됩니다:
 
 - `tui-data-cache.json` — TUI 시작 캐시
-- `source-message-cache.bin` + `source-message-cache.lock` — 소스 메시지 캐시와 락 파일
+- `source-message-cache-v2/` + `source-message-cache.lock` — 샤딩된 소스 메시지 캐시와 락 파일
 - `pricing-litellm.json` / `pricing-openrouter.json` — 가격 캐시
 - `opencode-migration.json` — OpenCode 마이그레이션 기록
 - `fonts/`, `images/` — Wrapped 에셋 캐시

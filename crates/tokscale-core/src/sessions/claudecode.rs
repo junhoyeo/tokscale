@@ -154,8 +154,9 @@ fn is_workflow_journal(path: &Path) -> bool {
 ///   → parent at `.../projects/<key>/<session>.jsonl`
 /// Flat layout: `.../projects/<key>/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session-id>.jsonl`
-fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+fn parent_session_paths(sidechain_path: &Path, parent_session_id: &str) -> Vec<PathBuf> {
     let parent_filename = format!("{}.jsonl", parent_session_id);
+    let mut candidates = Vec::with_capacity(2);
 
     // Nested layout: locate the `subagents` directory anywhere in the ancestry.
     // The session dir is its parent and the project dir its grandparent, so the
@@ -165,24 +166,69 @@ fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> O
     for ancestor in sidechain_path.ancestors() {
         if ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents") {
             if let Some(project_dir) = ancestor.parent().and_then(|d| d.parent()) {
-                let candidate = project_dir.join(&parent_filename);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
+                candidates.push(project_dir.join(&parent_filename));
             }
             break;
         }
     }
 
-    // Flat layout: parent dir is 1 level up
-    if let Some(project_dir) = sidechain_path.parent() {
-        let candidate = project_dir.join(&parent_filename);
-        if candidate.exists() {
-            return Some(candidate);
+    // Flat layout, and the existing nested-layout fallback: parent dir is one
+    // level up. Preserve this as the lower-priority candidate when nested.
+    if let Some(parent_dir) = sidechain_path.parent() {
+        let candidate = parent_dir.join(parent_filename);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+    parent_session_paths(sidechain_path, parent_session_id)
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+/// Resolve the parent transcript that can influence a sidechain's cached agent
+/// attribution. The probe follows the parser until its first parseable
+/// sidechain row, then returns every candidate in parser precedence order.
+/// Missing candidates are retained so their later appearance invalidates the
+/// cache.
+pub(crate) fn parent_session_paths_for_cache(sidechain_path: &Path) -> Vec<PathBuf> {
+    if is_workflow_journal(sidechain_path) {
+        return Vec::new();
+    }
+    let likely_nested = sidechain_path
+        .ancestors()
+        .any(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents"));
+    let likely_flat = sidechain_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.starts_with("agent-"));
+    if !likely_nested && !likely_flat {
+        return Vec::new();
+    }
+
+    let Ok(file) = std::fs::File::open(sidechain_path) else {
+        return Vec::new();
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(entry) = serde_json::from_str::<ClaudeEntry>(&line) else {
+            continue;
+        };
+        if entry.is_sidechain {
+            if let Some(parent_session_id) = entry
+                .session_id
+                .as_deref()
+                .filter(|session_id| !session_id.trim().is_empty())
+            {
+                return parent_session_paths(sidechain_path, parent_session_id);
+            }
         }
     }
 
-    None
+    Vec::new()
 }
 
 /// Scan a parent session JSONL to recover `subagent_type` for a given `agent_id`.
