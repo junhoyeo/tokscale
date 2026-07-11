@@ -109,6 +109,7 @@ interface SeriesCandidateSummary {
   model: string;
   kind: Exclude<UsageSeriesKind, "series-remainder">;
   total: number;
+  shadeCost: number;
 }
 
 interface SeriesCandidate extends SeriesCandidateSummary {
@@ -589,6 +590,71 @@ function providerColor(provider: UsageProviderId): string {
   return "#94a3b8";
 }
 
+// Keep the model shade progression aligned with the TUI's configurable
+// provider palettes. Each source retains its profile-chart color while model
+// rank determines how far that color is mixed toward white.
+const MODEL_SHADE_FACTORS = [0, 0.11, 0.22, 0.33, 0.44, 0.56, 0.67] as const;
+
+function modelFamilyTier(model: string): number {
+  const lower = model.toLowerCase();
+  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
+  if (tokens.includes("fable")) return 0;
+  if (lower.includes("opus")) return 1;
+  if (lower.includes("sonnet")) return 2;
+  if (lower.includes("haiku")) return 3;
+  return 4;
+}
+
+function leadingNumber(token: string): number | null {
+  const match = /^\d+/.exec(token);
+  if (!match) return null;
+  const value = Number.parseInt(match[0], 10);
+  return Number.isFinite(value) ? value : null;
+}
+
+function modelVersion(model: string): readonly [number, number] {
+  const tokens = model.split(/[^a-z0-9]+/i).filter(Boolean);
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const major = leadingNumber(tokens[index]);
+    if (major == null) continue;
+    // Four-digit values are dates, not model versions. As in the TUI, stop
+    // instead of scanning later date fragments as a plausible version.
+    if (major >= 1_000) return [0, 0];
+    const nextToken = tokens[index + 1];
+    const parsedMinor =
+      nextToken != null && /^\d+$/.test(nextToken)
+        ? Number.parseInt(nextToken, 10)
+        : 0;
+    const minor = parsedMinor < 1_000 ? parsedMinor : 0;
+    return [major, minor];
+  }
+
+  return [0, 0];
+}
+
+function compareModelShadeRank(
+  left: SeriesCandidateSummary,
+  right: SeriesCandidateSummary,
+): number {
+  const leftVersion = modelVersion(left.model);
+  const rightVersion = modelVersion(right.model);
+  return (
+    modelFamilyTier(left.model) - modelFamilyTier(right.model) ||
+    rightVersion[0] - leftVersion[0] ||
+    rightVersion[1] - leftVersion[1] ||
+    right.shadeCost - left.shadeCost ||
+    left.model.localeCompare(right.model) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function modelShade(base: string, rank: number): string {
+  const factor =
+    MODEL_SHADE_FACTORS[Math.min(rank, MODEL_SHADE_FACTORS.length - 1)];
+  return mixHexColor(base, "#ffffff", factor);
+}
+
 function candidatesForDays(
   days: readonly AggregatedUsageDay[],
   metric: UsageMetric,
@@ -613,6 +679,7 @@ function candidatesForDays(
           model: model.model,
           kind: model.kind,
           total: 0,
+          shadeCost: 0,
         };
         const value = finiteUsage(model[metric]);
         valuesByDay[dayIndex].set(
@@ -620,6 +687,7 @@ function candidatesForDays(
           (valuesByDay[dayIndex].get(id) ?? 0) + value,
         );
         candidate.total += value;
+        candidate.shadeCost += finiteUsage(model.cost);
         bySeries.set(id, candidate);
       }
     }
@@ -691,23 +759,16 @@ function colorCandidates(
     const actualModels = providerCandidates.filter(
       ({ kind }) => kind === "model" || kind === "synthetic",
     );
-    const largestModel = [
+    const rankedModels = [
       ...(actualModels.length > 0 ? actualModels : providerCandidates),
-    ].sort(
-      (left, right) =>
-        right.total - left.total || left.model.localeCompare(right.model),
-    )[0];
-    const otherCandidates = providerCandidates.filter(
-      ({ id }) => id !== largestModel.id,
-    );
+    ].sort(compareModelShadeRank);
+    const rankedModelIds = new Set(rankedModels.map(({ id }) => id));
+    const rankedRemainders = providerCandidates
+      .filter(({ id }) => !rankedModelIds.has(id))
+      .sort(compareModelShadeRank);
     const base = providerColor(provider);
-    colors.set(largestModel.id, base);
-    otherCandidates.forEach((candidate, index) => {
-      const progress = (index + 1) / Math.max(1, otherCandidates.length);
-      colors.set(
-        candidate.id,
-        mixHexColor(base, "#f8fafc", 0.12 + progress * 0.5),
-      );
+    [...rankedModels, ...rankedRemainders].forEach((candidate, rank) => {
+      colors.set(candidate.id, modelShade(base, rank));
     });
   }
   return colors;

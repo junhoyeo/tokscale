@@ -357,6 +357,78 @@ describe("profile usage chart aggregation", () => {
     ).not.toBe("#f97316");
   });
 
+  it("ranks source shades by the TUI family hierarchy without changing stack or tooltip order", () => {
+    const chart = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-06-17", [
+          client("claude", { input: 10 }, 1, "claude-fable-5"),
+          client("claude", { input: 300 }, 30, "claude-opus-4-8"),
+          client("claude", { input: 5 }, 50, "claude-opus-4-7"),
+          client("claude", { input: 1 }, 200, "claude-sonnet-5"),
+          client("claude", { input: 400 }, 400, "claude-haiku-6"),
+        ]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+    );
+    const colorByModel = Object.fromEntries(
+      chart.series.map(({ model: modelId, color }) => [modelId, color]),
+    );
+
+    // Same hierarchy and seven-step white interpolation as the TUI: family,
+    // version, cost, then name. Fable stays the base Claude Code color even
+    // when every lower-tier family has more usage or cost.
+    expect(colorByModel).toMatchObject({
+      "claude-fable-5": "#f97316",
+      "claude-opus-4-8": "#fa8230",
+      "claude-opus-4-7": "#fa9249",
+      "claude-sonnet-5": "#fba163",
+      "claude-haiku-6": "#fcb17d",
+    });
+    expect(chart.series.map(({ model: modelId }) => modelId)).toEqual([
+      "claude-sonnet-5",
+      "claude-opus-4-7",
+      "claude-fable-5",
+      "claude-opus-4-8",
+      "claude-haiku-6",
+    ]);
+    expect(
+      getActiveTooltipRows(chart.series, 0).map(({ series }) => series.model),
+    ).toEqual([
+      "claude-haiku-6",
+      "claude-opus-4-8",
+      "claude-fable-5",
+      "claude-opus-4-7",
+      "claude-sonnet-5",
+    ]);
+  });
+
+  it("assigns duplicate model ids deterministic shades inside each source", () => {
+    const forward = [
+      client("claude", { input: 10 }, 1, "claude-fable-5"),
+      client("claude", { input: 100 }, 10, "claude-opus-4-8"),
+      client("opencode", { input: 20 }, 2, "claude-fable-5"),
+      client("opencode", { input: 200 }, 20, "claude-opus-4-8"),
+    ];
+    const buildColors = (clients: ClientContribution[]) =>
+      Object.fromEntries(
+        buildUsageChartData(
+          aggregateDailyUsage([day("2026-06-17", clients)]),
+          "tokens",
+          "all",
+          "daily",
+        ).series.map(({ id, color }) => [id, color]),
+      );
+
+    const colors = buildColors(forward);
+    expect(buildColors([...forward].reverse())).toEqual(colors);
+    expect(colors["claude::claude-fable-5"]).toBe("#f97316");
+    expect(colors["claude::claude-opus-4-8"]).toBe("#fa8230");
+    expect(colors["opencode::claude-fable-5"]).toBe("#00a8e8");
+    expect(colors["opencode::claude-opus-4-8"]).toBe("#1cb2eb");
+  });
+
   it("lifts near-black provider colors for the dark chart canvas", () => {
     const chart = buildUsageChartData(
       aggregateDailyUsage([
