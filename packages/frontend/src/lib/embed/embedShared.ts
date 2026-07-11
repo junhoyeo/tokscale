@@ -8,7 +8,11 @@
  * contribution-grid layout, and small SVG building blocks.
  */
 import { escapeXml } from "../format";
-import { colorPalettes, getPaletteNames, type ColorPaletteName } from "../themes";
+import {
+  colorPalettes,
+  getPaletteNames,
+  type ColorPaletteName,
+} from "../themes";
 
 export { escapeXml };
 
@@ -126,11 +130,27 @@ export const THEMES: Record<EmbedTheme, ThemePalette> = {
   },
 };
 
-export const FIGTREE_FONT_STACK = "Figtree, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
-export const FIGTREE_FONT_IMPORT = "https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700;800&amp;display=swap";
-export const MONO_FONT_STACK = "ui-monospace, SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace";
+export const FIGTREE_FONT_STACK =
+  "Figtree, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+export const FIGTREE_FONT_IMPORT =
+  "https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700;800&amp;display=swap";
+export const MONO_FONT_STACK =
+  "ui-monospace, SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace";
 
-export const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export const MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
 
 export const EMBED_TEMPLATES: EmbedTemplate[] = [
   "classic",
@@ -145,25 +165,34 @@ export const EMBED_TEMPLATES: EmbedTemplate[] = [
 
 /** Parse the `template` query param, falling back to the classic card. */
 export function parseEmbedTemplate(value: string | null): EmbedTemplate {
-  return EMBED_TEMPLATES.includes(value as EmbedTemplate) ? (value as EmbedTemplate) : "classic";
+  return EMBED_TEMPLATES.includes(value as EmbedTemplate)
+    ? (value as EmbedTemplate)
+    : "classic";
 }
 
 /** Parse the `color` query param against the named graph palettes. */
 export function parseEmbedColor(value: string | null): EmbedColorName | null {
   if (!value) return null;
-  return getPaletteNames().includes(value as ColorPaletteName) ? (value as ColorPaletteName) : null;
+  return getPaletteNames().includes(value as ColorPaletteName)
+    ? (value as ColorPaletteName)
+    : null;
 }
 
 /** Parse a `compact` | `full` number-format query param; `undefined` if unset. */
-export function parseNumberFormat(value: string | null): EmbedNumberFormat | undefined {
+export function parseNumberFormat(
+  value: string | null,
+): EmbedNumberFormat | undefined {
   if (value === "full") return "full";
   if (value === "compact") return "compact";
   return undefined;
 }
 
 /** Parse the `rank` query param; undefined falls back to the renderer default. */
-export function parseRankFormat(value: string | null): EmbedRankFormat | undefined {
-  if (value === "plain" || value === "percent" || value === "total") return value;
+export function parseRankFormat(
+  value: string | null,
+): EmbedRankFormat | undefined {
+  if (value === "plain" || value === "percent" || value === "total")
+    return value;
   return undefined;
 }
 
@@ -181,7 +210,6 @@ export function formatRank(
   }
   return `#${rank}`;
 }
-
 
 function hexToRgb(hex: string): [number, number, number] | null {
   const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
@@ -202,7 +230,10 @@ export function hexToRgba(hex: string, alpha: number): string {
  * Cost stays green and the medal rank colors stay semantic so those metrics
  * remain readable independent of the chosen accent.
  */
-export function applyEmbedColor(palette: ThemePalette, color: EmbedColorName | null): ThemePalette {
+export function applyEmbedColor(
+  palette: ThemePalette,
+  color: EmbedColorName | null,
+): ThemePalette {
   if (!color) return palette;
   const p = colorPalettes[color];
   if (!p) return palette;
@@ -225,11 +256,17 @@ export function applyEmbedColor(palette: ThemePalette, color: EmbedColorName | n
 }
 
 /** Resolve the base theme palette and apply an optional color override. */
-export function resolvePalette(theme: EmbedTheme, color: EmbedColorName | null): ThemePalette {
+export function resolvePalette(
+  theme: EmbedTheme,
+  color: EmbedColorName | null,
+): ThemePalette {
   return applyEmbedColor(THEMES[theme], color);
 }
 
-export function getRankColor(rank: number | null, palette: ThemePalette): string {
+export function getRankColor(
+  rank: number | null,
+  palette: ThemePalette,
+): string {
   if (rank === 1) return palette.rankGold;
   if (rank === 2) return palette.rankSilver;
   if (rank === 3) return palette.rankBronze;
@@ -267,6 +304,7 @@ export interface ContributionDay {
 export interface ContributionCell {
   week: number;
   day: number;
+  date: string;
   intensity: 0 | 1 | 2 | 3 | 4;
 }
 
@@ -282,12 +320,16 @@ export interface ContributionLayout {
  * weeks (columns) by weekdays (rows), aligned so the first column starts on a
  * Sunday. Future days are omitted. `activeDays` counts days with any usage.
  */
-export function layoutContributions(contributions: ContributionDay[]): ContributionLayout {
+export function layoutContributions(
+  contributions: ContributionDay[],
+): ContributionLayout {
   const intensityMap = new Map<string, 0 | 1 | 2 | 3 | 4>();
   for (const c of contributions) intensityMap.set(c.date, c.intensity);
 
   const now = new Date();
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const today = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
   const start = new Date(today);
   start.setUTCFullYear(start.getUTCFullYear() - 1);
   start.setUTCDate(start.getUTCDate() + 1);
@@ -312,9 +354,10 @@ export function layoutContributions(contributions: ContributionDay[]): Contribut
       const date = new Date(start);
       date.setUTCDate(date.getUTCDate() + w * 7 + d);
       if (date > today) continue;
-      const intensity = intensityMap.get(date.toISOString().split("T")[0]) ?? 0;
+      const dateKey = date.toISOString().split("T")[0];
+      const intensity = intensityMap.get(dateKey) ?? 0;
       if (intensity > 0) activeDays += 1;
-      cells.push({ week: w, day: d, intensity });
+      cells.push({ week: w, day: d, date: dateKey, intensity });
     }
   }
 
@@ -333,13 +376,24 @@ export function gradeColors(palette: ThemePalette): string[] {
 }
 
 /** Point on a circle. 0deg = 12 o'clock, angle increases clockwise. */
-export function polarPoint(cx: number, cy: number, r: number, deg: number): [number, number] {
+export function polarPoint(
+  cx: number,
+  cy: number,
+  r: number,
+  deg: number,
+): [number, number] {
   const a = ((deg - 90) * Math.PI) / 180;
   return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
 }
 
 /** SVG arc path from startDeg to endDeg, drawn clockwise. 0deg = 12 o'clock. */
-export function arcPath(cx: number, cy: number, r: number, startDeg: number, endDeg: number): string {
+export function arcPath(
+  cx: number,
+  cy: number,
+  r: number,
+  startDeg: number,
+  endDeg: number,
+): string {
   const [x1, y1] = polarPoint(cx, cy, r, startDeg);
   const [x2, y2] = polarPoint(cx, cy, r, endDeg);
   const large = Math.abs(endDeg - startDeg) > 180 ? 1 : 0;
@@ -347,6 +401,203 @@ export function arcPath(cx: number, cy: number, r: number, startDeg: number, end
 }
 
 /** Count of contribution days at intensity >= the given threshold. */
-export function activeDayCount(contributions: ContributionDay[], minIntensity = 1): number {
-  return contributions.reduce((n, c) => (c.intensity >= minIntensity ? n + 1 : n), 0);
+export function activeDayCount(
+  contributions: ContributionDay[],
+  minIntensity = 1,
+): number {
+  return contributions.reduce(
+    (n, c) => (c.intensity >= minIntensity ? n + 1 : n),
+    0,
+  );
+}
+
+/** Shared quiet card surface used by every 2D embed template. */
+export function cardSurface(
+  width: number,
+  height: number,
+  palette: ThemePalette,
+  radius = 12,
+): string {
+  return [
+    `<rect width="${width}" height="${height}" rx="${radius}" fill="${palette.bgStart}"/>`,
+    `<rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="${radius - 0.5}" fill="none" stroke="${palette.border}"/>`,
+  ].join("\n  ");
+}
+
+export interface CardHeaderOptions {
+  username: string;
+  displayName?: string | null;
+  palette: ThemePalette;
+  x: number;
+  y: number;
+  right: number;
+  eyebrow?: string;
+  mono?: boolean;
+}
+
+/** Compact identity header with one brand accent and no decorative chrome. */
+export function cardHeader(options: CardHeaderOptions): string {
+  const {
+    username,
+    displayName,
+    palette,
+    x,
+    y,
+    right,
+    eyebrow = "Tokscale",
+    mono = false,
+  } = options;
+  const font = mono ? MONO_FONT_STACK : FIGTREE_FONT_STACK;
+  const safeUser = escapeXml(`@${username}`);
+  const safeName = displayName ? escapeXml(displayName) : null;
+  const nameX = x + 18 + (username.length + 1) * 9;
+  const nameFits =
+    Boolean(safeName) && nameX + (displayName?.length ?? 0) * 7 < right;
+
+  return [
+    `<rect x="${x}" y="${y - 12}" width="3" height="14" rx="1.5" fill="${palette.brand}"/>`,
+    `<text x="${x + 12}" y="${y - 1}" fill="${palette.muted}" font-size="10" font-weight="700" letter-spacing="0.1em" font-family="${font}">${escapeXml(eyebrow)}</text>`,
+    `<text x="${x}" y="${y + 23}" fill="${palette.text}" font-size="16" font-weight="700" font-family="${font}">${safeUser}</text>`,
+    nameFits
+      ? `<text x="${nameX}" y="${y + 23}" fill="${palette.muted}" font-size="12" font-family="${font}">${safeName}</text>`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n  ");
+}
+
+export function cardFooter(options: {
+  username: string;
+  updatedAt: string | null;
+  palette: ThemePalette;
+  x: number;
+  right: number;
+  y: number;
+  mono?: boolean;
+}): string {
+  const font = options.mono ? MONO_FONT_STACK : FIGTREE_FONT_STACK;
+  return [
+    `<g data-card-footer-y="${options.y}">`,
+    `<text x="${options.x}" y="${options.y}" fill="${options.palette.muted}" font-size="10" font-family="${font}">${escapeXml(formatDateLabel(options.updatedAt))}</text>`,
+    `<text x="${options.right}" y="${options.y}" fill="${options.palette.muted}" font-size="10" text-anchor="end" font-family="${font}">tokscale.ai/u/${escapeXml(options.username)}</text>`,
+    `</g>`,
+  ].join("\n  ");
+}
+
+export function divider(
+  x: number,
+  right: number,
+  y: number,
+  palette: ThemePalette,
+): string {
+  return `<line x1="${x}" y1="${y}" x2="${right}" y2="${y}" stroke="${palette.divider}"/>`;
+}
+
+export interface ContributionPanelOptions {
+  x: number;
+  y: number;
+  width: number;
+  palette: ThemePalette;
+  contributions: ContributionDay[];
+  showDayLabels?: boolean;
+  showLegend?: boolean;
+  mono?: boolean;
+  heading?: string;
+}
+
+export interface ContributionPanelResult {
+  svg: string;
+  height: number;
+  activeDays: number;
+}
+
+/**
+ * Shared contribution panel. It retains each date in a native SVG title so
+ * standalone SVG embeds remain inspectable without adding visual noise.
+ */
+export function contributionPanel(
+  options: ContributionPanelOptions,
+): ContributionPanelResult {
+  const {
+    x,
+    y,
+    width,
+    palette,
+    contributions,
+    showDayLabels = false,
+    showLegend = false,
+    mono = false,
+    heading = "Contribution activity",
+  } = options;
+  const layout = layoutContributions(contributions);
+  const colors = gradeColors(palette);
+  const font = mono ? MONO_FONT_STACK : FIGTREE_FONT_STACK;
+  const dayLabelWidth = showDayLabels ? 30 : 0;
+  const gap = width >= 700 ? 3 : 2;
+  const graphWidth = width - dayLabelWidth;
+  const stride = (graphWidth + gap) / layout.numWeeks;
+  const cell = Math.max(2, stride - gap);
+  const graphX = x + dayLabelWidth;
+  const monthY = y + 28;
+  const gridY = y + 36;
+  const gridHeight = 7 * stride - gap;
+  const legendY = gridY + gridHeight + 16;
+  const height = 36 + gridHeight + (showLegend ? 36 : 14);
+  const parts: string[] = [];
+
+  parts.push(
+    `<text x="${x}" y="${y + 11}" fill="${palette.text}" font-size="12" font-weight="600" font-family="${font}">${escapeXml(heading)}</text>`,
+  );
+  parts.push(
+    `<text x="${x + width}" y="${y + 11}" fill="${palette.muted}" font-size="10" text-anchor="end" font-family="${font}">${layout.activeDays} active days</text>`,
+  );
+
+  for (const month of layout.months) {
+    parts.push(
+      `<text x="${(graphX + month.week * stride).toFixed(1)}" y="${monthY}" fill="${palette.muted}" font-size="10" font-family="${font}">${month.label}</text>`,
+    );
+  }
+
+  if (showDayLabels) {
+    for (const [day, label] of [
+      [1, "Mon"],
+      [3, "Wed"],
+      [5, "Fri"],
+    ] as const) {
+      parts.push(
+        `<text x="${x}" y="${(gridY + day * stride + cell - 1).toFixed(1)}" fill="${palette.muted}" font-size="10" font-family="${font}">${label}</text>`,
+      );
+    }
+  }
+
+  for (const item of layout.cells) {
+    parts.push(
+      `<rect x="${(graphX + item.week * stride).toFixed(2)}" y="${(gridY + item.day * stride).toFixed(2)}" width="${cell.toFixed(2)}" height="${cell.toFixed(2)}" rx="${Math.min(2, cell / 3).toFixed(1)}" fill="${colors[item.intensity]}"><title>${item.date} · level ${item.intensity}</title></rect>`,
+    );
+  }
+
+  if (showLegend) {
+    const legendCell = 9;
+    const legendStride = 13;
+    let legendX = x + width - (24 + legendStride * 5 + 28);
+    parts.push(
+      `<text x="${legendX}" y="${legendY + 8}" fill="${palette.muted}" font-size="10" font-family="${font}">Less</text>`,
+    );
+    legendX += 24;
+    colors.forEach((color) => {
+      parts.push(
+        `<rect x="${legendX}" y="${legendY}" width="${legendCell}" height="${legendCell}" rx="2" fill="${color}"/>`,
+      );
+      legendX += legendStride;
+    });
+    parts.push(
+      `<text x="${legendX + 2}" y="${legendY + 8}" fill="${palette.muted}" font-size="10" font-family="${font}">More</text>`,
+    );
+  }
+
+  return {
+    svg: `<g data-contribution-panel="true" data-bottom="${(y + height).toFixed(1)}">\n  ${parts.join("\n  ")}\n  </g>`,
+    height,
+    activeDays: layout.activeDays,
+  };
 }
