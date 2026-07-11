@@ -22,6 +22,7 @@ const OverviewPanel = styled.section`
   border-radius: 12px;
   background: var(--service-surface);
   color: var(--service-text);
+  container-type: inline-size;
 `;
 
 const OverviewHeader = styled.div`
@@ -235,8 +236,9 @@ const Metrics = styled.dl`
   border-top: 1px solid var(--service-border);
   text-align: left;
 
-  @media (min-width: 640px) {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+  @container (min-width: 40rem) {
+    grid-template-columns: repeat(4, 9.25rem);
+    justify-content: start;
   }
 `;
 
@@ -256,7 +258,7 @@ const Metric = styled.div`
     border-top: 1px solid var(--service-border);
   }
 
-  @media (min-width: 640px) {
+  @container (min-width: 40rem) {
     padding-right: 1.25rem;
     padding-left: 1.25rem;
 

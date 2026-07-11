@@ -45,7 +45,7 @@
 
 - Color: Dark zinc-neutral canvas; raised surfaces only slightly lighter; translucent white borders; white/default/muted text with WCAG AA contrast; Tokscale blue for the single primary action and selected data emphasis; provider colors only in chart/legend context.
 - Typography: Existing Figtree UI font and JetBrains Mono for code only. Page title 20–24px medium/semibold, section title 16–18px medium, body 14–16px, metadata 12–13px where it is supplementary rather than body copy. Numeric values use tabular figures.
-- Spacing/layout rhythm: 4px base; common gaps 8/12/16/20/24px; profile analytics canvas max-width 1500px with responsive 16–32px gutters and roughly 650px reserved for the desktop contribution column.
+- Spacing/layout rhythm: 4px base; common gaps 8/12/16/20/24px; profile analytics canvas max-width 1500px with responsive 16–32px gutters and roughly 650px reserved for the desktop contribution column. Keep headline profile metrics left-packed in compact tracks instead of stretching them across the canvas.
 - Shape/radius/elevation: 8px controls, 12px panels, full radius only for badges/avatars where semantically appropriate. Dark application surfaces use borders, not shadows.
 - Motion: Immediate color/background state changes; 120–160ms transform only for pressed controls; honor `prefers-reduced-motion`.
 - Imagery/iconography: GitHub avatar with a subtle dark-surface outline at 72px mobile and 80px desktop. Give rank one compact accent-backed emphasis beside identity metadata. Reuse existing 16px application icons and source assets; avoid decorative icon containers.
