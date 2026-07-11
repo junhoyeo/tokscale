@@ -531,6 +531,24 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    DevinCli = 37 => {
+        id: "devin-cli",
+        root: PathRoot::XdgData,
+        relative: "devin/cli",
+        pattern: "sessions.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    DevinDesktop = 38 => {
+        id: "devin-desktop",
+        root: PathRoot::Home,
+        relative: "Library/Application Support/Devin/User/acp-events",
+        pattern: "*.ndjson",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -583,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 37);
+        assert_eq!(ClientId::COUNT, 39);
     }
 
     #[test]
@@ -609,6 +627,31 @@ mod tests {
             "/tmp/home/.workbuddy"
         );
         assert_eq!(client.data().pattern, "workbuddy.db");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
+    }
+
+    #[test]
+    fn test_devincli_client_registered_as_local_session_source() {
+        let client =
+            ClientId::from_str("devin-cli").expect("devin-cli client should be registered");
+        assert_eq!(client.data().relative_path, "devin/cli");
+        assert_eq!(client.data().pattern, "sessions.db");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
+    }
+
+    #[test]
+    fn test_devindesktop_client_registered_as_local_session_source() {
+        let client =
+            ClientId::from_str("devin-desktop").expect("devin-desktop client should be registered");
+        assert_eq!(
+            client.data().relative_path,
+            "Library/Application Support/Devin/User/acp-events"
+        );
+        assert_eq!(client.data().pattern, "*.ndjson");
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
         assert!(!client.data().headless);

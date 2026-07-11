@@ -269,6 +269,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "*.ndjson" => file_name.ends_with(".ndjson"),
                 "*.log" => file_name.ends_with(".log"),
                 "codebuddy-extension-log" => {
                     file_name.ends_with(".log")
@@ -789,6 +790,23 @@ fn cline_additional_vscode_task_roots(home_dir: &str, use_env_roots: bool) -> Ve
         PathBuf::from(home_dir)
             .join(".vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks"),
     );
+
+    roots
+}
+
+fn devin_desktop_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from(home_dir).join(".config/Devin/User/acp-events"),
+        PathBuf::from(home_dir).join(".config/devin/User/acp-events"),
+    ];
+
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            roots.push(PathBuf::from(app_data).join("Devin/User/acp-events"));
+        }
+    }
+
+    roots.push(PathBuf::from(home_dir).join("AppData/Roaming/Devin/User/acp-events"));
 
     roots
 }
@@ -1337,6 +1355,27 @@ fn scan_all_clients_with_env_strategy_inner(
 
         for root in cline_additional_vscode_task_roots(home_dir, use_env_roots) {
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Cline, root);
+        }
+    }
+
+    if enabled.contains(&ClientId::DevinDesktop) {
+        let local_path = ClientId::DevinDesktop
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::DevinDesktop,
+            local_path,
+        );
+
+        for root in devin_desktop_additional_roots(home_dir, use_env_roots) {
+            push_unique_scan_task(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::DevinDesktop,
+                root,
+            );
         }
     }
 
