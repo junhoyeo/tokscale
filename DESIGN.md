@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Status: Active
-- Last refreshed: 2026-07-11
+- Last refreshed: 2026-07-12
 - Primary product surfaces: Public user profiles at `/u/[username]`, with `/profile` as the authenticated redirect.
 - Evidence reviewed: `packages/frontend/src/app/u/[username]/ProfilePageClient.tsx`, `packages/frontend/src/components/profile/`, `packages/frontend/src/components/GraphContainer.tsx`, `packages/frontend/src/components/GraphControls.tsx`, `packages/frontend/src/components/StatsPanel.tsx`, `packages/frontend/src/components/layout/Navigation.tsx`, `packages/frontend/src/app/globals.css`, the current production profile at `https://tokscale.ai/u/junhoyeo`, and the compact content/usage references at `https://cho.sh/ko` and `https://cho.sh/ko/mini/usage`.
 - Visual reference captures: `.omx/artifacts/visual-ralph/compact-profile/cho-*-desktop.png`, `.omx/artifacts/visual-ralph/compact-profile/cho-*-mobile.png`, and `.omx/artifacts/visual-ralph/compact-profile/current-profile-*.png`.
@@ -30,7 +30,7 @@
 
 - Primary navigation: Existing Tokscale application navigation remains unchanged.
 - Core routes/screens: `/u/[username]` is the canonical public profile; `/profile` redirects authenticated users; profile tabs switch between Usage and Models without navigating away.
-- Content hierarchy: Identity and freshness → headline metrics → range/tab controls → model-level usage chart → contribution density calendar → always-visible token mix → compact supporting insights → devices.
+- Content hierarchy: Identity and freshness → headline metrics → range/tab controls → paired usage and contribution views → persistent selected-day contribution detail → compact supporting insights and token mix → devices.
 
 ## Design principles
 
@@ -39,13 +39,13 @@
 - Lightest useful surface: Use whitespace and dividers first; reserve bordered panels for the identity overview, chart, and independently grouped datasets.
 - Compact, not cramped: Desktop controls use 28–36px heights; mobile keeps 44–48px coarse-pointer targets without inflating visual chrome.
 - Reference, not replica: Adopt the reference's narrow content measure, restrained borders, chart-first composition, and low-noise controls while retaining Tokscale typography, data, and blue accent.
-- Tradeoffs: The public profile uses a purpose-built responsive SVG trend instead of the shared 2D/3D canvas. It keeps raw totals authoritative while defaulting the visual trend to a trailing average. The richer local visualizer remains available at `/local`.
+- Tradeoffs: The public profile keeps its purpose-built responsive usage trend and adds an optional inline isometric contribution view using the same scoped calendar as 2D. It does not reuse the heavier `/local` graph container or decorative 3D embed card. Raw totals remain authoritative, the usage trend still defaults to a trailing average, and 2D remains the default contribution view.
 
 ## Visual language
 
 - Color: Dark zinc-neutral canvas; raised surfaces only slightly lighter; translucent white borders; white/default/muted text with WCAG AA contrast; Tokscale blue for the single primary action and selected data emphasis; provider colors only in chart/legend context.
 - Typography: Existing Figtree UI font and JetBrains Mono for code only. Page title 20–24px medium/semibold, section title 16–18px medium, body 14–16px, metadata 12–13px where it is supplementary rather than body copy. Numeric values use tabular figures.
-- Spacing/layout rhythm: 4px base; common gaps 8/12/16/20/24px; profile analytics canvas max-width 1280px (1216px usable on wide desktop) with responsive 16–32px gutters.
+- Spacing/layout rhythm: 4px base; common gaps 8/12/16/20/24px; profile analytics canvas max-width 1500px with responsive 16–32px gutters and roughly 650px reserved for the desktop contribution column.
 - Shape/radius/elevation: 8px controls, 12px panels, full radius only for badges/avatars where semantically appropriate. Dark application surfaces use borders, not shadows.
 - Motion: Immediate color/background state changes; 120–160ms transform only for pressed controls; honor `prefers-reduced-motion`.
 - Imagery/iconography: GitHub avatar with subtle dark-surface outline. Reuse existing 16px application icons and source assets; avoid decorative icon containers.
@@ -53,10 +53,10 @@
 ## Components
 
 - Existing components to reuse: `Navigation`, `ProfileDevices`, formatters in `lib/utils`, shared graph palettes/settings, source labels/colors, and existing 16px icons.
-- New/changed components: Compact `ProfileOverview`, `ProfileTabBar`, profile-only `ProfileUsageChart`, responsive `ProfileContributionGraph`, `ProfileInsights`, `TokenBreakdown`, and semantic models/devices tables.
+- New/changed components: Compact `ProfileOverview`, `ProfileTabBar`, profile-only `ProfileUsageChart`, controlled 2D/3D `ProfileContributionGraph`, persistent `ProfileContributionBreakdown`, `ProfileInsights`, `TokenBreakdown`, and semantic models/devices tables.
 - Variants and states: Primary/secondary/ghost actions; active/inactive tabs and ranges; all/single-provider chart; tokens/cost metric; trailing-average/daily display; empty and sparse charts; hovered, keyboard-selected, and tapped chart days; selectable contribution palettes; responsive table overflow.
 - Chart contract: Render one stable stacked area per provider/model pair. Order provider groups and their models by raw scoped usage ascending so dominant bands remain on top; sort only the active tooltip rows descending. Use provider-level legend colors, deterministic model shades, 40% fills, 1px monotone boundaries, and no chart animation.
-- Contribution contract: Render the complete requested UTC date range, including zero-valued outer days; derive intensity from tokens; expose a compact palette selector; show a viewport-clamped daily tooltip on hover/focus; and let click, tap, Enter, or Space pin the complete token, cost, client, and model breakdown below the calendar. Retain roving keyboard navigation and a concise screen-reader summary.
+- Contribution contract: Render the complete requested UTC date range, including zero-valued outer days; derive 2D intensity and 3D height from the same token-scoped calendar; expose compact view and palette selectors; show a viewport-clamped daily tooltip on hover/focus; and let click, tap, Enter, or Space update one persistent token, cost, client, and model breakdown. Default that breakdown to the visible range end, preserve it across view and palette changes, retain roving keyboard navigation in both views, and expose a concise screen-reader summary.
 - Embed contract: Keep the live preview visually primary, place dense settings in a viewport-contained scroll region, expose only options the selected renderer consumes, and trap/restore focus while the dialog is open. The eight 2D templates share one solid surface, identity header, divider, footer, type scale, and restrained semantic colors while using distinct data hierarchies; decorative gradients, glows, patterns, fake chrome, and metaphor-heavy ornament are excluded. The 3D contribution view remains a supported first-class renderer with its own compatible controls. Desktop uses preview/settings panes; mobile uses one body scroll.
 - Token/component ownership: Additive service tokens live in `src/app/globals.css`; profile composition and variants live in `src/components/profile/`. Shared `/local` graph components are out of scope.
 
@@ -71,7 +71,7 @@
 ## Responsive behavior
 
 - Supported breakpoints/devices: 320px mobile through wide desktop; primary checks at 390, 768, and 1024+ CSS pixels. The usage chart targets 224px height on mobile and 256px on desktop.
-- Layout adaptations: Four metric cells become two columns; identity/actions wrap; controls wrap; the area chart remains full-width; on wide desktop, Contributions and Token mix stay vertically paired in the main activity column while Usage details occupies a compact side rail. Tablet and mobile collapse back to the same single-column reading order. The area chart and seven-row contribution grid compress within their component containers without forcing page overflow; tables expose secondary detail instead of silently dropping it.
+- Layout adaptations: Four metric cells become two columns; identity/actions and controls wrap. At 1360px and wider, activity becomes two independent stacks: a left Contributions + complete selected-day breakdown column at roughly 650px, and a still-wider right Usage over time + Usage details + Token mix column. Contribution cards keep intrinsic height, and the standalone breakdown expands with the full client/model list instead of using an internal scroll region. Tablet and mobile collapse to Contributions → selected-day breakdown → Usage → Usage details → Token mix → Devices. The area chart, seven-row 2D calendar, and range-sized isometric SVG compress within their containers without page overflow; tables expose secondary detail instead of silently dropping it.
 - Touch/hover differences: Coarse pointers receive at least 44px effective targets; chart selection works by tap and keyboard, with a compact detail panel below the chart. Fine pointers receive a clamped, internally scrollable floating tooltip; contribution cells expose the same value on hover and focus.
 
 ## Interaction states
@@ -93,10 +93,10 @@
 
 - Framework/styling system: Next.js 16, React 19, and styled-components. No Sass/Tailwind/chart package is introduced.
 - Design-token constraints: Add tokens without changing existing global aliases used by landing, leaderboard, settings, groups, or `/local`.
-- Performance constraints: Keep chart derivation memoized; allow normal profiles to retain their model bands, apply a high pathological series cap with an explicit remainder, avoid a per-day DOM tree, and preserve server data fetching and ISR.
+- Performance constraints: Keep chart and contribution geometry derivation memoized; allow normal profiles to retain their model bands, apply a high pathological series cap with an explicit remainder, render only one contribution view at a time, and preserve server data fetching and ISR.
 - Analytical constraints: Missing calendar dates are zero-valued. Lifetime defaults to a trailing 30-day average and finite ranges to a trailing 7-day average, with daily values available as an explicit display mode. Moving averages never alter raw range totals or stable series ranking.
 - Compatibility constraints: Leave API/auth/database contracts and canonical profile redirects unchanged. Do not mutate the shared `GraphContainer` behavior.
-- Test/screenshot expectations: Unit-test chart aggregation and formatting; run frontend tests/lint/typecheck/build; capture `/u/junhoyeo` locally at 1440×1100 and 390×844 with `NEXT_PUBLIC_URL=https://tokscale.ai`; persist each visual verdict in `.omx/state/compact-profile/ralph-progress.json` with a pass target of 90.
+- Test/screenshot expectations: Unit-test chart aggregation, contribution selection, isometric geometry, and formatting; run frontend tests/lint/typecheck/build; capture `/u/junhoyeo` locally in 2D and 3D at 1440×1100 and 390×844; persist each visual verdict under `.omx/state/` with a pass target of 90.
 
 ## Open questions
 

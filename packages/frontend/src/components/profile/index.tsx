@@ -9,8 +9,20 @@ export type { ProfileTab, ProfileTabBarProps } from "./ProfileTabBar";
 export { ProfileUsageChart } from "./ProfileUsageChart";
 export type { ProfileUsageChartProps } from "./ProfileUsageChart";
 
-export { ProfileContributionGraph } from "./ProfileContributionGraph";
-export type { ProfileContributionGraphProps } from "./ProfileContributionGraph";
+export {
+  getContributionDayForDate,
+  getDefaultContributionDate,
+  ProfileContributionBreakdown,
+  ProfileContributionGraph,
+  reconcileContributionSelectionRange,
+  resolveContributionSelectedDate,
+} from "./ProfileContributionGraph";
+export type {
+  ContributionSelectionState,
+  ProfileContributionBreakdownProps,
+  ProfileContributionGraphProps,
+  ProfileContributionView,
+} from "./ProfileContributionGraph";
 
 export { TokenBreakdown } from "./TokenBreakdown";
 export type { TokenBreakdownProps } from "./TokenBreakdown";

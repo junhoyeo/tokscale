@@ -1,25 +1,32 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
 import {
+  getContributionDayForDate,
+  getDefaultContributionDate,
+  ProfileContributionBreakdown,
   ProfileContributionGraph,
   ProfileDevices,
   ProfileModels,
   ProfileOverview,
   ProfileTabBar,
   ProfileUsageChart,
+  reconcileContributionSelectionRange,
+  resolveContributionSelectedDate,
   TokenBreakdown,
   type ModelUsage,
   type ProfileDevice,
   type ProfileStatsData,
   type ProfileTab,
+  type ProfileContributionView,
   type ProfileUser,
 } from "@/components/profile";
 import type { DailyContribution } from "@/lib/types";
 import { formatDuration } from "@/lib/format";
+import { DEFAULT_PALETTE, type ColorPaletteName } from "@/lib/themes";
 
 type ProfilePeriod = "all" | "week" | "month";
 
@@ -87,11 +94,47 @@ export default function ProfilePageClient({
   username,
 }: ProfilePageClientProps) {
   const [activeTab, setActiveTab] = useState<ProfileTab>("activity");
+  const [contributionView, setContributionView] =
+    useState<ProfileContributionView>("2d");
+  const [contributionPalette, setContributionPalette] =
+    useState<ColorPaletteName>(DEFAULT_PALETTE);
+  const contributionBreakdownId = useId();
   const data = initialData;
   const period = data.period ?? "all";
   const chartRange = useMemo(
     () => getProfileChartRange(period, data.dateRange),
     [period, data.dateRange],
+  );
+  const contributionRangeIdentity = `${chartRange.start ?? ""}:${chartRange.end ?? ""}`;
+  const [contributionSelection, setContributionSelection] = useState<{
+    date: string | null;
+    rangeIdentity: string;
+  }>(() => ({ date: null, rangeIdentity: contributionRangeIdentity }));
+  const reconciledContributionSelection = reconcileContributionSelectionRange(
+    contributionSelection,
+    contributionRangeIdentity,
+  );
+  if (reconciledContributionSelection !== contributionSelection) {
+    setContributionSelection(reconciledContributionSelection);
+  }
+  const defaultContributionDate = useMemo(
+    () =>
+      getDefaultContributionDate(
+        data.contributions,
+        chartRange.start,
+        chartRange.end,
+      ),
+    [data.contributions, chartRange.end, chartRange.start],
+  );
+  const selectedContributionDate = resolveContributionSelectedDate(
+    reconciledContributionSelection,
+    contributionRangeIdentity,
+    defaultContributionDate,
+  );
+  const selectedContributionDay = useMemo(
+    () =>
+      getContributionDayForDate(data.contributions, selectedContributionDate),
+    [data.contributions, selectedContributionDate],
   );
 
   const user: ProfileUser = useMemo(
@@ -171,26 +214,29 @@ export default function ProfilePageClient({
               aria-labelledby="tab-activity"
             >
               {data.contributions.length > 0 ? (
-                <ActivityLayout>
-                  <ProfileUsageChart
-                    contributions={data.contributions}
-                    averageWindowDays={period === "all" ? 30 : 7}
-                    rangeStart={chartRange.start}
-                    rangeEnd={chartRange.end}
-                    description={
-                      period === "all"
-                        ? "Model activity for the latest 12 months, grouped by provider."
-                        : period === "month"
-                          ? "Model activity for the last 30 days, grouped by provider."
-                          : "Model activity for the last 7 days, grouped by provider."
-                    }
-                  />
-                  <ActivityDetailsGrid>
-                    <ActivityMainColumn>
+                <ActivityDashboardGrid>
+                  <ContributionColumn>
+                    <ContributionArea>
                       <ProfileContributionGraph
+                        breakdownId={contributionBreakdownId}
                         contributions={data.contributions}
+                        onPaletteChange={setContributionPalette}
+                        onSelectedDateChange={(date) => {
+                          if (date) {
+                            setContributionSelection({
+                              date,
+                              rangeIdentity: contributionRangeIdentity,
+                            });
+                          }
+                        }}
+                        onViewChange={setContributionView}
+                        paletteName={contributionPalette}
+                        persistentSelection
                         rangeStart={chartRange.start}
                         rangeEnd={chartRange.end}
+                        selectedDate={selectedContributionDate}
+                        showBreakdown={false}
+                        view={contributionView}
                         description={
                           period === "all"
                             ? "Daily contribution density across the latest 12 months."
@@ -199,18 +245,48 @@ export default function ProfilePageClient({
                               : "Daily contribution density across the last 7 days."
                         }
                       />
+                    </ContributionArea>
+                    {selectedContributionDay && (
+                      <BreakdownArea>
+                        <ProfileContributionBreakdown
+                          day={selectedContributionDay}
+                          id={contributionBreakdownId}
+                          paletteName={contributionPalette}
+                        />
+                      </BreakdownArea>
+                    )}
+                  </ContributionColumn>
+                  <UsageColumn>
+                    <UsageArea>
+                      <ProfileUsageChart
+                        contributions={data.contributions}
+                        averageWindowDays={period === "all" ? 30 : 7}
+                        rangeStart={chartRange.start}
+                        rangeEnd={chartRange.end}
+                        description={
+                          period === "all"
+                            ? "Model activity for the latest 12 months, grouped by provider."
+                            : period === "month"
+                              ? "Model activity for the last 30 days, grouped by provider."
+                              : "Model activity for the last 7 days, grouped by provider."
+                        }
+                      />
+                    </UsageArea>
+                    <DetailsArea>
+                      <ProfileInsights
+                        stats={stats}
+                        favoriteModel={favoriteModel}
+                        clients={data.clients}
+                        models={data.models}
+                        mcpServers={data.mcpServers ?? []}
+                        period={period}
+                      />
+                    </DetailsArea>
+                    <TokenArea>
                       <TokenBreakdown stats={stats} />
-                    </ActivityMainColumn>
-                    <ProfileInsights
-                      stats={stats}
-                      favoriteModel={favoriteModel}
-                      clients={data.clients}
-                      models={data.models}
-                      mcpServers={data.mcpServers ?? []}
-                      period={period}
-                    />
-                  </ActivityDetailsGrid>
-                </ActivityLayout>
+                    </TokenArea>
+                  </UsageColumn>
+                </ActivityDashboardGrid>
               ) : (
                 <EmptyState>
                   <EmptyTitle>No usage history yet</EmptyTitle>
@@ -407,7 +483,7 @@ const PageContainer = styled.div`
 
 const MainContent = styled.main`
   width: 100%;
-  max-width: 1280px;
+  max-width: 1500px;
   flex: 1;
   margin: 0 auto;
   padding: 96px 32px 40px;
@@ -527,28 +603,41 @@ const TabPanel = styled.section`
   min-width: 0;
 `;
 
-const ActivityLayout = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-`;
-
-const ActivityDetailsGrid = styled.div`
+const ActivityDashboardGrid = styled.div`
   display: grid;
   min-width: 0;
   gap: 14px;
 
-  @media (min-width: 1060px) {
-    grid-template-columns: minmax(0, 2.15fr) minmax(280px, 0.85fr);
+  @media (min-width: 1360px) {
+    grid-template-columns: minmax(650px, 1fr) minmax(0, 1.2fr);
     align-items: start;
   }
 `;
 
-const ActivityMainColumn = styled.div`
+const DashboardArea = styled.div`
+  min-width: 0;
+`;
+
+const DashboardColumn = styled.div`
   display: grid;
   min-width: 0;
   gap: 14px;
+  align-content: start;
 `;
+
+const ContributionColumn = styled(DashboardColumn)``;
+
+const UsageColumn = styled(DashboardColumn)``;
+
+const UsageArea = styled(DashboardArea)``;
+
+const ContributionArea = styled(DashboardArea)``;
+
+const BreakdownArea = styled(DashboardArea)``;
+
+const DetailsArea = styled(DashboardArea)``;
+
+const TokenArea = styled(DashboardArea)``;
 
 const EmptyState = styled.div`
   padding: 40px 24px;
@@ -727,7 +816,7 @@ const ServiceFooter = styled.footer`
 
 const ServiceFooterInner = styled.div`
   width: 100%;
-  max-width: 1280px;
+  max-width: 1500px;
   display: flex;
   align-items: center;
   justify-content: space-between;

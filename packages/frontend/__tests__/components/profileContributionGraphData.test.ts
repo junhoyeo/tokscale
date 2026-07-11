@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  createContributionIsometricGeometry,
   createContributionClientDetails,
   createContributionCalendar,
+  getContributionDayForDate,
+  getDefaultContributionDate,
   getContributionDayMessageCount,
   getContributionColor,
   getContributionFocusDate,
   mergeDailyContributions,
+  reconcileContributionSelectionRange,
+  resolveContributionSelectedDate,
 } from "../../src/components/profile/ProfileContributionGraph";
 import type { DailyContribution } from "../../src/lib/types";
 import { colorPalettes } from "../../src/lib/themes";
@@ -279,6 +284,86 @@ describe("profile contribution calendar", () => {
 
     expect(details[0].models[0].totalTokens).toBe(250);
     expect(details[0].totalTokens).toBe(250);
+  });
+
+  it("defaults the persistent breakdown to the visible range end", () => {
+    const contributions = [contribution("2026-07-10", 250, 10)];
+
+    expect(
+      getDefaultContributionDate(contributions, "2026-07-05", "2026-07-11"),
+    ).toBe("2026-07-11");
+    expect(
+      getContributionDayForDate(contributions, "2026-07-11"),
+    ).toMatchObject({
+      date: "2026-07-11",
+      totals: { cost: 0, messages: 0, tokens: 0 },
+    });
+  });
+
+  it("does not revive a requested day after the visible range changes", () => {
+    const requested = {
+      date: "2026-07-10",
+      rangeIdentity: "2026-07-05:2026-07-11",
+    };
+
+    expect(
+      resolveContributionSelectedDate(
+        requested,
+        "2026-07-05:2026-07-11",
+        "2026-07-11",
+      ),
+    ).toBe("2026-07-10");
+    expect(
+      resolveContributionSelectedDate(
+        requested,
+        "2025-07-11:2026-07-11",
+        "2026-07-11",
+      ),
+    ).toBe("2026-07-11");
+
+    const weekSelection = reconcileContributionSelectionRange(
+      {
+        date: "2026-06-17",
+        rangeIdentity: "2025-07-11:2026-07-11",
+      },
+      "2026-07-05:2026-07-11",
+    );
+    const lifetimeSelection = reconcileContributionSelectionRange(
+      weekSelection,
+      "2025-07-11:2026-07-11",
+    );
+    expect(weekSelection).toEqual({
+      date: null,
+      rangeIdentity: "2026-07-05:2026-07-11",
+    });
+    expect(lifetimeSelection).toEqual({
+      date: null,
+      rangeIdentity: "2025-07-11:2026-07-11",
+    });
+  });
+
+  it("builds finite isometric cells from the same scoped calendar", () => {
+    const calendar = createContributionCalendar(
+      [contribution("2026-07-05", 0, 0), contribution("2026-07-06", 400, 10)],
+      "2026-07-05",
+      "2026-07-18",
+    );
+
+    const geometry = createContributionIsometricGeometry(calendar);
+    const empty = geometry.cells.find(({ cell }) => cell.date === "2026-07-05");
+    const active = geometry.cells.find(
+      ({ cell }) => cell.date === "2026-07-06",
+    );
+
+    expect(geometry.cells).toHaveLength(14);
+    expect(geometry.viewBox.width).toBeGreaterThan(0);
+    expect(geometry.viewBox.height).toBeGreaterThan(0);
+    expect(active?.height).toBeGreaterThan(empty?.height ?? 0);
+    expect(
+      geometry.cells.every(({ centerX, centerY, height }) =>
+        [centerX, centerY, height].every(Number.isFinite),
+      ),
+    ).toBe(true);
   });
 
   it("moves one roving contribution focus by day, week, and boundary", () => {
