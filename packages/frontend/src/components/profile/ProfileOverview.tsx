@@ -42,13 +42,13 @@ const Identity = styled.div`
   min-width: 0;
   flex: 1 1 19rem;
   align-items: center;
-  gap: 0.75rem;
+  gap: 1rem;
 `;
 
 const Avatar = styled.div`
   position: relative;
-  width: 60px;
-  height: 60px;
+  width: 72px;
+  height: 72px;
   overflow: hidden;
   flex: 0 0 auto;
   border: 1px solid var(--service-border-strong);
@@ -56,8 +56,8 @@ const Avatar = styled.div`
   background: var(--service-surface-muted);
 
   @media (min-width: 640px) {
-    width: 64px;
-    height: 64px;
+    width: 80px;
+    height: 80px;
   }
 `;
 
@@ -115,6 +115,25 @@ const MetadataItem = styled.li`
     border-radius: 50%;
     background: var(--service-border-strong);
     content: "";
+  }
+`;
+
+const RankItem = styled.li`
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  padding: 0.1875rem 0.4375rem;
+  border: 1px solid color-mix(in srgb, var(--service-accent) 42%, transparent);
+  border-radius: 0.375rem;
+  background: var(--service-accent-soft);
+  color: var(--service-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+
+  strong {
+    color: var(--service-accent);
+    font-weight: 700;
   }
 `;
 
@@ -214,6 +233,7 @@ const Metrics = styled.dl`
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
   border-top: 1px solid var(--service-border);
+  text-align: left;
 
   @media (min-width: 640px) {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -221,8 +241,12 @@ const Metrics = styled.dl`
 `;
 
 const Metric = styled.div`
+  display: flex;
   min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
   padding: 0.6875rem 1rem;
+  text-align: left;
 
   &:nth-child(even) {
     border-left: 1px solid var(--service-border);
@@ -247,15 +271,18 @@ const Metric = styled.div`
 `;
 
 const MetricLabel = styled.dt`
+  width: 100%;
   overflow: hidden;
   color: var(--service-text-muted);
   font-size: 0.75rem;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
 `;
 
 const MetricValue = styled.dd`
+  width: 100%;
   overflow: hidden;
   margin: 0.3rem 0 0;
   color: var(--service-text);
@@ -265,6 +292,7 @@ const MetricValue = styled.dd`
   line-height: 1.1;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
 `;
 
 const subscribeNoop = () => () => {};
@@ -376,7 +404,7 @@ export function ProfileOverview({
               src={avatarUrl}
               alt={`${displayName}'s avatar`}
               fill
-              sizes="(min-width: 640px) 64px, 60px"
+              sizes="(min-width: 640px) 80px, 72px"
               priority
             />
           </Avatar>
@@ -390,9 +418,10 @@ export function ProfileOverview({
             {(user.rank != null || joined || formattedLastUpdated) && (
               <Metadata aria-label="Profile details">
                 {user.rank != null && (
-                  <MetadataItem>
-                    Rank #{user.rank.toLocaleString("en-US")}
-                  </MetadataItem>
+                  <RankItem>
+                    <span>Rank</span>
+                    <strong>#{user.rank.toLocaleString("en-US")}</strong>
+                  </RankItem>
                 )}
                 {joined && <MetadataItem>Joined {joined}</MetadataItem>}
                 {formattedLastUpdated && (

@@ -36,7 +36,7 @@
 
 - Data before decoration: Labels, values, trend, and range context carry the hierarchy.
 - One fact, one home: Do not repeat tokens, cost, active time, or sessions across multiple cards.
-- Lightest useful surface: Use whitespace and dividers first; reserve bordered panels for the identity overview, chart, and independently grouped datasets.
+- Lightest useful surface: Use whitespace and dividers first; reserve bordered panels for the identity overview, charts, Usage details, Token mix, and independently grouped datasets.
 - Compact, not cramped: Desktop controls use 28–36px heights; mobile keeps 44–48px coarse-pointer targets without inflating visual chrome.
 - Reference, not replica: Adopt the reference's narrow content measure, restrained borders, chart-first composition, and low-noise controls while retaining Tokscale typography, data, and blue accent.
 - Tradeoffs: The public profile keeps its purpose-built responsive usage trend and adds an optional inline isometric contribution view using the same scoped calendar as 2D. It does not reuse the heavier `/local` graph container or decorative 3D embed card. Raw totals remain authoritative, the usage trend still defaults to a trailing average, and 2D remains the default contribution view.
@@ -48,7 +48,7 @@
 - Spacing/layout rhythm: 4px base; common gaps 8/12/16/20/24px; profile analytics canvas max-width 1500px with responsive 16–32px gutters and roughly 650px reserved for the desktop contribution column.
 - Shape/radius/elevation: 8px controls, 12px panels, full radius only for badges/avatars where semantically appropriate. Dark application surfaces use borders, not shadows.
 - Motion: Immediate color/background state changes; 120–160ms transform only for pressed controls; honor `prefers-reduced-motion`.
-- Imagery/iconography: GitHub avatar with subtle dark-surface outline. Reuse existing 16px application icons and source assets; avoid decorative icon containers.
+- Imagery/iconography: GitHub avatar with a subtle dark-surface outline at 72px mobile and 80px desktop. Give rank one compact accent-backed emphasis beside identity metadata. Reuse existing 16px application icons and source assets; avoid decorative icon containers.
 
 ## Components
 

@@ -668,8 +668,9 @@ const EmptyCopy = styled.p`
 
 const InsightsPanel = styled.section`
   overflow: hidden;
-  border-top: 1px solid var(--service-border);
-  border-bottom: 1px solid var(--service-border);
+  border: 1px solid var(--service-border);
+  border-radius: 12px;
+  background: var(--service-surface);
   container-type: inline-size;
 `;
 
@@ -678,7 +679,7 @@ const InsightsHeader = styled.div`
   align-items: baseline;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 0;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--service-border);
 
   @container (max-width: 28rem) {
@@ -705,7 +706,7 @@ const InsightsGrid = styled.dl`
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
-  padding: 0;
+  padding: 0 16px;
 
   @container (min-width: 42rem) {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -774,7 +775,7 @@ const MetadataRow = styled.div`
   grid-template-columns: 96px minmax(0, 1fr);
   gap: 12px;
   align-items: start;
-  padding: 10px 0;
+  padding: 10px 16px;
   border-top: 1px solid var(--service-border);
 
   @container (max-width: 28rem) {
