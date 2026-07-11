@@ -37,7 +37,9 @@ use std::time::UNIX_EPOCH;
 // (via parentSpanId hierarchy) over a nested task/sub-agent invoke, so agentless
 // turns in a trace with nested invokes are no longer mis-attributed to the
 // sub-agent; schema-26 caches carry the mis-attributed agent, so invalidate them.
-const CACHE_SCHEMA_VERSION: u32 = 27;
+// 28: Pi subagent sessions now derive agent attribution from session_info names;
+// schema-27 caches carry those messages without agent metadata.
+const CACHE_SCHEMA_VERSION: u32 = 28;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

@@ -51,6 +51,7 @@ pub struct PiSessionEntry {
     pub parent_id: Option<String>,
     pub timestamp: Option<String>,
     pub message: Option<PiMessage>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +73,44 @@ pub struct PiUsage {
     pub total_tokens: Option<i64>,
 }
 
+fn is_generated_id(value: &str) -> bool {
+    (value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || (value.len() == 36
+            && value.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            }))
+}
+
+fn strip_generated_id(value: &str) -> Option<&str> {
+    for id_len in [36, 8] {
+        if value.len() <= id_len || value.as_bytes()[value.len() - id_len - 1] != b'-' {
+            continue;
+        }
+        let id = &value[value.len() - id_len..];
+        if is_generated_id(id) {
+            return Some(&value[..value.len() - id_len - 1]);
+        }
+    }
+    None
+}
+
+fn pi_subagent_name(session_name: &str) -> Option<String> {
+    let name = session_name.strip_prefix("subagent-")?;
+    let without_id = strip_generated_id(name).or_else(|| {
+        let (without_index, index) = name.rsplit_once('-')?;
+        if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        strip_generated_id(without_index)
+    })?;
+
+    (!without_id.is_empty()).then(|| without_id.to_string())
+}
+
 /// Parse a Pi JSONL session file
 pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
@@ -88,6 +127,7 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut session_id: Option<String> = None;
     let mut workspace_key: Option<String> = None;
     let mut workspace_label: Option<String> = None;
+    let mut agent: Option<String> = None;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -134,6 +174,11 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
             Err(_) => continue,
         };
 
+        if entry.entry_type == "session_info" {
+            agent = entry.name.as_deref().and_then(pi_subagent_name);
+            continue;
+        }
+
         if entry.entry_type != "message" {
             continue;
         }
@@ -173,7 +218,7 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
             .map(|dt| dt.timestamp_millis())
             .unwrap_or(fallback_timestamp);
 
-        let mut unified = UnifiedMessage::new(
+        let mut unified = UnifiedMessage::new_with_agent(
             "pi",
             model,
             provider,
@@ -187,6 +232,7 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning: 0,
             },
             0.0,
+            agent.clone(),
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
@@ -230,6 +276,24 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].workspace_key, Some("/tmp".to_string()));
         assert_eq!(messages[0].workspace_label, Some("tmp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pi_subagent_session_name_as_agent() {
+        let content = r#"{"type":"session","id":"pi_subagent_001","timestamp":"2026-07-10T00:00:00.000Z","cwd":"/tmp"}
+{"type":"session_info","id":"info_001","parentId":null,"timestamp":"2026-07-10T00:00:00.100Z","name":"subagent-go-reviewer-e2e7405c-cb84-4f0a-a6da-9d987494d130-1"}
+{"type":"message","id":"msg_001","parentId":"info_001","timestamp":"2026-07-10T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_pi_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("go-reviewer"));
+        assert_eq!(
+            pi_subagent_name("subagent-context-builder-208242ce-1").as_deref(),
+            Some("context-builder")
+        );
+        assert_eq!(pi_subagent_name("Refactor auth module"), None);
     }
 
     #[test]
