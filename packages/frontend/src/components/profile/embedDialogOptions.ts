@@ -38,6 +38,11 @@ export interface ProfileEmbedLinks {
 
 const TOKSCALE_URL = "https://tokscale.ai";
 
+export function buildEmbedPreviewPath(embedUrl: string): string {
+  const url = new URL(embedUrl, TOKSCALE_URL);
+  return `${url.pathname}${url.search}`;
+}
+
 export function getEmbedDialogCapabilities(
   options: Pick<EmbedDialogOptions, "compact" | "template" | "view">,
 ): EmbedDialogCapabilities {

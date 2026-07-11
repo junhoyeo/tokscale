@@ -11,6 +11,7 @@ import {
   type ColorPaletteName,
 } from "@/lib/themes";
 import {
+  buildEmbedPreviewPath,
   buildProfileEmbedLinks,
   getEmbedDialogCapabilities,
   type EmbedNumberFormat,
@@ -159,6 +160,7 @@ export function ProfileEmbedDialog({
       view,
     ],
   );
+  const previewUrl = useMemo(() => buildEmbedPreviewPath(embedUrl), [embedUrl]);
 
   const copyToClipboard = async (value: string, label: string) => {
     try {
@@ -189,7 +191,6 @@ export function ProfileEmbedDialog({
       >
         <DialogHeader>
           <HeaderCopy>
-            <Eyebrow>README card</Eyebrow>
             <DialogTitle id="profile-embed-dialog-title">
               Embed @{username}
             </DialogTitle>
@@ -211,16 +212,10 @@ export function ProfileEmbedDialog({
         <DialogBody>
           <PreviewPanel>
             <PreviewSurface>
-              <PreviewHeading>
-                <PreviewLabel>Live preview</PreviewLabel>
-                <PreviewStatus>
-                  <StatusDot aria-hidden="true" />
-                  Updates with profile data
-                </PreviewStatus>
-              </PreviewHeading>
-              <PreviewFrame>
+              <PreviewLabel>Live preview</PreviewLabel>
+              <PreviewFrame $threeD={view === "3d"}>
                 <PreviewImage
-                  src={embedUrl}
+                  src={previewUrl}
                   alt={`Tokscale README embed preview for ${displayName || username}`}
                 />
               </PreviewFrame>
@@ -606,15 +601,6 @@ const HeaderCopy = styled.div`
   gap: 2px;
 `;
 
-const Eyebrow = styled.span`
-  color: var(--service-text-muted);
-  font-size: 0.6875rem;
-  font-weight: 650;
-  letter-spacing: 0.09em;
-  line-height: 1.2;
-  text-transform: uppercase;
-`;
-
 const DialogTitle = styled.h2`
   overflow: hidden;
   margin: 0;
@@ -761,18 +747,7 @@ const PreviewSurface = styled.div`
   min-height: 0;
   flex: 0 0 auto;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--service-border);
-  border-radius: 12px;
-  background: var(--service-surface);
-`;
-
-const PreviewHeading = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 `;
 
 const PreviewLabel = styled.span`
@@ -782,27 +757,10 @@ const PreviewLabel = styled.span`
   line-height: 1.3;
 `;
 
-const PreviewStatus = styled.span`
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  color: color-mix(in srgb, var(--service-text-muted) 88%, var(--service-text));
-  font-size: 0.75rem;
-  line-height: 1.3;
-`;
-
-const StatusDot = styled.span`
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: #3fb950;
-`;
-
-const PreviewFrame = styled.div`
+const PreviewFrame = styled.div<{ $threeD: boolean }>`
   display: flex;
-  height: clamp(240px, 30dvh, 280px);
+  height: ${({ $threeD }) =>
+    $threeD ? "clamp(360px, 46dvh, 440px)" : "clamp(210px, 26dvh, 248px)"};
   min-height: 0;
   flex: 0 0 auto;
   align-items: center;
@@ -814,11 +772,11 @@ const PreviewFrame = styled.div`
   background: #090c12;
 
   @media (max-width: 840px) {
-    height: 240px;
+    height: ${({ $threeD }) => ($threeD ? "340px" : "220px")};
   }
 
   @media (max-width: 640px) {
-    height: 180px;
+    height: ${({ $threeD }) => ($threeD ? "280px" : "170px")};
     padding: 10px;
   }
 `;
@@ -829,7 +787,6 @@ const PreviewImage = styled.img`
   max-height: 100%;
   height: auto;
   object-fit: contain;
-  filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.34));
 `;
 
 const ControlsPanel = styled.div`

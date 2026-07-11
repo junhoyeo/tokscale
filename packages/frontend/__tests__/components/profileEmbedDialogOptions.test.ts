@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildEmbedPreviewPath,
   buildProfileEmbedLinks,
   getEmbedDialogCapabilities,
   type EmbedDialogOptions,
@@ -19,6 +20,14 @@ const defaults: EmbedDialogOptions = {
 };
 
 describe("profile embed dialog options", () => {
+  it("previews the live renderer on the current origin", () => {
+    expect(
+      buildEmbedPreviewPath(
+        "https://tokscale.ai/api/embed/octocat/svg?template=graph&theme=light",
+      ),
+    ).toBe("/api/embed/octocat/svg?template=graph&theme=light");
+  });
+
   it("keeps the default 2D URL minimal but explicit about number formats", () => {
     const links = buildProfileEmbedLinks("octocat", defaults);
     const url = new URL(links.embedUrl);
