@@ -8,6 +8,7 @@ import {
   useState,
   type FocusEvent,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent,
 } from "react";
 import styled, { css } from "styled-components";
@@ -140,6 +141,14 @@ export interface ContributionIsometricCell {
 export interface ContributionIsometricGeometry {
   cells: ContributionIsometricCell[];
   viewBox: { height: number; width: number };
+}
+
+export interface ContributionHitTarget {
+  bottom: number;
+  date: string;
+  left: number;
+  right: number;
+  top: number;
 }
 
 type ContributionNavigationKey =
@@ -752,6 +761,39 @@ export function getContributionFocusDate(
   return dates[Math.max(0, Math.min(dates.length - 1, nextIndex))] ?? null;
 }
 
+export function getNearestContributionDate(
+  targets: readonly ContributionHitTarget[],
+  clientX: number,
+  clientY: number,
+  maximumDistance = 24,
+): string | null {
+  let nearestDate: string | null = null;
+  let nearestDistanceSquared = Number.POSITIVE_INFINITY;
+
+  for (const target of targets) {
+    const distanceX =
+      clientX < target.left
+        ? target.left - clientX
+        : clientX > target.right
+          ? clientX - target.right
+          : 0;
+    const distanceY =
+      clientY < target.top
+        ? target.top - clientY
+        : clientY > target.bottom
+          ? clientY - target.bottom
+          : 0;
+    const distanceSquared = distanceX ** 2 + distanceY ** 2;
+
+    if (distanceSquared < nearestDistanceSquared) {
+      nearestDate = target.date;
+      nearestDistanceSquared = distanceSquared;
+    }
+  }
+
+  return nearestDistanceSquared <= maximumDistance ** 2 ? nearestDate : null;
+}
+
 function formatRange(startDate: string | null, endDate: string | null): string {
   if (!startDate || !endDate) return "No activity yet";
 
@@ -873,22 +915,54 @@ const ViewToggle = styled.div`
 `;
 
 const ViewButton = styled.button<{ $active: boolean }>`
+  position: relative;
+  display: inline-flex;
   min-width: 2rem;
   height: 1.5rem;
-  padding: 0 0.5rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   border: 0;
   border-radius: 0.35rem;
-  background: ${(props) =>
-    props.$active ? "var(--service-surface)" : "transparent"};
+  background: transparent;
   color: ${(props) =>
     props.$active ? "var(--service-text)" : "var(--service-text-muted)"};
   font-size: 0.625rem;
   font-weight: 600;
   cursor: pointer;
 
+  > span {
+    display: inline-flex;
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    border-radius: inherit;
+    background: ${(props) =>
+      props.$active ? "var(--service-surface)" : "transparent"};
+  }
+
   &:focus-visible {
     outline: 2px solid var(--service-focus);
     outline-offset: 1px;
+  }
+
+  @media (pointer: coarse) {
+    min-width: 2.75rem;
+
+    &::after {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 100%;
+      height: 2.75rem;
+      content: "";
+      transform: translate(-50%, -50%);
+    }
+
+    > span {
+      width: 2rem;
+    }
   }
 `;
 
@@ -1146,6 +1220,10 @@ const PaletteControl = styled.label`
     content: "";
     pointer-events: none;
     transform: translateY(-0.125rem) rotate(45deg);
+  }
+
+  @media (pointer: coarse) {
+    min-height: 2.75rem;
   }
 `;
 
@@ -1872,7 +1950,7 @@ export function ProfileContributionGraph({
   const breakdownId = providedBreakdownId ?? generatedBreakdownId;
   const calendarId = useId();
   const calendarInstructionsId = useId();
-  const cellRefs = useRef(new Map<string, { focus: () => void }>());
+  const cellRefs = useRef(new Map<string, Element & { focus: () => void }>());
   const [tooltip, setTooltip] = useState<ContributionTooltipState | null>(null);
   const [keyboardDate, setKeyboardDate] = useState<string | null>(null);
   const [internalSelectedDate, setInternalSelectedDate] = useState<
@@ -2056,6 +2134,42 @@ export function ProfileContributionGraph({
     );
   };
 
+  const selectNearestCell = (event: ReactMouseEvent<Element>) => {
+    if (
+      event.target instanceof Element &&
+      event.target.closest("[data-contribution-date]")
+    ) {
+      return;
+    }
+
+    const targets = calendar.cells.flatMap((cell) => {
+      if (!cell.inRange) return [];
+      const node = cellRefs.current.get(cell.date);
+      if (!node) return [];
+      const bounds = node.getBoundingClientRect();
+      return [
+        {
+          bottom: bounds.bottom,
+          date: cell.date,
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+        },
+      ];
+    });
+    const date = getNearestContributionDate(
+      targets,
+      event.clientX,
+      event.clientY,
+    );
+    if (!date) return;
+
+    const cell = calendar.cells.find(
+      (candidate) => candidate.inRange && candidate.date === date,
+    );
+    if (cell) selectCell(cell);
+  };
+
   return (
     <Figure
       aria-describedby={descriptionId}
@@ -2078,7 +2192,7 @@ export function ProfileContributionGraph({
                 aria-pressed={view === option}
                 onClick={() => commitView(option)}
               >
-                {option.toUpperCase()}
+                <span>{option.toUpperCase()}</span>
               </ViewButton>
             ))}
           </ViewToggle>
@@ -2116,6 +2230,8 @@ export function ProfileContributionGraph({
                   role="group"
                   aria-label="Daily token contributions"
                   aria-describedby={calendarInstructionsId}
+                  data-contribution-hit-surface="2d"
+                  onClick={selectNearestCell}
                 >
                   {calendar.cells.map((cell) => (
                     <Cell
@@ -2178,6 +2294,8 @@ export function ProfileContributionGraph({
                 role="group"
                 aria-label="Isometric daily token contributions"
                 aria-describedby={calendarInstructionsId}
+                data-contribution-hit-surface="3d"
+                onClick={selectNearestCell}
                 preserveAspectRatio="xMidYMid meet"
               >
                 {isometricGeometry.cells.map((geometry) => {

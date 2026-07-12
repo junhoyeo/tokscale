@@ -8,6 +8,7 @@ import {
   getContributionDayMessageCount,
   getContributionColor,
   getContributionFocusDate,
+  getNearestContributionDate,
   mergeDailyContributions,
   reconcileContributionSelectionRange,
   resolveContributionSelectedDate,
@@ -391,6 +392,17 @@ describe("profile contribution calendar", () => {
     expect(
       getContributionFocusDate(calendar.cells, "2026-07-05", "ArrowLeft"),
     ).toBe("2026-07-05");
+  });
+
+  it("maps compact chart taps to the nearest contribution day", () => {
+    const targets = [
+      { bottom: 4, date: "2026-07-10", left: 0, right: 4, top: 0 },
+      { bottom: 4, date: "2026-07-11", left: 5, right: 9, top: 0 },
+    ];
+
+    expect(getNearestContributionDate(targets, 4.75, 2)).toBe("2026-07-11");
+    expect(getNearestContributionDate(targets, -20, 2)).toBe("2026-07-10");
+    expect(getNearestContributionDate(targets, -25, 2)).toBeNull();
   });
 
   it("keeps every active palette level distinct from the dark empty cell", () => {
