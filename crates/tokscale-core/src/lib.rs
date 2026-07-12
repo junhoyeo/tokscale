@@ -3108,7 +3108,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(devin_cli_parsed);
     messages.extend(devin_desktop_parsed);
 
-
     let codebuddy_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::CodeBuddy)
         .par_iter()

@@ -355,12 +355,7 @@ mod tests {
         db_path
     }
 
-    fn insert_session(
-        conn: &Connection,
-        id: &str,
-        working_directory: &str,
-        model: &str,
-    ) {
+    fn insert_session(conn: &Connection, id: &str, working_directory: &str, model: &str) {
         conn.execute(
             "INSERT INTO sessions (id, working_directory, backend_type, model, agent_mode, created_at, last_activity_at) VALUES (?1, ?2, 'windsurf', ?3, 'accept-edits', 1, 1)",
             rusqlite::params![id, working_directory, model],
@@ -377,7 +372,7 @@ mod tests {
         chat_message: &str,
         created_at: i64,
     ) -> i64 {
-    conn.execute(
+        conn.execute(
         "INSERT INTO message_nodes (session_id, node_id, chat_message, metadata, created_at) VALUES (?1, 1, ?2, NULL, ?3)",
         rusqlite::params![session_id, chat_message, created_at],
     )
