@@ -120,7 +120,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
 export const SOURCE_COLORS: Record<ClientType, string> = {
   opencode: "#00A8E8",
   claude: "#f97316",
-  codex: "#3b82f6",
+  codex: "#10B981",
   copilot: "#24292F",
   gemini: "#8b5cf6",
   cursor: "#22c55e",

@@ -360,6 +360,19 @@ describe("profile usage chart aggregation", () => {
     ).not.toBe("#f97316");
   });
 
+  it("uses the OpenAI green ramp for Codex CLI model series", () => {
+    const chart = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-05-02", [client("codex", { input: 10 }, 1, "gpt-5")]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+    );
+
+    expect(chart.series[0]).toMatchObject({ color: "#10b981" });
+  });
+
   it("ranks source shades by the TUI family hierarchy without changing stack or tooltip order", () => {
     const chart = buildUsageChartData(
       aggregateDailyUsage([
