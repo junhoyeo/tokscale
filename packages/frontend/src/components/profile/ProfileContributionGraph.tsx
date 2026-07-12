@@ -2330,7 +2330,9 @@ export function ProfileContributionGraph({
     if (nextScrollLeft !== scrollContainer.scrollLeft) {
       scrollContainer.scrollLeft = nextScrollLeft;
     }
-  }, [rangeEnd, rangeStart, tabbableDate, view]);
+    // `reversed` is a dep: toggling "Newest first" moves the newest day's cell
+    // to the opposite edge, so re-run to scroll it back into view.
+  }, [rangeEnd, rangeStart, reversed, tabbableDate, view]);
 
   const commitSelectedDate = (date: string | null) => {
     if (providedSelectedDate === undefined) setInternalSelectedDate(date);
@@ -2628,9 +2630,12 @@ export function ProfileContributionGraph({
                       }}
                       onFocus={(event) => handleCellFocus(cell, event)}
                       onBlur={() => setTooltip(null)}
-                      onKeyDown={(event) =>
-                        handleCellKeyDown(cell, event, displayCells)
-                      }
+                      // Keyboard nav stays chronological even when the view is
+                      // visually reversed: Arrow keys inspect adjacent calendar
+                      // days and Home/End hit the true range boundaries, matching
+                      // the documented a11y contract. "Newest first" is a
+                      // display-only mirror.
+                      onKeyDown={(event) => handleCellKeyDown(cell, event)}
                     />
                   ))}
                 </Grid>
