@@ -889,7 +889,7 @@ After restart, the Minutely tab appears between Hourly and Stats in the tab stri
 The regenerable CLI/TUI/pricing/Wrapped caches now live under `~/.config/tokscale/cache/` (or `${TOKSCALE_CONFIG_DIR}/cache/` when overridden). Integration sync artifacts remain in client-specific cache roots such as `~/.config/tokscale/antigravity-cache/` and `~/.config/tokscale/trae-cache/`:
 
 - `tui-data-cache.json` — TUI startup cache
-- `source-message-cache.bin` + `source-message-cache.lock` — source-message cache + lock file
+- `source-message-cache-v2/` + `source-message-cache.lock` — sharded source-message cache + lock file
 - `pricing-litellm.json` / `pricing-openrouter.json` — pricing caches
 - `opencode-migration.json` — OpenCode migration record
 - `fonts/` and `images/` — Wrapped asset caches
