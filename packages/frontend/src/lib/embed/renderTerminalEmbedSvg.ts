@@ -40,10 +40,7 @@ export function renderTerminalEmbedSvg(
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
   const sortBy = options.sortBy === "cost" ? "cost" : "tokens";
-  const contributions =
-    options.graph && options.contributions?.length
-      ? options.contributions
-      : null;
+  const contributions = options.graph ? (options.contributions ?? []) : null;
   const right = W - PAD;
   const rank = data.stats.rank
     ? formatRank(

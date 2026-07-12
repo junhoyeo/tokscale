@@ -154,15 +154,11 @@ export interface ContributionHitTarget {
 }
 
 type ContributionNavigationKey =
-  | "ArrowDown"
-  | "ArrowLeft"
-  | "ArrowRight"
-  | "ArrowUp"
-  | "End"
-  | "Home";
+  "ArrowDown" | "ArrowLeft" | "ArrowRight" | "ArrowUp" | "End" | "Home";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const LEGACY_COST_FLOAT_EPSILON = 1e-6;
 
 const dayFormatter = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
@@ -303,11 +299,7 @@ export function mergeDailyContributions(
       ...existing,
       clients: [...existing.clients, ...contribution.clients],
       intensity: Math.max(existing.intensity, contribution.intensity) as
-        | 0
-        | 1
-        | 2
-        | 3
-        | 4,
+        0 | 1 | 2 | 3 | 4,
       timestampMs: existing.timestampMs ?? contribution.timestampMs,
       tokenBreakdown: addTokenBreakdowns(existing.tokenBreakdown, tokens),
       totals: {
@@ -606,7 +598,10 @@ export function createContributionCalendar(
     cells,
     endDate: toDateKey(lastTimestamp),
     freeTokenDays: scopedContributions.filter(
-      ({ cost, tokens }) => tokens > 0 && cost === 0,
+      ({ cost, tokens }) =>
+        tokens > 0 &&
+        Number.isFinite(cost) &&
+        Math.abs(cost) <= LEGACY_COST_FLOAT_EPSILON,
     ).length,
     highestDay:
       [...cells]

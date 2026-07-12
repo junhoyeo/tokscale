@@ -53,10 +53,7 @@ export function renderOrbitEmbedSvg(
   const layout = options.contributions?.length
     ? layoutContributions(options.contributions)
     : null;
-  const contributions =
-    options.graph && options.contributions?.length
-      ? options.contributions
-      : null;
+  const contributions = options.graph ? (options.contributions ?? []) : null;
   const right = W - PAD;
   const graphY = 236;
   const graph = contributions

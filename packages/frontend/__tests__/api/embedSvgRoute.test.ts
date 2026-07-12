@@ -420,14 +420,7 @@ describe("GET /api/embed/[username]/svg", () => {
       const response = await request("");
 
       expect(response.status).toBe(500);
-      expect(response.headers.get("content-type")).toBe(
-        "image/svg+xml; charset=utf-8",
-      );
-      expect(response.headers.get("cache-control")).toBe("no-store");
-      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-      expect(response.headers.get("content-security-policy")).toBe(
-        "default-src 'none'; img-src data:; style-src 'unsafe-inline';",
-      );
+      expectFailureSvgHeaders(response);
     } finally {
       errorLog.mockRestore();
     }

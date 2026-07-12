@@ -248,4 +248,23 @@ describe("non-crossing usage chart geometry", () => {
     expect(singleton.layers[0]?.upper.segments).toEqual([]);
     expect(singleton.maximum).toBe(7);
   });
+
+  it("saturates cumulative boundaries when finite series would overflow", () => {
+    const geometry = createNonCrossingStackGeometry([
+      [Number.MAX_VALUE, Number.MAX_VALUE],
+      [Number.MAX_VALUE, Number.MAX_VALUE],
+    ]);
+
+    expect(geometry.layers[1]?.upper.values[0]).toBe(Number.MAX_VALUE);
+    expect(Number.isFinite(geometry.maximum)).toBe(true);
+    for (const progress of [0, 0.25, 0.5, 0.75, 1]) {
+      const segment = geometry.layers[1]?.upper.segments[0];
+      expect(segment).toBeDefined();
+      expect(
+        Number.isFinite(
+          segment ? sampleCubicValueSegment(segment, progress) : NaN,
+        ),
+      ).toBe(true);
+    }
+  });
 });

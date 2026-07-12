@@ -38,6 +38,20 @@ export interface ProfileEmbedLinks {
 
 const TOKSCALE_URL = "https://tokscale.ai";
 
+function escapeHtmlAttribute(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[character] ?? character,
+  );
+}
+
 export function buildEmbedPreviewPath(embedUrl: string): string {
   const url = new URL(embedUrl, TOKSCALE_URL);
   return `${url.pathname}${url.search}`;
@@ -92,14 +106,16 @@ export function buildProfileEmbedLinks(
   }
 
   const query = params.toString();
-  const baseEmbedUrl = `${TOKSCALE_URL}/api/embed/${username}/svg`;
+  const encodedUsername = encodeURIComponent(username);
+  const escapedUsername = escapeHtmlAttribute(username);
+  const baseEmbedUrl = `${TOKSCALE_URL}/api/embed/${encodedUsername}/svg`;
   const embedUrl = query ? `${baseEmbedUrl}?${query}` : baseEmbedUrl;
-  const profileUrl = `${TOKSCALE_URL}/u/${username}`;
+  const profileUrl = `${TOKSCALE_URL}/u/${encodedUsername}`;
 
   return {
     embedUrl,
     markdownSnippet: `[![Tokscale Stats](${embedUrl})](${profileUrl})`,
-    htmlSnippet: `<a href="${profileUrl}"><img alt="Tokscale Stats for @${username}" src="${embedUrl}" /></a>`,
+    htmlSnippet: `<a href="${profileUrl}"><img alt="Tokscale Stats for @${escapedUsername}" src="${embedUrl}" /></a>`,
     profileUrl,
   };
 }

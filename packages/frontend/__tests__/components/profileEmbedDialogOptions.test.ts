@@ -41,6 +41,15 @@ describe("profile embed dialog options", () => {
     expect(links.htmlSnippet).toContain("@octocat");
   });
 
+  it("encodes usernames in paths and HTML snippets", () => {
+    const links = buildProfileEmbedLinks('alice/foo"', defaults);
+
+    expect(links.embedUrl).toContain("/api/embed/alice%2Ffoo%22/svg");
+    expect(links.profileUrl).toBe("https://tokscale.ai/u/alice%2Ffoo%22");
+    expect(links.htmlSnippet).toContain("@alice/foo&quot;");
+    expect(links.htmlSnippet).not.toContain('foo"');
+  });
+
   it("does not advertise or encode a classic graph in compact layout", () => {
     const options = { ...defaults, compact: true, graph: true };
     const url = new URL(buildProfileEmbedLinks("octocat", options).embedUrl);

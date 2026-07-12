@@ -562,7 +562,7 @@ function relativeLuminance(color: string): number | null {
   return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
 }
 
-function providerColor(provider: UsageProviderId): string {
+export function providerColor(provider: UsageProviderId): string {
   const base =
     provider === UNATTRIBUTED_USAGE_PROVIDER
       ? "#737373"
@@ -599,9 +599,9 @@ function modelFamilyTier(model: string): number {
   const lower = model.toLowerCase();
   const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
   if (tokens.includes("fable")) return 0;
-  if (lower.includes("opus")) return 1;
-  if (lower.includes("sonnet")) return 2;
-  if (lower.includes("haiku")) return 3;
+  if (tokens.includes("opus")) return 1;
+  if (tokens.includes("sonnet")) return 2;
+  if (tokens.includes("haiku")) return 3;
   return 4;
 }
 

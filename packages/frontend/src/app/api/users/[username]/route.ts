@@ -34,13 +34,15 @@ function parseProfilePeriod(value: string | null): ProfilePeriod {
 
 function getProfilePeriodDateRange(
   period: ProfilePeriod,
-  now: Date = new Date()
+  now: Date = new Date(),
 ): ProfilePeriodDateRange | null {
   if (period === "all") {
     return null;
   }
 
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const end = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
 
@@ -50,12 +52,31 @@ function getProfilePeriodDateRange(
   };
 }
 
-function serializeUpdatedAt(value: Date | string | null | undefined): string | null {
+function getRollingProfileDateRange(
+  now: Date = new Date(),
+): ProfilePeriodDateRange {
+  const end = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  const start = new Date(end);
+  start.setUTCFullYear(start.getUTCFullYear() - 1);
+
+  return {
+    start: toUtcDateString(start),
+    end: toUtcDateString(end),
+  };
+}
+
+function serializeUpdatedAt(
+  value: Date | string | null | undefined,
+): string | null {
   if (!value) {
     return null;
   }
 
-  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+  return value instanceof Date
+    ? value.toISOString()
+    : new Date(value).toISOString();
 }
 
 export const revalidate = 60; // ISR: revalidate every 60 seconds
@@ -70,6 +91,7 @@ export async function GET(request: Request, { params }: RouteParams) {
     const { searchParams } = new URL(request.url);
     const period = parseProfilePeriod(searchParams.get("period"));
     const periodRange = getProfilePeriodDateRange(period);
+    const chartRange = periodRange ?? getRollingProfileDateRange();
 
     // Find user
     const matchingUsers = await db
@@ -97,54 +119,53 @@ export async function GET(request: Request, { params }: RouteParams) {
       return NextResponse.redirect(canonicalUrl, 308);
     }
 
-    const oneYearAgo = new Date();
-    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-    const profileStartDate = periodRange?.start ?? oneYearAgo.toISOString().split("T")[0];
+    const profileStartDate = chartRange.start;
     const dailyBreakdownFilter = periodRange
       ? and(
           eq(submissions.userId, user.id),
           gte(dailyBreakdown.date, periodRange.start),
-          lte(dailyBreakdown.date, periodRange.end)
+          lte(dailyBreakdown.date, periodRange.end),
         )
       : and(
           eq(submissions.userId, user.id),
-          gte(dailyBreakdown.date, profileStartDate)
+          gte(dailyBreakdown.date, profileStartDate),
         );
 
-    const [statsResult, latestSubmissionResult, rankResult, dailyData] = await Promise.all([
-      db
-        .select({
-          totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)`,
-          totalCost: sql<number>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4))), 0)`,
-          inputTokens: sql<number>`COALESCE(SUM(${submissions.inputTokens}), 0)`,
-          outputTokens: sql<number>`COALESCE(SUM(${submissions.outputTokens}), 0)`,
-          cacheReadTokens: sql<number>`COALESCE(SUM(${submissions.cacheReadTokens}), 0)`,
-          cacheCreationTokens: sql<number>`COALESCE(SUM(${submissions.cacheCreationTokens}), 0)`,
-          reasoningTokens: sql<number>`COALESCE(SUM(${submissions.reasoningTokens}), 0)`,
-          submissionCount: sql<number>`COALESCE(MAX(${submissions.submitCount}), 0)`,
-          earliestDate: sql<string>`MIN(${submissions.dateStart})`,
-          latestDate: sql<string>`MAX(${submissions.dateEnd})`,
-          totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`,
-          sessionCount: sql<number>`COALESCE(SUM(${submissions.sessionCount}), 0)`,
-        })
-        .from(submissions)
-        .where(eq(submissions.userId, user.id)),
+    const [statsResult, latestSubmissionResult, rankResult, dailyData] =
+      await Promise.all([
+        db
+          .select({
+            totalTokens: sql<number>`COALESCE(SUM(${submissions.totalTokens}), 0)`,
+            totalCost: sql<number>`COALESCE(SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4))), 0)`,
+            inputTokens: sql<number>`COALESCE(SUM(${submissions.inputTokens}), 0)`,
+            outputTokens: sql<number>`COALESCE(SUM(${submissions.outputTokens}), 0)`,
+            cacheReadTokens: sql<number>`COALESCE(SUM(${submissions.cacheReadTokens}), 0)`,
+            cacheCreationTokens: sql<number>`COALESCE(SUM(${submissions.cacheCreationTokens}), 0)`,
+            reasoningTokens: sql<number>`COALESCE(SUM(${submissions.reasoningTokens}), 0)`,
+            submissionCount: sql<number>`COALESCE(MAX(${submissions.submitCount}), 0)`,
+            earliestDate: sql<string>`MIN(${submissions.dateStart})`,
+            latestDate: sql<string>`MAX(${submissions.dateEnd})`,
+            totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`,
+            sessionCount: sql<number>`COALESCE(SUM(${submissions.sessionCount}), 0)`,
+          })
+          .from(submissions)
+          .where(eq(submissions.userId, user.id)),
 
-      db
-        .select({
-          sourcesUsed: submissions.sourcesUsed,
-          modelsUsed: submissions.modelsUsed,
-          updatedAt: submissions.updatedAt,
-          cliVersion: submissions.cliVersion,
-          schemaVersion: submissions.schemaVersion,
-          mcpServers: submissions.mcpServers,
-        })
-        .from(submissions)
-        .where(eq(submissions.userId, user.id))
-        .orderBy(desc(submissions.updatedAt))
-        .limit(1),
+        db
+          .select({
+            sourcesUsed: submissions.sourcesUsed,
+            modelsUsed: submissions.modelsUsed,
+            updatedAt: submissions.updatedAt,
+            cliVersion: submissions.cliVersion,
+            schemaVersion: submissions.schemaVersion,
+            mcpServers: submissions.mcpServers,
+          })
+          .from(submissions)
+          .where(eq(submissions.userId, user.id))
+          .orderBy(desc(submissions.updatedAt))
+          .limit(1),
 
-      db.execute<{ rank: number }>(sql`
+        db.execute<{ rank: number }>(sql`
         WITH user_totals AS (
           SELECT 
             user_id,
@@ -161,22 +182,25 @@ export async function GET(request: Request, { params }: RouteParams) {
         SELECT rank FROM ranked WHERE user_id = ${user.id}
       `),
 
-      db
-        .select({
-          date: dailyBreakdown.date,
-          timestampMs: dailyBreakdown.timestampMs,
-          activeTimeMs: dailyBreakdown.activeTimeMs,
-          tokens: dailyBreakdown.tokens,
-          cost: dailyBreakdown.cost,
-          inputTokens: dailyBreakdown.inputTokens,
-          outputTokens: dailyBreakdown.outputTokens,
-          sourceBreakdown: dailyBreakdown.sourceBreakdown,
-        })
-        .from(dailyBreakdown)
-        .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
-        .where(dailyBreakdownFilter)
-        .orderBy(dailyBreakdown.date),
-    ]);
+        db
+          .select({
+            date: dailyBreakdown.date,
+            timestampMs: dailyBreakdown.timestampMs,
+            activeTimeMs: dailyBreakdown.activeTimeMs,
+            tokens: dailyBreakdown.tokens,
+            cost: dailyBreakdown.cost,
+            inputTokens: dailyBreakdown.inputTokens,
+            outputTokens: dailyBreakdown.outputTokens,
+            sourceBreakdown: dailyBreakdown.sourceBreakdown,
+          })
+          .from(dailyBreakdown)
+          .innerJoin(
+            submissions,
+            eq(dailyBreakdown.submissionId, submissions.id),
+          )
+          .where(dailyBreakdownFilter)
+          .orderBy(dailyBreakdown.date),
+      ]);
 
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
@@ -249,9 +273,13 @@ export async function GET(request: Request, { params }: RouteParams) {
               existing.clients[client].reasoning += breakdown.reasoning || 0;
               existing.clients[client].messages += breakdown.messages || 0;
               if (breakdown.models) {
-                existing.clients[client].models = existing.clients[client].models || {};
-                for (const [modelId, modelData] of Object.entries(breakdown.models)) {
-                  const existingModel = existing.clients[client].models![modelId];
+                existing.clients[client].models =
+                  existing.clients[client].models || {};
+                for (const [modelId, modelData] of Object.entries(
+                  breakdown.models,
+                )) {
+                  const existingModel =
+                    existing.clients[client].models![modelId];
                   if (existingModel) {
                     existingModel.tokens += modelData.tokens || 0;
                     existingModel.cost += modelData.cost || 0;
@@ -290,13 +318,18 @@ export async function GET(request: Request, { params }: RouteParams) {
               };
             }
             if (breakdown.models) {
-              for (const [modelId, modelData] of Object.entries(breakdown.models)) {
+              for (const [modelId, modelData] of Object.entries(
+                breakdown.models,
+              )) {
                 const existingModel = existing.models[modelId];
                 if (existingModel) {
                   existingModel.tokens += modelData.tokens || 0;
                   existingModel.cost += modelData.cost || 0;
                 } else {
-                  existing.models[modelId] = { tokens: modelData.tokens || 0, cost: modelData.cost || 0 };
+                  existing.models[modelId] = {
+                    tokens: modelData.tokens || 0,
+                    cost: modelData.cost || 0,
+                  };
                 }
               }
             } else if (breakdown.modelId) {
@@ -305,12 +338,15 @@ export async function GET(request: Request, { params }: RouteParams) {
                 existingModel.tokens += breakdown.tokens || 0;
                 existingModel.cost += breakdown.cost || 0;
               } else {
-                existing.models[breakdown.modelId] = { tokens: breakdown.tokens || 0, cost: breakdown.cost || 0 };
+                existing.models[breakdown.modelId] = {
+                  tokens: breakdown.tokens || 0,
+                  cost: breakdown.cost || 0,
+                };
               }
             }
           }
         }
-       } else {
+      } else {
         const clients: Record<string, ClientBreakdown> = {};
         const models: Record<string, { tokens: number; cost: number }> = {};
         if (day.sourceBreakdown) {
@@ -329,7 +365,9 @@ export async function GET(request: Request, { params }: RouteParams) {
               clients[client].messages += breakdown.messages || 0;
               if (breakdown.models) {
                 clients[client].models = clients[client].models || {};
-                for (const [modelId, modelData] of Object.entries(breakdown.models)) {
+                for (const [modelId, modelData] of Object.entries(
+                  breakdown.models,
+                )) {
                   const existingModel = clients[client].models![modelId];
                   if (existingModel) {
                     existingModel.tokens += modelData.tokens || 0;
@@ -369,13 +407,18 @@ export async function GET(request: Request, { params }: RouteParams) {
               };
             }
             if (breakdown.models) {
-              for (const [modelId, modelData] of Object.entries(breakdown.models)) {
+              for (const [modelId, modelData] of Object.entries(
+                breakdown.models,
+              )) {
                 const existingModel = models[modelId];
                 if (existingModel) {
                   existingModel.tokens += modelData.tokens || 0;
                   existingModel.cost += modelData.cost || 0;
                 } else {
-                  models[modelId] = { tokens: modelData.tokens || 0, cost: modelData.cost || 0 };
+                  models[modelId] = {
+                    tokens: modelData.tokens || 0,
+                    cost: modelData.cost || 0,
+                  };
                 }
               }
             } else if (breakdown.modelId) {
@@ -384,7 +427,10 @@ export async function GET(request: Request, { params }: RouteParams) {
                 existingModel.tokens += breakdown.tokens || 0;
                 existingModel.cost += breakdown.cost || 0;
               } else {
-                models[breakdown.modelId] = { tokens: breakdown.tokens || 0, cost: breakdown.cost || 0 };
+                models[breakdown.modelId] = {
+                  tokens: breakdown.tokens || 0,
+                  cost: breakdown.cost || 0,
+                };
               }
             }
           }
@@ -431,7 +477,7 @@ export async function GET(request: Request, { params }: RouteParams) {
         cacheWriteTokens: 0,
         reasoningTokens: 0,
         totalActiveTimeMs: 0,
-      }
+      },
     );
 
     // Build contribution graph data
@@ -440,14 +486,14 @@ export async function GET(request: Request, { params }: RouteParams) {
         maxCost === 0
           ? 0
           : day.cost === 0
-          ? 0
-          : day.cost <= maxCost * 0.25
-          ? 1
-          : day.cost <= maxCost * 0.5
-          ? 2
-          : day.cost <= maxCost * 0.75
-          ? 3
-          : 4;
+            ? 0
+            : day.cost <= maxCost * 0.25
+              ? 1
+              : day.cost <= maxCost * 0.5
+                ? 2
+                : day.cost <= maxCost * 0.75
+                  ? 3
+                  : 4;
 
       let dayCacheRead = 0;
       let dayCacheWrite = 0;
@@ -503,7 +549,9 @@ export async function GET(request: Request, { params }: RouteParams) {
       }
     }
 
-    const totalModelCost = Array.from(modelUsageMap.values()).reduce((sum, m) => sum + m.cost, 0);
+    const totalModelCost = Array.from(modelUsageMap.entries())
+      .filter(([model]) => model !== "<synthetic>")
+      .reduce((sum, [, data]) => sum + data.cost, 0);
     const modelUsage = Array.from(modelUsageMap.entries())
       .filter(([model]) => model !== "<synthetic>")
       .map(([model, data]) => ({
@@ -514,9 +562,11 @@ export async function GET(request: Request, { params }: RouteParams) {
       }))
       .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
     const periodClients = Array.from(
-      new Set(contributions.flatMap((day) => Object.keys(day.clients)))
+      new Set(contributions.flatMap((day) => Object.keys(day.clients))),
     );
-    const periodModels = Array.from(modelUsageMap.keys()).filter((model) => model !== "<synthetic>");
+    const periodModels = Array.from(modelUsageMap.keys()).filter(
+      (model) => model !== "<synthetic>",
+    );
     const isPeriodFiltered = period !== "all";
 
     return NextResponse.json({
@@ -529,16 +579,32 @@ export async function GET(request: Request, { params }: RouteParams) {
         rank: isPeriodFiltered ? null : rank ? Number(rank) : null,
       },
       stats: {
-        totalTokens: isPeriodFiltered ? periodTotals.totalTokens : Number(stats?.totalTokens) || 0,
-        totalCost: isPeriodFiltered ? periodTotals.totalCost : Number(stats?.totalCost) || 0,
-        inputTokens: isPeriodFiltered ? periodTotals.inputTokens : Number(stats?.inputTokens) || 0,
-        outputTokens: isPeriodFiltered ? periodTotals.outputTokens : Number(stats?.outputTokens) || 0,
-        cacheReadTokens: isPeriodFiltered ? periodTotals.cacheReadTokens : Number(stats?.cacheReadTokens) || 0,
-        cacheWriteTokens: isPeriodFiltered ? periodTotals.cacheWriteTokens : Number(stats?.cacheCreationTokens) || 0,
-        reasoningTokens: isPeriodFiltered ? periodTotals.reasoningTokens : Number(stats?.reasoningTokens) || 0,
+        totalTokens: isPeriodFiltered
+          ? periodTotals.totalTokens
+          : Number(stats?.totalTokens) || 0,
+        totalCost: isPeriodFiltered
+          ? periodTotals.totalCost
+          : Number(stats?.totalCost) || 0,
+        inputTokens: isPeriodFiltered
+          ? periodTotals.inputTokens
+          : Number(stats?.inputTokens) || 0,
+        outputTokens: isPeriodFiltered
+          ? periodTotals.outputTokens
+          : Number(stats?.outputTokens) || 0,
+        cacheReadTokens: isPeriodFiltered
+          ? periodTotals.cacheReadTokens
+          : Number(stats?.cacheReadTokens) || 0,
+        cacheWriteTokens: isPeriodFiltered
+          ? periodTotals.cacheWriteTokens
+          : Number(stats?.cacheCreationTokens) || 0,
+        reasoningTokens: isPeriodFiltered
+          ? periodTotals.reasoningTokens
+          : Number(stats?.reasoningTokens) || 0,
         submissionCount: Number(stats?.submissionCount) || 0,
         activeDays,
-        totalActiveTimeMs: isPeriodFiltered ? periodTotals.totalActiveTimeMs : Number(stats?.totalActiveTimeMs) || 0,
+        totalActiveTimeMs: isPeriodFiltered
+          ? periodTotals.totalActiveTimeMs
+          : Number(stats?.totalActiveTimeMs) || 0,
         // Session count is only stored at submission level, so hide it for rolling ranges.
         sessionCount: isPeriodFiltered ? 0 : Number(stats?.sessionCount) || 0,
       },
@@ -546,6 +612,7 @@ export async function GET(request: Request, { params }: RouteParams) {
         start: periodRange?.start ?? stats?.earliestDate ?? null,
         end: periodRange?.end ?? stats?.latestDate ?? null,
       },
+      chartRange,
       period,
       updatedAt: serializeUpdatedAt(latestSubmission?.updatedAt),
       submissionFreshness: buildSubmissionFreshness({
@@ -553,8 +620,12 @@ export async function GET(request: Request, { params }: RouteParams) {
         cliVersion: latestSubmission?.cliVersion,
         schemaVersion: latestSubmission?.schemaVersion,
       }),
-      clients: isPeriodFiltered ? periodClients : latestSubmission?.sourcesUsed || [],
-      models: isPeriodFiltered ? periodModels : latestSubmission?.modelsUsed || [],
+      clients: isPeriodFiltered
+        ? periodClients
+        : latestSubmission?.sourcesUsed || [],
+      models: isPeriodFiltered
+        ? periodModels
+        : latestSubmission?.modelsUsed || [],
       mcpServers: latestSubmission?.mcpServers || [],
       modelUsage,
       contributions: graphContributions,
@@ -563,14 +634,14 @@ export async function GET(request: Request, { params }: RouteParams) {
     if (error instanceof AmbiguousUsernameError) {
       return NextResponse.json(
         { error: "Username is ambiguous" },
-        { status: 409 }
+        { status: 409 },
       );
     }
 
     console.error("Profile error:", error);
     return NextResponse.json(
       { error: "Failed to fetch profile" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

@@ -138,7 +138,7 @@ export function ProfileTabBar({
             type="button"
             role="tab"
             aria-selected={isActive}
-            aria-controls={`tabpanel-${tab.id}`}
+            aria-controls={isActive ? `tabpanel-${tab.id}` : undefined}
             tabIndex={isActive ? 0 : -1}
             $active={isActive}
             onClick={() => onTabChange(tab.id)}

@@ -404,6 +404,26 @@ describe("profile usage chart aggregation", () => {
     ]);
   });
 
+  it("does not classify model-name substrings as model families", () => {
+    const chart = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-07-01", [
+          client("claude", { input: 1 }, 1, "claude-opus-4"),
+          client("claude", { input: 1 }, 1, "claude-myopus-99"),
+        ]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+    );
+
+    const colors = Object.fromEntries(
+      chart.series.map(({ model, color }) => [model, color]),
+    );
+    expect(colors["claude-opus-4"]).toBe("#f97316");
+    expect(colors["claude-myopus-99"]).toBe("#fa8230");
+  });
+
   it("assigns duplicate model ids deterministic shades inside each source", () => {
     const forward = [
       client("claude", { input: 10 }, 1, "claude-fable-5"),

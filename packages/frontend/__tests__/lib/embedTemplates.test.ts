@@ -825,6 +825,16 @@ describe("graph toggle", () => {
     ).toContain("Contribution activity");
   });
 
+  it("keeps an explicitly requested empty blueprint graph visible", () => {
+    const svg = renderBlueprintEmbedSvg(mockStats, {
+      contributions: [],
+      graph: true,
+    });
+
+    expect(svg).toContain("Contribution activity");
+    expect(svg).toContain('height="367"');
+  });
+
   it("reserves footer space below every optional contribution panel", () => {
     const svgs = [
       renderMinimalEmbedSvg(mockStats, {

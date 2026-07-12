@@ -116,43 +116,50 @@ const Percentage = styled.span`
   font-weight: 500;
 `;
 
+function finiteNonnegative(value: number | undefined): number {
+  return Number.isFinite(value) ? Math.max(0, value ?? 0) : 0;
+}
+
 export function TokenBreakdown({ stats, className }: TokenBreakdownProps) {
   const headingId = useId();
   const descriptionId = useId();
   const tokenTypes = [
     {
       label: "Input",
-      value: Math.max(0, stats.inputTokens),
+      value: finiteNonnegative(stats.inputTokens),
       color: "var(--service-accent)",
     },
     {
       label: "Output",
-      value: Math.max(0, stats.outputTokens),
+      value: finiteNonnegative(stats.outputTokens),
       color: "var(--service-accent-hover)",
     },
     {
       label: "Cache read",
-      value: Math.max(0, stats.cacheReadTokens),
+      value: finiteNonnegative(stats.cacheReadTokens),
       color:
         "color-mix(in srgb, var(--service-accent) 55%, var(--service-text-muted))",
     },
     {
       label: "Cache write",
-      value: Math.max(0, stats.cacheWriteTokens),
+      value: finiteNonnegative(stats.cacheWriteTokens),
       color:
         "color-mix(in srgb, var(--service-accent) 30%, var(--service-text-muted))",
     },
-    ...(stats.reasoningTokens && stats.reasoningTokens > 0
+    ...(finiteNonnegative(stats.reasoningTokens) > 0
       ? [
           {
             label: "Reasoning",
-            value: stats.reasoningTokens,
+            value: finiteNonnegative(stats.reasoningTokens),
             color: "var(--service-text-muted)",
           },
         ]
       : []),
   ];
-  const breakdownTotal = tokenTypes.reduce((sum, type) => sum + type.value, 0);
+  const breakdownTotal = tokenTypes.reduce(
+    (sum, type) => Math.min(Number.MAX_VALUE, sum + type.value),
+    0,
+  );
   const describedBreakdown = tokenTypes
     .map((type) => `${type.label} ${formatNumber(type.value)}`)
     .join(", ");
@@ -191,7 +198,11 @@ export function TokenBreakdown({ stats, className }: TokenBreakdownProps) {
         <BreakdownList>
           {tokenTypes.map((type) => {
             const percentage =
-              breakdownTotal > 0 ? (type.value / breakdownTotal) * 100 : 0;
+              Number.isFinite(type.value) &&
+              Number.isFinite(breakdownTotal) &&
+              breakdownTotal > 0
+                ? (type.value / breakdownTotal) * 100
+                : 0;
 
             return (
               <BreakdownItem

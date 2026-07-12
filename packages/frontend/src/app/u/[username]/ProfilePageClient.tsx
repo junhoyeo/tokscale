@@ -56,6 +56,10 @@ interface ProfileData {
     start: string | null;
     end: string | null;
   };
+  chartRange?: {
+    start: string | null;
+    end: string | null;
+  };
   updatedAt: string | null;
   clients: string[];
   models: string[];
@@ -68,16 +72,9 @@ interface ProfileData {
 function getProfileChartRange(
   period: ProfilePeriod,
   apiRange: ProfileData["dateRange"],
+  chartRange: ProfileData["chartRange"],
 ): { start: string | null; end: string | null } {
-  if (period !== "all") return apiRange;
-
-  const end = new Date();
-  const start = new Date(end);
-  start.setUTCFullYear(start.getUTCFullYear() - 1);
-  return {
-    start: start.toISOString().slice(0, 10),
-    end: end.toISOString().slice(0, 10),
-  };
+  return period === "all" ? (chartRange ?? apiRange) : apiRange;
 }
 
 interface ProfilePageClientProps {
@@ -104,8 +101,8 @@ export default function ProfilePageClient({
   const data = initialData;
   const period = data.period ?? "all";
   const chartRange = useMemo(
-    () => getProfileChartRange(period, data.dateRange),
-    [period, data.dateRange],
+    () => getProfileChartRange(period, data.dateRange, data.chartRange),
+    [period, data.chartRange, data.dateRange],
   );
   const contributionRangeIdentity = `${chartRange.start ?? ""}:${chartRange.end ?? ""}`;
   const [contributionSelection, setContributionSelection] = useState<{

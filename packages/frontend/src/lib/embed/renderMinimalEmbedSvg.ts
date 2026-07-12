@@ -41,10 +41,7 @@ export function renderMinimalEmbedSvg(
   const palette = resolvePalette(theme, options.color ?? null);
   const tokensFormat = options.tokensFormat ?? "compact";
   const costFormat = options.costFormat ?? "compact";
-  const contributions =
-    options.graph && options.contributions?.length
-      ? options.contributions
-      : null;
+  const contributions = options.graph ? (options.contributions ?? []) : null;
   const right = W - PAD;
 
   const tokens = formatNumber(

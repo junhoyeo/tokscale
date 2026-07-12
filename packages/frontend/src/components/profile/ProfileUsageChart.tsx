@@ -10,7 +10,7 @@ import {
   type PointerEvent,
 } from "react";
 import styled, { css } from "styled-components";
-import { SOURCE_COLORS, SOURCE_DISPLAY_NAMES } from "@/lib/constants";
+import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
 import type { DailyContribution } from "@/lib/types";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
 import {
@@ -19,6 +19,7 @@ import {
   buildUsageChartData,
   getActiveTooltipRows,
   getUsageProviderTotals,
+  providerColor,
   toTrailingAverage,
   type UsageChartSeries,
   type UsageMetric,
@@ -189,14 +190,6 @@ function createChartStack(
 function providerName(provider: UsageProviderId): string {
   if (provider === "unattributed") return "Unattributed";
   return SOURCE_DISPLAY_NAMES[provider] ?? provider;
-}
-
-function providerColor(provider: UsageProviderId): string {
-  if (provider === "unattributed") return "#737373";
-  const color = SOURCE_COLORS[provider] ?? "#3b82f6";
-  return ["#171717", "#1f1d1c", "#24292f"].includes(color.toLowerCase())
-    ? "#8b98a7"
-    : color;
 }
 
 function formatMetric(value: number, metric: UsageMetric): string {
@@ -1011,7 +1004,7 @@ export function ProfileUsageChart({
         selectedProvider,
         activeIndex,
         view,
-        averageWindowDays,
+        chartData.averageWindowDays,
       ),
     [
       days,
@@ -1019,7 +1012,7 @@ export function ProfileUsageChart({
       selectedProvider,
       activeIndex,
       view,
-      averageWindowDays,
+      chartData.averageWindowDays,
     ],
   );
 
@@ -1033,7 +1026,7 @@ export function ProfileUsageChart({
         )
         .sort(
           (left, right) =>
-            left[metric] - right[metric] ||
+            right[metric] - left[metric] ||
             left.provider.localeCompare(right.provider),
         ),
     [providerTotals, selectedProvider, metric],
@@ -1103,7 +1096,7 @@ export function ProfileUsageChart({
       : PLOT_LEFT;
   const activeOffset = (activeX / VIEWBOX_WIDTH) * 100;
   const activeTooltipLeft = tooltipLeft(activeOffset, plotWidth);
-  const modeLabel = viewLabel(view, averageWindowDays);
+  const modeLabel = viewLabel(view, chartData.averageWindowDays);
   const chartTitle = `${modeLabel} ${metricLabel(metric).toLowerCase()} usage by model and provider`;
   const chartDescription = `${chartTitle} from ${
     chartData.dates[0] ? formatDate(chartData.dates[0]) : "no start date"
@@ -1181,7 +1174,9 @@ export function ProfileUsageChart({
                 setView(event.currentTarget.value as UsageView)
               }
             >
-              <option value="average">{averageWindowDays}d average</option>
+              <option value="average">
+                {chartData.averageWindowDays}d average
+              </option>
               <option value="daily">Daily</option>
             </CompactSelect>
           </SelectControl>

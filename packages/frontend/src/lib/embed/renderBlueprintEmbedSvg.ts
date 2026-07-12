@@ -43,8 +43,7 @@ export function renderBlueprintEmbedSvg(
   const palette = resolvePalette(theme, options.color ?? null);
   const contributionDays = options.contributions ?? [];
   const scopedContributionDays = getContributionWindow(contributionDays).days;
-  const contributions =
-    options.graph && contributionDays.length ? contributionDays : null;
+  const contributions = options.graph ? contributionDays : null;
   const right = W - PAD;
   const innerWidth = W - PAD * 2;
   const tokensCompact = (options.tokensFormat ?? "full") === "compact";

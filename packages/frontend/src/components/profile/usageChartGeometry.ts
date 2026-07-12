@@ -53,6 +53,11 @@ function normalizeValues(
   );
 }
 
+function saturatingAdd(left: number, right: number): number {
+  const sum = left + right;
+  return Number.isFinite(sum) ? sum : Number.MAX_VALUE;
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
@@ -138,17 +143,17 @@ function addBoundaries(
   thickness: CubicValueBoundary,
 ): CubicValueBoundary {
   return {
-    values: lower.values.map(
-      (value, index) => value + (thickness.values[index] ?? 0),
+    values: lower.values.map((value, index) =>
+      saturatingAdd(value, thickness.values[index] ?? 0),
     ),
     segments: lower.segments.map((segment, index) => {
       const addition = thickness.segments[index];
       return {
         index: segment.index,
-        from: segment.from + (addition?.from ?? 0),
-        control1: segment.control1 + (addition?.control1 ?? 0),
-        control2: segment.control2 + (addition?.control2 ?? 0),
-        to: segment.to + (addition?.to ?? 0),
+        from: saturatingAdd(segment.from, addition?.from ?? 0),
+        control1: saturatingAdd(segment.control1, addition?.control1 ?? 0),
+        control2: saturatingAdd(segment.control2, addition?.control2 ?? 0),
+        to: saturatingAdd(segment.to, addition?.to ?? 0),
       };
     }),
   };
@@ -199,11 +204,10 @@ export function sampleCubicValueSegment(
   progress: number,
 ): number {
   const t = clamp(Number.isFinite(progress) ? progress : 0, 0, 1);
-  const inverse = 1 - t;
-  return (
-    inverse * inverse * inverse * segment.from +
-    3 * inverse * inverse * t * segment.control1 +
-    3 * inverse * t * t * segment.control2 +
-    t * t * t * segment.to
-  );
+  const interpolate = (left: number, right: number): number =>
+    left + (right - left) * t;
+  const first = interpolate(segment.from, segment.control1);
+  const second = interpolate(segment.control1, segment.control2);
+  const third = interpolate(segment.control2, segment.to);
+  return interpolate(interpolate(first, second), interpolate(second, third));
 }

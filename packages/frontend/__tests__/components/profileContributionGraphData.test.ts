@@ -71,6 +71,15 @@ describe("profile contribution calendar", () => {
     expect(calendar.highestDay?.date).toBe("2026-07-06");
   });
 
+  it("treats floating-point cost residue as free usage", () => {
+    const calendar = createContributionCalendar([
+      contribution("2026-07-05", 100, 1e-7),
+      contribution("2026-07-06", 100, 1e-5),
+    ]);
+
+    expect(calendar.freeTokenDays).toBe(1);
+  });
+
   it("renders explicit outer range days as zero-valued cells", () => {
     const calendar = createContributionCalendar(
       [contribution("2026-07-06", 200, 1)],

@@ -288,9 +288,16 @@ describe("user embed data", () => {
 
   it("derives contribution intensity from max-relative tokens even when cost is zero", async () => {
     mockState.pushAwaitedResult([{ id: "user-alice" }]);
+    const end = new Date();
+    end.setUTCHours(0, 0, 0, 0);
+    end.setUTCDate(end.getUTCDate() - 1);
     mockState.pushAwaitedResult(
       [1, 25, 26, 50, 51, 75, 76, 100].map((tokens, index) => ({
-        date: `2026-03-${String(index + 1).padStart(2, "0")}`,
+        date: (() => {
+          const date = new Date(end);
+          date.setUTCDate(date.getUTCDate() - (7 - index));
+          return date.toISOString().slice(0, 10);
+        })(),
         tokens,
         cost: 0,
       })),

@@ -40,10 +40,7 @@ export function renderReceiptEmbedSvg(
 ): string {
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
-  const contributions =
-    options.graph && options.contributions?.length
-      ? options.contributions
-      : null;
+  const contributions = options.graph ? (options.contributions ?? []) : null;
   const layout = options.contributions?.length
     ? layoutContributions(options.contributions)
     : null;

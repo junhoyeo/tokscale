@@ -48,8 +48,7 @@ function renderProfileCardSvg(
   const costFormat =
     options.costFormat ?? (compactNumbers ? "compact" : "full");
   const sortBy: EmbedSortBy = options.sortBy === "cost" ? "cost" : "tokens";
-  const contributions =
-    !compact && options.contributions?.length ? options.contributions : null;
+  const contributions = !compact ? (options.contributions ?? null) : null;
 
   const width = compact ? 460 : 680;
   const x = compact ? 18 : 24;
