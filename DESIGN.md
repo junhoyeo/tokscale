@@ -16,8 +16,8 @@
 
 ## Product goals
 
-- Goals: Make profiles understandable in one viewport; make global and group rankings immediately scannable; preserve tokens, cost, time, submissions, rank, and role at every viewport; make group discovery and membership workflows feel like one service; make every embed template communicate one distinct usage story; and work cleanly from 320px through desktop.
-- Non-goals: No database, API, authentication, settings, global landing/footer asset, or `/local` graph redesign in this pass. No new dependency and no pixel-for-pixel clone of the reference sites.
+- Goals: Make profiles understandable in one viewport; make global and group rankings immediately scannable; preserve tokens, cost, time, rank, and role at every viewport; make group discovery and membership workflows feel like one service; make every embed template communicate one distinct usage story; and work cleanly from 320px through desktop.
+- Non-goals: No database schema, authentication, settings, global landing/footer asset, or `/local` graph redesign in this pass. The leaderboard response may be narrowed to facts its ranking surfaces consume. No new dependency and no pixel-for-pixel clone of the reference sites.
 - Success signals: A visitor reaches leaderboard data without crossing a promotional hero; top ranks and active scope scan in seconds; public groups are compact enough to compare; group detail never collides with navigation; mobile ranking rows retain their decisive metrics without horizontal scrolling; and profile, leaderboard, groups, and embeds share one visual grammar.
 
 ## Personas and jobs
@@ -56,7 +56,7 @@
 
 ## Components
 
-- Existing components to reuse: `Navigation`, profile components, formatters in `lib/utils`, shared graph palettes/settings, `TabBar`, existing 16px icons, and current server/API contracts.
+- Existing components to reuse: `Navigation`, profile components, formatters in `lib/utils`, shared graph palettes/settings, `TabBar`, existing 16px icons, and established server-fetching patterns.
 - New/changed components: A shared compact application shell and `ServiceFooter` for profile/ranking routes; compact `LeaderboardViewSelector`, aggregate fact strip, responsive global ranking rows, `GroupDirectory`, deterministic group mark, scoped group overview, responsive group ranking rows, and focused create/join surfaces. Existing profile analytics and embed components remain unchanged in this follow-up.
 - Variants and states: Primary/secondary/ghost actions; active/inactive navigation and ranges; current-user and top-three rows; public/private/member/owner/admin group states; loading, empty, search-empty, error, pagination, copied-invite, and submitting states; desktop table and mobile ranking-list compositions.
 - Chart contract: Render one stable stacked area per provider/model pair. Order provider groups and their models by raw scoped usage ascending so dominant bands remain on top; sort only the active tooltip rows descending. Use provider-level legend colors, deterministic model shades, 40% fills, 1px monotone boundaries, and no chart animation.
@@ -98,9 +98,9 @@
 
 - Framework/styling system: Next.js 16, React 19, and styled-components. No Sass/Tailwind/chart package is introduced.
 - Design-token constraints: Add tokens without changing existing global aliases used by landing, leaderboard, settings, groups, or `/local`.
-- Performance constraints: Keep chart and contribution geometry derivation memoized; allow normal profiles to retain their model bands, apply a high pathological series cap with an explicit remainder, render only one contribution view at a time, and preserve server data fetching and ISR.
+- Performance constraints: Keep chart and contribution geometry derivation memoized; allow normal profiles to retain their model bands, apply a high pathological series cap with an explicit remainder, render only one contribution view at a time, and preserve server data fetching and ISR. Ranking queries and API payloads include only displayed identity, rank, token, cost, time, role, scope, and pagination facts; submission counts and freshness metadata stay on profile-specific surfaces.
 - Analytical constraints: Missing calendar dates are zero-valued. Lifetime defaults to a trailing 30-day average and finite ranges to a trailing 7-day average, with daily values available as an explicit display mode. Moving averages never alter raw range totals or stable series ranking.
-- Compatibility constraints: Leave API/auth/database contracts and canonical profile redirects unchanged. Do not mutate the shared `GraphContainer` behavior. Preserve all public embed template IDs and query parameters, XML escaping, CSP-compatible standalone SVG output, intrinsic template widths, and the classic fallback for invalid or omitted templates.
+- Compatibility constraints: Leave auth, database schema, profile APIs, and canonical profile redirects unchanged. The public leaderboard APIs intentionally omit unused submission-count and freshness fields. Do not mutate the shared `GraphContainer` behavior. Preserve all public embed template IDs and query parameters, XML escaping, CSP-compatible standalone SVG output, intrinsic template widths, and the classic fallback for invalid or omitted templates.
 - Test/screenshot expectations: Preserve existing profile/embed coverage; add focused tests for view-link filter preservation and responsive ranking/group presentation helpers; run frontend tests, lint, typecheck, and build; capture `/leaderboard`, `/leaderboard?view=groups`, and a populated public `/groups/[slug]` with actual API data at 1440×1100 and 390×844; exercise search, period, sort, view, and primary group navigation; persist the visual verdict under `.omx/state/groups-leaderboard/ralph-progress.json` with a pass target of 90.
 
 ## Open questions

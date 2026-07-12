@@ -21,6 +21,7 @@ import { formatCurrency, formatNumber, formatDuration } from "@/lib/utils";
 import { useSettings } from "@/lib/useSettings";
 import { isValidSortBy, type LeaderboardSortBy } from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
+import type { LeaderboardData, LeaderboardUser, Period } from "@/lib/leaderboard/types";
 
 const Section = styled.div`
   display: grid;
@@ -323,10 +324,6 @@ const CostValue = styled.span`
   @media (min-width: 561px) {
     display: none;
   }
-`;
-
-const SubmitCount = styled.span`
-  color: var(--service-text-muted);
 `;
 
 const PaginationContainer = styled.div`
@@ -823,42 +820,6 @@ const PaginationPages = styled.div`
   }
 `;
 
-export type Period = "all" | "month" | "last-month" | "week" | "custom";
-
-export interface LeaderboardUser {
-  rank: number;
-  userId: string;
-  username: string;
-  displayName: string | null;
-  avatarUrl: string | null;
-  totalTokens: number;
-  totalCost: number;
-  totalActiveTimeMs: number | null;
-  submissionCount: number | null;
-  lastSubmission: string;
-}
-
-export interface LeaderboardData {
-  users: LeaderboardUser[];
-  pagination: {
-    page: number;
-    limit: number;
-    totalUsers: number;
-    totalPages: number;
-    hasNext: boolean;
-    hasPrev: boolean;
-  };
-  stats: {
-    totalTokens: number;
-    totalCost: number;
-    totalActiveTimeMs: number | null;
-    totalSubmissions: number | null;
-    uniqueUsers: number;
-  };
-  period: Period;
-  sortBy?: 'tokens' | 'cost' | 'time';
-}
-
 interface LeaderboardClientProps {
   initialData: LeaderboardData;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
@@ -880,7 +841,6 @@ function isValidLeaderboardData(data: unknown): data is LeaderboardData {
 interface LeaderboardRowProps {
   user: LeaderboardUser;
   isCurrentUser: boolean;
-  showSubmissionCount: boolean;
   showTime: boolean;
   onRowClick: (username: string) => void;
 }
@@ -888,7 +848,6 @@ interface LeaderboardRowProps {
 const LeaderboardRow = memo(function LeaderboardRow({
   user,
   isCurrentUser,
-  showSubmissionCount,
   showTime,
   onRowClick,
 }: LeaderboardRowProps) {
@@ -946,11 +905,6 @@ const LeaderboardRow = memo(function LeaderboardRow({
           <StatSpan>{formatDuration(user.totalActiveTimeMs)}</StatSpan>
         </TableCell>
       )}
-      {showSubmissionCount && (
-        <TableCell className="text-right hidden-mobile w-24">
-          <SubmitCount>{user.submissionCount ?? "—"}</SubmitCount>
-        </TableCell>
-      )}
     </TableRow>
   );
 });
@@ -958,12 +912,10 @@ const LeaderboardRow = memo(function LeaderboardRow({
 function LeaderboardMobileRow({
   user,
   isCurrentUser,
-  showSubmissionCount,
   sortBy,
 }: {
   user: LeaderboardUser;
   isCurrentUser: boolean;
-  showSubmissionCount: boolean;
   sortBy: LeaderboardSortBy;
 }) {
   const primary = sortBy === "cost"
@@ -975,9 +927,6 @@ function LeaderboardMobileRow({
     sortBy !== "tokens" ? `${formatNumber(user.totalTokens)} tokens` : null,
     sortBy !== "cost" ? formatCurrency(user.totalCost) : null,
     sortBy !== "time" ? formatDuration(user.totalActiveTimeMs) : null,
-    showSubmissionCount && user.submissionCount !== null
-      ? `${user.submissionCount.toLocaleString("en-US")} submits`
-      : null,
   ].filter(Boolean).join(" · ");
 
   return (
@@ -1208,7 +1157,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   }, [appliedFrom, appliedTo, debouncedSearch, effectiveSortBy, fetchData, isLoading, period, requestedPage, retryToken]);
 
   const sortedUsers = data.users || [];
-  const showSubmissionCount = period === "all";
   const showTime = true;
 
   const handleCopyCommand = (command: string) => {
@@ -1256,17 +1204,12 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
               </HoverTooltip>
             </MetricValue>
           </MetricItem>
-          {data.stats.totalActiveTimeMs !== null ? (
+          {data.stats.totalActiveTimeMs !== null && (
             <MetricItem>
               <MetricLabel>Active time</MetricLabel>
               <MetricValue>{formatDuration(data.stats.totalActiveTimeMs)}</MetricValue>
             </MetricItem>
-          ) : data.stats.totalSubmissions !== null ? (
-            <MetricItem>
-              <MetricLabel>Submissions</MetricLabel>
-              <MetricValue>{data.stats.totalSubmissions.toLocaleString("en-US")}</MetricValue>
-            </MetricItem>
-          ) : null}
+          )}
         </MetricStrip>
       </Section>
 
@@ -1458,9 +1401,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                       {showTime && (
                         <TableHeaderCell className="text-right hidden-mobile w-24">Time</TableHeaderCell>
                       )}
-                      {showSubmissionCount && (
-                        <TableHeaderCell className="text-right hidden-mobile w-24">Submits</TableHeaderCell>
-                      )}
                     </tr>
                   </TableHead>
                   <TableBody>
@@ -1469,7 +1409,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                         key={user.userId}
                         user={user}
                         isCurrentUser={!!(currentUser && user.username === currentUser.username)}
-                        showSubmissionCount={showSubmissionCount}
                         showTime={showTime}
                         onRowClick={handleRowClick}
                       />
@@ -1484,7 +1423,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                     key={user.userId}
                     user={user}
                     isCurrentUser={!!(currentUser && user.username === currentUser.username)}
-                    showSubmissionCount={showSubmissionCount}
                     sortBy={effectiveSortBy}
                   />
                 ))}

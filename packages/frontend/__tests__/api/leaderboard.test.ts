@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 
 describe("GET /api/leaderboard", () => {
-  it("passes submission freshness metadata through unchanged", async () => {
+  it("returns the lean leaderboard payload", async () => {
     getLeaderboardData.mockResolvedValue({
       users: [
         {
@@ -31,14 +31,7 @@ describe("GET /api/leaderboard", () => {
           avatarUrl: null,
           totalTokens: 1200,
           totalCost: 12.5,
-          submissionCount: 2,
-          lastSubmission: "2026-01-10T10:00:00.000Z",
-          submissionFreshness: {
-            lastUpdated: "2026-01-10T10:00:00.000Z",
-            cliVersion: "1.4.2",
-            schemaVersion: 1,
-            isStale: true,
-          },
+          totalActiveTimeMs: 3600000,
         },
       ],
       pagination: {
@@ -52,7 +45,7 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 1200,
         totalCost: 12.5,
-        totalSubmissions: 1,
+        totalActiveTimeMs: null,
         uniqueUsers: 1,
       },
       period: "all",
@@ -76,12 +69,16 @@ describe("GET /api/leaderboard", () => {
       undefined,
       undefined,
     );
-    expect(body.users[0].submissionFreshness).toEqual({
-      lastUpdated: "2026-01-10T10:00:00.000Z",
-      cliVersion: "1.4.2",
-      schemaVersion: 1,
-      isStale: true,
-    });
+    expect(Object.keys(body.users[0]).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "totalActiveTimeMs",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
   });
 
   it("accepts time sort requests", async () => {
@@ -99,7 +96,6 @@ describe("GET /api/leaderboard", () => {
         totalTokens: 0,
         totalCost: 0,
         totalActiveTimeMs: 0,
-        totalSubmissions: 0,
         uniqueUsers: 0,
       },
       period: "all",
@@ -137,7 +133,6 @@ describe("GET /api/leaderboard", () => {
         totalTokens: 0,
         totalCost: 0,
         totalActiveTimeMs: 0,
-        totalSubmissions: 0,
         uniqueUsers: 0,
       },
       period: "all",
@@ -175,7 +170,6 @@ describe("GET /api/leaderboard", () => {
         totalTokens: 0,
         totalCost: 0,
         totalActiveTimeMs: 0,
-        totalSubmissions: 0,
         uniqueUsers: 0,
       },
       period: "all",

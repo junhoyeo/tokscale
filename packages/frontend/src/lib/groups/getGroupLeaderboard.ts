@@ -1,7 +1,6 @@
 import { unstable_cache } from "next/cache";
 import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { db, dailyBreakdown, groupMembers, submissions, users } from "@/lib/db";
-import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 import type { LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
 
 interface GroupLeaderboardPeriodRow {
@@ -12,9 +11,6 @@ interface GroupLeaderboardPeriodRow {
   role: string;
   tokens: number;
   cost: number;
-  updatedAt: string;
-  cliVersion: string | null;
-  schemaVersion: number;
 }
 
 interface GroupLeaderboardDbRow {
@@ -25,10 +21,6 @@ interface GroupLeaderboardDbRow {
   role: string;
   totalTokens: number | string | null;
   totalCost: number | string | null;
-  submissionCount: number | string | null;
-  lastSubmission: string;
-  cliVersion: string | null;
-  schemaVersion: number | null;
 }
 
 export interface GroupLeaderboardUser extends LeaderboardUser {
@@ -48,8 +40,6 @@ export interface GroupLeaderboardData {
   stats: {
     totalTokens: number;
     totalCost: number;
-    totalSubmissions: number | null;
-    uniqueUsers: number;
     activeUsers: number;
     totalMembers: number;
   };
@@ -108,8 +98,7 @@ function paginateRankedUsers(
   period: Period,
   sortBy: SortBy,
   search: string,
-  totalMembers: number,
-  totalSubmissions: number | null
+  totalMembers: number
 ): GroupLeaderboardData {
   const offset = (page - 1) * limit;
   const filteredUsers = usersWithRanks.filter((user) => matchesSearch(user, search));
@@ -128,8 +117,6 @@ function paginateRankedUsers(
     stats: {
       totalTokens: usersWithRanks.reduce((sum, user) => sum + user.totalTokens, 0),
       totalCost: usersWithRanks.reduce((sum, user) => sum + user.totalCost, 0),
-      totalSubmissions,
-      uniqueUsers: usersWithRanks.length,
       activeUsers: usersWithRanks.length,
       totalMembers,
     },
@@ -154,14 +141,6 @@ function buildPeriodGroupLeaderboardData(
     if (existing) {
       existing.totalTokens += row.tokens;
       existing.totalCost += row.cost;
-      if (row.updatedAt > existing.lastSubmission) {
-        existing.lastSubmission = row.updatedAt;
-        existing.submissionFreshness = buildSubmissionFreshness({
-          updatedAt: row.updatedAt,
-          cliVersion: row.cliVersion,
-          schemaVersion: row.schemaVersion,
-        });
-      }
       continue;
     }
 
@@ -174,13 +153,6 @@ function buildPeriodGroupLeaderboardData(
       totalTokens: row.tokens,
       totalCost: row.cost,
       totalActiveTimeMs: null,
-      submissionCount: null,
-      lastSubmission: row.updatedAt,
-      submissionFreshness: buildSubmissionFreshness({
-        updatedAt: row.updatedAt,
-        cliVersion: row.cliVersion,
-        schemaVersion: row.schemaVersion,
-      }),
     });
   }
 
@@ -195,8 +167,7 @@ function buildPeriodGroupLeaderboardData(
     period,
     sortBy,
     search,
-    totalMembers,
-    null
+    totalMembers
   );
 }
 
@@ -225,9 +196,6 @@ async function fetchPeriodRows(
       role: groupMembers.role,
       tokens: dailyBreakdown.tokens,
       cost: dailyBreakdown.cost,
-      updatedAt: submissions.updatedAt,
-      cliVersion: submissions.cliVersion,
-      schemaVersion: submissions.schemaVersion,
     })
     .from(dailyBreakdown)
     .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
@@ -249,11 +217,6 @@ async function fetchPeriodRows(
     role: row.role,
     tokens: Number(row.tokens) || 0,
     cost: Number(row.cost) || 0,
-    updatedAt: row.updatedAt instanceof Date
-      ? row.updatedAt.toISOString()
-      : new Date(row.updatedAt).toISOString(),
-    cliVersion: row.cliVersion,
-    schemaVersion: Number(row.schemaVersion) || 0,
   }));
 }
 
@@ -274,18 +237,6 @@ async function fetchAllTimeRows(groupId: string, sortBy: SortBy): Promise<GroupL
       role: groupMembers.role,
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
       totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
-      submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
-      lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
-      cliVersion: sql<string | null>`(
-        SELECT s2.cli_version FROM submissions s2
-        WHERE s2.user_id = ${users.id}
-        ORDER BY s2.updated_at DESC, s2.id DESC LIMIT 1
-      )`.as("cli_version"),
-      schemaVersion: sql<number>`COALESCE((
-        SELECT s2.schema_version FROM submissions s2
-        WHERE s2.user_id = ${users.id}
-        ORDER BY s2.updated_at DESC, s2.id DESC LIMIT 1
-      ), 0)`.as("schema_version"),
     })
     .from(submissions)
     .innerJoin(users, eq(submissions.userId, users.id))
@@ -314,13 +265,6 @@ async function fetchAllTimeRows(groupId: string, sortBy: SortBy): Promise<GroupL
     totalTokens: Number(row.totalTokens) || 0,
     totalCost: Number(row.totalCost) || 0,
     totalActiveTimeMs: null,
-    submissionCount: Number(row.submissionCount) || 0,
-    lastSubmission: row.lastSubmission,
-    submissionFreshness: buildSubmissionFreshness({
-      updatedAt: row.lastSubmission,
-      cliVersion: row.cliVersion,
-      schemaVersion: row.schemaVersion,
-    }),
   }));
 }
 
@@ -340,10 +284,6 @@ async function fetchGroupLeaderboardData(
   }
 
   const usersWithRanks = await fetchAllTimeRows(groupId, sortBy);
-  const totalSubmissions = usersWithRanks.reduce(
-    (sum, user) => sum + (user.submissionCount ?? 0),
-    0
-  );
 
   return paginateRankedUsers(
     usersWithRanks,
@@ -352,8 +292,7 @@ async function fetchGroupLeaderboardData(
     period,
     sortBy,
     search,
-    totalMembers,
-    totalSubmissions
+    totalMembers
   );
 }
 

@@ -14,18 +14,15 @@ const mockState = vi.hoisted(() => {
     submissions: {
       id: "submissions.id",
       userId: "submissions.userId",
-      submitCount: "submissions.submitCount",
-      updatedAt: "submissions.updatedAt",
       totalTokens: "submissions.totalTokens",
       totalCost: "submissions.totalCost",
-      cliVersion: "submissions.cliVersion",
-      schemaVersion: "submissions.schemaVersion",
     },
     dailyBreakdown: {
       submissionId: "dailyBreakdown.submissionId",
       date: "dailyBreakdown.date",
       tokens: "dailyBreakdown.tokens",
       cost: "dailyBreakdown.cost",
+      activeTimeMs: "dailyBreakdown.activeTimeMs",
     },
   };
 
@@ -122,10 +119,6 @@ vi.mock("@/lib/db/usernameLookup", () => {
   };
 });
 
-vi.mock("@/lib/submissionFreshness", async () =>
-  import("../../src/lib/submissionFreshness")
-);
-
 vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
@@ -139,6 +132,13 @@ type ModuleExports = typeof import("../../src/lib/leaderboard/getLeaderboard");
 
 let getLeaderboardData: ModuleExports["getLeaderboardData"];
 let getUserRank: ModuleExports["getUserRank"];
+
+function selectedKeys(callIndex: number): string[] {
+  const calls = mockState.db.select.mock.calls as unknown as Array<
+    [Record<string, unknown> | undefined]
+  >;
+  return Object.keys(calls[callIndex]?.[0] ?? {});
+}
 
 beforeAll(async () => {
   const leaderboardModule = await import("../../src/lib/leaderboard/getLeaderboard");
@@ -163,9 +163,7 @@ describe("period leaderboard data", () => {
       avatarUrl: null,
       tokens: 100,
       cost: 1.25,
-      updatedAt: "2026-03-07T11:00:00.000Z",
-      cliVersion: "1.5.0",
-      schemaVersion: 1,
+      activeTimeMs: 10,
     },
     {
       userId: "user-alice",
@@ -174,9 +172,7 @@ describe("period leaderboard data", () => {
       avatarUrl: null,
       tokens: 150,
       cost: 1.75,
-      updatedAt: "2026-03-07T11:00:00.000Z",
-      cliVersion: "1.5.0",
-      schemaVersion: 1,
+      activeTimeMs: 15,
     },
     {
       userId: "user-bob",
@@ -185,9 +181,7 @@ describe("period leaderboard data", () => {
       avatarUrl: null,
       tokens: 1000,
       cost: 9.5,
-      updatedAt: "2026-01-15T09:00:00.000Z",
-      cliVersion: "1.3.0",
-      schemaVersion: 0,
+      activeTimeMs: 100,
     },
   ];
 
@@ -213,32 +207,40 @@ describe("period leaderboard data", () => {
       username: "bob",
       totalTokens: 1000,
       totalCost: 9.5,
-      submissionFreshness: {
-        lastUpdated: "2026-01-15T09:00:00.000Z",
-        cliVersion: "1.3.0",
-        schemaVersion: 0,
-        isStale: true,
-      },
+      totalActiveTimeMs: 100,
     });
     expect(leaderboard.users[1]).toMatchObject({
       rank: 2,
       username: "alice",
       totalTokens: 250,
       totalCost: 3,
-      submissionCount: null,
-      submissionFreshness: {
-        lastUpdated: "2026-03-07T11:00:00.000Z",
-        cliVersion: "1.5.0",
-        schemaVersion: 1,
-        isStale: false,
-      },
+      totalActiveTimeMs: 25,
     });
-    expect(leaderboard.stats).toMatchObject({
+    expect(Object.keys(leaderboard.users[0]).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "totalActiveTimeMs",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
+    expect(leaderboard.stats).toEqual({
+      totalActiveTimeMs: 125,
       totalTokens: 1250,
       totalCost: 12.5,
-      totalSubmissions: null,
       uniqueUsers: 2,
     });
+    expect(selectedKeys(0)).toEqual([
+      "userId",
+      "username",
+      "displayName",
+      "avatarUrl",
+      "tokens",
+      "cost",
+      "activeTimeMs",
+    ]);
   });
 
   it("uses the current month for the month leaderboard range", async () => {
@@ -287,7 +289,6 @@ describe("period leaderboard data", () => {
     expect(leaderboard.stats).toMatchObject({
       totalTokens: 1250,
       totalCost: 12.5,
-      totalSubmissions: null,
       uniqueUsers: 2,
     });
   });
@@ -305,14 +306,7 @@ describe("period leaderboard data", () => {
       username: "alice",
       totalTokens: 250,
       totalCost: 3,
-      submissionCount: null,
-      lastSubmission: "2026-03-07T11:00:00.000Z",
-      submissionFreshness: {
-        lastUpdated: "2026-03-07T11:00:00.000Z",
-        cliVersion: "1.5.0",
-        schemaVersion: 1,
-        isStale: false,
-      },
+      totalActiveTimeMs: 25,
     });
   });
 
@@ -343,9 +337,7 @@ describe("period leaderboard data", () => {
         avatarUrl: null,
         tokens: 50,
         cost: 0.5,
-        updatedAt: "2026-03-07T11:00:00.000Z",
-        cliVersion: "1.5.0",
-        schemaVersion: 1,
+        activeTimeMs: 5,
       },
     ]);
 

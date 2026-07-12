@@ -18,7 +18,6 @@ function createEmptyLeaderboardData(sortBy: "tokens" | "cost"): LeaderboardData 
       totalTokens: 0,
       totalCost: 0,
       totalActiveTimeMs: null,
-      totalSubmissions: null,
       uniqueUsers: 0,
     },
     period: "all",

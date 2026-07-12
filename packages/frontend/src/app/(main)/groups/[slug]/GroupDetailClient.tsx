@@ -409,11 +409,9 @@ function roleLabel(role: string): string {
 
 function GroupRow({
   user,
-  showSubmissionCount,
   isCurrentUser,
 }: {
   user: GroupLeaderboardUser;
-  showSubmissionCount: boolean;
   isCurrentUser: boolean;
 }) {
   return (
@@ -434,19 +432,16 @@ function GroupRow({
       <Td>{roleLabel(user.role)}</Td>
       <Td className="right">{formatCurrency(user.totalCost)}</Td>
       <Td className="right">{formatNumber(user.totalTokens)}</Td>
-      {showSubmissionCount && <Td className="right">{user.submissionCount ?? "-"}</Td>}
     </DesktopRow>
   );
 }
 
 function GroupMobileRow({
   user,
-  showSubmissionCount,
   isCurrentUser,
   sortBy,
 }: {
   user: GroupLeaderboardUser;
-  showSubmissionCount: boolean;
   isCurrentUser: boolean;
   sortBy: SortBy;
 }) {
@@ -458,9 +453,6 @@ function GroupMobileRow({
     sortBy === "cost"
       ? `${formatNumber(user.totalTokens)} tokens`
       : formatCurrency(user.totalCost),
-    showSubmissionCount && user.submissionCount !== null
-      ? `${user.submissionCount.toLocaleString("en-US")} submits`
-      : null,
   ].filter(Boolean).join(" · ");
 
   return (
@@ -500,7 +492,6 @@ export default function GroupDetailClient({
   const didMountLeaderboard = useRef(false);
 
   const canInvite = isAdminRole(group.membership?.role);
-  const showSubmissionCount = period === "all";
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -715,7 +706,6 @@ export default function GroupDetailClient({
                     <Th>Role</Th>
                     <Th className="right">Cost</Th>
                     <Th className="right">Tokens</Th>
-                    {showSubmissionCount && <Th className="right">Submits</Th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -723,7 +713,6 @@ export default function GroupDetailClient({
                     <GroupRow
                       key={user.userId}
                       user={user}
-                      showSubmissionCount={showSubmissionCount}
                       isCurrentUser={currentUser?.username === user.username}
                     />
                   ))}
@@ -735,7 +724,6 @@ export default function GroupDetailClient({
                 <GroupMobileRow
                   key={user.userId}
                   user={user}
-                  showSubmissionCount={showSubmissionCount}
                   isCurrentUser={currentUser?.username === user.username}
                   sortBy={sortBy}
                 />

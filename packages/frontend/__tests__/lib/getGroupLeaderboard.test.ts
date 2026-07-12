@@ -22,10 +22,6 @@ const mockState = vi.hoisted(() => {
       userId: "submissions.userId",
       totalTokens: "submissions.totalTokens",
       totalCost: "submissions.totalCost",
-      submitCount: "submissions.submitCount",
-      updatedAt: "submissions.updatedAt",
-      cliVersion: "submissions.cliVersion",
-      schemaVersion: "submissions.schemaVersion",
     },
     dailyBreakdown: {
       submissionId: "dailyBreakdown.submissionId",
@@ -148,10 +144,6 @@ vi.mock("@/lib/db", () => ({
   groupMembers: mockState.tables.groupMembers,
 }));
 
-vi.mock("@/lib/submissionFreshness", async () =>
-  import("../../src/lib/submissionFreshness")
-);
-
 vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
@@ -165,6 +157,13 @@ vi.mock("drizzle-orm", () => ({
 type ModuleExports = typeof import("../../src/lib/groups/getGroupLeaderboard");
 
 let getGroupLeaderboardData: ModuleExports["getGroupLeaderboardData"];
+
+function selectedKeys(callIndex: number): string[] {
+  const calls = mockState.db.select.mock.calls as unknown as Array<
+    [Record<string, unknown> | undefined]
+  >;
+  return Object.keys(calls[callIndex]?.[0] ?? {});
+}
 
 beforeAll(async () => {
   const groupLeaderboardModule = await import("../../src/lib/groups/getGroupLeaderboard");
@@ -189,9 +188,6 @@ describe("group leaderboard data", () => {
       role: "owner",
       tokens: 200,
       cost: 2,
-      updatedAt: "2026-03-07T11:00:00.000Z",
-      cliVersion: "1.5.0",
-      schemaVersion: 1,
     },
     {
       userId: "user-bob",
@@ -201,9 +197,6 @@ describe("group leaderboard data", () => {
       role: "member",
       tokens: 600,
       cost: 6,
-      updatedAt: "2026-03-06T11:00:00.000Z",
-      cliVersion: "1.5.0",
-      schemaVersion: 1,
     },
   ];
 
@@ -233,11 +226,32 @@ describe("group leaderboard data", () => {
       role: "member",
       totalTokens: 600,
     });
-    expect(leaderboard.stats).toMatchObject({
+    expect(leaderboard.stats).toEqual({
       totalTokens: 800,
       totalCost: 8,
       activeUsers: 2,
+      totalMembers: 0,
     });
+    expect(Object.keys(leaderboard.users[0]).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "role",
+      "totalActiveTimeMs",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
+    expect(selectedKeys(1)).toEqual([
+      "userId",
+      "username",
+      "displayName",
+      "avatarUrl",
+      "role",
+      "tokens",
+      "cost",
+    ]);
   });
 
   it("filters search results after computing scoped ranks", async () => {
@@ -265,10 +279,6 @@ describe("group leaderboard data", () => {
         role: "member",
         totalTokens: 100,
         totalCost: "3.0000",
-        submissionCount: 1,
-        lastSubmission: "2026-03-07T11:00:00.000Z",
-        cliVersion: "1.5.0",
-        schemaVersion: 1,
       },
       {
         userId: "user-bob",
@@ -278,10 +288,6 @@ describe("group leaderboard data", () => {
         role: "member",
         totalTokens: 100,
         totalCost: "3.0000",
-        submissionCount: 1,
-        lastSubmission: "2026-03-07T11:00:00.000Z",
-        cliVersion: "1.5.0",
-        schemaVersion: 1,
       },
     ]);
 
@@ -291,11 +297,16 @@ describe("group leaderboard data", () => {
     expect(mockState.orderByCalls[0]).toHaveLength(4);
     expect(mockState.asc).toHaveBeenCalledWith(mockState.tables.users.username);
     expect(mockState.asc).toHaveBeenCalledWith(mockState.tables.users.id);
-    expect(mockState.sql).toHaveBeenCalledWith(
-      expect.arrayContaining(["(\n        SELECT s2.cli_version FROM submissions s2\n        WHERE s2.user_id = ", "\n        ORDER BY s2.updated_at DESC, s2.id DESC LIMIT 1\n      )"]),
-      mockState.tables.users.id
-    );
     expect(leaderboard.users.map((user) => user.username)).toEqual(["alice", "bob"]);
+    expect(selectedKeys(1)).toEqual([
+      "userId",
+      "username",
+      "displayName",
+      "avatarUrl",
+      "role",
+      "totalTokens",
+      "totalCost",
+    ]);
   });
 
   // submissions.total_cost is decimal(18,4); narrowing the cast to DECIMAL(12,4)
