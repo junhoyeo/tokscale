@@ -10,6 +10,7 @@ import {
   getContributionColor,
   getContributionFocusDate,
   getContributionScrollOffset,
+  isContributionDateHit,
   getNearestContributionDate,
   mergeDailyContributions,
   PROFILE_CONTRIBUTION_CELL_RADIUS,
@@ -197,6 +198,16 @@ describe("profile contribution calendar", () => {
     expect(getContributionScrollOffset(0, 20, 360, 570, 578)).toBe(218);
     expect(getContributionScrollOffset(218, 20, 360, -4, 4)).toBe(194);
     expect(getContributionScrollOffset(218, 20, 360, 120, 128)).toBe(218);
+  });
+
+  it("does not turn a marked inert cell into a nearest-date selection", () => {
+    const futureCell = {
+      closest: (selector: string) =>
+        selector === "[data-contribution-date]" ? {} : null,
+    } as unknown as Element;
+
+    expect(isContributionDateHit(futureCell)).toBe(true);
+    expect(isContributionDateHit(null)).toBe(false);
   });
 
   it("derives intensity from tokens so free usage remains visible", () => {

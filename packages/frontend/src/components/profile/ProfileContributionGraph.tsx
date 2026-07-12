@@ -193,6 +193,10 @@ export function getContributionScrollOffset(
   return currentScrollLeft;
 }
 
+export function isContributionDateHit(target: Element | null): boolean {
+  return Boolean(target?.closest("[data-contribution-date]"));
+}
+
 const dayFormatter = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
   month: "short",
@@ -1185,7 +1189,7 @@ const IsometricCell = styled.g<{ $active: boolean; $selected: boolean }>`
   outline: none;
 
   &[aria-hidden="true"] {
-    pointer-events: none;
+    pointer-events: auto;
     cursor: default;
   }
 
@@ -1195,8 +1199,8 @@ const IsometricCell = styled.g<{ $active: boolean; $selected: boolean }>`
       filter 120ms ease;
   }
 
-  &:hover polygon,
-  &:focus-visible polygon {
+  &:not([aria-hidden="true"]):hover polygon,
+  &:not([aria-hidden="true"]):focus-visible polygon {
     filter: brightness(1.12);
   }
 
@@ -2342,10 +2346,8 @@ export function ProfileContributionGraph({
   };
 
   const selectNearestCell = (event: ReactMouseEvent<Element>) => {
-    if (
-      event.target instanceof Element &&
-      event.target.closest("[data-contribution-date]")
-    ) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (isContributionDateHit(target)) {
       return;
     }
 
@@ -2491,7 +2493,7 @@ export function ProfileContributionGraph({
                         tooltip?.cell.date === cell.date ? tooltipId : undefined
                       }
                       data-contribution-date={
-                        cell.selectable ? cell.date : undefined
+                        cell.inRange ? cell.date : undefined
                       }
                       $active={tooltip?.cell.date === cell.date}
                       $color={getContributionColor(palette, cell.intensity)}
@@ -2558,7 +2560,7 @@ export function ProfileContributionGraph({
                         interactive && active ? tooltipId : undefined
                       }
                       data-contribution-date={
-                        interactive ? cell.date : undefined
+                        cell.inRange ? cell.date : undefined
                       }
                       data-contribution-view={interactive ? "3d" : undefined}
                       $active={active}
