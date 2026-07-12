@@ -1660,9 +1660,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             messages,
             cache_entry,
             ..
-        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
-            sessions::devin::parse_devin_cli_sqlite(path)
-        });
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::DevinCli),
+            db_path,
+            &source_cache,
+            pricing,
+            sessions::devin::parse_devin_cli_sqlite,
+        );
         all_messages.extend(messages);
         if let Some(entry) = cache_entry {
             source_cache.insert(entry);
@@ -1818,9 +1822,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::DevinDesktop)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::devin::parse_devin_desktop_ndjson(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::DevinDesktop),
+                path,
+                &source_cache,
+                pricing,
+                sessions::devin::parse_devin_desktop_ndjson,
+            )
         })
         .collect();
     for outcome in devin_desktop_outcomes {
