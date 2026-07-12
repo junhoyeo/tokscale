@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import styled from "styled-components";
+import { SegmentButton, SegmentedGroup } from "@/components/leaderboard/RankingUI";
 
 // Top-of-page segmented control that swaps between the global user leaderboard
 // and the group browser. Pure-link nav (no client state), so SSR + back/forward
@@ -15,71 +16,44 @@ import styled from "styled-components";
 
 export type LeaderboardView = "users" | "groups";
 
-const Bar = styled.nav`
-  margin: 24px 0 0;
+const Header = styled.header`
   display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 24px;
 
-  @media (max-width: 480px) {
-    gap: 12px;
+  @media (max-width: 640px) {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 16px;
   }
 `;
 
-const Group = styled.div`
-  display: inline-flex;
-  padding: 4px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-subtle);
-`;
-
-const Item = styled(Link)<{ $active: boolean }>`
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 14px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  text-decoration: none;
-  color: ${({ $active }) => ($active ? "var(--color-fg-default)" : "var(--color-fg-muted)")};
-  background: ${({ $active }) => ($active ? "var(--color-bg-default)" : "transparent")};
-  transition: background 0.12s, color 0.12s;
-
-  &:hover {
-    color: var(--color-fg-default);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 2px;
-  }
+const HeadingGroup = styled.div`
+  min-width: 0;
 `;
 
 const Title = styled.h1`
   margin: 0;
-  font-size: 30px;
-  font-weight: 700;
-  color: var(--color-fg-default);
-
-  @media (max-width: 480px) {
-    font-size: 24px;
-  }
+  color: var(--service-text);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
 `;
 
-const VisuallyHidden = styled.span`
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+const Description = styled.p`
+  max-width: 68ch;
+  margin: 6px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 export type LeaderboardSearchParams = Record<string, string | string[] | undefined>;
@@ -120,45 +94,53 @@ export function buildLeaderboardViewHref(
   return `/leaderboard?${params.toString()}`;
 }
 
-const VIEW_LABELS: Record<LeaderboardView, string> = {
-  users: "Users",
-  groups: "Groups",
-};
-
 export default function ViewSelector({ current, searchParams }: ViewSelectorProps) {
-  const [announcement, setAnnouncement] = useState("");
-  const isFirstRender = useRef(true);
+  const liveSearchParams = useSearchParams();
+  const liveSearchParamsRecord: LeaderboardSearchParams = {};
 
-  useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      return;
+  liveSearchParams.forEach((value, key) => {
+    const existing = liveSearchParamsRecord[key];
+    if (existing === undefined) {
+      liveSearchParamsRecord[key] = value;
+    } else if (Array.isArray(existing)) {
+      existing.push(value);
+    } else {
+      liveSearchParamsRecord[key] = [existing, value];
     }
-    setAnnouncement(`Showing ${VIEW_LABELS[current]}`);
-  }, [current]);
+  });
+
+  const activeSearchParams = liveSearchParams.toString()
+    ? liveSearchParamsRecord
+    : searchParams;
 
   return (
-    <Bar aria-label="Leaderboard view">
-      <Title>{current === "groups" ? "Groups" : "Leaderboard"}</Title>
-      <Group>
-        <Item
-          href={buildLeaderboardViewHref(searchParams, "users")}
+    <Header>
+      <HeadingGroup>
+        <Title>{current === "groups" ? "Groups" : "Leaderboard"}</Title>
+        <Description>
+          {current === "groups"
+            ? "Scoped rankings for teams, friends, and workspaces."
+            : "Global rankings across public Tokscale submissions."}
+        </Description>
+      </HeadingGroup>
+      <SegmentedGroup as="nav" aria-label="Leaderboard view">
+        <SegmentButton
+          as={Link}
+          href={buildLeaderboardViewHref(activeSearchParams, "users")}
           $active={current === "users"}
           aria-current={current === "users" ? "page" : undefined}
         >
           Users
-        </Item>
-        <Item
-          href={buildLeaderboardViewHref(searchParams, "groups")}
+        </SegmentButton>
+        <SegmentButton
+          as={Link}
+          href={buildLeaderboardViewHref(activeSearchParams, "groups")}
           $active={current === "groups"}
           aria-current={current === "groups" ? "page" : undefined}
         >
           Groups
-        </Item>
-      </Group>
-      <VisuallyHidden role="status" aria-live="polite">
-        {announcement}
-      </VisuallyHidden>
-    </Bar>
+        </SegmentButton>
+      </SegmentedGroup>
+    </Header>
   );
 }

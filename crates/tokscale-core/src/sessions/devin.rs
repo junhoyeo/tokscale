@@ -8,7 +8,7 @@ use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -55,6 +55,102 @@ struct DevinMetrics {
     total_time_ms: Option<i64>,
 }
 
+/// Metadata from the authoritative Devin CLI session database that lets ACP
+/// event files recover a stable session id and model. Desktop ACP file names
+/// are independent UUIDs, so they cannot be compared directly with the CLI
+/// database's session ids.
+#[derive(Debug, Clone)]
+struct DevinDesktopSession {
+    session_id: String,
+    model_id: Option<String>,
+    workspace: Option<String>,
+}
+
+/// Title-to-session lookup for Desktop ACP streams. A title shared by more
+/// than one database session is deliberately treated as ambiguous: using an
+/// arbitrary match could suppress unrelated Desktop usage when CLI data is
+/// also present.
+#[derive(Debug, Default)]
+pub struct DevinDesktopSessionLookup {
+    by_title: HashMap<String, Option<DevinDesktopSession>>,
+}
+
+impl DevinDesktopSessionLookup {
+    fn insert(&mut self, title: String, session: DevinDesktopSession) {
+        match self.by_title.entry(title) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some(session));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry
+                    .get()
+                    .as_ref()
+                    .is_some_and(|existing| existing.session_id != session.session_id)
+                {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+
+    fn resolve(&self, title: &str) -> Option<&DevinDesktopSession> {
+        self.by_title.get(title)?.as_ref()
+    }
+}
+
+/// Load the CLI-session metadata needed to resolve Desktop ACP file titles.
+///
+/// Older or partial databases may not yet expose `sessions.title`; those
+/// databases remain usable for CLI usage while Desktop streams fall back to
+/// their file-based identity instead of failing the whole scan.
+pub fn load_devin_desktop_session_lookup(
+    db_paths: &[std::path::PathBuf],
+) -> DevinDesktopSessionLookup {
+    let mut lookup = DevinDesktopSessionLookup::default();
+
+    for db_path in db_paths {
+        let Some(conn) = open_readonly_sqlite(db_path) else {
+            continue;
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT id, title, model, working_directory FROM sessions \
+             WHERE title IS NOT NULL AND TRIM(title) != ''",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => continue,
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        }) {
+            Ok(rows) => rows,
+            Err(_) => continue,
+        };
+
+        for row in rows.flatten() {
+            let (session_id, title, model_id, workspace) = row;
+            let title = title.trim();
+            if title.is_empty() {
+                continue;
+            }
+            lookup.insert(
+                title.to_string(),
+                DevinDesktopSession {
+                    session_id,
+                    model_id: model_id.filter(|model| !model.is_empty()),
+                    workspace,
+                },
+            );
+        }
+    }
+
+    lookup
+}
+
 pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(db_path);
     let Some(conn) = open_readonly_sqlite(db_path) else {
@@ -78,7 +174,7 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             s.working_directory
         FROM message_nodes m
         JOIN sessions s ON m.session_id = s.id
-        WHERE json_extract(m.chat_message, '$.role') = 'assistant'
+        ORDER BY m.row_id
     "#;
 
     let mut stmt = match conn.prepare(query) {
@@ -165,8 +261,15 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         } else {
             tokens
         };
+        // Assistant rows without any attributable usage must not become
+        // precedence markers for a matching Desktop ACP session. Otherwise a
+        // zero-metric CLI row could suppress the only real usage record.
+        if tokens.total() == 0 {
+            continue;
+        }
 
         let timestamp = created_at_ms.unwrap_or(fallback_timestamp);
+        let dedup_key = format!("devin-cli:{session_id}:{row_id}");
         let mut unified = UnifiedMessage::new_with_dedup(
             "devin-cli",
             model_id,
@@ -175,7 +278,7 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             timestamp,
             tokens,
             0.0,
-            Some(format!("devin-cli:{row_id}")),
+            Some(dedup_key),
         );
 
         if let Some(total_time_ms) = metrics.and_then(|m| m.total_time_ms) {
@@ -204,19 +307,117 @@ struct DevinDesktopEvent {
     notification: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Default)]
+struct DevinDesktopAcpUsage {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    model_id: Option<String>,
+    timestamp: Option<i64>,
+}
+
+fn nonnegative_number(value: Option<&serde_json::Value>) -> Option<i64> {
+    value
+        .and_then(|value| value.as_i64())
+        .map(|value| value.max(0))
+}
+
+fn notification_timestamp(notification: &serde_json::Value) -> Option<i64> {
+    notification
+        .pointer("/content/metadata/created_at")
+        .or_else(|| notification.pointer("/metadata/created_at"))
+        .or_else(|| notification.get("created_at"))
+        .or_else(|| notification.get("timestamp"))
+        .and_then(|value| value.as_str())
+        .and_then(super::utils::parse_timestamp_str)
+}
+
+fn notification_model(notification: &serde_json::Value) -> Option<String> {
+    notification
+        .pointer("/content/metadata/generation_model")
+        .or_else(|| notification.pointer("/metadata/generation_model"))
+        .or_else(|| notification.pointer("/_meta/cognition.ai/model"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+struct DevinDesktopMessage<'a> {
+    file_session_id: &'a str,
+    title: Option<&'a str>,
+    model_hint: Option<&'a str>,
+    timestamp: i64,
+    tokens: TokenBreakdown,
+}
+
+fn desktop_message(
+    path: &Path,
+    lookup: &DevinDesktopSessionLookup,
+    message: DevinDesktopMessage<'_>,
+    dedup_suffix: impl std::fmt::Display,
+) -> UnifiedMessage {
+    let resolved = message.title.and_then(|title| lookup.resolve(title));
+    let session_id = resolved
+        .map(|session| session.session_id.clone())
+        .unwrap_or_else(|| message.file_session_id.to_string());
+    let model_id = resolved
+        .and_then(|session| session.model_id.as_deref())
+        .filter(|model| !is_devin_routing_mode(model))
+        .or(message.model_hint)
+        .filter(|model| !model.is_empty() && !is_devin_routing_mode(model))
+        .unwrap_or("devin")
+        .to_string();
+    let provider = provider_identity::inferred_provider_from_model(&model_id)
+        .map(str::to_string)
+        .unwrap_or_else(|| "devin".to_string());
+    let source_key = path.to_string_lossy();
+    let mut message = UnifiedMessage::new_with_dedup(
+        "devin-desktop",
+        model_id,
+        provider,
+        session_id,
+        message.timestamp,
+        message.tokens,
+        0.0,
+        Some(format!("devin-desktop:{source_key}:{dedup_suffix}")),
+    );
+
+    if let Some(workspace) = resolved.and_then(|session| session.workspace.as_deref()) {
+        let workspace_key = normalize_workspace_key(workspace);
+        let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+        message.set_workspace(workspace_key, workspace_label);
+    }
+
+    message
+}
+
 pub fn parse_devin_desktop_ndjson(path: &Path) -> Vec<UnifiedMessage> {
+    parse_devin_desktop_ndjson_with_lookup(path, &DevinDesktopSessionLookup::default())
+}
+
+/// Parse a Devin Desktop ACP event stream.
+///
+/// Canonical ACP `usage_update` events contain cumulative input/cache counts
+/// and per-step output counts. They are therefore reduced to one aggregate
+/// message per file. The older embedded-metrics shape remains supported as a
+/// best-effort fallback for historical captures.
+pub fn parse_devin_desktop_ndjson_with_lookup(
+    path: &Path,
+    lookup: &DevinDesktopSessionLookup,
+) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(_) => return Vec::new(),
     };
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    let session_id = session_id_from_ndjson_path(path);
-    let mut messages = Vec::new();
-    let mut seen = HashSet::new();
-    let mut line_index: usize = 0;
+    let file_session_id = session_id_from_ndjson_path(path);
+    let mut legacy_messages = Vec::new();
+    let mut acp_usage: Option<DevinDesktopAcpUsage> = None;
+    let mut title: Option<String> = None;
 
-    for line in BufReader::new(file).lines() {
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
         let Ok(line) = line else { continue };
         if line.is_empty() {
             continue;
@@ -234,6 +435,69 @@ pub fn parse_devin_desktop_ndjson(path: &Path) -> Vec<UnifiedMessage> {
         let Some(notification) = event.notification else {
             continue;
         };
+
+        if notification
+            .get("sessionUpdate")
+            .and_then(|value| value.as_str())
+            == Some("session_info_update")
+        {
+            if let Some(updated_title) = notification
+                .get("title")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_string)
+            {
+                title = Some(updated_title);
+            }
+            continue;
+        }
+
+        if notification
+            .get("sessionUpdate")
+            .and_then(|value| value.as_str())
+            == Some("usage_update")
+        {
+            let meta = notification.get("_meta");
+            let input =
+                nonnegative_number(meta.and_then(|meta| meta.get("cognition.ai/inputTokens")));
+            let cache_read =
+                nonnegative_number(meta.and_then(|meta| meta.get("cognition.ai/cachedReadTokens")));
+            let cache_write = nonnegative_number(
+                meta.and_then(|meta| meta.get("cognition.ai/cachedWriteTokens")),
+            );
+            let output =
+                nonnegative_number(meta.and_then(|meta| meta.get("cognition.ai/outputTokens")));
+
+            // A few historical captures label the legacy embedded-metrics
+            // shape as `usage_update` but do not contain ACP `_meta` fields.
+            // Only claim the event for ACP aggregation when at least one
+            // canonical token field is present; otherwise let the legacy
+            // extraction below handle it.
+            if input.is_some() || cache_read.is_some() || cache_write.is_some() || output.is_some()
+            {
+                let usage = acp_usage.get_or_insert_with(DevinDesktopAcpUsage::default);
+                if let Some(input) = input {
+                    usage.input = input;
+                }
+                if let Some(cache_read) = cache_read {
+                    usage.cache_read = cache_read;
+                }
+                if let Some(cache_write) = cache_write {
+                    usage.cache_write = cache_write;
+                }
+                if let Some(output) = output {
+                    usage.output = usage.output.saturating_add(output);
+                }
+                if usage.model_id.is_none() {
+                    usage.model_id = notification_model(&notification);
+                }
+                if let Some(timestamp) = notification_timestamp(&notification) {
+                    usage.timestamp = Some(timestamp);
+                }
+                continue;
+            }
+        }
 
         // Look for usage metrics nested inside the notification. Devin Desktop
         // stores them either under a `metrics` object or directly on `metadata`.
@@ -273,56 +537,57 @@ pub fn parse_devin_desktop_ndjson(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
-        let model_id = notification
-            .pointer("/content/metadata/generation_model")
-            .or_else(|| notification.pointer("/metadata/generation_model"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("devin")
-            .to_string();
-
-        let provider = provider_identity::inferred_provider_from_model(&model_id)
-            .map(str::to_string)
-            .unwrap_or_else(|| "devin".to_string());
-
-        let timestamp = notification
-            .pointer("/content/metadata/created_at")
-            .or_else(|| notification.pointer("/metadata/created_at"))
-            .and_then(|v| v.as_str())
-            .and_then(super::utils::parse_timestamp_str)
-            .unwrap_or(fallback_timestamp);
-
-        // Dedup by file-position line index rather than timestamp+tokens.
-        // `created_at` is commonly absent, so all events in a file would share
-        // the file-mtime fallback and collide on identical model+token counts.
-        // Anchoring to the line position matches the qwen.rs pattern for
-        // NDJSON sources without stable per-event identifiers.
-        let dedup_key = format!("devin-desktop:{session_id}:{line_index}");
-        if !seen.insert(dedup_key.clone()) {
-            continue;
-        }
-
-        let message = UnifiedMessage::new_with_dedup(
-            "devin-desktop",
-            model_id,
-            provider,
-            session_id.clone(),
-            timestamp,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning: 0,
+        let model_hint = notification_model(&notification);
+        legacy_messages.push(desktop_message(
+            path,
+            lookup,
+            DevinDesktopMessage {
+                file_session_id: &file_session_id,
+                title: title.as_deref(),
+                model_hint: model_hint.as_deref(),
+                timestamp: notification_timestamp(&notification).unwrap_or(fallback_timestamp),
+                tokens: TokenBreakdown {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    reasoning: 0,
+                },
             },
-            0.0,
-            Some(dedup_key),
-        );
-
-        messages.push(message);
-        line_index += 1;
+            line_index,
+        ));
     }
 
-    messages
+    if let Some(usage) = acp_usage {
+        let tokens = TokenBreakdown {
+            // ACP's inputTokens is the complete prompt, including the
+            // cachedReadTokens subset. Tokscale stores uncached input and
+            // cache reads separately, so subtract the overlap before totals
+            // and pricing add both fields.
+            input: usage.input.saturating_sub(usage.cache_read),
+            output: usage.output,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+            reasoning: 0,
+        };
+        if tokens.total() == 0 {
+            return Vec::new();
+        }
+        return vec![desktop_message(
+            path,
+            lookup,
+            DevinDesktopMessage {
+                file_session_id: &file_session_id,
+                title: title.as_deref(),
+                model_hint: usage.model_id.as_deref(),
+                timestamp: usage.timestamp.unwrap_or(fallback_timestamp),
+                tokens,
+            },
+            "usage",
+        )];
+    }
+
+    legacy_messages
 }
 
 fn session_id_from_ndjson_path(path: &Path) -> String {
@@ -349,6 +614,7 @@ mod tests {
                 working_directory TEXT NOT NULL,
                 backend_type TEXT NOT NULL,
                 model TEXT NOT NULL,
+                title TEXT,
                 agent_mode TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_activity_at INTEGER NOT NULL
@@ -370,8 +636,16 @@ mod tests {
 
     fn insert_session(conn: &Connection, id: &str, working_directory: &str, model: &str) {
         conn.execute(
-            "INSERT INTO sessions (id, working_directory, backend_type, model, agent_mode, created_at, last_activity_at) VALUES (?1, ?2, 'windsurf', ?3, 'accept-edits', 1, 1)",
+            "INSERT INTO sessions (id, working_directory, backend_type, model, title, agent_mode, created_at, last_activity_at) VALUES (?1, ?2, 'windsurf', ?3, NULL, 'accept-edits', 1, 1)",
             rusqlite::params![id, working_directory, model],
+        )
+        .unwrap();
+    }
+
+    fn set_session_title(conn: &Connection, id: &str, title: &str) {
+        conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE id = ?1",
+            rusqlite::params![id, title],
         )
         .unwrap();
     }
@@ -494,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_devin_cli_sqlite_clamps_negative_values() {
+    fn test_parse_devin_cli_sqlite_skips_zero_usage() {
         let dir = TempDir::new().unwrap();
         let db_path = create_devin_cli_db(&dir);
         let conn = Connection::open(&db_path).unwrap();
@@ -509,12 +783,29 @@ mod tests {
         drop(conn);
 
         let messages = parse_devin_cli_sqlite(&db_path);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_devin_cli_sqlite_skips_malformed_rows_without_losing_later_usage() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_devin_cli_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+
+        insert_session(&conn, "sess-1", "/Users/alice/project", "gpt-5");
+        insert_message(&conn, "sess-1", "{not valid json", 1_700_000_000);
+        insert_message(
+            &conn,
+            "sess-1",
+            r#"{"role":"assistant","metadata":{"metrics":{"input_tokens":10,"output_tokens":5}}}"#,
+            1_700_000_001,
+        );
+        drop(conn);
+
+        let messages = parse_devin_cli_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].tokens.input, 0);
-        assert_eq!(messages[0].tokens.output, 0);
-        assert_eq!(messages[0].tokens.cache_read, 0);
-        assert_eq!(messages[0].tokens.cache_write, 0);
-        assert_eq!(messages[0].duration_ms, Some(0));
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 5);
     }
 
     #[test]
@@ -543,6 +834,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_devin_desktop_usage_update_without_acp_fields_keeps_legacy_metrics() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy-usage-update.ndjson");
+        std::fs::write(
+            &path,
+            r#"{"notification":{"sessionUpdate":"usage_update","metadata":{"input_tokens":12,"output_tokens":3,"generation_model":"gpt-5"}}}
+"#,
+        )
+        .unwrap();
+
+        let messages = parse_devin_desktop_ndjson(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5");
+        assert_eq!(messages[0].tokens.input, 12);
+        assert_eq!(messages[0].tokens.output, 3);
+    }
+
+    #[test]
     fn test_parse_devin_desktop_ndjson_keeps_distinct_events_with_identical_usage() {
         // Two events with identical model/tokens/timestamp at different line
         // positions must both survive — they represent distinct API calls.
@@ -561,6 +870,83 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[1].tokens.input, 10);
+    }
+
+    #[test]
+    fn test_parse_devin_desktop_acp_usage_aggregates_and_resolves_cli_title() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_devin_cli_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_session(&conn, "cli-session-1", "/Users/alice/project", "gpt-5");
+        set_session_title(&conn, "cli-session-1", "Build the release");
+        drop(conn);
+
+        let path = dir.path().join("desktop-file-id.ndjson");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"notification":{"sessionUpdate":"session_info_update","title":"Build the release"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"session_info_update"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":100,"cognition.ai/outputTokens":7,"cognition.ai/cachedReadTokens":20}}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":150,"cognition.ai/outputTokens":8,"cognition.ai/cachedReadTokens":30}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let lookup = load_devin_desktop_session_lookup(std::slice::from_ref(&db_path));
+        let messages = parse_devin_desktop_ndjson_with_lookup(&path, &lookup);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "cli-session-1");
+        assert_eq!(messages[0].model_id, "gpt-5");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 15);
+        assert_eq!(messages[0].tokens.cache_read, 30);
+        assert_eq!(messages[0].tokens.total(), 165);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/Users/alice/project")
+        );
+    }
+
+    #[test]
+    fn test_parse_devin_desktop_does_not_resolve_an_ambiguous_title() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_devin_cli_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_session(&conn, "cli-session-1", "/Users/alice/project-a", "gpt-5");
+        insert_session(
+            &conn,
+            "cli-session-2",
+            "/Users/alice/project-b",
+            "claude-sonnet-4",
+        );
+        set_session_title(&conn, "cli-session-1", "Untitled task");
+        set_session_title(&conn, "cli-session-2", "Untitled task");
+        drop(conn);
+
+        let path = dir.path().join("desktop-file-id.ndjson");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"notification":{"sessionUpdate":"session_info_update","title":"Untitled task"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":100,"cognition.ai/outputTokens":7}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let lookup = load_devin_desktop_session_lookup(std::slice::from_ref(&db_path));
+        let messages = parse_devin_desktop_ndjson_with_lookup(&path, &lookup);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "desktop-file-id");
+        assert_eq!(messages[0].model_id, "devin");
     }
 
     #[test]

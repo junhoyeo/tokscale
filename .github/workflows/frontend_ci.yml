@@ -6,6 +6,8 @@ on:
     branches: [main, develop]
     paths:
       - "packages/frontend/**"
+      - "crates/tokscale-core/src/clients.rs"
+      - ".github/assets/**"
       - "package.json"
       - "bun.lock"
       - ".github/workflows/frontend_ci.yml"
@@ -13,6 +15,8 @@ on:
     branches: [main, develop]
     paths:
       - "packages/frontend/**"
+      - "crates/tokscale-core/src/clients.rs"
+      - ".github/assets/**"
       - "package.json"
       - "bun.lock"
       - ".github/workflows/frontend_ci.yml"
@@ -41,6 +45,9 @@ jobs:
 
       - name: Run frontend tests
         run: bun run --cwd packages/frontend test
+
+      - name: Run frontend type check
+        run: bun run --cwd packages/frontend typecheck
 
   migration-replay:
     name: Frontend Migration Replay

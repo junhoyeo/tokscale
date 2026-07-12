@@ -1,4 +1,12 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { expectNoNarrowedCostCast } from "../support/costCastWidths";
 
@@ -37,7 +45,6 @@ const mockState = vi.hoisted(() => {
       submissionId: "dailyBreakdown.submissionId",
       date: "dailyBreakdown.date",
       timestampMs: "dailyBreakdown.timestampMs",
-      activeTimeMs: "dailyBreakdown.activeTimeMs",
       tokens: "dailyBreakdown.tokens",
       cost: "dailyBreakdown.cost",
       inputTokens: "dailyBreakdown.inputTokens",
@@ -59,7 +66,7 @@ const mockState = vi.hoisted(() => {
     })),
     {
       raw: vi.fn(),
-    }
+    },
   );
 
   function nextSelectResult() {
@@ -77,7 +84,8 @@ const mockState = vi.hoisted(() => {
           limitCalls.push(value);
           return builder;
         }),
-        then: (resolve: (value: unknown) => unknown) => resolve(nextSelectResult()),
+        then: (resolve: (value: unknown) => unknown) =>
+          resolve(nextSelectResult()),
       };
 
       return builder;
@@ -133,7 +141,9 @@ vi.mock("@/lib/db/usernameLookup", () => {
     USERNAME_LOOKUP_LIMIT: 2,
     getSingleUsernameMatch: (rows: readonly unknown[], username: string) => {
       if (rows.length > 1) {
-        throw new AmbiguousUsernameError(`Multiple users match username ${username} case-insensitively`);
+        throw new AmbiguousUsernameError(
+          `Multiple users match username ${username} case-insensitively`,
+        );
       }
       return rows[0] ?? null;
     },
@@ -143,8 +153,9 @@ vi.mock("@/lib/db/usernameLookup", () => {
   };
 });
 
-vi.mock("@/lib/submissionFreshness", async () =>
-  import("../../src/lib/submissionFreshness")
+vi.mock(
+  "@/lib/submissionFreshness",
+  async () => import("../../src/lib/submissionFreshness"),
 );
 
 vi.mock("drizzle-orm", () => ({
@@ -216,16 +227,20 @@ describe("GET /api/users/[username]", () => {
 
     const response = await GET(
       new Request("http://localhost:3000/api/users/imlunahey"),
-      { params: Promise.resolve({ username: "imlunahey" }) }
+      { params: Promise.resolve({ username: "imlunahey" }) },
     );
     const sqlTexts = serializeSqlCalls();
 
     expect(response.status).toBe(308);
-    expect(response.headers.get("location")).toBe("http://localhost:3000/api/users/ImLunaHey");
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/api/users/ImLunaHey",
+    );
     expect(mockState.limitCalls[0]).toBe(2);
-    expect(sqlTexts.some((text) =>
-      text.toLowerCase().includes("lower(users.username) = imlunahey")
-    )).toBe(true);
+    expect(
+      sqlTexts.some((text) =>
+        text.toLowerCase().includes("lower(users.username) = imlunahey"),
+      ),
+    ).toBe(true);
   });
 
   it("returns the profile payload when the request already uses the canonical username", async () => {
@@ -258,7 +273,7 @@ describe("GET /api/users/[username]", () => {
 
     const response = await GET(
       new Request("http://localhost:3000/api/users/ImLunaHey"),
-      { params: Promise.resolve({ username: "ImLunaHey" }) }
+      { params: Promise.resolve({ username: "ImLunaHey" }) },
     );
     const body = await response.json();
 
@@ -294,10 +309,9 @@ describe("GET /api/users/[username]", () => {
     mockState.pushSelectResult([]);
     mockState.pushExecuteResult([]);
 
-    await GET(
-      new Request("http://localhost:3000/api/users/alice"),
-      { params: Promise.resolve({ username: "alice" }) }
-    );
+    await GET(new Request("http://localhost:3000/api/users/alice"), {
+      params: Promise.resolve({ username: "alice" }),
+    });
 
     // submissions.total_cost is decimal(18,4); a narrower cast overflows for a
     // profile whose lifetime cost has grown past the narrowed ceiling.
@@ -324,7 +338,7 @@ describe("GET /api/users/[username]", () => {
 
     const response = await GET(
       new Request("http://localhost:3000/api/users/imlunahey"),
-      { params: Promise.resolve({ username: "imlunahey" }) }
+      { params: Promise.resolve({ username: "imlunahey" }) },
     );
     const body = await response.json();
 
@@ -334,6 +348,9 @@ describe("GET /api/users/[username]", () => {
   });
 
   it("aggregates same-date rows from multiple submitted devices into one profile contribution", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-12T12:00:00.000Z"));
+
     mockState.pushSelectResult([
       {
         id: "user-1",
@@ -345,9 +362,9 @@ describe("GET /api/users/[username]", () => {
     ]);
     mockState.pushSelectResult([
       {
-        totalTokens: 27,
-        totalCost: 1.25,
-        inputTokens: 17,
+        totalTokens: 37,
+        totalCost: 2.25,
+        inputTokens: 27,
         outputTokens: 10,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
@@ -355,7 +372,6 @@ describe("GET /api/users/[username]", () => {
         submissionCount: 2,
         earliestDate: "2026-04-30",
         latestDate: "2026-04-30",
-        totalActiveTimeMs: 0,
         sessionCount: 0,
       },
     ]);
@@ -370,34 +386,55 @@ describe("GET /api/users/[username]", () => {
     ]);
     mockState.pushSelectResult([
       {
-        date: "2026-04-30",
-        timestampMs: 100,
-        tokens: 12,
-        cost: "0.5000",
-        inputTokens: 7,
-        outputTokens: 5,
+        date: "2024-06-06",
+        timestampMs: 50,
+        tokens: 10,
+        cost: "1.0000",
+        inputTokens: 10,
+        outputTokens: 0,
         sourceBreakdown: {
           codex: {
-            tokens: 12,
-            cost: 0.5,
-            input: 7,
-            output: 5,
+            tokens: 10,
+            cost: 1,
+            input: 10,
+            output: 0,
             cacheRead: 0,
             cacheWrite: 0,
             reasoning: 0,
             messages: 1,
             models: {
-              "gpt-5.5": {
-                tokens: 12,
-                cost: 0.5,
-                input: 7,
-                output: 5,
+              "gpt-legacy": {
+                tokens: 10,
+                cost: 1,
+                input: 10,
+                output: 0,
                 cacheRead: 0,
                 cacheWrite: 0,
                 reasoning: 0,
                 messages: 1,
               },
             },
+          },
+        },
+      },
+      {
+        date: "2026-04-30",
+        timestampMs: 100,
+        tokens: 12,
+        cost: "0.5000",
+        inputTokens: 7,
+        outputTokens: 5,
+      sourceBreakdown: {
+        codex: {
+          tokens: 12,
+            cost: 0.5,
+            input: 7,
+            output: 5,
+            cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 1,
+          modelId: "gpt-legacy",
           },
         },
       },
@@ -438,43 +475,111 @@ describe("GET /api/users/[username]", () => {
 
     const response = await GET(
       new Request("http://localhost:3000/api/users/alice"),
-      { params: Promise.resolve({ username: "alice" }) }
+      { params: Promise.resolve({ username: "alice" }) },
     );
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.stats.totalTokens).toBe(27);
+    expect(mockState.gte).not.toHaveBeenCalled();
+    expect(body.stats.totalTokens).toBe(37);
+    expect(body.chartRange).toEqual({
+      start: "2025-07-12",
+      end: "2026-07-12",
+    });
     expect(body.stats.activeDays).toBe(1);
-    expect(body.contributions).toHaveLength(1);
-    expect(body.contributions[0]).toEqual(expect.objectContaining({
-      date: "2026-04-30",
-      timestampMs: 100,
-      totals: expect.objectContaining({
-        tokens: 27,
+    expect(body.contributions).toHaveLength(2);
+    expect(body.contributions.map((day: { date: string }) => day.date)).toEqual(
+      ["2024-06-06", "2026-04-30"],
+    );
+    expect(body.contributions[1]).toEqual(
+      expect.objectContaining({
+        date: "2026-04-30",
+        timestampMs: 100,
+        totals: expect.objectContaining({
+          tokens: 27,
+          cost: 1.25,
+        }),
+        tokenBreakdown: expect.objectContaining({
+          input: 17,
+          output: 10,
+        }),
+      }),
+    );
+    expect(body.contributions[1].clients[0]).toEqual(
+      expect.objectContaining({
+        client: "codex",
         cost: 1.25,
+        messages: 2,
+        tokens: expect.objectContaining({
+          input: 17,
+          output: 10,
+        }),
       }),
-      tokenBreakdown: expect.objectContaining({
-        input: 17,
-        output: 10,
+    );
+    expect(body.contributions[1].clients[0].models).toEqual(
+      expect.objectContaining({
+        "gpt-5.5": expect.objectContaining({ tokens: 15, cost: 0.75 }),
+        "gpt-legacy": expect.objectContaining({ tokens: 12, cost: 0.5 }),
       }),
-    }));
-    expect(body.contributions[0].clients[0]).toEqual(expect.objectContaining({
-      client: "codex",
-      cost: 1.25,
-      messages: 2,
-      tokens: expect.objectContaining({
-        input: 17,
-        output: 10,
-      }),
-    }));
+    );
     expect(body.modelUsage).toEqual([
       expect.objectContaining({
         model: "gpt-5.5",
-        tokens: 27,
-        cost: 1.25,
-        percentage: 100,
+        tokens: 15,
+        cost: 0.75,
+        percentage: 60,
+      }),
+      expect.objectContaining({
+        model: "gpt-legacy",
+        tokens: 12,
+        cost: 0.5,
+        percentage: 40,
       }),
     ]);
+  });
+
+  it("clamps leap-day rolling ranges to the prior year's last valid day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-02-29T12:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-leap-day",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2024-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 0,
+        totalCost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 0,
+        earliestDate: null,
+        latestDate: null,
+      },
+    ]);
+    mockState.pushSelectResult([]);
+    mockState.pushSelectResult([]);
+    mockState.pushExecuteResult([]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/users/alice"),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.chartRange).toEqual({
+      start: "2023-02-28",
+      end: "2024-02-29",
+    });
   });
 
   it("recalculates profile overview stats from daily rows for rolling periods", async () => {
@@ -502,7 +607,6 @@ describe("GET /api/users/[username]", () => {
         submissionCount: 3,
         earliestDate: "2026-01-01",
         latestDate: "2026-06-28",
-        totalActiveTimeMs: 1200000,
         sessionCount: 8,
       },
     ]);
@@ -519,7 +623,6 @@ describe("GET /api/users/[username]", () => {
       {
         date: "2026-06-22",
         timestampMs: 100,
-        activeTimeMs: 300000,
         tokens: 200,
         cost: "2.0000",
         inputTokens: 120,
@@ -552,7 +655,6 @@ describe("GET /api/users/[username]", () => {
       {
         date: "2026-06-28",
         timestampMs: 200,
-        activeTimeMs: 600000,
         tokens: 300,
         cost: "3.0000",
         inputTokens: 180,
@@ -587,27 +689,34 @@ describe("GET /api/users/[username]", () => {
 
     const response = await GET(
       new Request("http://localhost:3000/api/users/alice?period=week"),
-      { params: Promise.resolve({ username: "alice" }) }
+      { params: Promise.resolve({ username: "alice" }) },
     );
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mockState.gte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, "2026-06-22");
-    expect(mockState.lte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, "2026-06-28");
+    expect(mockState.gte).toHaveBeenCalledWith(
+      mockState.tables.dailyBreakdown.date,
+      "2026-06-22",
+    );
+    expect(mockState.lte).toHaveBeenCalledWith(
+      mockState.tables.dailyBreakdown.date,
+      "2026-06-28",
+    );
     expect(body.period).toBe("week");
     expect(body.dateRange).toEqual({ start: "2026-06-22", end: "2026-06-28" });
-    expect(body.stats).toEqual(expect.objectContaining({
-      totalTokens: 500,
-      totalCost: 5,
-      inputTokens: 300,
-      outputTokens: 200,
-      cacheReadTokens: 70,
-      cacheWriteTokens: 30,
-      reasoningTokens: 15,
-      activeDays: 2,
-      totalActiveTimeMs: 900000,
-      sessionCount: 0,
-    }));
+    expect(body.stats).toEqual(
+      expect.objectContaining({
+        totalTokens: 500,
+        totalCost: 5,
+        inputTokens: 300,
+        outputTokens: 200,
+        cacheReadTokens: 70,
+        cacheWriteTokens: 30,
+        reasoningTokens: 15,
+        activeDays: 2,
+        sessionCount: 0,
+      }),
+    );
     expect(body.clients).toEqual(["codex", "claude"]);
     expect(body.models).toEqual(["gpt-5.5", "claude-sonnet-4-5"]);
   });
@@ -653,7 +762,7 @@ describe("GET /api/users/[username]", () => {
 
     const response = await GET(
       new Request("http://localhost:3000/api/users/alice"),
-      { params: Promise.resolve({ username: "alice" }) }
+      { params: Promise.resolve({ username: "alice" }) },
     );
     const body = await response.json();
 
@@ -699,7 +808,7 @@ describe("GET /api/users/[username]", () => {
 
     const response = await GET(
       new Request("http://localhost:3000/api/users/new-user"),
-      { params: Promise.resolve({ username: "new-user" }) }
+      { params: Promise.resolve({ username: "new-user" }) },
     );
     const body = await response.json();
 

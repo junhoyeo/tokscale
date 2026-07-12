@@ -16,12 +16,8 @@ const mockState = vi.hoisted(() => {
     submissions: {
       id: "submissions.id",
       userId: "submissions.userId",
-      submitCount: "submissions.submitCount",
-      updatedAt: "submissions.updatedAt",
       totalTokens: "submissions.totalTokens",
       totalCost: "submissions.totalCost",
-      cliVersion: "submissions.cliVersion",
-      schemaVersion: "submissions.schemaVersion",
     },
     dailyBreakdown: {
       submissionId: "dailyBreakdown.submissionId",
@@ -127,10 +123,6 @@ vi.mock("@/lib/db/usernameLookup", () => {
   };
 });
 
-vi.mock("@/lib/submissionFreshness", async () =>
-  import("../../src/lib/submissionFreshness")
-);
-
 vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
@@ -144,6 +136,13 @@ type ModuleExports = typeof import("../../src/lib/leaderboard/getLeaderboard");
 
 let getLeaderboardData: ModuleExports["getLeaderboardData"];
 let getUserRank: ModuleExports["getUserRank"];
+
+function selectedKeys(callIndex: number): string[] {
+  const calls = mockState.db.select.mock.calls as unknown as Array<
+    [Record<string, unknown> | undefined]
+  >;
+  return Object.keys(calls[callIndex]?.[0] ?? {});
+}
 
 function serializeSqlCalls(): string[] {
   return mockState.sql.mock.calls.map((call) => {
@@ -171,10 +170,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("all-time leaderboard freshness queries", () => {
+describe("all-time leaderboard queries", () => {
   it("uses competition-rank SQL for all-time list and search ranks", async () => {
     mockState.pushAwaitedResult([]);
-    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 }]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 0 }]);
 
     await getLeaderboardData("all", 1, 50, "tokens");
     const listSqlTexts = serializeSqlCalls();
@@ -185,13 +184,35 @@ describe("all-time leaderboard freshness queries", () => {
     mockState.reset();
     mockState.pushAwaitedResult([]);
     mockState.pushAwaitedResult([{ count: 0 }]);
-    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 }]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 0 }]);
 
     await getLeaderboardData("all", 1, 50, "tokens", "ali");
     const searchSqlTexts = serializeSqlCalls();
 
     expect(searchSqlTexts.some((text) => text.includes("RANK() OVER (ORDER BY"))).toBe(true);
     expect(searchSqlTexts.some((text) => text.includes("ROW_NUMBER() OVER"))).toBe(false);
+  });
+
+  it("counts distinct users for all-time pagination and global stats", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 2 }]);
+
+    const list = await getLeaderboardData("all", 1, 50, "tokens");
+    expect(list.pagination.totalUsers).toBe(2);
+    expect(serializeSqlCalls().some((text) =>
+      text.includes("COUNT(DISTINCT submissions.userId)")
+    )).toBe(true);
+
+    mockState.reset();
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 2 }]);
+
+    const search = await getLeaderboardData("all", 1, 50, "tokens", "ali");
+    expect(search.stats.uniqueUsers).toBe(2);
+    expect(serializeSqlCalls().some((text) =>
+      text.includes("COUNT(DISTINCT submissions.userId)")
+    )).toBe(true);
   });
 
   it("keeps tied all-time users at the same rank across list, search, and user rank", async () => {
@@ -204,11 +225,6 @@ describe("all-time leaderboard freshness queries", () => {
         avatarUrl: null,
         totalTokens: 5000,
         totalCost: 50,
-        totalActiveTimeMs: 500,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T10:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
       {
         rank: 2,
@@ -218,11 +234,6 @@ describe("all-time leaderboard freshness queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 400,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
       {
         rank: 2,
@@ -232,18 +243,12 @@ describe("all-time leaderboard freshness queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 30,
-        totalActiveTimeMs: 300,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T08:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([
       {
         totalTokens: 11000,
         totalCost: 120,
-        totalSubmissions: 3,
         uniqueUsers: 3,
       },
     ]);
@@ -262,11 +267,6 @@ describe("all-time leaderboard freshness queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 400,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
       {
         rank: 2,
@@ -276,11 +276,6 @@ describe("all-time leaderboard freshness queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 30,
-        totalActiveTimeMs: 300,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T08:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 2 }]);
@@ -288,7 +283,6 @@ describe("all-time leaderboard freshness queries", () => {
       {
         totalTokens: 11000,
         totalCost: 120,
-        totalSubmissions: 3,
         uniqueUsers: 3,
       },
     ]);
@@ -310,11 +304,6 @@ describe("all-time leaderboard freshness queries", () => {
       {
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 400,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 1 }]);
@@ -328,10 +317,7 @@ describe("all-time leaderboard freshness queries", () => {
     expect(aliceUserRank?.rank).toBe(2);
   });
 
-  it("uses latest-row scalar subqueries instead of MAX(cliVersion/schemaVersion)", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-12T18:45:00Z"));
-
+  it("selects and returns only fields consumed by leaderboard surfaces", async () => {
     mockState.pushAwaitedResult([
       {
         rank: 1,
@@ -341,54 +327,47 @@ describe("all-time leaderboard freshness queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 30,
-        submissionCount: 2,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([
       {
         totalTokens: 3000,
         totalCost: 30,
-        totalSubmissions: 2,
         uniqueUsers: 1,
       },
     ]);
 
     const leaderboard = await getLeaderboardData("all", 1, 50, "tokens");
-    const sqlTexts = serializeSqlCalls();
-
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.cli_version FROM submissions s2")
-        && text.includes("ORDER BY s2.updated_at DESC LIMIT 1")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.schema_version FROM submissions s2")
-        && text.includes("ORDER BY s2.updated_at DESC LIMIT 1")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.cliVersion")
-    )).toBe(false);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.schemaVersion")
-    )).toBe(false);
-    expect(leaderboard.users[0]).toMatchObject({
-      rank: 1,
-      username: "alice",
-      lastSubmission: "2026-03-12T09:00:00.000Z",
-      submissionFreshness: {
-        lastUpdated: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
-        isStale: false,
-      },
+    expect(selectedKeys(0)).toEqual([
+      "rank",
+      "userId",
+      "username",
+      "displayName",
+      "avatarUrl",
+      "totalTokens",
+      "totalCost",
+    ]);
+    expect(selectedKeys(1)).toEqual([
+      "totalTokens",
+      "totalCost",
+      "uniqueUsers",
+    ]);
+    expect(Object.keys(leaderboard.users[0]).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
+    expect(leaderboard.stats).toEqual({
+      totalTokens: 3000,
+      totalCost: 30,
+      uniqueUsers: 1,
     });
-  });
 
-  it("uses latest-row scalar subqueries for all-time user rank metadata", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-12T18:45:00Z"));
+    mockState.reset();
 
     mockState.pushAwaitedResult([
       {
@@ -402,10 +381,6 @@ describe("all-time leaderboard freshness queries", () => {
       {
         totalTokens: 3000,
         totalCost: 30,
-        submissionCount: 2,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([
@@ -415,36 +390,20 @@ describe("all-time leaderboard freshness queries", () => {
     ]);
 
     const rank = await getUserRank("alice", "all", "tokens");
-    const sqlTexts = serializeSqlCalls();
 
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.cli_version FROM submissions s2")
-        && text.includes("WHERE s2.user_id = user-alice")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.schema_version FROM submissions s2")
-        && text.includes("WHERE s2.user_id = user-alice")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.cliVersion")
-    )).toBe(false);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.schemaVersion")
-    )).toBe(false);
-    expect(rank).toMatchObject({
-      rank: 1,
-      username: "alice",
-      totalTokens: 3000,
-      totalCost: 30,
-      submissionCount: 2,
-      lastSubmission: "2026-03-12T09:00:00.000Z",
-      submissionFreshness: {
-        lastUpdated: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
-        isStale: false,
-      },
-    });
+    expect(selectedKeys(1)).toEqual([
+      "totalTokens",
+      "totalCost",
+    ]);
+    expect(Object.keys(rank || {}).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
   });
 
   it("looks up all-time user rank usernames case-insensitively", async () => {
@@ -460,10 +419,6 @@ describe("all-time leaderboard freshness queries", () => {
       {
         totalTokens: 1200,
         totalCost: 12,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 0 }]);
@@ -522,7 +477,7 @@ describe("all-time cost aggregation precision across query shapes (numeric overf
     mockState.pushAwaitedResult([]);
     mockState.pushAwaitedResult([{ count: 0 }]);
     mockState.pushAwaitedResult([
-      { totalTokens: 0, totalCost: 0, totalSubmissions: 0, uniqueUsers: 0 },
+      { totalTokens: 0, totalCost: 0, uniqueUsers: 0 },
     ]);
 
     await getLeaderboardData("all", 1, 50, "cost", "ali");
@@ -538,11 +493,6 @@ describe("all-time cost aggregation precision across query shapes (numeric overf
       {
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 0,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 0 }]);

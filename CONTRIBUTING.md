@@ -15,8 +15,10 @@ Prerequisites: a stable Rust toolchain (`rustup` recommended) and [Bun](https://
 | Rust tests | `cargo test --workspace --all-features` |
 | Build the CLI | `cargo build --release -p tokscale-cli` |
 | Frontend dev server | `bun run dev:frontend` |
+| Frontend registry contract | `bun run --cwd packages/frontend test -- __tests__/lib/clientRegistry.test.ts` |
+| Frontend type check | `bun run --cwd packages/frontend typecheck` |
 
-CI runs the same format, clippy, and test commands across every release target, plus the frontend test suite and type check. A clean local `cargo fmt`, `cargo clippy`, and `cargo test` is the baseline for a reviewable PR.
+CI runs format, Clippy, and Rust tests on Linux, then builds the supported release targets separately. Frontend CI runs Vitest, migration replay, and the type check; it also runs when `crates/tokscale-core/src/clients.rs` or a GitHub CDN asset changes, so cross-registry client checks cannot be skipped by a Rust-only integration PR. A clean local `cargo fmt`, `cargo clippy`, and `cargo test` is the baseline for a reviewable PR.
 
 ## Repository layout
 
@@ -84,6 +86,8 @@ This is the step that is easy to miss and that breaks real usage. Add the `id` t
 
 Because those three are `Record<ClientType, …>`, `tsc` fails to compile once the id is in `SUPPORTED_CLIENT_TYPES` until each has an entry — so if you start with `types.ts`, the type checker guides you through the rest.
 
+The frontend registry contract test also reads the Rust `define_clients!` list, validates each id through the submit schema, and checks its display name, logo, and color. Frontend CI is explicitly triggered by `clients.rs`, so adding a Rust client without completing this step fails before merge.
+
 ### 6. Add the logo asset
 
 Add `.github/assets/client-<id>.png` (or `.jpg`) and reference it from `SOURCE_LOGOS`:
@@ -94,6 +98,12 @@ Add `.github/assets/client-<id>.png` (or `.jpg`) and reference it from `SOURCE_L
 
 `SOURCE_LOGOS` may point at an external URL instead, but any `GITHUB_CDN_BASE` reference must resolve to a file that exists in `.github/assets` on `main`, or the frontend renders a broken image. CLI and desktop variants of the same product may share a single asset (as `antigravity` and `antigravity-cli` do).
 
+The frontend registry contract test checks every GitHub CDN logo against the checked-in asset directory. It is triggered by `.github/assets/**` changes as well as frontend changes.
+
+### 7. Update user-facing documentation
+
+Add the client to the supported-client overview and feature list in `README.md`, plus the data-location matrix when a platform-specific path matters. Mirror those user-facing updates in the maintained localized READMEs (`README.ko.md`, `README.ja.md`, and `README.zh-cn.md`).
+
 ### Registry enforcement
 
 Some registries fail the build when they are incomplete; others fail silently at runtime. Know which is which:
@@ -102,19 +112,20 @@ Some registries fail the build when they are incomplete; others fail silently at
 | --- | --- | --- |
 | `define_clients!` sequential index | Rust compile-time assertion | Build fails |
 | `CLIENT_UI` array | Rust fixed-size array | Build fails |
-| `SOURCE_DISPLAY_NAMES` / `SOURCE_LOGOS` / `SOURCE_COLORS` | TypeScript `Record<ClientType>` | `tsc` fails (once id is in `SUPPORTED_CLIENT_TYPES`) |
-| **`SUPPORTED_CLIENT_TYPES`** | **Nothing** | **Server rejects every submission that includes the client** |
+| `SOURCE_DISPLAY_NAMES` / `SOURCE_LOGOS` / `SOURCE_COLORS` | TypeScript `Record<ClientType>` + frontend registry contract test | Type check or CI test fails |
+| **`SUPPORTED_CLIENT_TYPES`** | **Frontend registry contract test, triggered by Rust registry changes** | **CI fails before a server-rejected client ships** |
 | Scanner + `lib.rs` dispatch | Nothing | Client is defined but scans and reports no data |
-| Logo asset file | Nothing | Broken logo image on the frontend |
+| Logo asset file | Frontend registry contract test, triggered by asset changes | CI fails for a missing GitHub CDN asset |
 
-The three "Nothing" rows are where integrations quietly ship broken. Verify them by hand.
+The scanner/dispatch row is the remaining silent integration gap. Verify it by hand.
 
 ### Verifying the integration
 
 1. Run `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
 2. Add a parser unit test with a small fixture in the client's real log format.
 3. Run `tokscale --no-spinner --client <id>` against real local data and confirm the message and token counts look right.
-4. From `packages/frontend`, run the type check so the `Record<ClientType>` maps are proven complete.
+4. Run `bun run --cwd packages/frontend test -- __tests__/lib/clientRegistry.test.ts` and `bun run --cwd packages/frontend typecheck`.
+5. Update the supported-client and data-location documentation, including maintained translations.
 
 ## Commit messages and pull requests
 

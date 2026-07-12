@@ -1,10 +1,7 @@
 "use client";
 
-import { useEffect, useState } from 'react';
 import Image from 'next/image';
 import styled from 'styled-components';
-
-const DEFAULT_COPYRIGHT_YEAR = 2026;
 
 const Container = styled.div`
   width: 100%;
@@ -200,11 +197,7 @@ const SpinningGlobe = styled(Image)`
 `;
 
 export function Footer() {
-  const [currentYear, setCurrentYear] = useState(DEFAULT_COPYRIGHT_YEAR);
-
-  useEffect(() => {
-    setCurrentYear(new Date().getFullYear());
-  }, []);
+  const currentYear = new Date().getFullYear();
 
   return (
     <Container>
@@ -215,6 +208,7 @@ export function Footer() {
               src="/assets/footer-logo-icon.png"
               alt="Tokscale Icon"
               fill
+              sizes="(max-width: 400px) 64px, (max-width: 560px) 80px, 108px"
             />
           </LogoContainer>
 
@@ -235,7 +229,7 @@ export function Footer() {
 
           <TextContainer>
             <CopyrightText>
-              © {currentYear} Tokscale. All rights reserved.
+              © <time dateTime={String(currentYear)} suppressHydrationWarning>{currentYear}</time> Tokscale. All rights reserved.
             </CopyrightText>
             <GitHubLink 
               href="https://github.com/junhoyeo/tokscale" 

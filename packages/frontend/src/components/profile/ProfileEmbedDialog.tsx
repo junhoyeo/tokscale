@@ -1,21 +1,40 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import styled from "styled-components";
 import { toast } from "react-toastify";
-import { EMBED_TEMPLATES, type EmbedTemplate } from "@/lib/embed/embedShared";
-import { getPaletteNames, getPalette, type ColorPaletteName } from "@/lib/themes";
-
-type EmbedTheme = "dark" | "light";
-type EmbedSortBy = "tokens" | "cost";
-type EmbedView = "2d" | "3d";
-type EmbedNumberFormat = "compact" | "full";
-type EmbedRankFormat = "plain" | "percent" | "total";
+import {
+  EMBED_TEMPLATES,
+  resolvePalette,
+  type EmbedTemplate,
+} from "@/lib/embed/embedShared";
+import { getPaletteNames, type ColorPaletteName } from "@/lib/themes";
+import {
+  buildEmbedPreviewPath,
+  buildProfileEmbedLinks,
+  getEmbedDialogCapabilities,
+  type EmbedNumberFormat,
+  type EmbedRankFormat,
+  type EmbedSortBy,
+  type EmbedTheme,
+  type EmbedView,
+} from "./embedDialogOptions";
 
 function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
+
+const EMBED_TEMPLATE_LABELS: Record<EmbedTemplate, string> = {
+  classic: "Overview",
+  minimal: "Token focus",
+  terminal: "Readout",
+  graph: "Contributions",
+  orbit: "Rank focus",
+  vitals: "Activity summary",
+  blueprint: "Detailed stats",
+  receipt: "Compact list",
+};
 
 interface ProfileEmbedDialogProps {
   open: boolean;
@@ -24,35 +43,90 @@ interface ProfileEmbedDialogProps {
   onClose: () => void;
 }
 
-const TOKSCALE_URL = "https://tokscale.ai";
-
 export function ProfileEmbedDialog({
   open,
   username,
   displayName,
   onClose,
 }: ProfileEmbedDialogProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState<EmbedTheme>("dark");
   const [sortBy, setSortBy] = useState<EmbedSortBy>("tokens");
-  const [compact, setCompact] = useState(false);
+  const [layoutCompact, setLayoutCompact] = useState(false);
+  const [threeDCompact, setThreeDCompact] = useState(false);
   const [view, setView] = useState<EmbedView>("2d");
   const [template, setTemplate] = useState<EmbedTemplate>("classic");
   const [color, setColor] = useState<ColorPaletteName | null>(null);
-  const [tokensFormat, setTokensFormat] = useState<EmbedNumberFormat>("compact");
+  const [tokensFormat, setTokensFormat] =
+    useState<EmbedNumberFormat>("compact");
   const [costFormat, setCostFormat] = useState<EmbedNumberFormat>("compact");
   const [rankFormat, setRankFormat] = useState<EmbedRankFormat>("plain");
   const [graph, setGraph] = useState(false);
+  const compact = view === "3d" ? threeDCompact : layoutCompact;
+  const setCompactForView = (nextCompact: boolean) => {
+    if (view === "3d") {
+      setThreeDCompact(nextCompact);
+    } else {
+      setLayoutCompact(nextCompact);
+    }
+  };
 
-  // Templates whose contribution graph is toggleable via `?graph=1`.
-  const graphCapable = template !== "graph" && template !== "vitals";
+  const capabilities = getEmbedDialogCapabilities({
+    compact,
+    template,
+    view,
+  });
 
   useEffect(() => {
     if (!open) return;
 
     const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const focusDialog = window.requestAnimationFrame(() => {
+      dialogRef.current?.focus();
+    });
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         onClose();
+        return;
+      }
+
+      if (event.key !== "Tab" || !dialogRef.current) {
+        return;
+      }
+
+      const focusableElements = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.getClientRects().length > 0);
+
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      const activeElement = document.activeElement;
+
+      if (
+        event.shiftKey &&
+        (activeElement === firstElement ||
+          activeElement === dialogRef.current ||
+          !dialogRef.current.contains(activeElement))
+      ) {
+        event.preventDefault();
+        lastElement.focus();
+      } else if (
+        !event.shiftKey &&
+        (activeElement === lastElement ||
+          !dialogRef.current.contains(activeElement))
+      ) {
+        event.preventDefault();
+        firstElement.focus();
       }
     };
 
@@ -60,42 +134,42 @@ export function ProfileEmbedDialog({
     window.addEventListener("keydown", handleKeyDown);
 
     return () => {
+      window.cancelAnimationFrame(focusDialog);
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
+      previousFocus?.focus();
     };
   }, [open, onClose]);
 
-  const {
-    embedUrl,
-    markdownSnippet,
-    htmlSnippet,
-    profileUrl,
-  } = useMemo(() => {
-    const params = new URLSearchParams();
-
-    if (view === "3d") params.set("view", "3d");
-    if (theme !== "dark") params.set("theme", theme);
-    if (sortBy !== "tokens") params.set("sort", sortBy);
-    if (template !== "classic") params.set("template", template);
-    if (color) params.set("color", color);
-    if (template === "classic" && compact) params.set("compact", "1");
-    if (graph && graphCapable) params.set("graph", "1");
-    if (rankFormat !== "plain") params.set("rank", rankFormat);
-    params.set("tokens", tokensFormat);
-    params.set("cost", costFormat);
-
-    const query = params.toString();
-    const baseEmbedUrl = `${TOKSCALE_URL}/api/embed/${username}/svg`;
-    const resolvedEmbedUrl = query ? `${baseEmbedUrl}?${query}` : baseEmbedUrl;
-    const resolvedProfileUrl = `${TOKSCALE_URL}/u/${username}`;
-
-    return {
-      embedUrl: resolvedEmbedUrl,
-      markdownSnippet: `[![Tokscale Stats](${resolvedEmbedUrl})](${resolvedProfileUrl})`,
-      htmlSnippet: `<a href="${resolvedProfileUrl}"><img alt="Tokscale Stats for @${username}" src="${resolvedEmbedUrl}" /></a>`,
-      profileUrl: resolvedProfileUrl,
-    };
-  }, [color, compact, costFormat, graph, graphCapable, rankFormat, sortBy, template, theme, tokensFormat, username, view]);
+  const { embedUrl, markdownSnippet, htmlSnippet, profileUrl } = useMemo(
+    () =>
+      buildProfileEmbedLinks(username, {
+        color,
+        compact,
+        costFormat,
+        graph,
+        rankFormat,
+        sortBy,
+        template,
+        theme,
+        tokensFormat,
+        view,
+      }),
+    [
+      color,
+      compact,
+      costFormat,
+      graph,
+      rankFormat,
+      sortBy,
+      template,
+      theme,
+      tokensFormat,
+      username,
+      view,
+    ],
+  );
+  const previewUrl = useMemo(() => buildEmbedPreviewPath(embedUrl), [embedUrl]);
 
   const copyToClipboard = async (value: string, label: string) => {
     try {
@@ -111,26 +185,35 @@ export function ProfileEmbedDialog({
   }
 
   return createPortal(
-    <Overlay onClick={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
+    <Overlay
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
       <Dialog
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="profile-embed-dialog-title"
+        aria-describedby="profile-embed-dialog-description"
+        tabIndex={-1}
       >
         <DialogHeader>
           <HeaderCopy>
-            <Eyebrow>GitHub README embed</Eyebrow>
             <DialogTitle id="profile-embed-dialog-title">
-              Share @{username} with a polished Tokscale card
+              Embed @{username}
             </DialogTitle>
-            <DialogDescription>
-              Preview the live embed, tweak the presentation, and copy a ready-to-paste snippet for your README.
+            <DialogDescription id="profile-embed-dialog-description">
+              Customize the live card, then copy it into GitHub or any HTML
+              page.
             </DialogDescription>
           </HeaderCopy>
 
-          <CloseButton type="button" onClick={onClose} aria-label="Close embed dialog">
+          <CloseButton
+            type="button"
+            onClick={onClose}
+            aria-label="Close embed dialog"
+          >
             <CloseIcon />
           </CloseButton>
         </DialogHeader>
@@ -139,44 +222,50 @@ export function ProfileEmbedDialog({
           <PreviewPanel>
             <PreviewSurface>
               <PreviewLabel>Live preview</PreviewLabel>
-              <PreviewFrame>
+              <PreviewFrame $threeD={view === "3d"}>
                 <PreviewImage
-                  src={embedUrl}
+                  src={previewUrl}
                   alt={`Tokscale README embed preview for ${displayName || username}`}
                 />
               </PreviewFrame>
             </PreviewSurface>
-
-            <HighlightsList>
-              <HighlightItem>GitHub-ready markdown with a linked image card</HighlightItem>
-              <HighlightItem>Matches the new Tokscale 2.0 visual language</HighlightItem>
-              <HighlightItem>Automatically refreshes as profile stats update</HighlightItem>
-            </HighlightsList>
           </PreviewPanel>
 
-          <ControlsPanel>
-            <OptionGroup>
-              <OptionLabel>Template</OptionLabel>
-              <SegmentedControl>
-                {EMBED_TEMPLATES.map((tpl) => (
-                  <SegmentButton
-                    key={tpl}
-                    type="button"
-                    $active={template === tpl}
-                    onClick={() => setTemplate(tpl)}
+          <ControlsPanel aria-label="Embed customization">
+            <ControlsHeader>
+              <ControlsTitle>Card settings</ControlsTitle>
+            </ControlsHeader>
+
+            {capabilities.showTemplate && (
+              <OptionGroup>
+                <OptionLabel id="embed-template-label">Template</OptionLabel>
+                <SelectWrap>
+                  <SelectControl
+                    name="profile-embed-template"
+                    aria-labelledby="embed-template-label"
+                    value={template}
+                    onChange={(event) =>
+                      setTemplate(event.currentTarget.value as EmbedTemplate)
+                    }
                   >
-                    {titleCase(tpl)}
-                  </SegmentButton>
-                ))}
-              </SegmentedControl>
-            </OptionGroup>
+                    {EMBED_TEMPLATES.map((tpl) => (
+                      <option key={tpl} value={tpl}>
+                        {EMBED_TEMPLATE_LABELS[tpl]}
+                      </option>
+                    ))}
+                  </SelectControl>
+                  <SelectIcon aria-hidden="true" />
+                </SelectWrap>
+              </OptionGroup>
+            )}
 
             <OptionGroup>
-              <OptionLabel>View</OptionLabel>
-              <SegmentedControl>
+              <OptionLabel id="embed-view-label">View</OptionLabel>
+              <SegmentedControl role="group" aria-labelledby="embed-view-label">
                 <SegmentButton
                   type="button"
                   $active={view === "2d"}
+                  aria-pressed={view === "2d"}
                   onClick={() => setView("2d")}
                 >
                   2D
@@ -184,6 +273,7 @@ export function ProfileEmbedDialog({
                 <SegmentButton
                   type="button"
                   $active={view === "3d"}
+                  aria-pressed={view === "3d"}
                   onClick={() => setView("3d")}
                 >
                   3D
@@ -192,11 +282,15 @@ export function ProfileEmbedDialog({
             </OptionGroup>
 
             <OptionGroup>
-              <OptionLabel>Theme</OptionLabel>
-              <SegmentedControl>
+              <OptionLabel id="embed-theme-label">Theme</OptionLabel>
+              <SegmentedControl
+                role="group"
+                aria-labelledby="embed-theme-label"
+              >
                 <SegmentButton
                   type="button"
                   $active={theme === "dark"}
+                  aria-pressed={theme === "dark"}
                   onClick={() => setTheme("dark")}
                 >
                   Dark
@@ -204,6 +298,7 @@ export function ProfileEmbedDialog({
                 <SegmentButton
                   type="button"
                   $active={theme === "light"}
+                  aria-pressed={theme === "light"}
                   onClick={() => setTheme("light")}
                 >
                   Light
@@ -211,37 +306,45 @@ export function ProfileEmbedDialog({
               </SegmentedControl>
             </OptionGroup>
 
-            <OptionGroup>
-              <OptionLabel>Accent color</OptionLabel>
-              <SwatchRow>
-                <Swatch
-                  type="button"
-                  $active={color === null}
-                  $color="var(--color-border-default)"
-                  aria-label="Default accent color"
-                  title="Default"
-                  onClick={() => setColor(null)}
-                />
-                {getPaletteNames().map((name) => (
+            {capabilities.showAccent && (
+              <OptionGroup $stacked>
+                <OptionLabel id="embed-accent-label">Accent color</OptionLabel>
+                <SwatchRow role="group" aria-labelledby="embed-accent-label">
                   <Swatch
-                    key={name}
                     type="button"
-                    $active={color === name}
-                    $color={getPalette(name).grade3}
-                    aria-label={`${name} accent color`}
-                    title={titleCase(name)}
-                    onClick={() => setColor(name)}
+                    $active={color === null}
+                    $color={resolvePalette(theme, null).brand}
+                    aria-pressed={color === null}
+                    aria-label="Default accent color"
+                    title="Default"
+                    onClick={() => setColor(null)}
                   />
-                ))}
-              </SwatchRow>
-            </OptionGroup>
+                  {getPaletteNames().map((name) => (
+                    <Swatch
+                      key={name}
+                      type="button"
+                      $active={color === name}
+                      $color={resolvePalette(theme, name).brand}
+                      aria-pressed={color === name}
+                      aria-label={`${name} accent color`}
+                      title={titleCase(name)}
+                      onClick={() => setColor(name)}
+                    />
+                  ))}
+                </SwatchRow>
+              </OptionGroup>
+            )}
 
             <OptionGroup>
-              <OptionLabel>Ranking</OptionLabel>
-              <SegmentedControl>
+              <OptionLabel id="embed-ranking-label">Ranking</OptionLabel>
+              <SegmentedControl
+                role="group"
+                aria-labelledby="embed-ranking-label"
+              >
                 <SegmentButton
                   type="button"
                   $active={sortBy === "tokens"}
+                  aria-pressed={sortBy === "tokens"}
                   onClick={() => setSortBy("tokens")}
                 >
                   Tokens
@@ -249,6 +352,7 @@ export function ProfileEmbedDialog({
                 <SegmentButton
                   type="button"
                   $active={sortBy === "cost"}
+                  aria-pressed={sortBy === "cost"}
                   onClick={() => setSortBy("cost")}
                 >
                   Cost
@@ -256,37 +360,52 @@ export function ProfileEmbedDialog({
               </SegmentedControl>
             </OptionGroup>
 
-            <OptionGroup>
-              <OptionLabel>Rank format</OptionLabel>
-              <SegmentedControl>
-                {(["plain", "percent", "total"] as const).map((mode) => (
-                  <SegmentButton
-                    key={mode}
-                    type="button"
-                    $active={rankFormat === mode}
-                    onClick={() => setRankFormat(mode)}
-                  >
-                    {titleCase(mode)}
-                  </SegmentButton>
-                ))}
-              </SegmentedControl>
-            </OptionGroup>
-
-            {template === "classic" && (
+            {capabilities.showRankFormat && (
               <OptionGroup>
-                <OptionLabel>Layout</OptionLabel>
-                <SegmentedControl>
+                <OptionLabel id="embed-rank-format-label">
+                  Rank format
+                </OptionLabel>
+                <SegmentedControl
+                  role="group"
+                  aria-labelledby="embed-rank-format-label"
+                >
+                  {(["plain", "percent", "total"] as const).map((mode) => (
+                    <SegmentButton
+                      key={mode}
+                      type="button"
+                      $active={rankFormat === mode}
+                      aria-pressed={rankFormat === mode}
+                      onClick={() => setRankFormat(mode)}
+                    >
+                      {titleCase(mode)}
+                    </SegmentButton>
+                  ))}
+                </SegmentedControl>
+              </OptionGroup>
+            )}
+
+            {capabilities.showLayout && (
+              <OptionGroup>
+                <OptionLabel id="embed-layout-label">
+                  {view === "3d" ? "Number format" : "Layout"}
+                </OptionLabel>
+                <SegmentedControl
+                  role="group"
+                  aria-labelledby="embed-layout-label"
+                >
                   <SegmentButton
                     type="button"
                     $active={!compact}
-                    onClick={() => setCompact(false)}
+                    aria-pressed={!compact}
+                    onClick={() => setCompactForView(false)}
                   >
                     Full
                   </SegmentButton>
                   <SegmentButton
                     type="button"
                     $active={compact}
-                    onClick={() => setCompact(true)}
+                    aria-pressed={compact}
+                    onClick={() => setCompactForView(true)}
                   >
                     Compact
                   </SegmentButton>
@@ -294,13 +413,19 @@ export function ProfileEmbedDialog({
               </OptionGroup>
             )}
 
-            {graphCapable && (
+            {capabilities.showGraph && (
               <OptionGroup>
-                <OptionLabel>Contribution graph</OptionLabel>
-                <SegmentedControl>
+                <OptionLabel id="embed-graph-label">
+                  Contribution graph
+                </OptionLabel>
+                <SegmentedControl
+                  role="group"
+                  aria-labelledby="embed-graph-label"
+                >
                   <SegmentButton
                     type="button"
                     $active={!graph}
+                    aria-pressed={!graph}
                     onClick={() => setGraph(false)}
                   >
                     Off
@@ -308,6 +433,7 @@ export function ProfileEmbedDialog({
                   <SegmentButton
                     type="button"
                     $active={graph}
+                    aria-pressed={graph}
                     onClick={() => setGraph(true)}
                   >
                     On
@@ -316,54 +442,78 @@ export function ProfileEmbedDialog({
               </OptionGroup>
             )}
 
-            <OptionGroup>
-              <OptionLabel>Token number format</OptionLabel>
-              <SegmentedControl>
-                <SegmentButton
-                  type="button"
-                  $active={tokensFormat === "compact"}
-                  onClick={() => setTokensFormat("compact")}
-                >
-                  Compact
-                </SegmentButton>
-                <SegmentButton
-                  type="button"
-                  $active={tokensFormat === "full"}
-                  onClick={() => setTokensFormat("full")}
-                >
-                  Full
-                </SegmentButton>
-              </SegmentedControl>
-            </OptionGroup>
+            {capabilities.showNumberFormats && (
+              <>
+                <OptionGroup>
+                  <OptionLabel id="embed-token-format-label">
+                    Token format
+                  </OptionLabel>
+                  <SegmentedControl
+                    role="group"
+                    aria-labelledby="embed-token-format-label"
+                  >
+                    <SegmentButton
+                      type="button"
+                      $active={tokensFormat === "compact"}
+                      aria-pressed={tokensFormat === "compact"}
+                      onClick={() => setTokensFormat("compact")}
+                    >
+                      Compact
+                    </SegmentButton>
+                    <SegmentButton
+                      type="button"
+                      $active={tokensFormat === "full"}
+                      aria-pressed={tokensFormat === "full"}
+                      onClick={() => setTokensFormat("full")}
+                    >
+                      Full
+                    </SegmentButton>
+                  </SegmentedControl>
+                </OptionGroup>
 
-            <OptionGroup>
-              <OptionLabel>Cost number format</OptionLabel>
-              <SegmentedControl>
-                <SegmentButton
-                  type="button"
-                  $active={costFormat === "compact"}
-                  onClick={() => setCostFormat("compact")}
-                >
-                  Compact
-                </SegmentButton>
-                <SegmentButton
-                  type="button"
-                  $active={costFormat === "full"}
-                  onClick={() => setCostFormat("full")}
-                >
-                  Full
-                </SegmentButton>
-              </SegmentedControl>
-            </OptionGroup>
+                <OptionGroup>
+                  <OptionLabel id="embed-cost-format-label">
+                    Cost format
+                  </OptionLabel>
+                  <SegmentedControl
+                    role="group"
+                    aria-labelledby="embed-cost-format-label"
+                  >
+                    <SegmentButton
+                      type="button"
+                      $active={costFormat === "compact"}
+                      aria-pressed={costFormat === "compact"}
+                      onClick={() => setCostFormat("compact")}
+                    >
+                      Compact
+                    </SegmentButton>
+                    <SegmentButton
+                      type="button"
+                      $active={costFormat === "full"}
+                      aria-pressed={costFormat === "full"}
+                      onClick={() => setCostFormat("full")}
+                    >
+                      Full
+                    </SegmentButton>
+                  </SegmentedControl>
+                </OptionGroup>
+              </>
+            )}
 
             <SnippetSection>
               <SnippetHeader>
                 <SnippetTitle>Markdown snippet</SnippetTitle>
                 <InlineActions>
-                  <InlineActionButton type="button" onClick={() => copyToClipboard(embedUrl, "Image URL")}>
+                  <InlineActionButton
+                    type="button"
+                    onClick={() => copyToClipboard(embedUrl, "Image URL")}
+                  >
                     Copy image URL
                   </InlineActionButton>
-                  <InlineActionButton type="button" onClick={() => copyToClipboard(htmlSnippet, "HTML snippet")}>
+                  <InlineActionButton
+                    type="button"
+                    onClick={() => copyToClipboard(htmlSnippet, "HTML snippet")}
+                  >
                     Copy HTML
                   </InlineActionButton>
                 </InlineActions>
@@ -372,10 +522,19 @@ export function ProfileEmbedDialog({
               <CodeBlock>{markdownSnippet}</CodeBlock>
 
               <PrimaryActions>
-                <PrimaryButton type="button" onClick={() => copyToClipboard(markdownSnippet, "Markdown snippet")}>
+                <PrimaryButton
+                  type="button"
+                  onClick={() =>
+                    copyToClipboard(markdownSnippet, "Markdown snippet")
+                  }
+                >
                   Copy markdown
                 </PrimaryButton>
-                <SecondaryLink href={profileUrl} target="_blank" rel="noopener noreferrer">
+                <SecondaryLink
+                  href={profileUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
                   View profile
                 </SecondaryLink>
               </PrimaryActions>
@@ -384,7 +543,7 @@ export function ProfileEmbedDialog({
         </DialogBody>
       </Dialog>
     </Overlay>,
-    document.body
+    document.body,
   );
 }
 
@@ -395,409 +554,681 @@ const Overlay = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background:
-    radial-gradient(circle at top, rgba(22, 154, 255, 0.18), transparent 32%),
-    rgba(6, 10, 18, 0.82);
-  backdrop-filter: blur(18px);
+  padding: 16px;
+  background: rgba(5, 7, 12, 0.78);
+  backdrop-filter: blur(10px);
+  overscroll-behavior: contain;
 
   @media (max-width: 640px) {
     align-items: flex-end;
-    padding: 12px;
+    padding: 8px 0 0;
   }
 `;
 
 const Dialog = styled.div`
-  width: min(100%, 1040px);
-  max-height: min(88vh, 920px);
-  overflow: auto;
-  border: 1px solid rgba(133, 202, 255, 0.16);
-  border-radius: 28px;
-  background:
-    radial-gradient(circle at top right, rgba(22, 154, 255, 0.16), transparent 30%),
-    linear-gradient(180deg, rgba(26, 33, 42, 0.98) 0%, rgba(17, 17, 19, 0.98) 100%);
-  box-shadow:
-    0 30px 80px rgba(0, 0, 0, 0.55),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  display: grid;
+  width: min(100%, 960px);
+  height: min(84dvh, 760px);
+  max-height: calc(100dvh - 32px);
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 14px;
+  outline: none;
+  background: var(--service-surface);
+
+  @media (max-width: 840px) {
+    height: min(92dvh, 860px);
+  }
 
   @media (max-width: 640px) {
     width: 100%;
-    max-height: 92vh;
-    border-radius: 24px 24px 0 0;
+    height: min(96dvh, 860px);
+    max-height: calc(100dvh - 8px);
+    border-bottom: 0;
+    border-radius: 14px 14px 0 0;
   }
 `;
 
 const DialogHeader = styled.div`
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 28px 28px 0;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--service-border);
+  background: var(--service-surface);
 
   @media (max-width: 640px) {
-    padding: 22px 18px 0;
+    padding: 12px 14px;
   }
 `;
 
 const HeaderCopy = styled.div`
   display: flex;
-  flex-direction: column;
-  gap: 10px;
   min-width: 0;
-`;
-
-const Eyebrow = styled.span`
-  display: inline-flex;
-  width: fit-content;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid rgba(133, 202, 255, 0.18);
-  border-radius: 999px;
-  background: rgba(133, 202, 255, 0.08);
-  color: var(--color-accent-blue);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  flex-direction: column;
+  gap: 2px;
 `;
 
 const DialogTitle = styled.h2`
-  color: var(--color-fg-default);
-  font-size: clamp(28px, 3vw, 38px);
-  font-weight: 700;
-  line-height: 1.05;
-  letter-spacing: -0.04em;
+  overflow: hidden;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 `;
 
 const DialogDescription = styled.p`
-  max-width: 720px;
-  color: var(--color-fg-muted);
-  font-size: 15px;
-  line-height: 1.6;
+  overflow: hidden;
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  @media (max-width: 480px) {
+    display: none;
+  }
 `;
 
 const CloseButton = styled.button`
   display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  flex-shrink: 0;
-  border: 1px solid var(--color-border-default);
-  border-radius: 999px;
-  background: rgba(32, 41, 50, 0.82);
-  color: var(--color-fg-default);
+  border: 1px solid var(--service-border-strong);
+  border-radius: 8px;
+  background: var(--service-surface-muted);
+  color: var(--service-text-muted);
   transition:
-    transform 150ms ease,
     border-color 150ms ease,
-    background 150ms ease;
+    background-color 150ms ease,
+    color 150ms ease;
 
-  &:hover {
-    transform: translateY(-1px);
-    border-color: rgba(133, 202, 255, 0.28);
-    background: rgba(32, 41, 50, 1);
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background: var(--service-accent-soft);
+      color: var(--service-text);
+    }
+  }
+
+  @media (pointer: coarse) {
+    width: 44px;
+    height: 44px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
 `;
 
 const DialogBody = styled.div`
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 420px);
-  gap: 24px;
-  padding: 28px;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
+  overflow: hidden;
+  scrollbar-color: color-mix(
+      in srgb,
+      var(--service-text-muted) 52%,
+      transparent
+    )
+    var(--service-canvas);
+  scrollbar-width: thin;
 
-  @media (max-width: 920px) {
+  &::-webkit-scrollbar {
+    width: 9px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: var(--service-canvas);
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border: 2px solid var(--service-canvas);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--service-text-muted) 52%, transparent);
+  }
+
+  @media (max-width: 840px) {
     grid-template-columns: 1fr;
+    align-content: start;
+    overflow-y: auto;
+    padding-bottom: max(24px, env(safe-area-inset-bottom));
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scroll-padding-bottom: max(24px, env(safe-area-inset-bottom));
   }
 
   @media (max-width: 640px) {
-    gap: 18px;
-    padding: 18px;
+    padding-bottom: max(32px, calc(env(safe-area-inset-bottom) + 16px));
+    scroll-padding-bottom: max(32px, calc(env(safe-area-inset-bottom) + 16px));
   }
 `;
 
 const PreviewPanel = styled.div`
   display: flex;
+  min-width: 0;
+  min-height: 0;
   flex-direction: column;
-  gap: 16px;
+  overflow: hidden;
+  padding: 16px;
+  border-right: 1px solid var(--service-border);
+  background: var(--service-canvas);
+
+  @media (max-width: 840px) {
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--service-border);
+  }
+
+  @media (max-width: 640px) {
+    padding: 12px;
+  }
 `;
 
 const PreviewSurface = styled.div`
   display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: 16px;
-  min-height: 100%;
-  padding: 20px;
-  border: 1px solid rgba(133, 202, 255, 0.12);
-  border-radius: 24px;
-  background:
-    linear-gradient(180deg, rgba(16, 18, 28, 0.98) 0%, rgba(10, 12, 18, 0.98) 100%);
+  gap: 8px;
 `;
 
 const PreviewLabel = styled.span`
-  color: var(--color-fg-muted);
-  font-size: 13px;
+  color: var(--service-text);
+  font-size: 0.8125rem;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  line-height: 1.3;
 `;
 
-const PreviewFrame = styled.div`
+const PreviewFrame = styled.div<{ $threeD: boolean }>`
   display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
   align-items: center;
   justify-content: center;
-  min-height: 360px;
-  padding: 24px;
-  border: 1px dashed rgba(133, 202, 255, 0.16);
-  border-radius: 18px;
-  background:
-    linear-gradient(135deg, rgba(22, 154, 255, 0.06) 0%, transparent 35%),
-    rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+  padding: 20px 0;
+
+  @media (max-width: 840px) {
+    height: ${({ $threeD }) => ($threeD ? "320px" : "200px")};
+    flex: 0 0 auto;
+  }
 
   @media (max-width: 640px) {
-    min-height: 220px;
-    padding: 16px;
+    height: ${({ $threeD }) => ($threeD ? "272px" : "160px")};
+    padding: 8px 0;
   }
 `;
 
 const PreviewImage = styled.img`
-  width: 100%;
+  width: auto;
   max-width: 100%;
+  max-height: 100%;
   height: auto;
-  filter: drop-shadow(0 22px 48px rgba(0, 0, 0, 0.36));
-`;
-
-const HighlightsList = styled.ul`
-  display: grid;
-  gap: 10px;
-  padding: 0;
-  margin: 0;
-  list-style: none;
-`;
-
-const HighlightItem = styled.li`
-  position: relative;
-  padding-left: 18px;
-  color: var(--color-fg-muted);
-  font-size: 14px;
-  line-height: 1.5;
-
-  &::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 8px;
-    width: 7px;
-    height: 7px;
-    border-radius: 999px;
-    background: linear-gradient(135deg, #169aff 0%, #85caff 100%);
-    box-shadow: 0 0 12px rgba(22, 154, 255, 0.5);
-  }
+  object-fit: contain;
 `;
 
 const ControlsPanel = styled.div`
   display: flex;
+  min-width: 0;
+  min-height: 0;
   flex-direction: column;
-  gap: 16px;
+  overflow-y: auto;
+  padding: 14px 16px 16px;
+  background: var(--service-surface);
+  overscroll-behavior: contain;
+  scrollbar-color: color-mix(
+      in srgb,
+      var(--service-text-muted) 52%,
+      transparent
+    )
+    var(--service-canvas);
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+
+  &::-webkit-scrollbar {
+    width: 9px;
+  }
+
+  &::-webkit-scrollbar-track {
+    border-left: 1px solid var(--service-border);
+    background: var(--service-canvas);
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border: 2px solid var(--service-canvas);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--service-text-muted) 52%, transparent);
+  }
+
+  @media (max-width: 840px) {
+    overflow: visible;
+    scrollbar-gutter: auto;
+  }
+
+  @media (max-width: 640px) {
+    padding: 12px 14px max(16px, env(safe-area-inset-bottom));
+  }
 `;
 
-const OptionGroup = styled.div`
+const ControlsHeader = styled.div`
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 20px;
-  background: rgba(16, 18, 28, 0.68);
+  align-items: center;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--service-border);
+`;
+
+const ControlsTitle = styled.h3`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+`;
+
+const OptionGroup = styled.div<{ $stacked?: boolean }>`
+  display: grid;
+  grid-template-columns: ${({ $stacked }) =>
+    $stacked ? "1fr" : "7rem minmax(0, 1fr)"};
+  align-items: ${({ $stacked }) => ($stacked ? "start" : "center")};
+  gap: ${({ $stacked }) => ($stacked ? "7px" : "10px")};
+  padding: 8px 0;
+  border-bottom: 1px solid var(--service-border);
+
+  @media (max-width: 400px) {
+    grid-template-columns: ${({ $stacked }) =>
+      $stacked ? "1fr" : "6.25rem minmax(0, 1fr)"};
+    gap: ${({ $stacked }) => ($stacked ? "7px" : "8px")};
+  }
 `;
 
 const OptionLabel = styled.span`
-  color: var(--color-fg-default);
-  font-size: 14px;
-  font-weight: 600;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.3;
+`;
+
+const SelectWrap = styled.div`
+  position: relative;
+  min-width: 0;
+`;
+
+const SelectControl = styled.select`
+  width: 100%;
+  min-height: 34px;
+  appearance: none;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 8px;
+  padding: 6px 30px 6px 10px;
+  background: var(--service-surface-muted);
+  color: var(--service-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.3;
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (pointer: coarse) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
+`;
+
+const SelectIcon = styled.span`
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--service-text-muted);
+  border-bottom: 1.5px solid var(--service-text-muted);
+  pointer-events: none;
+  transform: translateY(-70%) rotate(45deg);
 `;
 
 const SegmentedControl = styled.div`
-  display: flex;
-  gap: 8px;
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
   flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--service-border);
+  border-radius: 8px;
+  background: var(--service-surface-muted);
 `;
 
 const SegmentButton = styled.button<{ $active: boolean }>`
   display: inline-flex;
+  min-height: 28px;
   align-items: center;
   justify-content: center;
-  min-height: 40px;
-  padding: 10px 14px;
-  border: 1px solid ${({ $active }) => $active ? "rgba(133, 202, 255, 0.24)" : "var(--color-border-default)"};
-  border-radius: 999px;
+  border: 1px solid
+    ${({ $active }) =>
+      $active ? "var(--service-border-strong)" : "transparent"};
+  border-radius: 6px;
+  padding: 4px 8px;
   background: ${({ $active }) =>
-    $active
-      ? "linear-gradient(135deg, rgba(22, 154, 255, 0.18) 0%, rgba(133, 202, 255, 0.1) 100%)"
-      : "rgba(32, 41, 50, 0.8)"};
-  color: ${({ $active }) => $active ? "var(--color-fg-default)" : "var(--color-fg-muted)"};
-  font-size: 14px;
-  font-weight: 600;
+    $active ? "var(--service-accent-soft)" : "transparent"};
+  color: ${({ $active }) =>
+    $active ? "var(--service-text)" : "var(--service-text-muted)"};
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 550;
+  line-height: 1;
   transition:
-    transform 150ms ease,
     border-color 150ms ease,
+    background-color 150ms ease,
     color 150ms ease,
-    background 150ms ease;
+    transform 120ms ease;
 
-  &:hover {
-    transform: translateY(-1px);
-    color: var(--color-fg-default);
-    border-color: rgba(133, 202, 255, 0.24);
+  &:active {
+    transform: translateY(1px);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 1px;
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      color: var(--service-text);
+    }
+  }
+
+  @media (pointer: coarse) {
+    min-height: 44px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
 `;
 
 const SwatchRow = styled.div`
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(10, 28px);
+  justify-content: space-between;
+  gap: 0;
+
+  @media (pointer: coarse) {
+    width: fit-content;
+    grid-template-columns: repeat(5, 44px);
+    justify-content: start;
+    gap: 8px;
+  }
+
+  @media (max-width: 640px) {
+    width: fit-content;
+    grid-template-columns: repeat(5, 44px);
+    justify-content: start;
+    gap: 8px;
+  }
 `;
 
 const Swatch = styled.button<{ $active: boolean; $color: string }>`
-  width: 34px;
-  height: 34px;
-  border-radius: 999px;
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--service-surface);
+  border-radius: 7px;
   background: ${({ $color }) => $color};
-  border: 2px solid ${({ $active }) => ($active ? "var(--color-fg-default)" : "transparent")};
-  box-shadow: inset 0 0 0 1px var(--color-border-default);
+  box-shadow:
+    0 0 0 1px
+      ${({ $active }) =>
+        $active ? "var(--service-text)" : "var(--service-border-strong)"},
+    inset 0 0 0 1px rgba(0, 0, 0, 0.18);
   cursor: pointer;
-  transition: transform 150ms ease;
+  transition: transform 120ms ease;
 
-  &:hover {
-    transform: translateY(-1px);
+  &:active {
+    transform: translateY(1px);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (pointer: coarse) {
+    width: 44px;
+    height: 44px;
+  }
+
+  @media (max-width: 640px) {
+    width: 44px;
+    height: 44px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
 `;
 
 const SnippetSection = styled.div`
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px;
-  border: 1px solid rgba(133, 202, 255, 0.16);
-  border-radius: 24px;
-  background:
-    linear-gradient(180deg, rgba(26, 33, 42, 0.92) 0%, rgba(17, 18, 24, 0.92) 100%);
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 10px;
+  background: var(--service-canvas);
 `;
 
 const SnippetHeader = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
   flex-wrap: wrap;
+  gap: 8px;
 `;
 
 const SnippetTitle = styled.h3`
-  color: var(--color-fg-default);
-  font-size: 15px;
-  font-weight: 700;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.3;
 `;
 
 const InlineActions = styled.div`
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 5px;
 `;
 
 const InlineActionButton = styled.button`
   display: inline-flex;
+  min-height: 28px;
   align-items: center;
   justify-content: center;
-  min-height: 34px;
-  padding: 8px 12px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 999px;
-  background: rgba(32, 41, 50, 0.68);
-  color: var(--color-fg-muted);
-  font-size: 13px;
-  font-weight: 600;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 7px;
+  padding: 4px 8px;
+  background: var(--service-surface-muted);
+  color: var(--service-text-muted);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 550;
+  line-height: 1;
   transition:
     border-color 150ms ease,
-    color 150ms ease,
-    background 150ms ease;
+    background-color 150ms ease,
+    color 150ms ease;
 
-  &:hover {
-    color: var(--color-fg-default);
-    border-color: rgba(133, 202, 255, 0.2);
-    background: rgba(32, 41, 50, 0.92);
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background: var(--service-accent-soft);
+      color: var(--service-text);
+    }
+  }
+
+  @media (pointer: coarse) {
+    min-height: 44px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
 `;
 
 const CodeBlock = styled.pre`
+  max-height: 92px;
   overflow: auto;
   margin: 0;
-  padding: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 18px;
-  background: rgba(8, 12, 18, 0.92);
-  color: #d9edff;
+  padding: 10px;
+  border: 1px solid var(--service-border);
+  border-radius: 8px;
+  background: #080b11;
+  color: var(--service-text);
   font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 0.6875rem;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+
+  @media (max-width: 840px) {
+    max-height: none;
+    overflow: visible;
+  }
 `;
 
 const PrimaryActions = styled.div`
   display: flex;
-  gap: 10px;
   flex-wrap: wrap;
+  gap: 7px;
 `;
 
 const PrimaryButton = styled.button`
   display: inline-flex;
+  min-height: 34px;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
-  padding: 12px 16px;
-  border: 1px solid rgba(133, 202, 255, 0.26);
-  border-radius: 999px;
-  background: linear-gradient(135deg, #169aff 0%, #0073ff 100%);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 700;
+  border: 1px solid var(--service-accent);
+  border-radius: 8px;
+  padding: 7px 11px;
+  background: var(--service-accent);
+  color: var(--service-accent-foreground);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1;
   transition:
-    transform 150ms ease,
-    filter 150ms ease;
+    border-color 150ms ease,
+    background-color 150ms ease;
 
-  &:hover {
-    transform: translateY(-1px);
-    filter: brightness(1.06);
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      border-color: var(--service-accent-hover);
+      background: var(--service-accent-hover);
+    }
+  }
+
+  @media (pointer: coarse) {
+    min-height: 44px;
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
 `;
 
 const SecondaryLink = styled.a`
   display: inline-flex;
+  min-height: 34px;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
-  padding: 12px 16px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 999px;
-  background: rgba(32, 41, 50, 0.68);
-  color: var(--color-fg-default);
-  font-size: 14px;
-  font-weight: 600;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 8px;
+  padding: 7px 11px;
+  background: var(--service-surface-muted);
+  color: var(--service-text);
+  font-size: 0.75rem;
+  font-weight: 550;
+  line-height: 1;
   text-decoration: none;
   transition:
-    transform 150ms ease,
-    border-color 150ms ease;
+    border-color 150ms ease,
+    background-color 150ms ease;
 
-  &:hover {
-    transform: translateY(-1px);
-    border-color: rgba(133, 202, 255, 0.22);
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background: var(--service-accent-soft);
+    }
+  }
+
+  @media (pointer: coarse) {
+    min-height: 44px;
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
 `;
 
 function CloseIcon() {
   return (
-    <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none">
-      <path d="M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    <svg
+      aria-hidden="true"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <path
+        d="M18 6L6 18"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M6 6L18 18"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

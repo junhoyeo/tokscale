@@ -1,21 +1,26 @@
 "use client";
 
-import type { ReactNode } from "react";
 import styled from "styled-components";
-import { formatNumber, formatCurrency } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
-import { ListCard, ListHeader, ListMetricCell, ListRow } from "./listStyles";
+import { formatCurrency, formatNumber } from "@/lib/utils";
+import {
+  ListBody,
+  ListCaption,
+  ListCard,
+  ListCell,
+  ListHead,
+  ListHeaderCell,
+  ListPrimaryCell,
+  ListRow,
+  ListTable,
+  NumericValue,
+} from "./listStyles";
 
-/**
- * Shape returned by GET /api/users/[username]/devices (route already coerces
- * the SQL SUM strings to numbers and applies the display-name fallback).
- */
+/** Public device usage shape returned by the profile devices route. */
 export interface ProfileDevice {
   id: string;
   deviceKey: string;
-  /** Resolved label (custom name or fallback) — what public UIs render. */
   displayName: string;
-  /** Raw user-set name, null when the device has never been renamed. */
   customName: string | null;
   createdAt: string | null;
   lastSubmittedAt: string | null;
@@ -30,145 +35,111 @@ export interface ProfileDevice {
 
 export interface ProfileDevicesProps {
   devices: ProfileDevice[];
+  className?: string;
 }
 
+const DevicesSection = styled.section`
+  display: grid;
+  gap: 0.5rem;
+`;
+
 const SectionHeading = styled.h2`
-  font-size: 1.125rem;
-  font-weight: 600;
-  margin-bottom: 0.75rem;
-`;
-
-// Card/header/row/metric-cell primitives are shared with ProfileModels via
-// ./listStyles so the two profile tables stay visually in sync.
-const DevicesContainer = ListCard;
-const DevicesHeader = ListHeader;
-const DeviceRow = ListRow;
-
-const DeviceNameCell = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  min-width: 0;
-`;
-
-const DeviceNameText = styled.span`
-  font-size: 0.8125rem;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1rem;
   font-weight: 500;
+  line-height: 1.25;
+`;
+
+const DeviceName = styled.span`
+  display: block;
   overflow: hidden;
+  color: var(--service-text);
   text-overflow: ellipsis;
   white-space: nowrap;
 
-  @media (min-width: 480px) {
-    font-size: 0.875rem;
+  @media (max-width: 639px) {
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 `;
 
-const DeviceSubText = styled.span`
+const LastSubmitted = styled.span`
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--service-text-muted);
   font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.25;
 `;
 
-// All device metric columns share the same fixed width, unlike the per-column
-// widths in ProfileModels, so bake them in here.
-function DeviceMetricCell(props: {
-  $hideOnMobile?: boolean;
-  children?: ReactNode;
-}) {
-  return <ListMetricCell $width="4.5rem" $smWidth="5.5rem" {...props} />;
-}
-
-const MetricText = styled.span`
-  font-size: 0.8125rem;
-
-  @media (min-width: 480px) {
-    font-size: 0.875rem;
-  }
-`;
-
-const CostText = styled.span`
-  font-size: 0.8125rem;
-  font-weight: 500;
-
-  @media (min-width: 480px) {
-    font-size: 0.875rem;
-  }
-`;
-
-/**
- * Per-device usage breakdown for the public profile page. Hidden entirely
- * when the user has no recorded devices (pre-device legacy profiles).
- */
-export function ProfileDevices({ devices }: ProfileDevicesProps) {
+/** Compact per-device usage for public profiles. */
+export function ProfileDevices({ devices, className }: ProfileDevicesProps) {
   if (devices.length === 0) return null;
 
   return (
-    <section aria-label="Devices">
-      <SectionHeading style={{ color: "var(--color-fg-default)" }}>
-        Devices
+    <DevicesSection
+      className={className}
+      aria-labelledby="profile-devices-heading"
+    >
+      <SectionHeading id="profile-devices-heading">
+        Devices · all-time
       </SectionHeading>
 
-      <DevicesContainer
-        style={{
-          backgroundColor: "var(--color-bg-default)",
-          borderColor: "var(--color-border-default)",
-        }}
-      >
-        <DevicesHeader
-          style={{
-            backgroundColor: "var(--color-bg-elevated)",
-            borderColor: "var(--color-border-default)",
-            color: "var(--color-fg-muted)",
-          }}
-        >
-          <div>Device</div>
-          <DeviceMetricCell>Tokens</DeviceMetricCell>
-          <DeviceMetricCell>Cost</DeviceMetricCell>
-          <DeviceMetricCell $hideOnMobile>Active Days</DeviceMetricCell>
-        </DevicesHeader>
-
-        <div>
-          {devices.map((device, index) => (
-            <DeviceRow
-              key={device.id}
-              style={{
-                backgroundColor:
-                  index % 2 === 1 ? "var(--color-bg-elevated)" : "transparent",
-                borderTop:
-                  index > 0 ? "1px solid var(--color-border-default)" : undefined,
-              }}
-            >
-              <DeviceNameCell>
-                <DeviceNameText style={{ color: "var(--color-fg-default)" }}>
-                  {device.displayName}
-                </DeviceNameText>
-                <DeviceSubText
-                  style={{ color: "var(--color-fg-muted)" }}
-                  suppressHydrationWarning
-                >
-                  Last submit {formatRelativeTime(device.lastSubmittedAt)}
-                </DeviceSubText>
-              </DeviceNameCell>
-              <DeviceMetricCell>
-                <MetricText
-                  style={{ color: "var(--color-fg-default)" }}
-                  title={device.totalTokens.toLocaleString("en-US")}
-                >
-                  {formatNumber(device.totalTokens)}
-                </MetricText>
-              </DeviceMetricCell>
-              <DeviceMetricCell>
-                <CostText style={{ color: "var(--color-primary)" }}>
-                  {formatCurrency(device.totalCost)}
-                </CostText>
-              </DeviceMetricCell>
-              <DeviceMetricCell $hideOnMobile>
-                <MetricText style={{ color: "var(--color-fg-muted)" }}>
-                  {device.activeDays}
-                </MetricText>
-              </DeviceMetricCell>
-            </DeviceRow>
-          ))}
-        </div>
-      </DevicesContainer>
-    </section>
+      <ListCard>
+        <ListTable>
+          <ListCaption>Usage by device</ListCaption>
+          <ListHead>
+            <tr>
+              <ListHeaderCell $width="52%">Device</ListHeaderCell>
+              <ListHeaderCell $width="19%" $align="right">
+                Tokens
+              </ListHeaderCell>
+              <ListHeaderCell $width="16%" $align="right">
+                Cost
+              </ListHeaderCell>
+              <ListHeaderCell $width="13%" $align="right">
+                Active days
+              </ListHeaderCell>
+            </tr>
+          </ListHead>
+          <ListBody>
+            {devices.map((device) => (
+              <ListRow key={device.id}>
+                <ListPrimaryCell scope="row">
+                  <DeviceName>{device.displayName}</DeviceName>
+                  <LastSubmitted>
+                    Last submitted{" "}
+                    <time
+                      dateTime={device.lastSubmittedAt ?? undefined}
+                      suppressHydrationWarning
+                    >
+                      {formatRelativeTime(device.lastSubmittedAt)}
+                    </time>
+                  </LastSubmitted>
+                </ListPrimaryCell>
+                <ListCell data-label="Tokens" $align="right">
+                  <NumericValue
+                    title={device.totalTokens.toLocaleString("en-US")}
+                  >
+                    {formatNumber(device.totalTokens)}
+                  </NumericValue>
+                </ListCell>
+                <ListCell data-label="Cost" $align="right">
+                  <NumericValue $accent>
+                    {formatCurrency(device.totalCost)}
+                  </NumericValue>
+                </ListCell>
+                <ListCell data-label="Active days" $align="right">
+                  <NumericValue>
+                    {device.activeDays.toLocaleString("en-US")}
+                  </NumericValue>
+                </ListCell>
+              </ListRow>
+            ))}
+          </ListBody>
+        </ListTable>
+      </ListCard>
+    </DevicesSection>
   );
 }

@@ -9,7 +9,7 @@ describe("leaderboard view selector links", () => {
         period: "custom",
         from: "2026-01-01",
         to: "2026-01-31",
-        sortBy: "time",
+        sortBy: "cost",
         search: "alice",
         page: "3",
       },
@@ -22,7 +22,7 @@ describe("leaderboard view selector links", () => {
     expect(url.searchParams.get("period")).toBe("custom");
     expect(url.searchParams.get("from")).toBe("2026-01-01");
     expect(url.searchParams.get("to")).toBe("2026-01-31");
-    expect(url.searchParams.get("sortBy")).toBe("time");
+    expect(url.searchParams.get("sortBy")).toBe("cost");
     expect(url.searchParams.get("search")).toBe("alice");
     expect(url.searchParams.has("page")).toBe(false);
   });

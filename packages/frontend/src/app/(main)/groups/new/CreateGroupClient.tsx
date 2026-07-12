@@ -1,72 +1,132 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
+import { SecondaryActionLink } from "@/components/leaderboard/RankingUI";
 
 const Shell = styled.section`
-  max-width: 680px;
-  margin: 32px 0;
+  max-width: 640px;
 `;
 
 const Title = styled.h1`
-  margin: 0 0 8px;
-  color: var(--color-fg-default);
-  font-size: 30px;
-  font-weight: 700;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
 `;
 
 const Description = styled.p`
-  margin: 0 0 24px;
-  color: var(--color-fg-muted);
-  line-height: 1.6;
+  margin: 6px 0 24px;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const Form = styled.form`
   display: grid;
   gap: 16px;
-  padding: 20px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-default);
+  padding: 20px 0;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
 `;
 
 const Field = styled.label`
   display: grid;
   gap: 8px;
-  color: var(--color-fg-default);
-  font-size: 14px;
-  font-weight: 600;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const Input = styled.input`
-  min-height: 40px;
+  min-height: 38px;
   padding: 0 12px;
-  border: 1px solid var(--color-border-default);
+  border: 1px solid var(--service-border-strong);
   border-radius: 8px;
-  background: var(--color-bg-subtle);
-  color: var(--color-fg-default);
+  background: var(--service-surface);
+  color: var(--service-text);
   font: inherit;
+
+  &:focus-visible {
+    border-color: var(--service-focus);
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
 `;
 
 const Textarea = styled.textarea`
   min-height: 96px;
   padding: 10px 12px;
-  border: 1px solid var(--color-border-default);
+  border: 1px solid var(--service-border-strong);
   border-radius: 8px;
-  background: var(--color-bg-subtle);
-  color: var(--color-fg-default);
+  background: var(--service-surface);
+  color: var(--service-text);
   font: inherit;
   resize: vertical;
+
+  &:focus-visible {
+    border-color: var(--service-focus);
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const CheckboxLabel = styled.label`
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
-  color: var(--color-fg-default);
-  font-size: 14px;
+  color: var(--service-text);
+  font-size: 0.875rem;
+
+  input {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    margin: 1px 0 0;
+    accent-color: var(--service-accent);
+  }
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+
+    input {
+      width: 20px;
+      height: 20px;
+    }
+  }
+`;
+
+const CheckboxCopy = styled.span`
+  display: grid;
+  gap: 2px;
+`;
+
+const FieldHint = styled.span`
+  display: block;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 400;
 `;
 
 const Actions = styled.div`
@@ -77,35 +137,39 @@ const Actions = styled.div`
 `;
 
 const Button = styled.button`
-  min-height: 40px;
-  padding: 0 16px;
+  min-height: 36px;
+  padding: 0 12px;
   border-radius: 8px;
-  border: 1px solid var(--color-primary);
-  background: var(--color-primary);
+  border: 1px solid var(--service-accent);
+  background: var(--service-accent);
   color: #fff;
+  font-size: 0.875rem;
   font-weight: 600;
-  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: var(--service-accent-hover);
+    background: var(--service-accent-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
 
   &:disabled {
     cursor: not-allowed;
     opacity: 0.65;
   }
-`;
 
-const SecondaryLink = styled(Link)`
-  display: inline-flex;
-  align-items: center;
-  min-height: 40px;
-  padding: 0 16px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border-default);
-  color: var(--color-fg-default);
-  text-decoration: none;
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
 `;
 
 const ErrorText = styled.p`
   margin: 0;
-  color: var(--color-danger-fg, #f85149);
+  color: #ff8c85;
 `;
 
 export default function CreateGroupClient() {
@@ -155,32 +219,42 @@ export default function CreateGroupClient() {
         <Field>
           Group name
           <Input
+            type="text"
+            name="group-name"
             value={name}
             onChange={(event) => setName(event.target.value)}
             maxLength={100}
             required
             autoFocus
+            placeholder="Team or workspace name"
           />
         </Field>
         <Field>
           Description
+          <FieldHint>Optional context shown in the public group directory.</FieldHint>
           <Textarea
+            name="group-description"
             value={description}
             onChange={(event) => setDescription(event.target.value)}
             maxLength={500}
+            placeholder="What brings this group together?"
           />
         </Field>
         <CheckboxLabel>
           <input
             type="checkbox"
+            name="group-public"
             checked={isPublic}
             onChange={(event) => setIsPublic(event.target.checked)}
           />
-          Make this group public
+          <CheckboxCopy>
+            <span>Make this group public</span>
+            <FieldHint>Anyone can discover the group and view its ranking.</FieldHint>
+          </CheckboxCopy>
         </CheckboxLabel>
-        {error && <ErrorText>{error}</ErrorText>}
+        {error && <ErrorText role="alert">{error}</ErrorText>}
         <Actions>
-          <SecondaryLink href="/groups">Cancel</SecondaryLink>
+          <SecondaryActionLink href="/leaderboard?view=groups">Cancel</SecondaryActionLink>
           <Button disabled={isSubmitting || !name.trim()} type="submit">
             {isSubmitting ? "Creating..." : "Create group"}
           </Button>

@@ -352,6 +352,7 @@ const NavLogoImage = styled(Image)`
 `;
 
 const HamburgerButton = styled.button`
+  position: relative;
   display: none;
   width: 32px;
   height: 32px;
@@ -372,6 +373,18 @@ const HamburgerButton = styled.button`
 
   @media (max-width: ${MOBILE_BREAKPOINT}) {
     display: flex;
+  }
+
+  @media (pointer: coarse) {
+    &::after {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 44px;
+      height: 44px;
+      content: "";
+      transform: translate(-50%, -50%);
+    }
   }
 `;
 
@@ -683,6 +696,8 @@ export function Navigation() {
         <HamburgerButton
           onClick={() => setIsMobileMenuOpen((prev) => !prev)}
           aria-label={isMobileMenuOpen ? "Close menu" : "Open menu"}
+          aria-controls="mobile-navigation-menu"
+          aria-expanded={isMobileMenuOpen}
         >
           {isMobileMenuOpen ? <CloseIcon /> : <MenuIcon />}
         </HamburgerButton>
@@ -730,7 +745,12 @@ export function Navigation() {
       </NavHeaderRow>
 
 
-      <MobileDropdownWrapper $isOpen={isMobileMenuOpen}>
+      <MobileDropdownWrapper
+        id="mobile-navigation-menu"
+        $isOpen={isMobileMenuOpen}
+        aria-hidden={!isMobileMenuOpen}
+        inert={!isMobileMenuOpen}
+      >
         <MobileDropdown>
           <DropdownNavLink href="/" $isActive={pathname === "/"} onClick={closeMobileMenu}>
             About

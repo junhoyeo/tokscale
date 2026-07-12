@@ -31,7 +31,7 @@ pub use sessions::{CostSource, UnifiedMessage};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 /// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
@@ -336,6 +336,42 @@ impl std::fmt::Debug for ParsedMessages {
         debug.field("processing_time_ms", &self.processing_time_ms);
         debug.finish()
     }
+}
+
+/// Database state used to resolve Devin Desktop ACP titles. The source stream
+/// is deliberately absent: one lookup is valid for every Desktop file that
+/// observed the same CLI database/WAL snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DevinDesktopLookupSnapshot {
+    db_paths: Vec<PathBuf>,
+    related_files: Vec<message_cache::RelatedFileFingerprint>,
+}
+
+type DevinDesktopLookupCache = Mutex<
+    HashMap<DevinDesktopLookupSnapshot, Arc<OnceLock<sessions::devin::DevinDesktopSessionLookup>>>,
+>;
+
+/// Return the shared title lookup cell for one post-validation database
+/// snapshot. The cell is placed in the map before it is initialized, allowing
+/// parallel Desktop files from one snapshot to share one SQLite scan without
+/// holding the map lock during that scan.
+fn devin_desktop_lookup_cell_for_snapshot(
+    lookup_cache: &DevinDesktopLookupCache,
+    db_paths: &[PathBuf],
+    fingerprint: &message_cache::SourceFingerprint,
+) -> Arc<OnceLock<sessions::devin::DevinDesktopSessionLookup>> {
+    let snapshot = DevinDesktopLookupSnapshot {
+        db_paths: db_paths.to_vec(),
+        related_files: fingerprint.related_files.clone(),
+    };
+    let mut lookups = lookup_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(
+        lookups
+            .entry(snapshot)
+            .or_insert_with(|| Arc::new(OnceLock::new())),
+    )
 }
 
 #[derive(Debug, Clone, Default)]
@@ -692,7 +728,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         parse: F,
     ) -> CachedParseOutcome
     where
-        F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
+        F: Fn(&Path, Option<&message_cache::SourceFingerprint>) -> (Vec<UnifiedMessage>, bool),
         FingerprintFn: Fn(
             &Path,
             Option<&message_cache::SourceFingerprint>,
@@ -702,7 +738,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         let Some(fingerprint_status) =
             fingerprint_from_path(path, cached.map(|entry| &entry.fingerprint))
         else {
-            let (mut messages, _) = parse(path);
+            let (mut messages, _) = parse(path, None);
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
                 messages,
@@ -738,7 +774,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             }
         }
 
-        let (mut messages, cacheable) = parse(path);
+        let (mut messages, cacheable) = parse(path, Some(&fingerprint));
         let cache_entry = if messages.is_empty() || !cacheable {
             None
         } else {
@@ -781,7 +817,32 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             source_cache,
             pricing,
             fingerprint_from_path,
-            |path| (parse(path), true),
+            |path, _| (parse(path), true),
+        )
+    }
+
+    fn load_or_parse_source_with_fingerprint_context<F, FingerprintFn>(
+        identity: message_cache::CacheIdentity,
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        fingerprint_from_path: FingerprintFn,
+        parse: F,
+    ) -> CachedParseOutcome
+    where
+        F: Fn(&Path, Option<&message_cache::SourceFingerprint>) -> Vec<UnifiedMessage>,
+        FingerprintFn: Fn(
+            &Path,
+            Option<&message_cache::SourceFingerprint>,
+        ) -> Option<message_cache::FingerprintStatus>,
+    {
+        load_or_parse_source_with_fingerprint_and_policy(
+            identity,
+            path,
+            source_cache,
+            pricing,
+            fingerprint_from_path,
+            |path, fingerprint| (parse(path, fingerprint), true),
         )
     }
 
@@ -945,6 +1006,8 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
+    let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
+    let include_devin_desktop = include_synthetic || clients.iter().any(|c| c == "devin-desktop");
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
@@ -1165,7 +1228,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 &source_cache,
                 pricing,
                 message_cache::SourceFingerprint::check_path_samples_only,
-                |path| {
+                |path, _| {
                     let parsed = sessions::gemini::parse_gemini_file_with_cache_status(path);
                     (parsed.messages, parsed.cacheable)
                 },
@@ -1654,22 +1717,37 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(goose_messages);
     }
 
-    // Devin CLI stores authoritative model usage in SQLite.
-    if let Some(db_path) = &scan_result.devin_db {
-        let CachedParseOutcome {
-            messages,
-            cache_entry,
-            ..
-        } = load_or_parse_sqlite_source(
-            message_cache::CacheIdentity::for_client(ClientId::DevinCli),
-            db_path,
-            &source_cache,
-            pricing,
-            sessions::devin::parse_devin_cli_sqlite,
-        );
-        all_messages.extend(messages);
-        if let Some(entry) = cache_entry {
-            source_cache.insert(entry);
+    // Devin CLI stores authoritative model usage in SQLite. Multiple paths can
+    // be configured through scanner extra roots, so parse and dedupe all of
+    // them instead of silently ignoring non-default databases.
+    let mut devin_cli_session_ids: HashSet<String> = HashSet::new();
+    if include_devin_cli {
+        let devin_cli_outcomes: Vec<CachedParseOutcome> = scan_result
+            .devin_dbs
+            .par_iter()
+            .map(|db_path| {
+                load_or_parse_sqlite_source(
+                    message_cache::CacheIdentity::for_client(ClientId::DevinCli),
+                    db_path,
+                    &source_cache,
+                    pricing,
+                    sessions::devin::parse_devin_cli_sqlite,
+                )
+            })
+            .collect();
+        let mut devin_cli_seen = HashSet::new();
+        for outcome in devin_cli_outcomes {
+            for message in outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut devin_cli_seen, message))
+            {
+                devin_cli_session_ids.insert(message.session_id.clone());
+                all_messages.push(message);
+            }
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
         }
     }
 
@@ -1808,38 +1886,68 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    // Devin Desktop streams ACP events as NDJSON. Usage is sparse in these
-    // files, so the parser returns messages only when embedded metrics exist.
-    // The CLI database is authoritative, so skip any Desktop message whose
-    // session_id was already seen in the CLI output (matching the Copilot
-    // file-vs-desktop precedence pattern).
-    let devin_cli_session_ids: HashSet<String> = all_messages
-        .iter()
-        .filter(|message| message.client == "devin-cli")
-        .map(|message| message.session_id.clone())
-        .collect();
-    let devin_desktop_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::DevinDesktop)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(
-                message_cache::CacheIdentity::for_client(ClientId::DevinDesktop),
-                path,
-                &source_cache,
-                pricing,
-                sessions::devin::parse_devin_desktop_ndjson,
-            )
-        })
-        .collect();
-    for outcome in devin_desktop_outcomes {
-        all_messages.extend(
-            outcome
-                .messages
-                .into_iter()
-                .filter(|message| !devin_cli_session_ids.contains(&message.session_id)),
-        );
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
+    // Devin Desktop ACP file names are unrelated to the CLI database session
+    // ids. Resolve their session titles through the database so the CLI can
+    // take precedence only when both sources really describe one session.
+    if include_devin_desktop {
+        // Lookups are constructed only for cache misses. Key them by the
+        // post-validation database snapshot so parallel misses that observe
+        // different SQLite states never share stale metadata; identical
+        // snapshots still share one query on a cold scan.
+        let devin_desktop_lookups = DevinDesktopLookupCache::default();
+        let devin_desktop_outcomes: Vec<CachedParseOutcome> = scan_result
+            .get(ClientId::DevinDesktop)
+            .par_iter()
+            .map(|path| {
+                load_or_parse_source_with_fingerprint_context(
+                    message_cache::CacheIdentity::for_client(ClientId::DevinDesktop),
+                    path,
+                    &source_cache,
+                    pricing,
+                    |path, cached| {
+                        message_cache::SourceFingerprint::check_devin_desktop_path_samples_only(
+                            path,
+                            &scan_result.devin_dbs,
+                            cached,
+                        )
+                    },
+                    |path, fingerprint| {
+                        if let Some(fingerprint) = fingerprint {
+                            let lookup_cell = devin_desktop_lookup_cell_for_snapshot(
+                                &devin_desktop_lookups,
+                                &scan_result.devin_dbs,
+                                fingerprint,
+                            );
+                            let lookup = lookup_cell.get_or_init(|| {
+                                sessions::devin::load_devin_desktop_session_lookup(
+                                    &scan_result.devin_dbs,
+                                )
+                            });
+                            sessions::devin::parse_devin_desktop_ndjson_with_lookup(path, lookup)
+                        } else {
+                            // Unreadable sources cannot produce a cache entry,
+                            // so they do not need a snapshot-keyed lookup.
+                            sessions::devin::parse_devin_desktop_ndjson_with_lookup(
+                                path,
+                                &sessions::devin::load_devin_desktop_session_lookup(
+                                    &scan_result.devin_dbs,
+                                ),
+                            )
+                        }
+                    },
+                )
+            })
+            .collect();
+        for outcome in devin_desktop_outcomes {
+            all_messages.extend(
+                outcome
+                    .messages
+                    .into_iter()
+                    .filter(|message| !devin_cli_session_ids.contains(&message.session_id)),
+            );
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
         }
     }
 
@@ -2700,6 +2808,8 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     });
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
+    let include_devin_cli = include_synthetic || clients.iter().any(|c| c == "devin-cli");
+    let include_devin_desktop = include_synthetic || clients.iter().any(|c| c == "devin-desktop");
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
@@ -3258,24 +3368,38 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(warp_msgs);
 
     // Devin CLI SQLite usage plus Desktop NDJSON event streams. The CLI
-    // database is authoritative; Desktop NDJSON is treated as a fallback for
-    // sessions not present in the CLI database (matching the Copilot
-    // file-vs-desktop precedence pattern).
-    let devin_cli_messages: Vec<UnifiedMessage> = scan_result
-        .devin_db
-        .as_ref()
-        .map(|db_path| sessions::devin::parse_devin_cli_sqlite(db_path))
-        .unwrap_or_default();
+    // database is authoritative only when the CLI client itself is selected;
+    // Desktop-only reports still use the database for title/model metadata but
+    // must not leak CLI usage into their result.
+    let mut devin_cli_seen = HashSet::new();
+    let devin_cli_messages: Vec<UnifiedMessage> = if include_devin_cli {
+        scan_result
+            .devin_dbs
+            .iter()
+            .flat_map(|db_path| sessions::devin::parse_devin_cli_sqlite(db_path))
+            .filter(|message| should_keep_deduped_message(&mut devin_cli_seen, message))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let cli_session_ids: HashSet<String> = devin_cli_messages
         .iter()
         .map(|message| message.session_id.clone())
         .collect();
-    let devin_desktop_messages: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::DevinDesktop)
-        .par_iter()
-        .flat_map(|path| sessions::devin::parse_devin_desktop_ndjson(path))
-        .filter(|message| !cli_session_ids.contains(&message.session_id))
-        .collect();
+    let devin_desktop_messages: Vec<UnifiedMessage> = if include_devin_desktop {
+        let devin_desktop_lookup =
+            sessions::devin::load_devin_desktop_session_lookup(&scan_result.devin_dbs);
+        scan_result
+            .get(ClientId::DevinDesktop)
+            .par_iter()
+            .flat_map(|path| {
+                sessions::devin::parse_devin_desktop_ndjson_with_lookup(path, &devin_desktop_lookup)
+            })
+            .filter(|message| !cli_session_ids.contains(&message.session_id))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let devin_cli_parsed: Vec<ParsedMessage> = devin_cli_messages
         .into_iter()
@@ -7433,6 +7557,319 @@ mod tests {
         assert_eq!(parsed_with_settings.messages.len(), 1);
         assert_eq!(parsed_with_settings.messages[0].client, "opencode");
         assert_eq!(parsed_with_settings.messages[0].model_id, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn test_parse_local_clients_honors_devin_cli_extra_scan_paths() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let external_dir = temp_dir.path().join("imports/devin/profile");
+        std::fs::create_dir_all(&external_dir).unwrap();
+        let external_db = external_dir.join("sessions.db");
+        let conn = rusqlite::Connection::open(&external_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 working_directory TEXT NOT NULL,
+                 backend_type TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 title TEXT,
+                 agent_mode TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 last_activity_at INTEGER NOT NULL
+             );
+             CREATE TABLE message_nodes (
+                 row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 node_id INTEGER NOT NULL,
+                 parent_node_id INTEGER,
+                 chat_message TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 metadata TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, working_directory, backend_type, model, agent_mode, created_at, last_activity_at) VALUES ('external-session', '/tmp/project', 'windsurf', 'gpt-5', 'accept-edits', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_nodes (session_id, node_id, chat_message, created_at) VALUES ('external-session', 1, ?1, 1700000000)",
+            [r#"{"role":"assistant","metadata":{"metrics":{"input_tokens":42,"output_tokens":7}}}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert("devin-cli".to_string(), vec![external_dir]);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["devin-cli".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::DevinCli), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "devin-cli");
+        assert_eq!(parsed.messages[0].session_id, "external-session");
+    }
+
+    #[test]
+    fn test_parse_local_clients_devin_zero_cli_usage_does_not_suppress_desktop() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join(".local/share/devin/cli/sessions.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 working_directory TEXT NOT NULL,
+                 backend_type TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 title TEXT,
+                 agent_mode TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 last_activity_at INTEGER NOT NULL
+             );
+             CREATE TABLE message_nodes (
+                 row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 node_id INTEGER NOT NULL,
+                 parent_node_id INTEGER,
+                 chat_message TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 metadata TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, working_directory, backend_type, model, title, agent_mode, created_at, last_activity_at) VALUES ('cli-session', '/tmp/project', 'windsurf', 'gpt-5', 'Desktop task', 'accept-edits', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_nodes (session_id, node_id, chat_message, created_at) VALUES ('cli-session', 1, ?1, 1700000000)",
+            [r#"{"role":"assistant","metadata":{"metrics":{"input_tokens":0,"output_tokens":0}}}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        let desktop_dir = temp_dir
+            .path()
+            .join("Library/Application Support/Devin/User/acp-events");
+        std::fs::create_dir_all(&desktop_dir).unwrap();
+        std::fs::write(
+            desktop_dir.join("desktop-file.ndjson"),
+            concat!(
+                r#"{"notification":{"sessionUpdate":"session_info_update","title":"Desktop task"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":100,"cognition.ai/outputTokens":20,"cognition.ai/cachedReadTokens":10}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["devin-cli".to_string(), "devin-desktop".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::DevinCli), 0);
+        assert_eq!(parsed.counts.get(ClientId::DevinDesktop), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "devin-desktop");
+        assert_eq!(parsed.messages[0].session_id, "cli-session");
+        assert_eq!(parsed.messages[0].model_id, "gpt-5");
+        assert_eq!(parsed.messages[0].input, 90);
+        assert_eq!(parsed.messages[0].cache_read, 10);
+    }
+
+    #[test]
+    fn test_parse_local_clients_desktop_uses_configured_cli_lookup_without_cli_usage() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let external_dir = temp_dir.path().join("imports/devin/profile");
+        std::fs::create_dir_all(&external_dir).unwrap();
+        let external_db = external_dir.join("sessions.db");
+        let conn = rusqlite::Connection::open(&external_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 title TEXT,
+                 model TEXT,
+                 working_directory TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, title, model, working_directory) VALUES ('external-session', 'External desktop task', 'claude-sonnet-4', '/tmp/external-project')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let desktop_dir = temp_dir
+            .path()
+            .join("Library/Application Support/Devin/User/acp-events");
+        std::fs::create_dir_all(&desktop_dir).unwrap();
+        std::fs::write(
+            desktop_dir.join("desktop-file.ndjson"),
+            concat!(
+                r#"{"notification":{"sessionUpdate":"session_info_update","title":"External desktop task"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":100,"cognition.ai/outputTokens":20}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert("devin-cli".to_string(), vec![external_dir]);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["devin-desktop".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::DevinCli), 0);
+        assert_eq!(parsed.counts.get(ClientId::DevinDesktop), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "devin-desktop");
+        assert_eq!(parsed.messages[0].session_id, "external-session");
+        assert_eq!(parsed.messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(
+            parsed.messages[0].workspace_key.as_deref(),
+            Some("/tmp/external-project")
+        );
+    }
+
+    #[test]
+    fn test_devin_desktop_lookup_cache_separates_database_snapshots() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("sessions.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 title TEXT,
+                 model TEXT,
+                 working_directory TEXT
+             );
+             INSERT INTO sessions (id, title, model, working_directory)
+             VALUES ('cli-session', 'Snapshot task', 'gpt-5', '/tmp/project');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let desktop_path = temp_dir.path().join("desktop-file.ndjson");
+        std::fs::write(
+            &desktop_path,
+            concat!(
+                r#"{"notification":{"sessionUpdate":"session_info_update","title":"Snapshot task"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":100,"cognition.ai/outputTokens":20}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let first_fingerprint =
+            match message_cache::SourceFingerprint::check_devin_desktop_path_samples_only(
+                &desktop_path,
+                std::slice::from_ref(&db_path),
+                None,
+            )
+            .unwrap()
+            {
+                message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
+                message_cache::FingerprintStatus::Unchanged => {
+                    panic!("an uncached Desktop source must build a fingerprint")
+                }
+            };
+        let lookup_cache = std::sync::Mutex::new(HashMap::new());
+        let first_cell = super::devin_desktop_lookup_cell_for_snapshot(
+            &lookup_cache,
+            std::slice::from_ref(&db_path),
+            &first_fingerprint,
+        );
+        let first_lookup = first_cell.get_or_init(|| {
+            crate::sessions::devin::load_devin_desktop_session_lookup(std::slice::from_ref(
+                &db_path,
+            ))
+        });
+        let first_messages = crate::sessions::devin::parse_devin_desktop_ndjson_with_lookup(
+            &desktop_path,
+            first_lookup,
+        );
+        assert_eq!(first_messages[0].model_id, "gpt-5");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE sessions SET model = 'claude-sonnet-4' WHERE id = 'cli-session'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let second_fingerprint =
+            match message_cache::SourceFingerprint::check_devin_desktop_path_samples_only(
+                &desktop_path,
+                std::slice::from_ref(&db_path),
+                None,
+            )
+            .unwrap()
+            {
+                message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
+                message_cache::FingerprintStatus::Unchanged => {
+                    panic!("an uncached Desktop source must build a fingerprint")
+                }
+            };
+        assert_ne!(
+            first_fingerprint.related_files,
+            second_fingerprint.related_files
+        );
+
+        let second_cell = super::devin_desktop_lookup_cell_for_snapshot(
+            &lookup_cache,
+            std::slice::from_ref(&db_path),
+            &second_fingerprint,
+        );
+        assert!(
+            !Arc::ptr_eq(&first_cell, &second_cell),
+            "different database snapshots must not share a lookup cell"
+        );
+        let second_lookup = second_cell.get_or_init(|| {
+            crate::sessions::devin::load_devin_desktop_session_lookup(std::slice::from_ref(
+                &db_path,
+            ))
+        });
+        let second_messages = crate::sessions::devin::parse_devin_desktop_ndjson_with_lookup(
+            &desktop_path,
+            second_lookup,
+        );
+        assert_eq!(second_messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(lookup_cache.lock().unwrap().len(), 2);
     }
 
     #[test]

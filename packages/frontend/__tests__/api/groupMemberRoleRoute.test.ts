@@ -15,7 +15,10 @@ const mockState = vi.hoisted(() => {
 
   const forUpdate = vi.fn(async () => selectRows[selectCall++] ?? []);
   const limit = vi.fn(() => ({ for: forUpdate }));
-  const selectWhere = vi.fn(() => ({ limit, for: forUpdate }));
+  const selectWhere = vi.fn((condition?: unknown) => {
+    void condition;
+    return { limit, for: forUpdate };
+  });
   const from = vi.fn(() => ({ where: selectWhere }));
   const select = vi.fn(() => ({ from }));
 
@@ -156,9 +159,13 @@ function roleRequest(role: string) {
 }
 
 function selectLockedUserId(callIndex: number) {
-  const [condition] = mockState.selectWhere.mock.calls[callIndex] ?? [];
+  const condition = mockState.selectWhere.mock.calls[callIndex]?.[0] as
+    | {
+        conditions?: Array<{ kind?: string; left?: string; right?: string }>;
+      }
+    | undefined;
   return condition?.conditions?.find(
-    (item: { kind?: string; left?: string }) => item.kind === "eq" && item.left === "groupMembers.userId"
+    (item) => item.kind === "eq" && item.left === "groupMembers.userId"
   )?.right;
 }
 

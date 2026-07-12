@@ -5,6 +5,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
 import { CheckIcon, CopyIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
+import {
+  CompactBadge,
+  GroupMark,
+  MetricItem,
+  MetricLabel,
+  MetricStrip,
+  MetricValue,
+  MobileRankingList,
+  MobileRankingRow,
+  SecondaryActionLink,
+  SecondaryButton,
+  SegmentedControl,
+} from "@/components/leaderboard/RankingUI";
+import { formatGroupMemberCount } from "@/components/leaderboard/presentation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import type { GroupLeaderboardData, GroupLeaderboardUser } from "@/lib/groups/getGroupLeaderboard";
 import type { Period, SortBy } from "@/lib/leaderboard/types";
@@ -36,9 +50,9 @@ interface GroupDetailClientProps {
 }
 
 const Header = styled.section`
-  margin: 32px 0 24px;
   display: grid;
-  gap: 18px;
+  gap: 16px;
+  margin-bottom: 24px;
 `;
 
 const HeaderTop = styled.div`
@@ -48,31 +62,30 @@ const HeaderTop = styled.div`
   align-items: flex-start;
 
   @media (max-width: 720px) {
+    align-items: stretch;
     flex-direction: column;
   }
 `;
 
 const Identity = styled.div`
   display: flex;
-  gap: 14px;
+  min-width: 0;
   align-items: center;
+  gap: 14px;
 `;
 
-const Avatar = styled.div<{ $image?: string | null }>`
-  width: 58px;
-  height: 58px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border-default);
-  background:
-    ${({ $image }) => $image ? `url(${$image}) center/cover` : "linear-gradient(135deg, #0073ff, #13a10e)"};
-  flex: 0 0 auto;
+const IdentityCopy = styled.div`
+  min-width: 0;
 `;
 
 const Title = styled.h1`
   margin: 0;
-  color: var(--color-fg-default);
-  font-size: 30px;
-  font-weight: 700;
+  overflow-wrap: anywhere;
+  color: var(--service-text);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
 `;
 
 const Meta = styled.div`
@@ -80,25 +93,19 @@ const Meta = styled.div`
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 6px;
-  color: var(--color-fg-muted);
-  font-size: 13px;
-`;
-
-const Badge = styled.span`
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 999px;
-  color: var(--color-fg-muted);
-  background: var(--color-bg-subtle);
 `;
 
 const Description = styled.p`
   margin: 0;
-  color: var(--color-fg-muted);
-  line-height: 1.6;
+  max-width: 76ch;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const Actions = styled.div`
@@ -107,76 +114,38 @@ const Actions = styled.div`
   flex-wrap: wrap;
 `;
 
-const Button = styled.button`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+const Button = styled(SecondaryButton)`
   gap: 8px;
-  min-height: 38px;
-  padding: 0 14px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border-default);
-  background: var(--color-bg-default);
-  color: var(--color-fg-default);
-  font-weight: 600;
-  cursor: pointer;
-
-  &:disabled {
-    opacity: 0.65;
-    cursor: not-allowed;
-  }
-`;
-
-const PrimaryLink = styled(Link)`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 38px;
-  padding: 0 14px;
-  border-radius: 8px;
-  border: 1px solid var(--color-primary);
-  background: var(--color-primary);
-  color: #fff;
-  font-weight: 600;
-  text-decoration: none;
-`;
-
-const StatsGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-
-  @media (max-width: 760px) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-`;
-
-const StatCard = styled.div`
-  padding: 12px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-default);
-`;
-
-const StatLabel = styled.div`
-  color: var(--color-fg-muted);
-  font-size: 12px;
-`;
-
-const StatValue = styled.div`
-  margin-top: 4px;
-  color: var(--color-fg-default);
-  font-weight: 700;
-  font-size: 18px;
 `;
 
 const InvitePanel = styled.div`
   display: grid;
   gap: 12px;
-  padding: 14px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-default);
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--service-border);
+`;
+
+const InviteHeading = styled.div`
+  display: grid;
+  gap: 4px;
+`;
+
+const InviteTitle = styled.h2`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-weight: 600;
+`;
+
+const InviteDescription = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const InviteForm = styled.div`
@@ -190,23 +159,45 @@ const InviteForm = styled.div`
 `;
 
 const Input = styled.input`
-  min-height: 38px;
+  min-height: 36px;
   padding: 0 12px;
-  border: 1px solid var(--color-border-default);
+  border: 1px solid var(--service-border-strong);
   border-radius: 8px;
-  background: var(--color-bg-subtle);
-  color: var(--color-fg-default);
+  background: var(--service-surface);
+  color: var(--service-text);
   font: inherit;
+
+  &:focus-visible {
+    border-color: var(--service-focus);
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
 `;
 
 const Select = styled.select`
-  min-height: 38px;
+  min-height: 36px;
   padding: 0 12px;
-  border: 1px solid var(--color-border-default);
+  border: 1px solid var(--service-border-strong);
   border-radius: 8px;
-  background: var(--color-bg-subtle);
-  color: var(--color-fg-default);
+  background: var(--service-surface);
+  color: var(--service-text);
   font: inherit;
+
+  &:focus-visible {
+    border-color: var(--service-focus);
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
 `;
 
 const LinkBox = styled.div`
@@ -215,10 +206,10 @@ const LinkBox = styled.div`
   justify-content: space-between;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid var(--color-border-default);
+  border: 1px solid var(--service-border);
   border-radius: 8px;
-  background: var(--color-bg-subtle);
-  color: var(--color-fg-default);
+  background: var(--service-surface);
+  color: var(--service-text);
   overflow: hidden;
 `;
 
@@ -233,37 +224,29 @@ const Toolbar = styled.div`
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  margin: 22px 0 14px;
-`;
-
-const Segmented = styled.div`
-  display: inline-flex;
-  padding: 4px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-subtle);
-`;
-
-const SegmentButton = styled.button<{ $active: boolean }>`
-  min-height: 32px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 6px;
-  background: ${({ $active }) => ($active ? "var(--color-bg-default)" : "transparent")};
-  color: ${({ $active }) => ($active ? "var(--color-fg-default)" : "var(--color-fg-muted)")};
-  font-weight: 600;
-  cursor: pointer;
+  margin: 0 0 14px;
 `;
 
 const SearchWrapper = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 38px;
+  min-height: 36px;
   padding: 0 10px;
-  border: 1px solid var(--color-border-default);
+  border: 1px solid var(--service-border-strong);
   border-radius: 8px;
-  background: var(--color-bg-subtle);
+  background: var(--service-surface);
+  color: var(--service-text-muted);
+
+  &:focus-within {
+    border-color: var(--service-focus);
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+  }
 `;
 
 const SearchInput = styled.input`
@@ -271,34 +254,62 @@ const SearchInput = styled.input`
   border: 0;
   outline: 0;
   background: transparent;
-  color: var(--color-fg-default);
+  color: var(--service-text);
   font: inherit;
+
+  @media (max-width: 640px) {
+    width: 100%;
+    min-width: 0;
+    font-size: 1rem;
+  }
+`;
+
+const ClearSearchButton = styled.button`
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--service-text-muted);
+
+  &:hover {
+    color: var(--service-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
 `;
 
 const TableContainer = styled.div`
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--color-bg-default);
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
 `;
 
 const TableWrapper = styled.div`
-  overflow-x: auto;
+  display: none;
+
+  @media (min-width: 720px) {
+    display: block;
+  }
 `;
 
 const Table = styled.table`
   width: 100%;
-  min-width: 680px;
 `;
 
 const Th = styled.th`
   padding: 12px 16px;
   text-align: left;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
-  color: var(--color-fg-muted);
-  background: var(--color-bg-elevated);
-  border-bottom: 1px solid var(--color-border-default);
+  color: var(--service-text-muted);
+  border-bottom: 1px solid var(--service-border);
+  white-space: nowrap;
 
   &.right {
     text-align: right;
@@ -307,8 +318,10 @@ const Th = styled.th`
 
 const Td = styled.td`
   padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border-default);
-  color: var(--color-fg-default);
+  border-bottom: 1px solid var(--service-border);
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
 
   &.right {
     text-align: right;
@@ -321,6 +334,11 @@ const UserCell = styled(Link)`
   gap: 10px;
   color: inherit;
   text-decoration: none;
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 3px;
+  }
 `;
 
 const UserAvatar = styled.img`
@@ -328,24 +346,57 @@ const UserAvatar = styled.img`
   height: 34px;
   border-radius: 50%;
   object-fit: cover;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
+  outline: 1px solid var(--service-border);
+  outline-offset: -1px;
 `;
 
 const Muted = styled.span`
   display: block;
-  color: var(--color-fg-muted);
-  font-size: 12px;
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
+`;
+
+const DesktopRow = styled.tr<{ $current: boolean }>`
+  background: ${({ $current }) => $current ? "var(--service-accent-soft)" : "transparent"};
+  box-shadow: ${({ $current }) => $current ? "inset 2px 0 0 var(--service-accent)" : "none"};
+`;
+
+const Pagination = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+`;
+
+const PaginationStatus = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+
+  @media (max-width: 640px) {
+    font-size: 0.875rem;
+  }
+`;
+
+const PaginationActions = styled.div`
+  display: flex;
+  gap: 8px;
 `;
 
 const EmptyState = styled.div`
   padding: 32px;
   text-align: center;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const ErrorText = styled.p`
   margin: 0;
-  color: var(--color-danger-fg, #f85149);
+  color: #ff8c85;
 `;
 
 function isAdminRole(role: GroupRole | undefined): boolean {
@@ -358,17 +409,20 @@ function roleLabel(role: string): string {
 
 function GroupRow({
   user,
-  showSubmissionCount,
+  isCurrentUser,
 }: {
   user: GroupLeaderboardUser;
-  showSubmissionCount: boolean;
+  isCurrentUser: boolean;
 }) {
   return (
-    <tr>
+    <DesktopRow $current={isCurrentUser}>
       <Td>#{user.rank}</Td>
       <Td>
-        <UserCell href={`/u/${user.username}`}>
-          <UserAvatar src={user.avatarUrl || `https://github.com/${user.username}.png`} alt={user.username} />
+        <UserCell
+          href={`/u/${user.username}`}
+          aria-current={isCurrentUser ? "true" : undefined}
+        >
+          <UserAvatar src={user.avatarUrl || `https://github.com/${user.username}.png`} alt="" />
           <span>
             {user.displayName || user.username}
             <Muted>@{user.username}</Muted>
@@ -378,13 +432,47 @@ function GroupRow({
       <Td>{roleLabel(user.role)}</Td>
       <Td className="right">{formatCurrency(user.totalCost)}</Td>
       <Td className="right">{formatNumber(user.totalTokens)}</Td>
-      {showSubmissionCount && <Td className="right">{user.submissionCount ?? "-"}</Td>}
-    </tr>
+    </DesktopRow>
+  );
+}
+
+function GroupMobileRow({
+  user,
+  isCurrentUser,
+  sortBy,
+}: {
+  user: GroupLeaderboardUser;
+  isCurrentUser: boolean;
+  sortBy: SortBy;
+}) {
+  const primary = sortBy === "cost"
+    ? { label: "Cost", value: formatCurrency(user.totalCost) }
+    : { label: "Tokens", value: formatNumber(user.totalTokens) };
+  const secondary = [
+    roleLabel(user.role),
+    sortBy === "cost"
+      ? `${formatNumber(user.totalTokens)} tokens`
+      : formatCurrency(user.totalCost),
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <MobileRankingRow
+      rank={user.rank}
+      href={`/u/${user.username}`}
+      avatarUrl={user.avatarUrl}
+      username={user.username}
+      displayName={user.displayName || user.username}
+      primaryLabel={primary.label}
+      primaryValue={primary.value}
+      meta={secondary}
+      isCurrentUser={isCurrentUser}
+    />
   );
 }
 
 export default function GroupDetailClient({
   group,
+  currentUser,
   initialData,
 }: GroupDetailClientProps) {
   const router = useRouter();
@@ -404,7 +492,6 @@ export default function GroupDetailClient({
   const didMountLeaderboard = useRef(false);
 
   const canInvite = isAdminRole(group.membership?.role);
-  const showSubmissionCount = period === "all";
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -503,7 +590,7 @@ export default function GroupDetailClient({
   async function leaveGroup() {
     const response = await fetch(`/api/groups/${group.slug}/leave`, { method: "POST" });
     if (response.ok) {
-      router.push("/groups");
+      router.push("/leaderboard?view=groups");
     }
   }
 
@@ -514,151 +601,201 @@ export default function GroupDetailClient({
       <Header>
         <HeaderTop>
           <Identity>
-            <Avatar $image={group.avatarUrl} />
-            <div>
+            <GroupMark name={group.name} avatarUrl={group.avatarUrl} size="detail" />
+            <IdentityCopy>
               <Title>{group.name}</Title>
               <Meta>
-                <Badge>{group.isPublic ? "Public" : "Private"}</Badge>
-                <Badge>{group.memberCount} members</Badge>
-                {group.membership && <Badge>{roleLabel(group.membership.role)}</Badge>}
+                <CompactBadge>{group.isPublic ? "Public" : "Private"}</CompactBadge>
+                {group.membership && <CompactBadge>{roleLabel(group.membership.role)}</CompactBadge>}
               </Meta>
-            </div>
+            </IdentityCopy>
           </Identity>
           <Actions>
-            <PrimaryLink href="/groups">All groups</PrimaryLink>
+            <SecondaryActionLink href="/leaderboard?view=groups">All groups</SecondaryActionLink>
             {group.membership && group.membership.role !== "owner" && (
-              <Button onClick={leaveGroup}>Leave</Button>
+              <Button type="button" onClick={leaveGroup}>Leave group</Button>
             )}
           </Actions>
         </HeaderTop>
         {group.description && <Description>{group.description}</Description>}
 
-        <StatsGrid>
-          <StatCard>
-            <StatLabel>Active users</StatLabel>
-            <StatValue>{data.stats.activeUsers}</StatValue>
-          </StatCard>
-          <StatCard>
-            <StatLabel>Members</StatLabel>
-            <StatValue>{data.stats.totalMembers || group.memberCount}</StatValue>
-          </StatCard>
-          <StatCard>
-            <StatLabel>Total tokens</StatLabel>
-            <StatValue>{formatNumber(data.stats.totalTokens)}</StatValue>
-          </StatCard>
-          <StatCard>
-            <StatLabel>Total cost</StatLabel>
-            <StatValue>{formatCurrency(data.stats.totalCost)}</StatValue>
-          </StatCard>
-        </StatsGrid>
-
-        {canInvite && (
-          <InvitePanel>
-            <InviteForm>
-              <Input
-                value={inviteUsername}
-                onChange={(event) => setInviteUsername(event.target.value)}
-                placeholder="GitHub username (optional)"
-              />
-              <Select
-                value={inviteRole}
-                onChange={(event) => setInviteRole(event.target.value as Exclude<GroupRole, "owner">)}
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-              </Select>
-              <Button onClick={createInvite}>Create invite</Button>
-            </InviteForm>
-            {inviteError && <ErrorText>{inviteError}</ErrorText>}
-            {inviteUrl && (
-              <LinkBox>
-                <LinkText>{inviteUrl}</LinkText>
-                <Button onClick={copyInvite} aria-label="Copy invite link">
-                  {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
-                  {copied ? "Copied" : "Copy"}
-                </Button>
-              </LinkBox>
-            )}
-          </InvitePanel>
-        )}
+        <MetricStrip>
+          <MetricItem>
+            <MetricLabel>Active users</MetricLabel>
+            <MetricValue>{data.stats.activeUsers.toLocaleString("en-US")}</MetricValue>
+          </MetricItem>
+          <MetricItem>
+            <MetricLabel>Members</MetricLabel>
+            <MetricValue aria-label={formatGroupMemberCount(data.stats.totalMembers || group.memberCount)}>
+              {(data.stats.totalMembers || group.memberCount).toLocaleString("en-US")}
+            </MetricValue>
+          </MetricItem>
+          <MetricItem>
+            <MetricLabel>Tokens</MetricLabel>
+            <MetricValue $accent>{formatNumber(data.stats.totalTokens)}</MetricValue>
+          </MetricItem>
+          <MetricItem>
+            <MetricLabel>Cost</MetricLabel>
+            <MetricValue>{formatCurrency(data.stats.totalCost)}</MetricValue>
+          </MetricItem>
+        </MetricStrip>
       </Header>
 
       <Toolbar>
-        <Segmented aria-label="Period">
-          {(["all", "month", "week"] as Period[]).map((value) => (
-            <SegmentButton
-              key={value}
-              $active={period === value}
-              onClick={() => {
-                setPeriod(value);
-                setPage(1);
-              }}
-            >
-              {value === "all" ? "All time" : value === "month" ? "Month" : "Week"}
-            </SegmentButton>
-          ))}
-        </Segmented>
+        <SegmentedControl
+          label="Group leaderboard period"
+          value={period}
+          options={[
+            { value: "all" as Period, label: "All time" },
+            { value: "month" as Period, label: "This month" },
+            { value: "week" as Period, label: "This week" },
+          ]}
+          onChange={(value) => {
+            setPeriod(value);
+            setPage(1);
+          }}
+        />
 
         <Actions>
           <SearchWrapper>
             <SearchIcon size={16} />
             <SearchInput
+              type="text"
+              name="group-member-search"
+              aria-label="Search group members"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search members"
             />
             {search && (
-              <Button onClick={() => setSearch("")} aria-label="Clear search">
+              <ClearSearchButton type="button" onClick={() => setSearch("")} aria-label="Clear search">
                 <XIcon size={16} />
-              </Button>
+              </ClearSearchButton>
             )}
           </SearchWrapper>
-          <Segmented aria-label="Sort">
-            {(["tokens", "cost"] as SortBy[]).map((value) => (
-              <SegmentButton
-                key={value}
-                $active={sortBy === value}
-                onClick={() => {
-                  setSortBy(value);
-                  setPage(1);
-                }}
-              >
-                {value === "tokens" ? "Tokens" : "Cost"}
-              </SegmentButton>
-            ))}
-          </Segmented>
+          <SegmentedControl
+            label="Group leaderboard sort"
+            value={sortBy}
+            options={[
+              { value: "tokens" as SortBy, label: "Tokens" },
+              { value: "cost" as SortBy, label: "Cost" },
+            ]}
+            onChange={(value) => {
+              setSortBy(value);
+              setPage(1);
+            }}
+          />
         </Actions>
       </Toolbar>
 
       <TableContainer>
         {error ? (
-          <EmptyState>{error}</EmptyState>
+          <EmptyState role="alert">{error}</EmptyState>
         ) : isLoading ? (
-          <EmptyState>Loading leaderboard...</EmptyState>
+          <EmptyState role="status">Loading leaderboard...</EmptyState>
         ) : sortedUsers.length === 0 ? (
           <EmptyState>No submitted usage for this group yet.</EmptyState>
         ) : (
-          <TableWrapper>
-            <Table>
-              <thead>
-                <tr>
-                  <Th>Rank</Th>
-                  <Th>User</Th>
-                  <Th>Role</Th>
-                  <Th className="right">Cost</Th>
-                  <Th className="right">Tokens</Th>
-                  {showSubmissionCount && <Th className="right">Submits</Th>}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedUsers.map((user) => (
-                  <GroupRow key={user.userId} user={user} showSubmissionCount={showSubmissionCount} />
-                ))}
-              </tbody>
-            </Table>
-          </TableWrapper>
+          <>
+            <TableWrapper>
+              <Table>
+                <thead>
+                  <tr>
+                    <Th>Rank</Th>
+                    <Th>User</Th>
+                    <Th>Role</Th>
+                    <Th className="right">Cost</Th>
+                    <Th className="right">Tokens</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedUsers.map((user) => (
+                    <GroupRow
+                      key={user.userId}
+                      user={user}
+                      isCurrentUser={currentUser?.username === user.username}
+                    />
+                  ))}
+                </tbody>
+              </Table>
+            </TableWrapper>
+            <MobileRankingList role="list" aria-label="Group leaderboard rankings">
+              {sortedUsers.map((user) => (
+                <GroupMobileRow
+                  key={user.userId}
+                  user={user}
+                  isCurrentUser={currentUser?.username === user.username}
+                  sortBy={sortBy}
+                />
+              ))}
+            </MobileRankingList>
+            {data.pagination.totalPages > 1 && (
+              <Pagination>
+                <PaginationStatus>
+                  Showing {(data.pagination.page - 1) * data.pagination.limit + 1}–{Math.min(data.pagination.page * data.pagination.limit, data.pagination.totalUsers)} of {data.pagination.totalUsers.toLocaleString("en-US")}
+                </PaginationStatus>
+                <PaginationActions>
+                  <SecondaryButton
+                    type="button"
+                    disabled={!data.pagination.hasPrev}
+                    onClick={() => setPage(Math.max(1, data.pagination.page - 1))}
+                  >
+                    Previous
+                  </SecondaryButton>
+                  <SecondaryButton
+                    type="button"
+                    disabled={!data.pagination.hasNext}
+                    onClick={() => setPage(data.pagination.page + 1)}
+                  >
+                    Next
+                  </SecondaryButton>
+                </PaginationActions>
+              </Pagination>
+            )}
+          </>
         )}
       </TableContainer>
+
+      {canInvite && (
+        <InvitePanel>
+          <InviteHeading>
+            <InviteTitle>Invite members</InviteTitle>
+            <InviteDescription>
+              Create a scoped link, optionally restricted to one GitHub username.
+            </InviteDescription>
+          </InviteHeading>
+          <InviteForm>
+            <Input
+              type="text"
+              name="invite-username"
+              aria-label="Invitee GitHub username"
+              value={inviteUsername}
+              onChange={(event) => setInviteUsername(event.target.value)}
+              placeholder="GitHub username (optional)"
+            />
+            <Select
+              name="invite-role"
+              aria-label="Invite role"
+              value={inviteRole}
+              onChange={(event) => setInviteRole(event.target.value as Exclude<GroupRole, "owner">)}
+            >
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+            </Select>
+            <Button type="button" onClick={createInvite}>Create invite</Button>
+          </InviteForm>
+          {inviteError && <ErrorText role="alert">{inviteError}</ErrorText>}
+          {inviteUrl && (
+            <LinkBox>
+              <LinkText>{inviteUrl}</LinkText>
+              <Button type="button" onClick={copyInvite} aria-label="Copy invite link">
+                {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
+                {copied ? "Copied" : "Copy"}
+              </Button>
+            </LinkBox>
+          )}
+        </InvitePanel>
+      )}
     </>
   );
 }

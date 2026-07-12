@@ -1,20 +1,14 @@
 import type { Metadata } from 'next';
 import { notFound, permanentRedirect } from 'next/navigation';
-import { normalizeUsernameCacheKey } from '@/lib/db/usernameLookup';
-import ProfilePageClient from './ProfilePageClient';
+import type { ProfileDevice } from '@/components/profile';
+import { loadPublicProfileDevicesForPage } from '@/lib/publicProfileDevices';
+import { loadPublicProfileForPage } from '@/lib/publicProfileData';
+import ProfilePageClient, { type ProfileData } from './ProfilePageClient';
 
 export const revalidate = 60;
 
 const PROFILE_PERIODS = ["all", "week", "month"] as const;
 type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
-
-// In production: use explicit URL or Vercel auto-URL.
-// In dev: use 127.0.0.1 to avoid ECONNREFUSED from localhost dual-stack DNS.
-function getBaseUrl(): string {
-  return process.env.NEXT_PUBLIC_URL
-    || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null)
-    || 'http://127.0.0.1:3000';
-}
 
 function parseProfilePeriod(value: string | string[] | undefined): ProfilePeriod {
   const period = Array.isArray(value) ? value[0] : value;
@@ -23,44 +17,38 @@ function parseProfilePeriod(value: string | string[] | undefined): ProfilePeriod
     : "all";
 }
 
-async function getProfileData(username: string, period: ProfilePeriod) {
-  const params = new URLSearchParams();
-  if (period !== "all") {
-    params.set("period", period);
+async function getProfileData(
+  username: string,
+  period: ProfilePeriod,
+): Promise<ProfileData | null> {
+  // Calling the shared server handler keeps Vercel Deployment Protection out
+  // of the render path. A server-side HTTP self-fetch is anonymous and is
+  // redirected to Vercel's HTML login page on protected preview deployments.
+  const result = await loadPublicProfileForPage(username, period);
+
+  if (result.kind === "redirect") {
+    if (result.location) {
+      const canonicalUsername = decodeURIComponent(
+        new URL(result.location).pathname.split("/").at(-1) ?? "",
+      );
+      if (canonicalUsername && canonicalUsername !== username) {
+        return getProfileData(canonicalUsername, period);
+      }
+    }
   }
 
-  const query = params.toString();
-  const res = await fetch(`${getBaseUrl()}/api/users/${username}${query ? `?${query}` : ""}`, {
-    next: { revalidate: 60 },
-  });
-
-  if (!res.ok) {
+  if (result.kind !== "data") {
     return null;
   }
 
-  return res.json();
+  return result.data as ProfileData;
 }
 
 // Devices are an enrichment on top of the core profile: if this fetch fails
 // we still render the profile, just without the Devices section.
 async function getProfileDevices(username: string) {
   try {
-    const res = await fetch(`${getBaseUrl()}/api/users/${username}/devices`, {
-      // Tagged so PATCH /api/settings/devices/[deviceId] (rename) can
-      // invalidate this immediately via revalidateTag(`user:...`) instead of
-      // waiting out the 60s revalidate window.
-      next: {
-        revalidate: 60,
-        tags: [`user:${normalizeUsernameCacheKey(username)}`],
-      },
-    });
-
-    if (!res.ok) {
-      return [];
-    }
-
-    const data = await res.json();
-    return Array.isArray(data.devices) ? data.devices : [];
+    return (await loadPublicProfileDevicesForPage(username)) as ProfileDevice[];
   } catch {
     return [];
   }

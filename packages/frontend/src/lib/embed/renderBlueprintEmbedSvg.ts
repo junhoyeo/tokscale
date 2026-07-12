@@ -1,22 +1,24 @@
-/**
- * "blueprint" embed template — an engineering-schematic card: a fine grid,
- * dimensioned stat values, a contribution "activity profile", and a drawing
- * title block along the bottom.
- */
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
-import { formatNumber, formatCurrency } from "../format";
+import { formatCurrency, formatNumber } from "../format";
 import {
-  type EmbedTheme,
   type EmbedColorName,
   type EmbedNumberFormat,
-  resolvePalette,
-  layoutContributions,
-  gradeColors,
-  formatDateLabel,
-  MONO_FONT_STACK,
-  escapeXml,
-  formatRank,
   type EmbedRankFormat,
+  type EmbedTheme,
+  FIGTREE_FONT_STACK,
+  cardFooter,
+  cardHeader,
+  cardSurface,
+  cardTextStyle,
+  contributionPanel,
+  divider,
+  escapeXml,
+  fittedText,
+  formatRank,
+  getContributionWindow,
+  getRankColor,
+  layoutContributions,
+  resolvePalette,
 } from "./embedShared";
 
 export interface RenderBlueprintEmbedOptions {
@@ -32,10 +34,6 @@ export interface RenderBlueprintEmbedOptions {
 
 const W = 640;
 const PAD = 22;
-const INNER = W - PAD * 2;
-const CELL = 7;
-const GAP = 1.5;
-const STRIDE = CELL + GAP;
 
 export function renderBlueprintEmbedSvg(
   data: UserEmbedStats,
@@ -43,92 +41,151 @@ export function renderBlueprintEmbedSvg(
 ): string {
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
-  const grades = gradeColors(palette);
-  const tokensFormat: EmbedNumberFormat = options.tokensFormat ?? "full";
-  const costFormat: EmbedNumberFormat = options.costFormat ?? "full";
-  const accent = palette.brand;
-  const showGraph = options.graph ?? false;
-  const H = showGraph ? 278 : 198;
-
-  const layout = layoutContributions(options.contributions ?? []);
-  const rankText = data.stats.rank
-    ? formatRank(data.stats.rank, data.stats.rankTotal ?? null, options.rankFormat)
-    : "UNRANKED";
-
-  const stats = [
-    { value: formatNumber(data.stats.totalTokens, tokensFormat === "compact"), label: "TOKENS" },
-    { value: formatCurrency(data.stats.totalCost, costFormat === "compact"), label: "COST" },
-    { value: rankText, label: "LEADERBOARD RANK" },
+  const contributionDays = options.contributions ?? [];
+  const scopedContributionDays = getContributionWindow(contributionDays).days;
+  const contributions = options.graph ? contributionDays : null;
+  const right = W - PAD;
+  const innerWidth = W - PAD * 2;
+  const tokensCompact = (options.tokensFormat ?? "full") === "compact";
+  const costCompact = (options.costFormat ?? "full") === "compact";
+  const rank = data.stats.rank
+    ? formatRank(
+        data.stats.rank,
+        data.stats.rankTotal ?? null,
+        options.rankFormat,
+      )
+    : "Unranked";
+  const activity = layoutContributions(contributionDays);
+  const yearTokens = scopedContributionDays.reduce(
+    (total, day) => total + Math.max(0, day.totalTokens || 0),
+    0,
+  );
+  const yearCost = scopedContributionDays.reduce(
+    (total, day) => total + Math.max(0, day.totalCost || 0),
+    0,
+  );
+  const peakDay = [...scopedContributionDays].sort(
+    (left, right) =>
+      right.totalTokens - left.totalTokens ||
+      right.totalCost - left.totalCost ||
+      right.date.localeCompare(left.date),
+  )[0];
+  const peakDate = peakDay
+    ? new Intl.DateTimeFormat("en-US", {
+        day: "numeric",
+        month: "short",
+        timeZone: "UTC",
+      }).format(new Date(`${peakDay.date}T00:00:00.000Z`))
+    : "No activity";
+  const details = [
+    {
+      id: "total-tokens",
+      value: formatNumber(data.stats.totalTokens, tokensCompact),
+      label: "Tokens · lifetime",
+      color: palette.brand,
+    },
+    {
+      id: "total-cost",
+      value: formatCurrency(data.stats.totalCost, costCompact),
+      label: "Cost · lifetime",
+      color: palette.cost,
+    },
+    {
+      id: "rank",
+      value: rank,
+      label: `Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}`,
+      color: getRankColor(data.stats.rank, palette),
+    },
+    {
+      id: "submissions",
+      value: data.stats.submissionCount.toLocaleString("en-US"),
+      label: "Submissions",
+      color: palette.text,
+    },
+    {
+      id: "active-days",
+      value: activity.activeDays.toLocaleString("en-US"),
+      label: "Active days · 1y",
+      color: palette.text,
+    },
+    {
+      id: "peak-day",
+      value: peakDate,
+      label: "Peak day · 1y",
+      color: palette.text,
+    },
+    {
+      id: "year-tokens",
+      value: formatNumber(yearTokens, tokensCompact),
+      label: "Tokens · 1y",
+      color: palette.text,
+    },
+    {
+      id: "year-cost",
+      value: formatCurrency(yearCost, costCompact),
+      label: "Cost · 1y",
+      color: palette.cost,
+    },
   ];
+  const detailBottom = 190;
+  const graphY = 208;
+  const graph = contributions
+    ? contributionPanel({
+        x: PAD,
+        y: graphY,
+        width: innerWidth,
+        palette,
+        contributions,
+      })
+    : null;
+  const height = graph ? 367 : 232;
 
-  const updated = escapeXml(formatDateLabel(data.stats.updatedAt).replace(/^Updated /, ""));
-  const parts: string[] = [];
-  const add = (s: string) => parts.push(s);
-
-  add(`<?xml version="1.0" encoding="UTF-8"?>`);
-  add(`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale usage schematic for @${escapeXml(data.user.username)}">`);
-  add(`  <defs>`);
-  add(`    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="${palette.divider}" stroke-width="0.5" opacity="0.45"/></pattern>`);
-  add(`    <clipPath id="card-clip"><rect width="${W}" height="${H}" rx="14"/></clipPath>`);
-  add(`  </defs>`);
-  add(`  <rect width="${W}" height="${H}" rx="14" fill="${palette.bgStart}"/>`);
-  add(`  <rect width="${W}" height="${H}" fill="url(#grid)" clip-path="url(#card-clip)"/>`);
-  add(`  <rect x="0.5" y="0.5" width="${W - 1}" height="${H - 1}" rx="13.5" fill="none" stroke="${palette.border}"/>`);
-  add(`  <rect x="9" y="9" width="${W - 18}" height="${H - 18}" fill="none" stroke="${accent}" stroke-opacity="0.4"/>`);
-
-  // Corner registration ticks.
-  for (const [cx, cy, dx, dy] of [[9, 9, 1, 1], [W - 9, 9, -1, 1], [9, H - 9, 1, -1], [W - 9, H - 9, -1, -1]] as const) {
-    add(`  <path d="M${cx} ${cy + dy * 10}V${cy}H${cx + dx * 10}" fill="none" stroke="${accent}" stroke-width="1.5"/>`);
-  }
-
-  // Header.
-  add(`  <text x="${PAD}" y="40" font-family="${MONO_FONT_STACK}"><tspan fill="${accent}" font-size="16" font-weight="700" letter-spacing="0.04em">TOKSCALE</tspan><tspan fill="${palette.muted}" font-size="11" letter-spacing="0.14em">  AI USAGE SCHEMATIC</tspan></text>`);
-  add(`  <text x="${W - PAD}" y="40" fill="${palette.text}" font-size="12" font-weight="700" text-anchor="end" font-family="${MONO_FONT_STACK}">@${escapeXml(data.user.username)}</text>`);
-  add(`  <line x1="${PAD}" y1="52" x2="${W - PAD}" y2="52" stroke="${palette.divider}"/>`);
-
-  // Dimensioned stats.
-  stats.forEach((s, i) => {
-    const cx = PAD + INNER / 6 + i * (INNER / 3);
-    // Shrink long values so they never collide with the neighbouring column.
-    const vSize = Math.max(13, Math.min(24, 168 / (s.value.length * 0.62)));
-    add(`  <text x="${cx.toFixed(1)}" y="100" fill="${palette.text}" font-size="${vSize.toFixed(1)}" font-weight="700" text-anchor="middle" font-family="${MONO_FONT_STACK}">${escapeXml(s.value)}</text>`);
-    const half = 84;
-    add(`  <line x1="${cx - half}" y1="116" x2="${cx + half}" y2="116" stroke="${accent}" stroke-width="1"/>`);
-    add(`  <line x1="${cx - half}" y1="112" x2="${cx - half}" y2="120" stroke="${accent}" stroke-width="1"/>`);
-    add(`  <line x1="${cx + half}" y1="112" x2="${cx + half}" y2="120" stroke="${accent}" stroke-width="1"/>`);
-    add(`  <text x="${cx.toFixed(1)}" y="134" fill="${palette.muted}" font-size="10" letter-spacing="0.1em" text-anchor="middle" font-family="${MONO_FONT_STACK}">${s.label}</text>`);
-  });
-
-  // Activity profile (contribution grid).
-  if (showGraph) {
-    add(`  <text x="${PAD}" y="162" fill="${palette.muted}" font-size="10" letter-spacing="0.1em" font-family="${MONO_FONT_STACK}">ACTIVITY PROFILE / ${layout.activeDays} ACTIVE DAYS</text>`);
-    const gridW = layout.numWeeks * STRIDE - GAP;
-    const gx = PAD + (INNER - gridW) / 2;
-    const gy = 170;
-    for (const c of layout.cells) {
-      add(`  <rect x="${(gx + c.week * STRIDE).toFixed(2)}" y="${gy + c.day * STRIDE}" width="${CELL}" height="${CELL}" fill="${grades[c.intensity]}" stroke="${palette.bgStart}" stroke-width="0.5"/>`);
-    }
-  }
-
-  // Title block.
-  const tbY = H - 40;
-  const tbH = 28;
-  const shortUser = data.user.username.length > 20
-    ? `${data.user.username.slice(0, 19)}…`
-    : data.user.username;
-  const cells = [
-    `BY    @${shortUser}`,
-    `DATE    ${updated}`,
-    `SHEET    tokscale.ai`,
-  ];
-  add(`  <rect x="${PAD}" y="${tbY}" width="${INNER}" height="${tbH}" fill="none" stroke="${accent}" stroke-opacity="0.55"/>`);
-  cells.forEach((text, i) => {
-    const cw = INNER / 3;
-    const cxs = PAD + i * cw;
-    if (i > 0) add(`  <line x1="${cxs}" y1="${tbY}" x2="${cxs}" y2="${tbY + tbH}" stroke="${accent}" stroke-opacity="0.55"/>`);
-    add(`  <text x="${cxs + 12}" y="${tbY + tbH / 2 + 4}" fill="${palette.muted}" font-size="10" font-family="${MONO_FONT_STACK}">${escapeXml(text)}</text>`);
-  });
-
-  add(`</svg>`);
-  return parts.join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg data-template="blueprint" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale usage data sheet for @${escapeXml(data.user.username)}">
+  ${cardTextStyle()}
+  ${cardSurface(W, height, palette)}
+  ${cardHeader({
+    username: data.user.username,
+    displayName: data.user.displayName,
+    palette,
+    x: PAD,
+    y: 26,
+    right,
+  })}
+  ${divider(PAD, right, 64, palette)}
+  ${details
+    .map((detail, index) => {
+      const column = index % 2;
+      const row = Math.floor(index / 2);
+      const columnWidth = innerWidth / 2;
+      const x = PAD + column * columnWidth;
+      const y = 87 + row * 29;
+      const valueX = x + columnWidth - 14;
+      return `<g data-detail="${detail.id}">
+    <text x="${(x + 14).toFixed(1)}" y="${y}" fill="${palette.muted}" font-size="10" font-family="${FIGTREE_FONT_STACK}">${escapeXml(detail.label)}</text>
+    ${fittedText({
+      text: detail.value,
+      x: valueX,
+      y,
+      maxWidth: 130,
+      fill: detail.color,
+      fontSize: 12,
+      minFontSize: 8,
+      fontWeight: 600,
+      textAnchor: "end",
+    })}
+    <line x1="${(x + 14).toFixed(1)}" y1="${y + 11}" x2="${valueX.toFixed(1)}" y2="${y + 11}" stroke="${palette.divider}"/>
+  </g>`;
+    })
+    .join("\n  ")}
+  <line x1="${(PAD + innerWidth / 2).toFixed(1)}" y1="76" x2="${(PAD + innerWidth / 2).toFixed(1)}" y2="${detailBottom}" stroke="${palette.divider}"/>
+  ${graph ? `${divider(PAD, right, 196, palette)}\n  ${graph.svg}` : ""}
+  ${cardFooter({
+    updatedAt: data.stats.updatedAt,
+    palette,
+    x: PAD,
+    right,
+    y: height - 16,
+  })}
+</svg>`;
 }

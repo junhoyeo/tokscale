@@ -26,7 +26,7 @@ describe("renderProfileEmbedSvg", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
     expect(svg).toContain("<svg");
-    expect(svg).toContain("Tokscale Stats");
+    expect(svg).toContain(">Tokscale<");
     expect(svg).toContain("@octocat");
     expect(svg).toContain("1,234,567");
     expect(svg).toContain("$42.42");
@@ -34,21 +34,25 @@ describe("renderProfileEmbedSvg", () => {
     expect(svg).not.toContain("Submissions");
   });
 
-  it("uses Figtree font in SVG", () => {
+  it("uses the local Figtree-first font stack without a remote import", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    expect(svg).toContain("family=Figtree");
     expect(svg).toContain('font-family="Figtree');
+    expect(svg).not.toContain("@import");
+    expect(svg).not.toContain("fonts.googleapis.com");
   });
 
   it("renders compact variant", () => {
-    const svg = renderProfileEmbedSvg(mockStats, { compact: true, theme: "light" });
+    const svg = renderProfileEmbedSvg(mockStats, {
+      compact: true,
+      theme: "light",
+    });
 
     expect(svg).toContain('width="460"');
     expect(svg).toContain('height="162"');
-    expect(svg).toContain("Tokscale Stats");
+    expect(svg).toContain(">Tokscale<");
     expect(svg).toContain("@octocat");
-    expect(svg).toContain('stop-color="#FFFFFF"');
+    expect(svg).toContain('fill="#FFFFFF"');
     expect(svg).not.toContain("Submissions");
   });
 
@@ -66,11 +70,10 @@ describe("renderProfileEmbedSvg", () => {
     expect(costSvg).toContain("Rank (Cost)");
   });
 
-  it("uses gradient tokens, green cost, and rank-specific colors", () => {
+  it("uses semantic accent colors for tokens, cost, and rank", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    expect(svg).toContain('id="token-grad"');
-    expect(svg).toContain('fill="url(#token-grad)"');
+    expect(svg).toContain('fill="#2F8FFF"');
     expect(svg).toContain('fill="#3FB950"');
     expect(svg).toContain('fill="#DA7E1A"');
   });
@@ -83,27 +86,21 @@ describe("renderProfileEmbedSvg", () => {
     expect(svg).toContain('fill="#E3B341"');
   });
 
-  it("uses amber accent bar for non-medal ranks instead of brand blue", () => {
+  it("keeps non-medal ranks neutral", () => {
     const svg = renderProfileEmbedSvg({
       ...mockStats,
       stats: { ...mockStats.stats, rank: 42 },
     });
-    const accRankMatch = svg.match(/id="acc-rank"[\s\S]*?<\/linearGradient>/);
-    expect(accRankMatch).toBeTruthy();
-    expect(accRankMatch![0]).toContain('stop-color="#D29922"');
-    expect(accRankMatch![0]).not.toContain('stop-color="#58A6FF"');
+    expect(svg).toMatch(/fill="#F4F7FB"[^>]*>#42<\/text>/);
   });
 
-  it("renders redesigned card structure with brand icon and accent bars", () => {
+  it("renders one restrained solid surface without decorative effects", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    expect(svg).toContain('id="bg"');
-    expect(svg).toContain('id="glow"');
-    expect(svg).toContain('id="divider-grad"');
-    expect(svg).toContain('id="acc-tokens"');
-    expect(svg).toContain('id="acc-cost"');
-    expect(svg).toContain('id="acc-rank"');
-    expect(svg).toContain('clip-path="url(#card-clip)"');
+    expect(svg).toContain('data-template="classic"');
+    expect(svg).not.toContain("<linearGradient");
+    expect(svg).not.toContain("<radialGradient");
+    expect(svg).not.toContain("filter=");
   });
 
   it("escapes XML in user-provided text", () => {
@@ -115,27 +112,34 @@ describe("renderProfileEmbedSvg", () => {
       },
     });
 
-    expect(svg).toContain("&lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;");
+    expect(svg).toContain(
+      "&lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;",
+    );
     expect(svg).not.toContain("<script>alert('xss')</script>");
   });
 
   it("does not contain raw & outside XML entities (well-formed XML)", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    const stripped = svg.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, "");
+    const stripped = svg.replace(
+      /&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);/g,
+      "",
+    );
     expect(stripped).not.toContain("&");
   });
 
-  it("positions display name dynamically after username", () => {
+  it("stacks display name above the username", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    const displayNameTag = svg.match(/<text x="(\d+(?:\.\d+)?)"[^>]*>The Octocat<\/text>/);
+    const displayNameTag = svg.match(
+      /<text x="(\d+(?:\.\d+)?)"[^>]*>The Octocat<\/text>/,
+    );
     expect(displayNameTag).toBeTruthy();
-    const x = Number(displayNameTag![1]);
-    expect(x).toBeGreaterThanOrEqual(24 + 8 * 17 * 0.6 + 8);
+    expect(Number(displayNameTag![1])).toBe(24);
+    expect(svg).toMatch(/x="24" y="47"[^>]*>@octocat<\/text>/);
   });
 
-  it("hides display name when username is too long to leave room", () => {
+  it("fits a long username without discarding the display name", () => {
     const longUsername = "a".repeat(50);
     const svg = renderProfileEmbedSvg(
       {
@@ -143,12 +147,15 @@ describe("renderProfileEmbedSvg", () => {
         user: {
           ...mockStats.user,
           username: longUsername,
-          displayName: "Should Be Hidden",
+          displayName: "Long Identity",
         },
       },
-      { compact: true }
+      { compact: true },
     );
-    expect(svg).not.toContain("Should Be Hidden");
+    expect(svg).toContain("Long Identity");
+    expect(svg).toMatch(
+      /font-size="(?:\d+(?:\.\d+)?)"[^>]*data-fit-max-width="332">@a{50}<\/text>/,
+    );
   });
 
   it("computes display name collision width from raw text, not XML-escaped", () => {
@@ -166,7 +173,7 @@ describe("renderProfileEmbedSvg", () => {
           displayName,
         },
       },
-      { compact: true }
+      { compact: true },
     );
     const defaultSvg = renderProfileEmbedSvg({
       ...mockStats,
@@ -188,24 +195,38 @@ describe("renderProfileEmbedSvg", () => {
     });
 
     expect(svg).toContain("15,726,314,363");
-    const valueTag = svg.match(/font-size="(\d+)"[^>]*font-weight="800"[^>]*>15,726,314,363/);
+    const valueTag = svg.match(
+      /font-size="(\d+(?:\.\d+)?)"[^>]*font-weight="600"[^>]*>15,726,314,363/,
+    );
     expect(valueTag).toBeTruthy();
     const fontSize = Number(valueTag![1]);
     expect(fontSize).toBeLessThan(28);
-    expect(fontSize).toBeGreaterThanOrEqual(14);
+    expect(fontSize).toBeGreaterThanOrEqual(8);
   });
 });
 
 describe("renderProfileEmbedSvg with contributions graph", () => {
   const mockContributions = [
     { date: "2026-01-15", intensity: 0 as const, totalTokens: 0, totalCost: 0 },
-    { date: "2026-02-10", intensity: 2 as const, totalTokens: 50_000, totalCost: 1.5 },
-    { date: "2026-02-20", intensity: 4 as const, totalTokens: 500_000, totalCost: 12.0 },
+    {
+      date: "2026-02-10",
+      intensity: 2 as const,
+      totalTokens: 50_000,
+      totalCost: 1.5,
+    },
+    {
+      date: "2026-02-20",
+      intensity: 4 as const,
+      totalTokens: 500_000,
+      totalCost: 12.0,
+    },
   ];
 
   it("extends card height when contributions provided", () => {
     const withoutGraph = renderProfileEmbedSvg(mockStats);
-    const withGraph = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+    const withGraph = renderProfileEmbedSvg(mockStats, {
+      contributions: mockContributions,
+    });
 
     expect(withoutGraph).toContain('height="186"');
     const heightMatch = withGraph.match(/height="(\d+)"/);
@@ -213,17 +234,33 @@ describe("renderProfileEmbedSvg with contributions graph", () => {
     expect(Number(heightMatch![1])).toBeGreaterThan(186);
   });
 
+  it("keeps the contribution legend clear of the footer", () => {
+    const svg = renderProfileEmbedSvg(mockStats, {
+      contributions: mockContributions,
+    });
+    const height = Number(svg.match(/<svg[^>]*height="([\d.]+)"/)?.[1]);
+    const panelBottom = Number(svg.match(/data-bottom="([\d.]+)"/)?.[1]);
+    const footerY = Number(svg.match(/data-card-footer-y="([\d.]+)"/)?.[1]);
+
+    expect(footerY).toBeGreaterThanOrEqual(panelBottom + 12);
+    expect(height).toBeGreaterThan(footerY);
+  });
+
   it("renders GitHub-style contribution grid cells", () => {
-    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+    const svg = renderProfileEmbedSvg(mockStats, {
+      contributions: mockContributions,
+    });
 
     expect(svg).toContain('rx="2"');
-    expect(svg).toContain('fill="#161B22"');
+    expect(svg).toContain('fill="#191F2B"');
     expect(svg).toContain("Less");
     expect(svg).toContain("More");
   });
 
   it("renders day labels (Mon, Wed, Fri)", () => {
-    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+    const svg = renderProfileEmbedSvg(mockStats, {
+      contributions: mockContributions,
+    });
 
     expect(svg).toContain(">Mon<");
     expect(svg).toContain(">Wed<");
@@ -231,13 +268,18 @@ describe("renderProfileEmbedSvg with contributions graph", () => {
   });
 
   it("renders month labels", () => {
-    const svg = renderProfileEmbedSvg(mockStats, { contributions: mockContributions });
+    const svg = renderProfileEmbedSvg(mockStats, {
+      contributions: mockContributions,
+    });
 
     expect(svg).toContain(">Jan<");
   });
 
   it("ignores contributions in compact mode", () => {
-    const svg = renderProfileEmbedSvg(mockStats, { compact: true, contributions: mockContributions });
+    const svg = renderProfileEmbedSvg(mockStats, {
+      compact: true,
+      contributions: mockContributions,
+    });
 
     expect(svg).toContain('height="162"');
     expect(svg).not.toContain("Less");
@@ -245,9 +287,12 @@ describe("renderProfileEmbedSvg with contributions graph", () => {
   });
 
   it("uses light theme graph colors", () => {
-    const svg = renderProfileEmbedSvg(mockStats, { theme: "light", contributions: mockContributions });
+    const svg = renderProfileEmbedSvg(mockStats, {
+      theme: "light",
+      contributions: mockContributions,
+    });
 
-    expect(svg).toContain('fill="#EBEDF0"');
+    expect(svg).toContain('fill="#EFF2F5"');
   });
 
   it("does not render graph when contributions is null", () => {
@@ -261,12 +306,15 @@ describe("renderProfileEmbedSvg with contributions graph", () => {
 describe("renderProfileEmbedSvg customization", () => {
   it("applies a named color override to the accent and gradient", () => {
     const svg = renderProfileEmbedSvg(mockStats, { color: "purple" });
-    expect(svg).toContain('stop-color="#a371f7"');
-    expect(svg).not.toContain('stop-color="#58A6FF"');
+    expect(svg).toContain('fill="#a371f7"');
+    expect(svg).not.toContain('fill="#58A6FF"');
   });
 
   it("formats tokens and cost independently", () => {
-    const svg = renderProfileEmbedSvg(mockStats, { tokensFormat: "compact", costFormat: "full" });
+    const svg = renderProfileEmbedSvg(mockStats, {
+      tokensFormat: "compact",
+      costFormat: "full",
+    });
     expect(svg).toContain("1.2M");
     expect(svg).toContain("$42.42");
   });
@@ -274,12 +322,14 @@ describe("renderProfileEmbedSvg customization", () => {
 
 describe("renderProfileEmbedErrorSvg", () => {
   it("renders safe fallback SVG", () => {
-    const svg = renderProfileEmbedErrorSvg("User <unknown>", { theme: "light" });
+    const svg = renderProfileEmbedErrorSvg("User <unknown>", {
+      theme: "light",
+    });
 
-    expect(svg).toContain("Tokscale Stats");
+    expect(svg).toContain(">Tokscale<");
     expect(svg).toContain("User &lt;unknown&gt;");
     expect(svg).not.toContain("User <unknown>");
-    expect(svg).toContain("family=Figtree");
+    expect(svg).toContain('font-family="Figtree');
     expect(svg).toContain('id="err-bg"');
   });
 });

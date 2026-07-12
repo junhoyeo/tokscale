@@ -95,8 +95,9 @@ pub struct ScanResult {
     pub micode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
-    /// Devin CLI SQLite database at `~/.local/share/devin/cli/sessions.db`.
-    pub devin_db: Option<PathBuf>,
+    /// Devin CLI SQLite databases, including the default data path and any
+    /// user-configured scan roots.
+    pub devin_dbs: Vec<PathBuf>,
 }
 
 impl Default for ScanResult {
@@ -115,7 +116,7 @@ impl Default for ScanResult {
             zcode_db: None,
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
-            devin_db: None,
+            devin_dbs: Vec::new(),
         }
     }
 }
@@ -374,6 +375,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
                 "workbuddy.db" => file_name == "workbuddy.db",
+                "sessions.db" => file_name == "sessions.db",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
                 // Antigravity CLI conversation databases. `ends_with(".db")`
@@ -663,6 +665,27 @@ pub(crate) fn discover_micode_dbs(data_dir: &Path) -> Vec<PathBuf> {
             Some(path)
         })
         .collect();
+
+    dbs.sort_unstable();
+    dbs
+}
+
+/// Discover Devin CLI `sessions.db` files from the default path and any
+/// configured extra scan roots. Extra roots preserve the generic scanner's
+/// behavior: a root may be the database itself or a directory containing one
+/// or more `sessions.db` files.
+fn discover_devin_cli_dbs(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut dbs = Vec::new();
+
+    for root in roots {
+        for db_path in scan_directory(&root.to_string_lossy(), "sessions.db") {
+            let key = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
+            if seen.insert(key) {
+                dbs.push(db_path);
+            }
+        }
+    }
 
     dbs.sort_unstable();
     dbs
@@ -999,11 +1022,20 @@ fn scan_all_clients_with_env_strategy_inner(
             .collect()
     };
 
+    // Desktop ACP filenames need Devin CLI database titles to recover their
+    // session/model/workspace metadata. Treat configured CLI roots as lookup
+    // inputs for a Desktop-only scan without enabling CLI usage output.
+    let mut enabled_with_devin_lookup = enabled.clone();
+    if enabled.contains(&ClientId::DevinDesktop) {
+        enabled_with_devin_lookup.insert(ClientId::DevinCli);
+    }
+
     let headless_roots = headless_roots_with_env_strategy(home_dir, use_env_roots);
 
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
     let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
+    let mut devin_cli_roots: Vec<PathBuf> = Vec::new();
 
     for client_id in &enabled {
         if matches!(
@@ -1023,6 +1055,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Kimi
                 | ClientId::Gjc
                 | ClientId::MiMoCode
+                | ClientId::DevinCli
         ) {
             continue;
         }
@@ -1032,9 +1065,13 @@ fn scan_all_clients_with_env_strategy_inner(
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
     }
 
-    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_devin_lookup) {
         warn_if_escapes_home(client_id, &path);
-        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
+        if client_id == ClientId::DevinCli {
+            devin_cli_roots.push(path);
+        } else {
+            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
+        }
     }
 
     for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
@@ -1125,9 +1162,13 @@ fn scan_all_clients_with_env_strategy_inner(
     // intentionally ignored when an explicit --home override disables env roots.
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
-        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled_with_devin_lookup) {
             warn_if_escapes_home(client_id, &PathBuf::from(&path));
-            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
+            if client_id == ClientId::DevinCli {
+                devin_cli_roots.push(PathBuf::from(path));
+            } else {
+                push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
+            }
         }
     }
 
@@ -1397,13 +1438,12 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    if enabled.contains(&ClientId::DevinCli) {
+    if enabled.contains(&ClientId::DevinCli) || enabled.contains(&ClientId::DevinDesktop) {
         let devin_db_path = ClientId::DevinCli
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        if std::path::Path::new(&devin_db_path).exists() {
-            result.devin_db = Some(PathBuf::from(devin_db_path));
-        }
+        devin_cli_roots.push(PathBuf::from(devin_db_path));
+        result.devin_dbs = discover_devin_cli_dbs(devin_cli_roots);
     }
 
     if enabled.contains(&ClientId::Hermes) {
@@ -2695,6 +2735,65 @@ mod tests {
         );
 
         assert_eq!(result.get(ClientId::Codex).len(), 2);
+    }
+
+    #[test]
+    fn test_scan_all_clients_with_scanner_settings_discovers_devin_cli_extra_databases() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_db = home.join(".local/share/devin/cli/sessions.db");
+        fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        File::create(&default_db).unwrap();
+
+        let extra_root = home.join("imports/devin");
+        let extra_db = extra_root.join("profile/sessions.db");
+        fs::create_dir_all(extra_db.parent().unwrap()).unwrap();
+        File::create(&extra_db).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "devin-cli": [extra_root]
+            }
+        }))
+        .unwrap();
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["devin-cli".to_string()],
+            false,
+            &settings,
+        );
+
+        assert_eq!(result.devin_dbs, vec![default_db, extra_db]);
+        assert!(
+            result.get(ClientId::DevinCli).is_empty(),
+            "Devin SQLite databases should use the dedicated scan result"
+        );
+    }
+
+    #[test]
+    fn test_devin_desktop_scan_includes_configured_cli_lookup_databases() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let extra_root = home.join("imports/devin");
+        let extra_db = extra_root.join("profile/sessions.db");
+        fs::create_dir_all(extra_db.parent().unwrap()).unwrap();
+        File::create(&extra_db).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "devin-cli": [extra_root]
+            }
+        }))
+        .unwrap();
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["devin-desktop".to_string()],
+            false,
+            &settings,
+        );
+
+        assert_eq!(result.devin_dbs, vec![extra_db]);
     }
 
     #[test]

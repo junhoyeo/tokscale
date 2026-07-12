@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   renderIsometric3DEmbedSvg,
   renderIsometric3DErrorSvg,
 } from "../../src/lib/embed/renderIsometric3DSvg";
-import type { UserEmbedStats, EmbedContributionDay } from "../../src/lib/embed/getUserEmbedStats";
+import type {
+  UserEmbedStats,
+  EmbedContributionDay,
+} from "../../src/lib/embed/getUserEmbedStats";
 
 const mockStats: UserEmbedStats = {
   user: {
@@ -29,6 +32,33 @@ const mockContributions: EmbedContributionDay[] = [
   { date: "2026-03-10", intensity: 3, totalTokens: 150_000, totalCost: 5.0 },
 ];
 
+function attributes(source: string): Record<string, string> {
+  return Object.fromEntries(
+    [...source.matchAll(/([\w:-]+)="([^"]*)"/g)].map((match) => [
+      match[1],
+      match[2],
+    ]),
+  );
+}
+
+function textNodes(svg: string): Array<{
+  attrs: Record<string, string>;
+  text: string;
+}> {
+  return [...svg.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/g)].map(
+    (match) => ({
+      attrs: attributes(match[1]),
+      text: match[2]
+        .replace(/<[^>]+>/g, "")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'"),
+    }),
+  );
+}
+
 describe("renderIsometric3DEmbedSvg", () => {
   it("renders a valid SVG with rect-based isometric cubes", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
@@ -53,55 +83,82 @@ describe("renderIsometric3DEmbedSvg", () => {
     expect(svg).toContain("@octocat");
   });
 
-  it("renders Token Usage stats box with cost and tokens", () => {
+  it("identifies the template and preserves root accessibility", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain("Token Usage");
-    expect(svg).toContain("Total");
-    expect(svg).toContain("Tokens");
-    expect(svg).toContain("active days");
+    expect(svg).toContain('<svg data-template="3d"');
+    expect(svg).toContain('role="img"');
+    expect(svg).toContain(
+      'aria-label="Tokscale 3D contribution graph for @octocat"',
+    );
+    expect(svg).toContain(
+      "<title>@octocat Tokscale 3D contribution graph</title>",
+    );
   });
 
-  it("renders Streaks stats box", () => {
+  it("renders one flat data rail with the canonical usage metrics", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain("Streaks");
-    expect(svg).toContain("Longest");
-    expect(svg).toContain("Current");
-    expect(svg).toContain("days");
+    expect(svg).toContain("Tokens");
+    expect(svg).toContain("Cost");
+    expect(svg).toContain("Rank");
+    expect(svg).toContain("Active days");
+    expect(svg).toContain("1,234,567");
+    expect(svg).toContain("$42.42");
   });
 
   it("computes active days from contributions with intensity > 0", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain("4 active days");
+    expect(svg).toMatch(/>Active days<\/text><text[^>]*>4<\/text>/);
   });
 
-  it("uses Figtree font", () => {
+  it("uses a local system font stack without external font loading", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain("family=Figtree");
-    expect(svg).toContain('font-family="Figtree');
+    expect(svg).toContain(
+      'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"',
+    );
+    expect(svg).not.toContain("@import");
+    expect(svg).not.toContain("fonts.googleapis.com");
+  });
+
+  it("omits decorative effects, animation, and fabricated stat chrome", () => {
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+    expect(svg).not.toContain("<linearGradient");
+    expect(svg).not.toContain("<radialGradient");
+    expect(svg).not.toContain("<animate");
+    expect(svg).not.toContain("filter=");
+    expect(svg).not.toContain('fill="url(');
+    expect(svg).not.toContain("Tokscale Stats");
+    expect(svg).not.toContain("Token Usage");
+    expect(svg).not.toContain("Streaks");
   });
 
   it("renders with dark theme by default", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain('stop-color="#0D1117"');
+    expect(svg).toContain('fill="#131822"');
+    expect(svg).toContain('fill="#F4F7FB"');
   });
 
   it("renders with light theme when specified", () => {
-    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions, { theme: "light" });
+    const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions, {
+      theme: "light",
+    });
 
-    expect(svg).toContain('stop-color="#FFFFFF"');
+    expect(svg).toContain('fill="#FFFFFF"');
+    expect(svg).toContain('fill="#1F2328"');
   });
 
-  it("uses different polygon fill colors for cube faces", () => {
+  it("uses distinct colors for each cube intensity", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
-    const fills = svg.match(/fill="(#[0-9a-fA-F]{6})"/g) || [];
-    const uniqueFills = new Set(fills);
+    const topFaceFills = [...svg.matchAll(/\.d\d-t\{fill:([^}]+)\}/g)].map(
+      ([, fill]) => fill,
+    );
 
-    expect(uniqueFills.size).toBeGreaterThan(3);
+    expect(new Set(topFaceFills).size).toBe(5);
   });
 
   it("includes tokscale.ai profile link", () => {
@@ -128,14 +185,32 @@ describe("renderIsometric3DEmbedSvg", () => {
 
     expect(svg).toContain("<svg");
     expect(svg).toContain("skewY");
-    expect(svg).toContain("0 active days");
-    expect(svg).toContain("0 days");
+    expect(svg).toContain("No activity yet");
+    expect(svg).toMatch(/>Active days<\/text><text[^>]*>0<\/text>/);
   });
 
-  it("renders fixed-width SVG of 680px", () => {
+  it("preserves the public 680 by 482 SVG dimensions", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
     expect(svg).toContain('width="680"');
+    expect(svg).toContain('height="482"');
+    expect(svg).toContain('viewBox="0 0 680 482"');
+  });
+
+  it("stays exactly 680 by 482 on a date that spans 54 calendar columns", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-03-03T12:00:00.000Z"));
+
+    try {
+      const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+
+      expect(svg).toContain('width="680"');
+      expect(svg).toContain('height="482"');
+      expect(svg).toContain('viewBox="0 0 680 482"');
+      expect(svg).not.toContain('height="487"');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows rank as dash when null", () => {
@@ -145,29 +220,70 @@ describe("renderIsometric3DEmbedSvg", () => {
     );
 
     expect(svg).toContain("Rank");
+    expect(svg).toContain(">\u2014</text>");
+  });
+
+  it("preserves compact number formatting", () => {
+    const stats = {
+      ...mockStats,
+      stats: { ...mockStats.stats, totalCost: 12_345.67 },
+    };
+    const regularSvg = renderIsometric3DEmbedSvg(stats, mockContributions);
+    const compactSvg = renderIsometric3DEmbedSvg(stats, mockContributions, {
+      compact: true,
+    });
+
+    expect(regularSvg).toContain("1,234,567");
+    expect(regularSvg).toContain("$12,345.67");
+    expect(compactSvg).toContain("1.2M");
+    expect(compactSvg).toContain("$12.3K");
   });
 
   it("shows date range from first to last active contribution", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain("02/10");
-    expect(svg).toContain("03/10");
+    expect(svg).toContain("Feb 10");
+    expect(svg).toContain("Mar 10, 2026");
     expect(svg).toContain("\u2192");
   });
 
-  it("renders stats box backgrounds with theme-appropriate colors", () => {
-    const darkSvg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
-    const lightSvg = renderIsometric3DEmbedSvg(mockStats, mockContributions, { theme: "light" });
+  it("ignores buffered contributions outside the visible year", () => {
+    const baseline = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+    const withBuffer = renderIsometric3DEmbedSvg(mockStats, [
+      {
+        date: "2000-01-01",
+        intensity: 4,
+        totalTokens: 999_999_999,
+        totalCost: 9_999,
+      },
+      ...mockContributions,
+    ]);
 
-    expect(darkSvg).toContain('fill="#1A212A"');
-    expect(lightSvg).toContain('fill="#F6F8FA"');
+    expect(withBuffer).toBe(baseline);
   });
 
-  it("uses blue palette for graph cubes (matching frontend default)", () => {
+  it("uses one solid theme-appropriate surface", () => {
+    const darkSvg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
+    const lightSvg = renderIsometric3DEmbedSvg(mockStats, mockContributions, {
+      theme: "light",
+    });
+
+    expect(darkSvg).toContain(
+      '<rect width="680" height="482" rx="12" fill="#131822"/>',
+    );
+    expect(lightSvg).toContain(
+      '<rect width="680" height="482" rx="12" fill="#FFFFFF"/>',
+    );
+  });
+
+  it("uses the profile service empty color and monotonic blue grades", () => {
     const svg = renderIsometric3DEmbedSvg(mockStats, mockContributions);
 
-    expect(svg).toContain("fill:#79b8ff");
-    expect(svg).toContain("fill:#1A212A");
+    expect(svg).toContain(".d0-t{fill:#191F2B}");
+    expect(svg).toContain(".d1-t{fill:#4069b2}");
+    expect(svg).toContain(".d2-t{fill:#1f6feb}");
+    expect(svg).toContain(".d3-t{fill:#388bfd}");
+    expect(svg).toContain(".d4-t{fill:#79b8ff}");
   });
 
   it("scales cube heights by usage within the same intensity bucket", () => {
@@ -180,15 +296,45 @@ describe("renderIsometric3DEmbedSvg", () => {
     expect(svg).toContain('height="30.4"');
   });
 
+  it("keeps the complete SVG unchanged when only contribution cost changes", () => {
+    const today = new Date();
+    const currentUtcDate = new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()),
+    );
+    const previousUtcDate = new Date(currentUtcDate);
+    previousUtcDate.setUTCDate(previousUtcDate.getUTCDate() - 1);
+    const baseline: EmbedContributionDay[] = [
+      {
+        date: previousUtcDate.toISOString().split("T")[0],
+        intensity: 4,
+        totalTokens: 100,
+        totalCost: 0,
+      },
+      {
+        date: currentUtcDate.toISOString().split("T")[0],
+        intensity: 1,
+        totalTokens: 0,
+        totalCost: 0,
+      },
+    ];
+    const costOnlyMutation = baseline.map((day, index) =>
+      index === 1 ? { ...day, totalCost: 1_000_000 } : day,
+    );
+
+    expect(renderIsometric3DEmbedSvg(mockStats, costOnlyMutation)).toBe(
+      renderIsometric3DEmbedSvg(mockStats, baseline),
+    );
+  });
 });
 
 describe("renderIsometric3DErrorSvg", () => {
   it("renders a valid error SVG", () => {
     const svg = renderIsometric3DErrorSvg("Something went wrong");
 
-    expect(svg).toContain("<svg");
+    expect(svg).toContain('<svg data-template="3d-error"');
+    expect(svg).toContain('role="img"');
     expect(svg).toContain("Something went wrong");
-    expect(svg).toContain("Tokscale Stats");
+    expect(svg).toContain(">Tokscale</text>");
   });
 
   it("escapes XML in error message", () => {
@@ -198,15 +344,34 @@ describe("renderIsometric3DErrorSvg", () => {
     expect(svg).not.toContain("User <unknown> not found");
   });
 
+  it("fits long error copy within the error-card content width", () => {
+    const message =
+      "프로필을 찾을 수 없습니다 · 使用量データを確認してください";
+    const node = textNodes(renderIsometric3DErrorSvg(message)).find(
+      (candidate) => candidate.text === message,
+    );
+
+    expect(node).toBeDefined();
+    expect(Number(node?.attrs["data-fit-max-width"])).toBeGreaterThan(0);
+  });
+
   it("supports light theme", () => {
     const svg = renderIsometric3DErrorSvg("Error", { theme: "light" });
 
-    expect(svg).toContain('stop-color="#FFFFFF"');
+    expect(svg).toContain(
+      '<rect width="540" height="120" rx="12" fill="#FFFFFF"/>',
+    );
   });
 
-  it("uses Figtree font", () => {
+  it("uses the same restrained local design language", () => {
     const svg = renderIsometric3DErrorSvg("Error");
 
-    expect(svg).toContain("family=Figtree");
+    expect(svg).toContain(
+      'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"',
+    );
+    expect(svg).not.toContain("@import");
+    expect(svg).not.toContain("<linearGradient");
+    expect(svg).not.toContain("<radialGradient");
+    expect(svg).not.toContain("Tokscale Stats");
   });
 });
