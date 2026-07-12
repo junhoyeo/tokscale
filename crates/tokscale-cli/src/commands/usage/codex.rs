@@ -58,6 +58,7 @@ struct RateLimit {
 #[serde(rename_all = "snake_case")]
 struct Window {
     used_percent: Option<f64>,
+    limit_window_seconds: Option<i64>,
     #[serde(alias = "resets_at")]
     reset_at: Option<i64>,
 }
@@ -1087,6 +1088,41 @@ fn metric_from_window(label: &str, window: &Window) -> UsageMetric {
     }
 }
 
+fn rate_limit_window_label(window: &Window) -> Option<String> {
+    let seconds = window.limit_window_seconds.filter(|seconds| *seconds > 0)?;
+    if seconds == 7 * 24 * 60 * 60 {
+        return Some("Weekly".to_string());
+    }
+    if seconds % (24 * 60 * 60) == 0 {
+        return Some(format!("{}d", seconds / (24 * 60 * 60)));
+    }
+    if seconds % (60 * 60) == 0 {
+        return Some(format!("{}h", seconds / (60 * 60)));
+    }
+    if seconds % 60 == 0 {
+        return Some(format!("{}m", seconds / 60));
+    }
+    Some(format!("{seconds}s"))
+}
+
+fn metric_label(
+    prefix: Option<&str>,
+    window: &Window,
+    fallback: &str,
+    prefixed_fallback: &str,
+) -> String {
+    let dynamic_label = rate_limit_window_label(window);
+    match prefix {
+        Some(prefix) => format!(
+            "{prefix} {}",
+            dynamic_label
+                .map(|label| label.to_ascii_lowercase())
+                .unwrap_or_else(|| prefixed_fallback.to_string())
+        ),
+        None => dynamic_label.unwrap_or_else(|| fallback.to_string()),
+    }
+}
+
 fn push_rate_limit_metrics(
     metrics: &mut Vec<UsageMetric>,
     prefix: Option<&str>,
@@ -1094,15 +1130,11 @@ fn push_rate_limit_metrics(
 ) {
     let label_prefix = prefix.map(str::trim).filter(|label| !label.is_empty());
     if let Some(ref w) = rate_limit.primary_window {
-        let label = label_prefix
-            .map(|prefix| format!("{prefix} 5h"))
-            .unwrap_or_else(|| "5h".to_string());
+        let label = metric_label(label_prefix, w, "5h", "5h");
         metrics.push(metric_from_window(&label, w));
     }
     if let Some(ref w) = rate_limit.secondary_window {
-        let label = label_prefix
-            .map(|prefix| format!("{prefix} week"))
-            .unwrap_or_else(|| "Weekly".to_string());
+        let label = metric_label(label_prefix, w, "Weekly", "week");
         metrics.push(metric_from_window(&label, w));
     }
 }
@@ -1855,6 +1887,54 @@ mod tests {
         assert_eq!(usage.email.as_deref(), Some("plus@example.com"));
         assert!(usage.additional_rate_limits.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn rate_limit_labels_follow_window_duration() -> Result<()> {
+        for (primary_seconds, secondary_seconds, expected) in [
+            (18_000, 604_800, ["5h", "Weekly"]),
+            (604_800, 18_000, ["Weekly", "5h"]),
+        ] {
+            let rate_limit: RateLimit = serde_json::from_value(serde_json::json!({
+                "primary_window": {
+                    "used_percent": 0,
+                    "limit_window_seconds": primary_seconds
+                },
+                "secondary_window": {
+                    "used_percent": 0,
+                    "limit_window_seconds": secondary_seconds
+                }
+            }))?;
+
+            let mut metrics = Vec::new();
+            push_rate_limit_metrics(&mut metrics, None, &rate_limit);
+            assert_eq!(metric_labels(&metrics), expected);
+
+            let mut prefixed_metrics = Vec::new();
+            push_rate_limit_metrics(&mut prefixed_metrics, Some("Spark"), &rate_limit);
+            assert_eq!(
+                metric_labels(&prefixed_metrics),
+                expected.map(|label| format!("Spark {}", label.to_ascii_lowercase()))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rate_limit_labels_keep_legacy_fallbacks_without_duration() -> Result<()> {
+        let rate_limit: RateLimit = serde_json::from_value(serde_json::json!({
+            "primary_window": { "used_percent": 10 },
+            "secondary_window": { "used_percent": 20 }
+        }))?;
+
+        let mut metrics = Vec::new();
+        push_rate_limit_metrics(&mut metrics, None, &rate_limit);
+        assert_eq!(metric_labels(&metrics), ["5h", "Weekly"]);
+        Ok(())
+    }
+
+    fn metric_labels(metrics: &[UsageMetric]) -> Vec<&str> {
+        metrics.iter().map(|metric| metric.label.as_str()).collect()
     }
 
     #[test]
