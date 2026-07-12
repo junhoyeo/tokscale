@@ -26,7 +26,7 @@ import {
 } from "@/components/profile";
 import type { DailyContribution } from "@/lib/types";
 import { formatDuration } from "@/lib/format";
-import { DEFAULT_PALETTE, type ColorPaletteName } from "@/lib/themes";
+import { useSettings } from "@/lib/useSettings";
 
 type ProfilePeriod = "all" | "week" | "month";
 
@@ -96,8 +96,10 @@ export default function ProfilePageClient({
   const [activeTab, setActiveTab] = useState<ProfileTab>("activity");
   const [contributionView, setContributionView] =
     useState<ProfileContributionView>("2d");
-  const [contributionPalette, setContributionPalette] =
-    useState<ColorPaletteName>(DEFAULT_PALETTE);
+  const {
+    paletteName: contributionPalette,
+    setPalette: setContributionPalette,
+  } = useSettings();
   const contributionBreakdownId = useId();
   const data = initialData;
   const period = data.period ?? "all";

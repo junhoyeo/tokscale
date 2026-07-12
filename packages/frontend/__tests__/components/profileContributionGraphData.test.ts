@@ -345,7 +345,11 @@ describe("profile contribution calendar", () => {
 
   it("builds finite isometric cells from the same scoped calendar", () => {
     const calendar = createContributionCalendar(
-      [contribution("2026-07-05", 0, 0), contribution("2026-07-06", 400, 10)],
+      [
+        contribution("2026-07-05", 0, 0),
+        contribution("2026-07-06", 400, 10),
+        contribution("2026-07-07", 200, 5),
+      ],
       "2026-07-05",
       "2026-07-18",
     );
@@ -355,10 +359,16 @@ describe("profile contribution calendar", () => {
     const active = geometry.cells.find(
       ({ cell }) => cell.date === "2026-07-06",
     );
+    const midpoint = geometry.cells.find(
+      ({ cell }) => cell.date === "2026-07-07",
+    );
 
     expect(geometry.cells).toHaveLength(14);
     expect(geometry.viewBox.width).toBeGreaterThan(0);
     expect(geometry.viewBox.height).toBeGreaterThan(0);
+    expect(empty?.height).toBe(1.5);
+    expect(midpoint?.height).toBe(52);
+    expect(active?.height).toBe(100);
     expect(active?.height).toBeGreaterThan(empty?.height ?? 0);
     expect(
       geometry.cells.every(({ centerX, centerY, height }) =>
@@ -407,10 +417,21 @@ describe("profile contribution calendar", () => {
 
   it("keeps every active palette level distinct from the dark empty cell", () => {
     for (const palette of Object.values(colorPalettes)) {
-      for (const level of [1, 2, 3, 4] as const) {
+      const colors = ([1, 2, 3, 4] as const).map((level) =>
+        getContributionColor(palette, level),
+      );
+      const luminances = colors.map(relativeLuminance);
+
+      expect(new Set(colors).size).toBe(4);
+      expect(luminances).toEqual([...luminances].sort((a, b) => a - b));
+      for (let index = 1; index < luminances.length; index += 1) {
         expect(
-          contrastRatio(getContributionColor(palette, level), "#191f2b"),
-        ).toBeGreaterThanOrEqual(3);
+          luminances[index] - luminances[index - 1],
+        ).toBeGreaterThanOrEqual(0.02);
+      }
+
+      for (const color of colors) {
+        expect(contrastRatio(color, "#191f2b")).toBeGreaterThanOrEqual(3);
       }
     }
   });

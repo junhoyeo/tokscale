@@ -642,7 +642,7 @@ const ISOMETRIC_CELL_DEPTH = 3.75;
 const ISOMETRIC_MARGIN = 12;
 const ISOMETRIC_MIN_HEIGHT = 1.5;
 const ISOMETRIC_ACTIVE_MIN_HEIGHT = 4;
-const ISOMETRIC_MAX_HEIGHT = 26;
+const ISOMETRIC_MAX_HEIGHT = 100;
 
 export function createContributionIsometricGeometry(
   calendar: ContributionCalendar,
@@ -827,21 +827,79 @@ function mixHexWithWhite(color: string, colorWeight: number): string {
     .join("")}`;
 }
 
+const CONTRIBUTION_EMPTY_HEX = "#191f2b";
+const MINIMUM_ACTIVE_CONTRAST = 3;
+const MINIMUM_LUMINANCE_STEP = 0.02;
+const darkPaletteCache = new WeakMap<GraphColorPalette, readonly string[]>();
+
+function relativeLuminance(color: string): number {
+  const match = /^#([0-9a-f]{6})$/i.exec(color);
+  if (!match) return 0;
+
+  const channels = [0, 2, 4].map((offset) =>
+    Number.parseInt(match[1].slice(offset, offset + 2), 16),
+  );
+  const linear = channels.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+}
+
+function contrastRatio(left: string, right: string): number {
+  const luminances = [relativeLuminance(left), relativeLuminance(right)].sort(
+    (a, b) => b - a,
+  );
+  return (luminances[0] + 0.05) / (luminances[1] + 0.05);
+}
+
+function darkContributionRamp(palette: GraphColorPalette): readonly string[] {
+  const cached = darkPaletteCache.get(palette);
+  if (cached) return cached;
+
+  const bases = [
+    palette.grade4,
+    palette.grade3,
+    palette.grade2,
+    palette.grade1,
+  ];
+  let previousLuminance = Number.NEGATIVE_INFINITY;
+  const colors = bases.map((baseColor, index) => {
+    for (let percentage = 100; percentage >= 0; percentage -= 1) {
+      const candidate = mixHexWithWhite(baseColor, percentage / 100);
+      const luminance = relativeLuminance(candidate);
+      const enoughSeparation =
+        index === 0 || luminance >= previousLuminance + MINIMUM_LUMINANCE_STEP;
+
+      if (
+        enoughSeparation &&
+        contrastRatio(candidate, CONTRIBUTION_EMPTY_HEX) >=
+          MINIMUM_ACTIVE_CONTRAST
+      ) {
+        previousLuminance = luminance;
+        return candidate;
+      }
+    }
+
+    previousLuminance = 1;
+    return "#ffffff";
+  });
+  darkPaletteCache.set(palette, colors);
+  return colors;
+}
+
 export function getContributionColor(
   palette: GraphColorPalette,
   level: ContributionCell["intensity"],
 ): string {
   if (level === 0) return "var(--service-surface-muted)";
 
-  // These palettes were authored for light canvases, where higher intensity
-  // is darker. Reverse the ramp on the service's dark canvas so activity
-  // gains contrast as it increases.
-  const baseColor =
-    [palette.grade4, palette.grade3, palette.grade2, palette.grade1][
-      level - 1
-    ] ?? palette.grade1;
-  const darkCanvasWeights = [0.55, 0.7, 0.85, 1] as const;
-  return mixHexWithWhite(baseColor, darkCanvasWeights[level - 1] ?? 1);
+  // The shared palettes are light-canvas ramps. Reverse them for this
+  // always-dark surface, then lift only colors that need contrast or a clear
+  // step from the preceding intensity instead of whitening every grade.
+  return darkContributionRamp(palette)[level - 1] ?? palette.grade1;
 }
 
 const Figure = styled.figure`
@@ -1025,7 +1083,7 @@ const IsometricBody = styled.div`
 const IsometricSvg = styled.svg`
   display: block;
   width: 100%;
-  max-height: 17rem;
+  max-height: 20rem;
   overflow: visible;
 `;
 
@@ -1247,15 +1305,15 @@ const PaletteSelect = styled.select`
 
 const PalettePreview = styled.span`
   display: inline-grid;
-  grid-template-columns: repeat(4, 0.375rem);
-  gap: 1px;
+  grid-template-columns: repeat(4, 0.625rem);
+  gap: 0.1875rem;
   overflow: hidden;
   border-radius: 2px;
 `;
 
 const PalettePreviewSwatch = styled.span<{ $color: string }>`
-  width: 0.375rem;
-  height: 0.75rem;
+  width: 0.625rem;
+  height: 0.625rem;
   background: ${(props) => props.$color};
 `;
 
@@ -2379,6 +2437,7 @@ export function ProfileContributionGraph({
                 ))}
               </PalettePreview>
               <PaletteSelect
+                name="profile-contribution-palette"
                 aria-label="Contribution graph color"
                 value={paletteName}
                 onChange={(event) =>
