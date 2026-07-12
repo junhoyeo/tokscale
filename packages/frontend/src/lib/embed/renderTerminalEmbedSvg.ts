@@ -7,10 +7,13 @@ import {
   type EmbedTheme,
   MONO_FONT_STACK,
   cardFooter,
+  cardHeader,
   cardSurface,
+  cardTextStyle,
   contributionPanel,
   divider,
   escapeXml,
+  fittedText,
   formatRank,
   getRankColor,
   resolvePalette,
@@ -42,7 +45,6 @@ export function renderTerminalEmbedSvg(
       ? options.contributions
       : null;
   const right = W - PAD;
-  const command = `tokscale profile @${data.user.username} --sort ${sortBy}`;
   const rank = data.stats.rank
     ? formatRank(
         data.stats.rank,
@@ -88,27 +90,33 @@ export function renderTerminalEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="terminal" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale stats for @${escapeXml(data.user.username)}">
+  ${cardTextStyle()}
   ${cardSurface(W, height, palette)}
-  <g data-terminal-command="${escapeXml(command)}">
-    <text x="${PAD}" y="34" fill="${palette.text}" font-size="12" font-family="${MONO_FONT_STACK}"><tspan fill="${palette.brand}" font-weight="700">$</tspan><tspan> ${escapeXml(command)}</tspan></text>
-  </g>
-  ${divider(PAD, right, 54, palette)}
+  ${cardHeader({
+    username: data.user.username,
+    displayName: data.user.displayName,
+    palette,
+    x: PAD,
+    y: 28,
+    right,
+  })}
+  ${divider(PAD, right, 60, palette)}
+  <g data-readout="usage">
   ${rows
     .map((row, index) => {
-      const y = 78 + index * 25;
+      const y = 82 + index * 24;
       return `<text x="${PAD}" y="${y}" fill="${palette.muted}" font-size="12" font-family="${MONO_FONT_STACK}">${escapeXml(row.label)}</text>
-  <text x="${right}" y="${y}" fill="${row.color}" font-size="13" font-weight="700" text-anchor="end" font-family="${MONO_FONT_STACK}">${escapeXml(row.value)}</text>`;
+  ${fittedText({ text: row.value, x: right, y, maxWidth: 320, fill: row.color, fontSize: 13, minFontSize: 8, fontFamily: MONO_FONT_STACK, fontWeight: 600, textAnchor: "end" })}`;
     })
     .join("\n  ")}
+  </g>
   ${graph ? `${divider(PAD, right, 146, palette)}\n  ${graph.svg}` : ""}
   ${cardFooter({
-    username: data.user.username,
     updatedAt: data.stats.updatedAt,
     palette,
     x: PAD,
     right,
     y: height - 16,
-    mono: true,
   })}
 </svg>`;
 }

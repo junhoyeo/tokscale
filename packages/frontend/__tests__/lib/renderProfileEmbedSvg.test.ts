@@ -34,11 +34,12 @@ describe("renderProfileEmbedSvg", () => {
     expect(svg).not.toContain("Submissions");
   });
 
-  it("uses Figtree font in SVG", () => {
+  it("uses the local Figtree-first font stack without a remote import", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    expect(svg).toContain("family=Figtree");
     expect(svg).toContain('font-family="Figtree');
+    expect(svg).not.toContain("@import");
+    expect(svg).not.toContain("fonts.googleapis.com");
   });
 
   it("renders compact variant", () => {
@@ -72,7 +73,7 @@ describe("renderProfileEmbedSvg", () => {
   it("uses semantic accent colors for tokens, cost, and rank", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
-    expect(svg).toContain('fill="#58A6FF"');
+    expect(svg).toContain('fill="#2F8FFF"');
     expect(svg).toContain('fill="#3FB950"');
     expect(svg).toContain('fill="#DA7E1A"');
   });
@@ -85,12 +86,12 @@ describe("renderProfileEmbedSvg", () => {
     expect(svg).toContain('fill="#E3B341"');
   });
 
-  it("uses the selected accent for non-medal ranks", () => {
+  it("keeps non-medal ranks neutral", () => {
     const svg = renderProfileEmbedSvg({
       ...mockStats,
       stats: { ...mockStats.stats, rank: 42 },
     });
-    expect(svg).toContain('fill="#58A6FF"');
+    expect(svg).toMatch(/fill="#F4F7FB"[^>]*>#42<\/text>/);
   });
 
   it("renders one restrained solid surface without decorative effects", () => {
@@ -127,18 +128,18 @@ describe("renderProfileEmbedSvg", () => {
     expect(stripped).not.toContain("&");
   });
 
-  it("positions display name dynamically after username", () => {
+  it("stacks display name above the username", () => {
     const svg = renderProfileEmbedSvg(mockStats);
 
     const displayNameTag = svg.match(
       /<text x="(\d+(?:\.\d+)?)"[^>]*>The Octocat<\/text>/,
     );
     expect(displayNameTag).toBeTruthy();
-    const x = Number(displayNameTag![1]);
-    expect(x).toBeGreaterThanOrEqual(24 + 8 * 17 * 0.6 + 8);
+    expect(Number(displayNameTag![1])).toBe(24);
+    expect(svg).toMatch(/x="24" y="47"[^>]*>@octocat<\/text>/);
   });
 
-  it("hides display name when username is too long to leave room", () => {
+  it("fits a long username without discarding the display name", () => {
     const longUsername = "a".repeat(50);
     const svg = renderProfileEmbedSvg(
       {
@@ -146,12 +147,15 @@ describe("renderProfileEmbedSvg", () => {
         user: {
           ...mockStats.user,
           username: longUsername,
-          displayName: "Should Be Hidden",
+          displayName: "Long Identity",
         },
       },
       { compact: true },
     );
-    expect(svg).not.toContain("Should Be Hidden");
+    expect(svg).toContain("Long Identity");
+    expect(svg).toMatch(
+      /font-size="(?:\d+(?:\.\d+)?)"[^>]*data-fit-max-width="332">@a{50}<\/text>/,
+    );
   });
 
   it("computes display name collision width from raw text, not XML-escaped", () => {
@@ -192,12 +196,12 @@ describe("renderProfileEmbedSvg", () => {
 
     expect(svg).toContain("15,726,314,363");
     const valueTag = svg.match(
-      /font-size="(\d+)"[^>]*font-weight="700"[^>]*>15,726,314,363/,
+      /font-size="(\d+(?:\.\d+)?)"[^>]*font-weight="600"[^>]*>15,726,314,363/,
     );
     expect(valueTag).toBeTruthy();
     const fontSize = Number(valueTag![1]);
     expect(fontSize).toBeLessThan(28);
-    expect(fontSize).toBeGreaterThanOrEqual(14);
+    expect(fontSize).toBeGreaterThanOrEqual(8);
   });
 });
 
@@ -248,7 +252,7 @@ describe("renderProfileEmbedSvg with contributions graph", () => {
     });
 
     expect(svg).toContain('rx="2"');
-    expect(svg).toContain('fill="#161B22"');
+    expect(svg).toContain('fill="#191F2B"');
     expect(svg).toContain("Less");
     expect(svg).toContain("More");
   });
@@ -288,7 +292,7 @@ describe("renderProfileEmbedSvg with contributions graph", () => {
       contributions: mockContributions,
     });
 
-    expect(svg).toContain('fill="#EBEDF0"');
+    expect(svg).toContain('fill="#EFF2F5"');
   });
 
   it("does not render graph when contributions is null", () => {
@@ -325,7 +329,7 @@ describe("renderProfileEmbedErrorSvg", () => {
     expect(svg).toContain(">Tokscale<");
     expect(svg).toContain("User &lt;unknown&gt;");
     expect(svg).not.toContain("User <unknown>");
-    expect(svg).toContain("family=Figtree");
+    expect(svg).toContain('font-family="Figtree');
     expect(svg).toContain('id="err-bg"');
   });
 });

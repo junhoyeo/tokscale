@@ -5,14 +5,15 @@ import {
   type EmbedNumberFormat,
   type EmbedRankFormat,
   type EmbedTheme,
-  FIGTREE_FONT_IMPORT,
   FIGTREE_FONT_STACK,
   cardFooter,
   cardHeader,
   cardSurface,
+  cardTextStyle,
   contributionPanel,
   divider,
   escapeXml,
+  fittedText,
   formatRank,
   getRankColor,
   resolvePalette,
@@ -32,21 +33,6 @@ export interface RenderProfileEmbedOptions {
   rankFormat?: EmbedRankFormat;
   sortBy?: EmbedSortBy;
   contributions?: EmbedContributionDay[] | null;
-}
-
-const CHAR_WIDTH_RATIO = 0.6;
-
-function fitValueFontSize(
-  text: string,
-  maxWidth: number,
-  baseSize: number,
-): number {
-  const estimatedWidth = text.length * baseSize * CHAR_WIDTH_RATIO;
-  if (estimatedWidth <= maxWidth) return baseSize;
-  return Math.max(
-    Math.ceil(baseSize * 0.5),
-    Math.floor(baseSize * (maxWidth / estimatedWidth)),
-  );
 }
 
 function renderProfileCardSvg(
@@ -116,13 +102,21 @@ function renderProfileCardSvg(
     .map((metric, index) => {
       const metricX = x + index * columnWidth + (index === 0 ? 0 : 16);
       const available = columnWidth - (index === 0 ? 16 : 32);
-      const valueSize = fitValueFontSize(metric.value, available, fontBase);
       return [
         index > 0
           ? `<line x1="${(x + index * columnWidth).toFixed(1)}" y1="${metricTop - 4}" x2="${(x + index * columnWidth).toFixed(1)}" y2="${metricTop + 54}" stroke="${palette.divider}"/>`
           : "",
         `<text x="${metricX.toFixed(1)}" y="${metricTop + 10}" fill="${palette.muted}" font-size="${compact ? 10 : 11}" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${escapeXml(metric.label)}</text>`,
-        `<text x="${metricX.toFixed(1)}" y="${metricTop + 43}" fill="${metric.color}" font-size="${valueSize}" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(metric.value)}</text>`,
+        fittedText({
+          text: metric.value,
+          x: Number(metricX.toFixed(1)),
+          y: metricTop + 43,
+          maxWidth: available,
+          fill: metric.color,
+          fontSize: fontBase,
+          minFontSize: 9,
+          fontWeight: 600,
+        }),
       ]
         .filter(Boolean)
         .join("\n  ");
@@ -131,7 +125,7 @@ function renderProfileCardSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="classic" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale profile stats for @${escapeXml(data.user.username)}">
-  <defs><style>@import url('${FIGTREE_FONT_IMPORT}');</style></defs>
+  ${cardTextStyle()}
   ${cardSurface(width, height, palette)}
   ${cardHeader({
     username: data.user.username,
@@ -145,7 +139,6 @@ function renderProfileCardSvg(
   ${metricSvg}
   ${graph ? `${divider(x, right, 144, palette)}\n  ${graph.svg}` : ""}
   ${cardFooter({
-    username: data.user.username,
     updatedAt: data.stats.updatedAt,
     palette,
     x,
@@ -175,15 +168,14 @@ export function renderProfileEmbedErrorSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale embed error">
-  <defs><style>@import url('${FIGTREE_FONT_IMPORT}');</style></defs>
+  ${cardTextStyle()}
   <g id="err-bg">
     ${cardSurface(width, height, palette)}
   </g>
-  <rect x="${x}" y="22" width="3" height="14" rx="1.5" fill="${palette.brand}"/>
-  <text x="${x + 12}" y="33" fill="${palette.muted}" font-size="10" font-weight="700" letter-spacing="0.1em" font-family="${FIGTREE_FONT_STACK}">Tokscale</text>
+  <text x="${x}" y="32" fill="${palette.text}" font-size="14" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Tokscale</text>
   ${divider(x, right, 46, palette)}
-  <text x="${x}" y="72" fill="${palette.title}" font-size="15" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(message)}</text>
-  <text x="${x}" y="94" fill="${palette.muted}" font-size="11" font-family="${FIGTREE_FONT_STACK}">Check the username or submit usage first.</text>
+  ${fittedText({ text: message, x, y: 72, maxWidth: right - x, fill: palette.text, fontSize: 15, minFontSize: 9, fontWeight: 600 })}
+  ${fittedText({ text: "Check the profile or try again later.", x, y: 94, maxWidth: right - x, fill: palette.muted, fontSize: 11, minFontSize: 8 })}
   <text x="${right}" y="106" fill="${palette.muted}" font-size="10" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">tokscale.ai</text>
 </svg>`;
 }

@@ -5,15 +5,16 @@ import {
   type EmbedNumberFormat,
   type EmbedRankFormat,
   type EmbedTheme,
-  FIGTREE_FONT_IMPORT,
   FIGTREE_FONT_STACK,
   cardFooter,
   cardHeader,
   cardSurface,
+  cardTextStyle,
   divider,
   escapeXml,
+  fittedText,
   formatRank,
-  gradeColors,
+  getRankColor,
   layoutContributions,
   resolvePalette,
 } from "./embedShared";
@@ -38,39 +39,22 @@ export function renderVitalsEmbedSvg(
 ): string {
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
-  const colors = gradeColors(palette);
   const contributions = options.contributions ?? [];
   const layout = layoutContributions(contributions);
-  const avgIntensity = contributions.length
-    ? contributions.reduce((sum, day) => sum + day.intensity, 0) /
-      contributions.length
+  const rangeCells = layout.cells.filter(({ inRange }) => inRange);
+  const avgIntensity = rangeCells.length
+    ? rangeCells.reduce((sum, day) => sum + day.intensity, 0) /
+      rangeCells.length
     : 0;
   const rank = data.stats.rank;
   const rankTotal = data.stats.rankTotal ?? null;
-  const rankFraction =
-    rank && rankTotal ? (rankTotal - rank + 1) / rankTotal : 0;
-  const signals = [
-    {
-      label: "Leaderboard",
-      value: rank
-        ? formatRank(rank, rankTotal, options.rankFormat)
-        : "Unranked",
-      fraction: rankFraction,
-      color: colors[4],
-    },
-    {
-      label: "Active days",
-      value: String(layout.activeDays),
-      fraction: Math.min(1, layout.activeDays / 365),
-      color: colors[3],
-    },
-    {
-      label: "Average intensity",
-      value: `${avgIntensity.toFixed(1)} / 4`,
-      fraction: Math.min(1, avgIntensity / 4),
-      color: colors[2],
-    },
-  ];
+  const rankText = rank
+    ? formatRank(rank, rankTotal, options.rankFormat)
+    : "Unranked";
+  const activityCoverage = Math.min(
+    1,
+    layout.activeDays / Math.max(1, layout.rangeDays),
+  );
   const right = W - PAD;
   const tokens = formatNumber(
     data.stats.totalTokens,
@@ -83,7 +67,7 @@ export function renderVitalsEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="vitals" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale usage signals for @${escapeXml(data.user.username)}">
-  <defs><style>@import url('${FIGTREE_FONT_IMPORT}');</style></defs>
+  ${cardTextStyle()}
   ${cardSurface(W, H, palette)}
   ${cardHeader({
     username: data.user.username,
@@ -92,24 +76,70 @@ export function renderVitalsEmbedSvg(
     x: PAD,
     y: 27,
     right,
-    eyebrow: "Tokscale",
   })}
-  <text x="${PAD}" y="88" fill="${palette.brand}" font-size="25" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(tokens)}</text>
-  <text x="${PAD}" y="104" fill="${palette.muted}" font-size="9" font-weight="600" letter-spacing="0.08em" font-family="${FIGTREE_FONT_STACK}">TOKENS</text>
-  <text x="${right}" y="88" fill="${palette.cost}" font-size="18" font-weight="700" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">${escapeXml(cost)}</text>
-  <text x="${right}" y="104" fill="${palette.muted}" font-size="9" font-weight="600" letter-spacing="0.08em" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">COST</text>
-  ${divider(PAD, right, 118, palette)}
-  ${signals
-    .map((signal, index) => {
-      const y = 140 + index * 28;
-      return `<text x="${PAD}" y="${y}" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${signal.label}</text>
-  <rect x="154" y="${y - 7}" width="244" height="5" rx="2.5" fill="${palette.graphGrade0}"/>
-  <rect x="154" y="${y - 7}" width="${(244 * Math.max(0, Math.min(1, signal.fraction))).toFixed(1)}" height="5" rx="2.5" fill="${signal.color}"/>
-  <text x="${right}" y="${y}" fill="${palette.text}" font-size="11" font-weight="700" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">${escapeXml(signal.value)}</text>`;
-    })
-    .join("\n  ")}
+  ${divider(PAD, right, 62, palette)}
+  <text x="${PAD}" y="82" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Active days · 1y</text>
+  ${fittedText({
+    text: String(layout.activeDays),
+    x: PAD,
+    y: 111,
+    maxWidth: 180,
+    fill: palette.brand,
+    fontSize: 30,
+    minFontSize: 10,
+    fontWeight: 600,
+  })}
+  <rect x="${PAD}" y="121" width="${right - PAD}" height="5" rx="2.5" fill="${palette.graphGrade0}"/>
+  <rect x="${PAD}" y="121" width="${((right - PAD) * activityCoverage).toFixed(1)}" height="5" rx="2.5" fill="${palette.brand}"/>
+  <text x="${right}" y="141" fill="${palette.muted}" font-size="10" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">${Math.round(activityCoverage * 100)}% of trailing year</text>
+  ${divider(PAD, right, 150, palette)}
+  <text x="${PAD}" y="166" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Tokens</text>
+  ${fittedText({
+    text: tokens,
+    x: PAD,
+    y: 186,
+    maxWidth: 210,
+    fill: palette.text,
+    fontSize: 16,
+    minFontSize: 8,
+    fontWeight: 600,
+  })}
+  <text x="264" y="166" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Cost</text>
+  ${fittedText({
+    text: cost,
+    x: right,
+    y: 186,
+    maxWidth: 210,
+    fill: palette.cost,
+    fontSize: 16,
+    minFontSize: 8,
+    fontWeight: 600,
+    textAnchor: "end",
+  })}
+  <text x="${PAD}" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Average intensity · 1y</text>
+  ${fittedText({
+    text: `${avgIntensity.toFixed(1)} / 4`,
+    x: PAD,
+    y: 219,
+    maxWidth: 210,
+    fill: palette.text,
+    fontSize: 13,
+    minFontSize: 8,
+    fontWeight: 600,
+  })}
+  <text x="264" y="201" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Rank · ${options.sortBy === "cost" ? "cost" : "tokens"}</text>
+  ${fittedText({
+    text: rankText,
+    x: right,
+    y: 219,
+    maxWidth: 210,
+    fill: getRankColor(rank, palette),
+    fontSize: 13,
+    minFontSize: 8,
+    fontWeight: 600,
+    textAnchor: "end",
+  })}
   ${cardFooter({
-    username: data.user.username,
     updatedAt: data.stats.updatedAt,
     palette,
     x: PAD,

@@ -5,14 +5,17 @@ import {
   type EmbedNumberFormat,
   type EmbedRankFormat,
   type EmbedTheme,
-  MONO_FONT_STACK,
+  FIGTREE_FONT_STACK,
   cardFooter,
   cardHeader,
   cardSurface,
+  cardTextStyle,
   contributionPanel,
   divider,
   escapeXml,
+  fittedText,
   formatRank,
+  getContributionWindow,
   getRankColor,
   layoutContributions,
   resolvePalette,
@@ -39,6 +42,7 @@ export function renderBlueprintEmbedSvg(
   const theme: EmbedTheme = options.theme === "light" ? "light" : "dark";
   const palette = resolvePalette(theme, options.color ?? null);
   const contributionDays = options.contributions ?? [];
+  const scopedContributionDays = getContributionWindow(contributionDays).days;
   const contributions =
     options.graph && contributionDays.length ? contributionDays : null;
   const right = W - PAD;
@@ -53,15 +57,15 @@ export function renderBlueprintEmbedSvg(
       )
     : "Unranked";
   const activity = layoutContributions(contributionDays);
-  const yearTokens = contributionDays.reduce(
+  const yearTokens = scopedContributionDays.reduce(
     (total, day) => total + Math.max(0, day.totalTokens || 0),
     0,
   );
-  const yearCost = contributionDays.reduce(
+  const yearCost = scopedContributionDays.reduce(
     (total, day) => total + Math.max(0, day.totalCost || 0),
     0,
   );
-  const peakDay = [...contributionDays].sort(
+  const peakDay = [...scopedContributionDays].sort(
     (left, right) =>
       right.totalTokens - left.totalTokens ||
       right.totalCost - left.totalCost ||
@@ -115,7 +119,7 @@ export function renderBlueprintEmbedSvg(
       id: "year-tokens",
       value: formatNumber(yearTokens, tokensCompact),
       label: "Tokens · 1y",
-      color: palette.brand,
+      color: palette.text,
     },
     {
       id: "year-cost",
@@ -133,13 +137,13 @@ export function renderBlueprintEmbedSvg(
         width: innerWidth,
         palette,
         contributions,
-        mono: true,
       })
     : null;
-  const height = graph ? Math.ceil(graphY + graph.height + 32) : 232;
+  const height = graph ? 367 : 232;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="blueprint" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale usage data sheet for @${escapeXml(data.user.username)}">
+  ${cardTextStyle()}
   ${cardSurface(W, height, palette)}
   ${cardHeader({
     username: data.user.username,
@@ -148,8 +152,6 @@ export function renderBlueprintEmbedSvg(
     x: PAD,
     y: 26,
     right,
-    eyebrow: "Tokscale",
-    mono: true,
   })}
   ${divider(PAD, right, 64, palette)}
   ${details
@@ -161,8 +163,18 @@ export function renderBlueprintEmbedSvg(
       const y = 87 + row * 29;
       const valueX = x + columnWidth - 14;
       return `<g data-detail="${detail.id}">
-    <text x="${(x + 14).toFixed(1)}" y="${y}" fill="${palette.muted}" font-size="10" font-family="${MONO_FONT_STACK}">${escapeXml(detail.label)}</text>
-    <text x="${valueX.toFixed(1)}" y="${y}" fill="${detail.color}" font-size="12" font-weight="700" text-anchor="end" font-family="${MONO_FONT_STACK}">${escapeXml(detail.value)}</text>
+    <text x="${(x + 14).toFixed(1)}" y="${y}" fill="${palette.muted}" font-size="10" font-family="${FIGTREE_FONT_STACK}">${escapeXml(detail.label)}</text>
+    ${fittedText({
+      text: detail.value,
+      x: valueX,
+      y,
+      maxWidth: 130,
+      fill: detail.color,
+      fontSize: 12,
+      minFontSize: 8,
+      fontWeight: 600,
+      textAnchor: "end",
+    })}
     <line x1="${(x + 14).toFixed(1)}" y1="${y + 11}" x2="${valueX.toFixed(1)}" y2="${y + 11}" stroke="${palette.divider}"/>
   </g>`;
     })
@@ -170,13 +182,11 @@ export function renderBlueprintEmbedSvg(
   <line x1="${(PAD + innerWidth / 2).toFixed(1)}" y1="76" x2="${(PAD + innerWidth / 2).toFixed(1)}" y2="${detailBottom}" stroke="${palette.divider}"/>
   ${graph ? `${divider(PAD, right, 196, palette)}\n  ${graph.svg}` : ""}
   ${cardFooter({
-    username: data.user.username,
     updatedAt: data.stats.updatedAt,
     palette,
     x: PAD,
     right,
     y: height - 16,
-    mono: true,
   })}
 </svg>`;
 }

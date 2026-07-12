@@ -5,14 +5,15 @@ import {
   type EmbedNumberFormat,
   type EmbedRankFormat,
   type EmbedTheme,
-  FIGTREE_FONT_IMPORT,
   FIGTREE_FONT_STACK,
   cardFooter,
   cardHeader,
   cardSurface,
+  cardTextStyle,
   contributionPanel,
   divider,
   escapeXml,
+  fittedText,
   formatRank,
   getRankColor,
   layoutContributions,
@@ -47,7 +48,7 @@ export function renderOrbitEmbedSvg(
     : "Unranked";
   const standing =
     rank && rankTotal
-      ? Math.max(0, Math.min(1, (rankTotal - rank + 1) / rankTotal))
+      ? Math.max(0, Math.min(1, (rankTotal - rank) / rankTotal))
       : 0;
   const layout = options.contributions?.length
     ? layoutContributions(options.contributions)
@@ -67,7 +68,7 @@ export function renderOrbitEmbedSvg(
         contributions,
       })
     : null;
-  const height = graph ? Math.ceil(graphY + graph.height + 32) : 248;
+  const height = graph ? 384 : 248;
   const statRows = [
     {
       label: "Tokens",
@@ -75,7 +76,7 @@ export function renderOrbitEmbedSvg(
         data.stats.totalTokens,
         (options.tokensFormat ?? "compact") === "compact",
       ),
-      color: palette.brand,
+      color: palette.text,
     },
     {
       label: "Cost",
@@ -98,7 +99,7 @@ export function renderOrbitEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="orbit" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale leaderboard standing for @${escapeXml(data.user.username)}">
-  <defs><style>@import url('${FIGTREE_FONT_IMPORT}');</style></defs>
+  ${cardTextStyle()}
   ${cardSurface(W, height, palette)}
   ${cardHeader({
     username: data.user.username,
@@ -107,11 +108,19 @@ export function renderOrbitEmbedSvg(
     x: PAD,
     y: 28,
     right,
-    eyebrow: "Tokscale",
   })}
   ${divider(PAD, right, 66, palette)}
   <text x="${PAD}" y="92" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">Rank · ${sortBy === "cost" ? "cost" : "tokens"}</text>
-  <text x="${PAD}" y="136" fill="${getRankColor(rank, palette)}" font-size="34" font-weight="700" font-family="${FIGTREE_FONT_STACK}">${escapeXml(rankText)}</text>
+  ${fittedText({
+    text: rankText,
+    x: PAD,
+    y: 136,
+    maxWidth: 236,
+    fill: getRankColor(rank, palette),
+    fontSize: 34,
+    minFontSize: 10,
+    fontWeight: 600,
+  })}
   <rect x="${PAD}" y="154" width="218" height="5" rx="2.5" fill="${palette.graphGrade0}"/>
   <rect x="${PAD}" y="154" width="${(218 * standing).toFixed(1)}" height="5" rx="2.5" fill="${palette.brand}"/>
   <text x="${PAD}" y="178" fill="${palette.muted}" font-size="10" font-family="${FIGTREE_FONT_STACK}">${rank && rankTotal ? `Ahead of ${Math.round(standing * 100)}% of ranked profiles` : "Ranking pending"}</text>
@@ -119,12 +128,21 @@ export function renderOrbitEmbedSvg(
     .map((stat, index) => {
       const y = 91 + index * 43;
       return `<text x="318" y="${y}" fill="${palette.muted}" font-size="10" font-weight="600" font-family="${FIGTREE_FONT_STACK}">${stat.label}</text>
-  <text x="${right}" y="${y + 20}" fill="${stat.color}" font-size="18" font-weight="700" text-anchor="end" font-family="${FIGTREE_FONT_STACK}">${escapeXml(stat.value)}</text>`;
+  ${fittedText({
+    text: stat.value,
+    x: right,
+    y: y + 20,
+    maxWidth: right - 318,
+    fill: stat.color,
+    fontSize: 18,
+    minFontSize: 8,
+    fontWeight: 600,
+    textAnchor: "end",
+  })}`;
     })
     .join("\n  ")}
   ${graph ? `${divider(PAD, right, 224, palette)}\n  ${graph.svg}` : ""}
   ${cardFooter({
-    username: data.user.username,
     updatedAt: data.stats.updatedAt,
     palette,
     x: PAD,

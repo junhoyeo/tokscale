@@ -13,6 +13,7 @@ import {
 } from "react";
 import styled, { css } from "styled-components";
 import { SOURCE_COLORS, SOURCE_DISPLAY_NAMES } from "@/lib/constants";
+import { getContributionIntensity } from "@/lib/embed/embedShared";
 import type {
   ClientContribution,
   ClientType,
@@ -22,6 +23,7 @@ import type {
 import {
   colorPalettes,
   DEFAULT_PALETTE,
+  getDarkGradeColors,
   getPalette,
   getPaletteNames,
   type ColorPaletteName,
@@ -481,15 +483,6 @@ export function getContributionDayMessageCount(
   );
 }
 
-function tokenIntensity(tokens: number, maxTokens: number): 0 | 1 | 2 | 3 | 4 {
-  if (tokens <= 0 || maxTokens <= 0) return 0;
-  const ratio = tokens / maxTokens;
-  if (ratio >= 0.75) return 4;
-  if (ratio >= 0.5) return 3;
-  if (ratio >= 0.25) return 2;
-  return 1;
-}
-
 export function createContributionCalendar(
   contributions: readonly DailyContribution[],
   rangeStart?: string | null,
@@ -572,7 +565,7 @@ export function createContributionCalendar(
       date,
       inRange,
       intensity: inRange
-        ? tokenIntensity(contribution?.tokens ?? 0, maxTokens)
+        ? getContributionIntensity(contribution?.tokens ?? 0, maxTokens)
         : 0,
       tokens: inRange ? (contribution?.tokens ?? 0) : 0,
     });
@@ -811,85 +804,6 @@ function cellTitle(cell: ContributionCell): string {
   return `${date}: ${tokenFormatter.format(cell.tokens)} ${tokenLabel}`;
 }
 
-function mixHexWithWhite(color: string, colorWeight: number): string {
-  const match = /^#([0-9a-f]{6})$/i.exec(color);
-  if (!match) return color;
-
-  const channels = [0, 2, 4].map((offset) =>
-    Number.parseInt(match[1].slice(offset, offset + 2), 16),
-  );
-  return `#${channels
-    .map((channel) =>
-      Math.round(channel * colorWeight + 255 * (1 - colorWeight))
-        .toString(16)
-        .padStart(2, "0"),
-    )
-    .join("")}`;
-}
-
-const CONTRIBUTION_EMPTY_HEX = "#191f2b";
-const MINIMUM_ACTIVE_CONTRAST = 3;
-const MINIMUM_LUMINANCE_STEP = 0.02;
-const darkPaletteCache = new WeakMap<GraphColorPalette, readonly string[]>();
-
-function relativeLuminance(color: string): number {
-  const match = /^#([0-9a-f]{6})$/i.exec(color);
-  if (!match) return 0;
-
-  const channels = [0, 2, 4].map((offset) =>
-    Number.parseInt(match[1].slice(offset, offset + 2), 16),
-  );
-  const linear = channels.map((channel) => {
-    const normalized = channel / 255;
-    return normalized <= 0.04045
-      ? normalized / 12.92
-      : ((normalized + 0.055) / 1.055) ** 2.4;
-  });
-  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
-}
-
-function contrastRatio(left: string, right: string): number {
-  const luminances = [relativeLuminance(left), relativeLuminance(right)].sort(
-    (a, b) => b - a,
-  );
-  return (luminances[0] + 0.05) / (luminances[1] + 0.05);
-}
-
-function darkContributionRamp(palette: GraphColorPalette): readonly string[] {
-  const cached = darkPaletteCache.get(palette);
-  if (cached) return cached;
-
-  const bases = [
-    palette.grade4,
-    palette.grade3,
-    palette.grade2,
-    palette.grade1,
-  ];
-  let previousLuminance = Number.NEGATIVE_INFINITY;
-  const colors = bases.map((baseColor, index) => {
-    for (let percentage = 100; percentage >= 0; percentage -= 1) {
-      const candidate = mixHexWithWhite(baseColor, percentage / 100);
-      const luminance = relativeLuminance(candidate);
-      const enoughSeparation =
-        index === 0 || luminance >= previousLuminance + MINIMUM_LUMINANCE_STEP;
-
-      if (
-        enoughSeparation &&
-        contrastRatio(candidate, CONTRIBUTION_EMPTY_HEX) >=
-          MINIMUM_ACTIVE_CONTRAST
-      ) {
-        previousLuminance = luminance;
-        return candidate;
-      }
-    }
-
-    previousLuminance = 1;
-    return "#ffffff";
-  });
-  darkPaletteCache.set(palette, colors);
-  return colors;
-}
-
 export function getContributionColor(
   palette: GraphColorPalette,
   level: ContributionCell["intensity"],
@@ -899,7 +813,7 @@ export function getContributionColor(
   // The shared palettes are light-canvas ramps. Reverse them for this
   // always-dark surface, then lift only colors that need contrast or a clear
   // step from the preceding intensity instead of whitening every grade.
-  return darkContributionRamp(palette)[level - 1] ?? palette.grade1;
+  return getDarkGradeColors(palette)[level - 1] ?? palette.grade1;
 }
 
 const Figure = styled.figure`
