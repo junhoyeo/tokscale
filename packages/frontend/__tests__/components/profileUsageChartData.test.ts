@@ -9,6 +9,7 @@ import type {
 import {
   BLANK_USAGE_MODEL,
   DAILY_REMAINDER_USAGE_MODEL,
+  MAX_LEGEND_MODELS,
   OTHER_USAGE_PROVIDERS,
   PROVIDER_REMAINDER_USAGE_MODEL,
   UNATTRIBUTED_USAGE_PROVIDER,
@@ -16,6 +17,7 @@ import {
   buildUsageChartData,
   fillMissingUsageDays,
   getActiveTooltipRows,
+  selectLegendModels,
   sumTokenBreakdown,
   toTrailingAverage,
 } from "../../src/components/profile/usageChartData";
@@ -733,5 +735,130 @@ describe("profile usage chart aggregation", () => {
     expect(fillMissingUsageDays(observed, "2025-01-01", "2026-12-31")).toEqual(
       observed,
     );
+  });
+});
+
+describe("profile usage chart legend", () => {
+  it("ranks models by total descending and cuts off at the limit", () => {
+    const chart = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-08-01", [
+          client("claude", { input: 100 }, 10, "m-a"),
+          client("claude", { input: 80 }, 8, "m-b"),
+          client("claude", { input: 60 }, 6, "m-c"),
+          client("claude", { input: 40 }, 4, "m-d"),
+        ]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+    );
+
+    const { visible, hiddenCount } = selectLegendModels(chart.series, 2);
+
+    expect(visible.map(({ label }) => label)).toEqual(["m-a", "m-b"]);
+    expect(hiddenCount).toBe(2);
+  });
+
+  it("excludes remainder, Other, blank, and daily-remainder series", () => {
+    const nested = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-08-02", [
+          nestedClient(
+            "claude",
+            {
+              opus: model({ input: 40 }, 4),
+              "": model({ input: 10 }, 1),
+              "<synthetic>": model({ input: 5 }, 0.5),
+            },
+            { input: 100 },
+            10,
+          ),
+        ]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+    );
+    const legacyDay = day("2026-08-03", []);
+    legacyDay.totals.tokens = 500;
+    legacyDay.totals.cost = 5;
+    const legacy = buildUsageChartData(
+      aggregateDailyUsage([legacyDay]),
+      "tokens",
+      "all",
+      "daily",
+    );
+    const capped = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-08-04", [
+          client("codex", { input: 30 }, 3, "r1"),
+          client("codex", { input: 20 }, 2, "r2"),
+          client("codex", { input: 10 }, 1, "r3"),
+        ]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+      30,
+      2,
+    );
+
+    // The nested client exposes a real model, a blank model, a synthetic
+    // model, and a provider remainder; the legacy day exposes a daily
+    // remainder; the capped chart exposes an "Other" series remainder.
+    expect(nested.series.map(({ kind }) => kind)).toEqual(
+      expect.arrayContaining([
+        "model",
+        "blank-model",
+        "synthetic",
+        "provider-remainder",
+      ]),
+    );
+    expect(legacy.series.some(({ kind }) => kind === "daily-remainder")).toBe(
+      true,
+    );
+    expect(capped.series.some(({ kind }) => kind === "series-remainder")).toBe(
+      true,
+    );
+
+    const combined = [
+      ...nested.series,
+      ...legacy.series,
+      ...capped.series,
+    ];
+    const { visible } = selectLegendModels(combined, 10);
+
+    expect(new Set(visible.map(({ label }) => label))).toEqual(
+      new Set(["opus", "Synthetic", "r1"]),
+    );
+  });
+
+  it("disambiguates duplicate model labels across providers", () => {
+    const chart = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-08-05", [
+          client("codex", { input: 10 }, 1, "shared-model"),
+          client("claude", { input: 20 }, 2, "shared-model"),
+        ]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+    );
+
+    const { visible } = selectLegendModels(chart.series, MAX_LEGEND_MODELS);
+    const claudeSeries = chart.series.find(
+      ({ provider }) => provider === "claude",
+    );
+    const codexSeries = chart.series.find(
+      ({ provider }) => provider === "codex",
+    );
+
+    expect(visible.map(({ label }) => label)).toEqual([
+      `shared-model · ${claudeSeries?.providerLabel}`,
+      `shared-model · ${codexSeries?.providerLabel}`,
+    ]);
+    expect(new Set(visible.map(({ label }) => label)).size).toBe(2);
   });
 });

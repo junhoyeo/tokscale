@@ -18,6 +18,7 @@ import {
   reconcileContributionSelectionRange,
   resolveContributionRange,
   resolveContributionSelectedDate,
+  reverseContributionCalendarWeeks,
 } from "../../src/components/profile/ProfileContributionGraph";
 import { BOX_BORDER_RADIUS, BOX_WIDTH } from "../../src/lib/constants";
 import type { DailyContribution } from "../../src/lib/types";
@@ -595,5 +596,43 @@ describe("profile contribution calendar", () => {
         expect(contrastRatio(color, "#191f2b")).toBeGreaterThanOrEqual(3);
       }
     }
+  });
+
+  it("mirrors 2D calendar weeks so the newest week renders first", () => {
+    const calendar = createContributionCalendar(
+      [contribution("2026-06-15", 200, 1)],
+      "2026-05-01",
+      "2026-07-31",
+    );
+
+    const reversed = reverseContributionCalendarWeeks(
+      calendar.cells,
+      calendar.monthMarkers,
+      calendar.weekCount,
+    );
+
+    // Same cells, regrouped so the newest chronological week leads.
+    expect(calendar.cells.length % 7).toBe(0);
+    expect(reversed.cells).toHaveLength(calendar.cells.length);
+    expect(reversed.cells.slice(0, 7)).toEqual(calendar.cells.slice(-7));
+    expect(reversed.cells.slice(-7)).toEqual(calendar.cells.slice(0, 7));
+
+    // Month markers move onto the mirrored week columns.
+    expect(calendar.monthMarkers.length).toBeGreaterThan(0);
+    expect(reversed.monthMarkers).toEqual(
+      calendar.monthMarkers.map((marker) => ({
+        ...marker,
+        weekIndex: calendar.weekCount - 1 - marker.weekIndex,
+      })),
+    );
+
+    // Reversing twice is the identity transform (the non-reversed rendering).
+    const roundTrip = reverseContributionCalendarWeeks(
+      reversed.cells,
+      reversed.monthMarkers,
+      calendar.weekCount,
+    );
+    expect(roundTrip.cells).toEqual(calendar.cells);
+    expect(roundTrip.monthMarkers).toEqual(calendar.monthMarkers);
   });
 });

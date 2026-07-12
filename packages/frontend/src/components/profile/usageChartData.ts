@@ -17,6 +17,7 @@ export const SERIES_REMAINDER_USAGE_MODEL = "__series-remainder__" as const;
 
 export const DEFAULT_USAGE_AVERAGE_WINDOW = 30;
 export const MAX_USAGE_CHART_SERIES = 128;
+export const MAX_LEGEND_MODELS = 6;
 
 /** @deprecated Model-aware charts use MAX_USAGE_CHART_SERIES instead. */
 export const MAX_VISIBLE_USAGE_PROVIDERS = 6;
@@ -873,6 +874,51 @@ export function buildUsageChartData(
     maxDailyTotal: Math.max(0, ...dailyTotals),
     total: rawDailyTotals.reduce((sum, value) => sum + value, 0),
   };
+}
+
+export interface LegendModel {
+  id: string;
+  label: string;
+  color: string;
+}
+
+/**
+ * Pick the highest-usage real model series for the chart legend. Remainder,
+ * "Other", blank, and daily-remainder buckets are excluded so the legend mirrors
+ * exactly what the model-shaded areas plot. Duplicate labels are disambiguated
+ * with their provider the same way the tooltip does.
+ */
+export function selectLegendModels(
+  series: readonly UsageChartSeries[],
+  limit: number,
+): { visible: LegendModel[]; hiddenCount: number } {
+  const models = series.filter(
+    ({ kind }) => kind === "model" || kind === "synthetic",
+  );
+  const ranked = [...models].sort(
+    (left, right) =>
+      right.total - left.total ||
+      left.label.localeCompare(right.label) ||
+      left.id.localeCompare(right.id),
+  );
+  const safeLimit = Math.max(0, Math.floor(finiteUsage(limit)));
+  const top = ranked.slice(0, safeLimit);
+
+  const labelCounts = new Map<string, number>();
+  for (const item of top) {
+    labelCounts.set(item.label, (labelCounts.get(item.label) ?? 0) + 1);
+  }
+
+  const visible = top.map((item) => ({
+    id: item.id,
+    label:
+      (labelCounts.get(item.label) ?? 0) > 1
+        ? `${item.label} · ${item.providerLabel}`
+        : item.label,
+    color: item.color,
+  }));
+
+  return { visible, hiddenCount: ranked.length - top.length };
 }
 
 /** Positive active-day rows in visual descending order with stable ties. */

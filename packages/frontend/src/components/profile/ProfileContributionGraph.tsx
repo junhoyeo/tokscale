@@ -7,13 +7,16 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type FocusEvent,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent,
 } from "react";
 import styled, { css } from "styled-components";
-import { SOURCE_COLORS, SOURCE_DISPLAY_NAMES } from "@/lib/constants";
+import { SourceLogo } from "@/components/SourceLogo";
+import { SOURCE_COLORS, SOURCE_DISPLAY_NAMES, SOURCE_LOGOS } from "@/lib/constants";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 import { getContributionIntensity } from "@/lib/embed/embedShared";
 import type {
   ClientContribution,
@@ -176,6 +179,10 @@ const LEGACY_COST_FLOAT_EPSILON = 1e-6;
 export const PROFILE_CONTRIBUTION_CELL_GAP = 2;
 export const PROFILE_CONTRIBUTION_CELL_RADIUS = 1.6;
 export const PROFILE_CONTRIBUTION_CELL_SIZE = 8;
+const NEWEST_FIRST_STORAGE_KEY = "tokscale:contributions-newest-first";
+const NEWEST_FIRST_DESKTOP_QUERY = "(min-width: 1360px)";
+
+const subscribeContributionMounted = () => () => {};
 
 export function getContributionScrollOffset(
   currentScrollLeft: number,
@@ -933,6 +940,42 @@ export function getContributionColor(
   return getDarkGradeColors(palette)[level - 1] ?? palette.grade1;
 }
 
+function clientHasLogo(client: ClientType): boolean {
+  return Object.prototype.hasOwnProperty.call(
+    SOURCE_LOGOS,
+    String(client).toLowerCase(),
+  );
+}
+
+export interface ContributionDisplayWeeks {
+  cells: ContributionCell[];
+  monthMarkers: MonthMarker[];
+}
+
+// The 2D calendar is laid out column-major with 7 rows per week, so reversing
+// the chronological weeks (chunks of 7 cells) places the newest week on the
+// left. Month markers are remapped onto the mirrored week columns; day-of-week
+// rows are unchanged. Applying this twice returns the original ordering.
+export function reverseContributionCalendarWeeks(
+  cells: readonly ContributionCell[],
+  monthMarkers: readonly MonthMarker[],
+  weekCount: number,
+): ContributionDisplayWeeks {
+  const weeks: ContributionCell[][] = [];
+  for (let offset = 0; offset < cells.length; offset += 7) {
+    weeks.push(cells.slice(offset, offset + 7));
+  }
+  weeks.reverse();
+
+  return {
+    cells: weeks.flat(),
+    monthMarkers: monthMarkers.map((marker) => ({
+      ...marker,
+      weekIndex: weekCount - 1 - marker.weekIndex,
+    })),
+  };
+}
+
 const Figure = styled.figure`
   width: 100%;
   min-width: 0;
@@ -1452,6 +1495,33 @@ const LegendSwatch = styled.span<{ $color: string }>`
   background: ${(props) => props.$color};
   border-radius: 2px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+`;
+
+const NewestFirstControl = styled.label`
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--service-text-muted);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+  cursor: pointer;
+
+  input {
+    width: 0.8125rem;
+    height: 0.8125rem;
+    margin: 0;
+    accent-color: var(--service-focus);
+    cursor: pointer;
+  }
+
+  &:focus-within {
+    color: var(--service-text);
+  }
+
+  @media (pointer: coarse) {
+    min-height: 2.75rem;
+  }
 `;
 
 const CellTooltip = styled.div<{
@@ -2018,10 +2088,14 @@ function ContributionDayBreakdown({
                 <ClientSection key={client.client}>
                   <ClientHeader>
                     <ClientIdentity>
-                      <ClientDot
-                        $color={getClientColor(client.client, palette)}
-                        aria-hidden="true"
-                      />
+                      {clientHasLogo(client.client) ? (
+                        <SourceLogo sourceId={client.client} height={14} />
+                      ) : (
+                        <ClientDot
+                          $color={getClientColor(client.client, palette)}
+                          aria-hidden="true"
+                        />
+                      )}
                       <ClientName>{getClientName(client.client)}</ClientName>
                     </ClientIdentity>
                     <ClientTotal>
@@ -2138,6 +2212,38 @@ export function ProfileContributionGraph({
     useState<ColorPaletteName>(DEFAULT_PALETTE);
   const [internalView, setInternalView] =
     useState<ProfileContributionView>("2d");
+  // Reversal is resolved after mount so the server render and the first client
+  // paint share a stable, chronological default (no hydration mismatch). The
+  // explicit toggle, once set, is persisted and wins over the responsive
+  // default (newest-first on the desktop 2-column layout, chronological below).
+  const isMounted = useSyncExternalStore(
+    subscribeContributionMounted,
+    () => true,
+    () => false,
+  );
+  const isDesktopReverseDefault = useMediaQuery(NEWEST_FIRST_DESKTOP_QUERY);
+  const [storedNewestFirst, setStoredNewestFirst] = useState<boolean | null>(
+    null,
+  );
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(NEWEST_FIRST_STORAGE_KEY);
+      setStoredNewestFirst(stored === "1" ? true : stored === "0" ? false : null);
+    } catch {
+      // localStorage may be unavailable (private mode / disabled).
+    }
+  }, []);
+  const newestFirst = isMounted
+    ? (storedNewestFirst ?? isDesktopReverseDefault)
+    : false;
+  const commitNewestFirst = (next: boolean) => {
+    setStoredNewestFirst(next);
+    try {
+      window.localStorage.setItem(NEWEST_FIRST_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      // Ignore persistence failures; the in-memory choice still applies.
+    }
+  };
   const selectedDate =
     providedSelectedDate === undefined
       ? internalSelectedDate
@@ -2159,6 +2265,21 @@ export function ProfileContributionGraph({
       ),
     [contributions, rangeStart, rangeEnd, selectableRangeEnd],
   );
+  // Only the 2D calendar mirrors; the 3D view stays chronological.
+  const reversed = newestFirst && view === "2d";
+  const displayWeeks = useMemo(
+    () =>
+      reversed
+        ? reverseContributionCalendarWeeks(
+            calendar.cells,
+            calendar.monthMarkers,
+            calendar.weekCount,
+          )
+        : null,
+    [reversed, calendar],
+  );
+  const displayCells = displayWeeks?.cells ?? calendar.cells;
+  const displayMonthMarkers = displayWeeks?.monthMarkers ?? calendar.monthMarkers;
   const activeDayLabel = `${calendar.activeDays.toLocaleString("en-US")} active ${
     calendar.activeDays === 1 ? "day" : "days"
   }`;
@@ -2233,11 +2354,7 @@ export function ProfileContributionGraph({
   };
 
   const positionCellTooltip = (cell: ContributionCell, target: Element) => {
-    if (
-      !cell.selectable ||
-      cell.date === selectedDate ||
-      typeof window === "undefined"
-    ) {
+    if (!cell.inRange || typeof window === "undefined") {
       setTooltip(null);
       return;
     }
@@ -2288,6 +2405,7 @@ export function ProfileContributionGraph({
   const handleCellKeyDown = (
     cell: ContributionCell,
     event: KeyboardEvent<Element>,
+    orderedCells: readonly ContributionCell[] = calendar.cells,
   ) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -2320,7 +2438,7 @@ export function ProfileContributionGraph({
 
     event.preventDefault();
     const nextDate = getContributionFocusDate(
-      calendar.cells,
+      orderedCells,
       cell.date,
       event.key as ContributionNavigationKey,
     );
@@ -2437,7 +2555,7 @@ export function ProfileContributionGraph({
           {view === "2d" ? (
             <CalendarBody id={calendarId} ref={calendarScrollRef}>
               <MonthRow $weeks={calendar.weekCount} aria-hidden="true">
-                {calendar.monthMarkers.map((marker) => (
+                {displayMonthMarkers.map((marker) => (
                   <Month
                     key={`${marker.weekIndex}-${marker.label}`}
                     $compactVisible={marker.compactVisible}
@@ -2461,7 +2579,7 @@ export function ProfileContributionGraph({
                   data-contribution-hit-surface="2d"
                   onClick={selectNearestCell}
                 >
-                  {calendar.cells.map((cell) => (
+                  {displayCells.map((cell) => (
                     <Cell
                       key={cell.date}
                       type="button"
@@ -2470,12 +2588,12 @@ export function ProfileContributionGraph({
                           cellRefs.current.set(cell.date, node);
                         else cellRefs.current.delete(cell.date);
                       }}
-                      disabled={!cell.selectable}
+                      disabled={!cell.inRange}
                       tabIndex={
                         cell.selectable && cell.date === tabbableDate ? 0 : -1
                       }
-                      aria-hidden={cell.selectable ? undefined : true}
-                      aria-label={cell.selectable ? cellTitle(cell) : undefined}
+                      aria-hidden={cell.inRange ? undefined : true}
+                      aria-label={cell.inRange ? cellTitle(cell) : undefined}
                       aria-current={
                         cell.selectable && cell.date === selectedDate
                           ? "date"
@@ -2510,7 +2628,9 @@ export function ProfileContributionGraph({
                       }}
                       onFocus={(event) => handleCellFocus(cell, event)}
                       onBlur={() => setTooltip(null)}
-                      onKeyDown={(event) => handleCellKeyDown(cell, event)}
+                      onKeyDown={(event) =>
+                        handleCellKeyDown(cell, event, displayCells)
+                      }
                     />
                   ))}
                 </Grid>
@@ -2567,7 +2687,7 @@ export function ProfileContributionGraph({
                       $selected={selected}
                       onClick={interactive ? () => selectCell(cell) : undefined}
                       onPointerEnter={(event) =>
-                        interactive && handleCellPointerEnter(cell, event)
+                        handleCellPointerEnter(cell, event)
                       }
                       onPointerLeave={(event) => {
                         if (document.activeElement !== event.currentTarget) {
@@ -2602,7 +2722,7 @@ export function ProfileContributionGraph({
               </IsometricSvg>
             </IsometricBody>
           )}
-          {tooltip && tooltip.cell.date !== selectedDate && (
+          {tooltip && (
             <CellTooltip
               id={tooltipId}
               role="tooltip"
@@ -2639,6 +2759,20 @@ export function ProfileContributionGraph({
                 ))}
               </PaletteSelect>
             </PaletteControl>
+            {view === "2d" && (
+              <NewestFirstControl title="Show newest activity on the left">
+                <input
+                  type="checkbox"
+                  name="profile-contribution-newest-first"
+                  aria-label="Show newest activity on the left"
+                  checked={newestFirst}
+                  onChange={(event) =>
+                    commitNewestFirst(event.currentTarget.checked)
+                  }
+                />
+                <span>Newest first</span>
+              </NewestFirstControl>
+            )}
             <Legend aria-label="Contribution intensity, low to high">
               <span>Low</span>
               <LegendSwatches>

@@ -15,11 +15,13 @@ import type { DailyContribution } from "@/lib/types";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
 import {
   ALL_USAGE_PROVIDERS,
+  MAX_LEGEND_MODELS,
   aggregateDailyUsage,
   buildUsageChartData,
   getActiveTooltipRows,
   getUsageProviderTotals,
   providerColor,
+  selectLegendModels,
   toTrailingAverage,
   type UsageChartSeries,
   type UsageMetric,
@@ -1016,20 +1018,9 @@ export function ProfileUsageChart({
     ],
   );
 
-  const providerLegend = useMemo(
-    () =>
-      providerTotals
-        .filter(
-          ({ provider }) =>
-            selectedProvider === ALL_USAGE_PROVIDERS ||
-            provider === selectedProvider,
-        )
-        .sort(
-          (left, right) =>
-            right[metric] - left[metric] ||
-            left.provider.localeCompare(right.provider),
-        ),
-    [providerTotals, selectedProvider, metric],
+  const modelLegend = useMemo(
+    () => selectLegendModels(chartData.series, MAX_LEGEND_MODELS),
+    [chartData.series],
   );
 
   const setActiveIndex = (index: number, announce = false) => {
@@ -1328,14 +1319,19 @@ export function ProfileUsageChart({
         </VisuallyHidden>
       </PlotRegion>
 
-      {providerLegend.length > 0 && (
-        <Legend role="list" aria-label="Usage providers">
-          {providerLegend.map(({ provider }) => (
-            <LegendItem key={provider}>
-              <Swatch $color={providerColor(provider)} aria-hidden="true" />
-              <span>{providerName(provider)}</span>
+      {modelLegend.visible.length > 0 && (
+        <Legend role="list" aria-label="Usage models">
+          {modelLegend.visible.map((entry) => (
+            <LegendItem key={entry.id}>
+              <Swatch $color={entry.color} aria-hidden="true" />
+              <span>{entry.label}</span>
             </LegendItem>
           ))}
+          {modelLegend.hiddenCount > 0 && (
+            <LegendItem>
+              <span>+{modelLegend.hiddenCount} more</span>
+            </LegendItem>
+          )}
         </Legend>
       )}
 
