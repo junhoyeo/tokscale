@@ -535,7 +535,7 @@ define_clients!(
     DevinCli = 37 => {
         id: "devin-cli",
         root: PathRoot::XdgData,
-        relative: "devin/cli",
+        relative: "devin/cli/sessions.db",
         pattern: "sessions.db",
         headless: false,
         parse_local: true,
@@ -636,7 +636,7 @@ mod tests {
     fn test_devincli_client_registered_as_local_session_source() {
         let client =
             ClientId::from_str("devin-cli").expect("devin-cli client should be registered");
-        assert_eq!(client.data().relative_path, "devin/cli");
+        assert_eq!(client.data().relative_path, "devin/cli/sessions.db");
         assert_eq!(client.data().pattern, "sessions.db");
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);

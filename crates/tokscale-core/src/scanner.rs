@@ -95,6 +95,8 @@ pub struct ScanResult {
     pub micode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
+    /// Devin CLI SQLite database at `~/.local/share/devin/cli/sessions.db`.
+    pub devin_db: Option<PathBuf>,
 }
 
 impl Default for ScanResult {
@@ -113,6 +115,7 @@ impl Default for ScanResult {
             zcode_db: None,
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
+            devin_db: None,
         }
     }
 }
@@ -1385,6 +1388,15 @@ fn scan_all_clients_with_env_strategy_inner(
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&kilo_db_path).exists() {
             result.kilo_db = Some(PathBuf::from(kilo_db_path));
+        }
+    }
+
+    if enabled.contains(&ClientId::DevinCli) {
+        let devin_db_path = ClientId::DevinCli
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        if std::path::Path::new(&devin_db_path).exists() {
+            result.devin_db = Some(PathBuf::from(devin_db_path));
         }
     }
 

@@ -952,6 +952,10 @@ pub enum ClientFilter {
     Opencodereview,
     Codebuddy,
     Workbuddy,
+    #[value(name = "devin-cli")]
+    DevinCli,
+    #[value(name = "devin-desktop")]
+    DevinDesktop,
     Synthetic,
 }
 
@@ -998,6 +1002,8 @@ impl ClientFilter {
             Self::Opencodereview => "opencodereview",
             Self::Codebuddy => "codebuddy",
             Self::Workbuddy => "workbuddy",
+            Self::DevinCli => "devin-cli",
+            Self::DevinDesktop => "devin-desktop",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1047,6 +1053,8 @@ impl ClientFilter {
             Self::Opencodereview => Some(ClientId::OpenCodeReview),
             Self::Codebuddy => Some(ClientId::CodeBuddy),
             Self::Workbuddy => Some(ClientId::WorkBuddy),
+            Self::DevinCli => Some(ClientId::DevinCli),
+            Self::DevinDesktop => Some(ClientId::DevinDesktop),
             Self::Synthetic => None,
         }
     }
@@ -1093,6 +1101,8 @@ impl ClientFilter {
             ClientId::OpenCodeReview => Self::Opencodereview,
             ClientId::CodeBuddy => Self::Codebuddy,
             ClientId::WorkBuddy => Self::Workbuddy,
+            ClientId::DevinCli => Self::DevinCli,
+            ClientId::DevinDesktop => Self::DevinDesktop,
         }
     }
 
@@ -3731,6 +3741,8 @@ fn capitalize_client(client: &str) -> String {
         "zcode" => "ZCode".to_string(),
         "codebuddy" => "CodeBuddy".to_string(),
         "workbuddy" => "WorkBuddy".to_string(),
+        "devin-cli" => "Devin CLI".to_string(),
+        "devin-desktop" => "Devin Desktop".to_string(),
         other => other.to_string(),
     }
 }
