@@ -1136,7 +1136,7 @@ const Cell = styled.button<{
   visibility: ${(props) => (props.$inRange ? "visible" : "hidden")};
   background: ${(props) => props.$color};
   border: 0;
-  border-radius: clamp(1px, 0.25cqw, 2px);
+  border-radius: 0;
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.035),
     ${(props) =>
