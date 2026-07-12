@@ -513,6 +513,50 @@ describe("GET /api/users/[username]", () => {
     ]);
   });
 
+  it("clamps leap-day rolling ranges to the prior year's last valid day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-02-29T12:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-leap-day",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2024-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 0,
+        totalCost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 0,
+        earliestDate: null,
+        latestDate: null,
+      },
+    ]);
+    mockState.pushSelectResult([]);
+    mockState.pushSelectResult([]);
+    mockState.pushExecuteResult([]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/users/alice"),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.chartRange).toEqual({
+      start: "2023-02-28",
+      end: "2024-02-29",
+    });
+  });
+
   it("recalculates profile overview stats from daily rows for rolling periods", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-28T12:00:00.000Z"));

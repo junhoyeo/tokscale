@@ -58,8 +58,14 @@ function getRollingProfileDateRange(
   const end = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
   );
-  const start = new Date(end);
-  start.setUTCFullYear(start.getUTCFullYear() - 1);
+  const targetYear = end.getUTCFullYear() - 1;
+  const month = end.getUTCMonth();
+  const lastValidDay = new Date(
+    Date.UTC(targetYear, month + 1, 0),
+  ).getUTCDate();
+  const start = new Date(
+    Date.UTC(targetYear, month, Math.min(end.getUTCDate(), lastValidDay)),
+  );
 
   return {
     start: toUtcDateString(start),
