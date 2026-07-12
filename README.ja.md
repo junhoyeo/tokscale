@@ -861,6 +861,8 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 
 プロジェクトレベルの `.codex` ディレクトリや、インポートした Gemini/OpenClaw 履歴など、恒久的な追加ルートには `scanner.extraScanPaths` を使用してください。Tokscale は `$HERMES_HOME/profiles/*/state.db` 以下の Hermes プロファイルデータベースを自動的に検出します（`HERMES_HOME` が未設定の場合は `~/.hermes/profiles/*/state.db`）。標準外の Hermes プロファイル場所にのみ `scanner.extraScanPaths.hermes` を使用してください。Hermes のエントリは `state.db` を含むプロファイルディレクトリ、または `state.db` ファイルを直接指すことができます。Tokscale はこれらのパスを毎回デフォルトのスキャンルートとマージし、重複するルートを正規パスで重複排除します。
 
+#### Minutely タブの有効化
+
 Minutely タブはトークン使用量を分単位で表示し、バーストパターンの診断、単一セッションのデバッグ、`autoRefreshEnabled` と組み合わせたほぼリアルタイムの監視に最も有用です。分単位の集計はデータ読み込み時にすべての解析済みメッセージを処理するため、ほとんどのユーザーには不要な RAM と CPU コストが発生します。そのため既定では非表示になっています。
 
 有効化するには、`~/.config/tokscale/settings.json` で `minutelyTabEnabled` を `true` に設定します：
@@ -872,20 +874,6 @@ Minutely タブはトークン使用量を分単位で表示し、バースト�
 ```
 
 再起動後、タブストリップの Hourly と Stats の間に Minutely タブが表示され、Tab / BackTab / Left / Right ナビゲーションがそれを循環します。フラグを `false` に戻すとタブは再び非表示になり、集計もスキップされます。
-
-#### Minutely タブの有効化
-
-Minutely タブはトークン使用量を分単位で表示します。バーストパターンの診断、単一セッションのデバッグ、`autoRefreshEnabled` と併用したほぼリアルタイムのアクティビティ監視に最も役立ちます。分単位の集計はデータ読み込み時に解析済みの全メッセージに対して実行され、多くのユーザーには不要な RAM と CPU のコストが増えるため、デフォルトでは非表示になっています。
-
-有効化するには、`~/.config/tokscale/settings.json` で `minutelyTabEnabled` を `true` に設定します:
-
-```json
-{
-  "minutelyTabEnabled": true
-}
-```
-
-再起動後、Minutely タブはタブストリップの Hourly と Stats の間に表示され、Tab / BackTab / Left / Right のナビゲーションで切り替えられます。フラグを `false` に戻すと、タブが非表示になり、集計も再びスキップされます。
 
 #### キャッシュディレクトリ構成
 
