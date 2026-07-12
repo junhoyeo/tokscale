@@ -152,7 +152,7 @@ impl SourceFingerprint {
         let related_paths = ["-wal"]
             .into_iter()
             .map(|suffix| (suffix.to_string(), append_path_suffix(path, suffix)));
-        Self::from_path_with_related(path, related_paths)
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
     }
 
     /// Fingerprint for a Jcode session snapshot and its append-only journal
@@ -268,7 +268,15 @@ impl SourceFingerprint {
         let related_paths = ["-wal"]
             .into_iter()
             .map(|suffix| (suffix.to_string(), append_path_suffix(path, suffix)));
-        Self::check_path_with_related(path, related_paths, cached)
+        // SQLite databases can be tens of GB; skip the whole-file content hash
+        // (size + mtime + samples detect changes, and no SQLite source reads
+        // content_hash). See ContentHashMode.
+        Self::check_path_with_related_mode(
+            path,
+            related_paths,
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
     }
 
     pub(crate) fn check_jcode_path(
@@ -364,6 +372,18 @@ impl SourceFingerprint {
     where
         I: IntoIterator<Item = (String, PathBuf)>,
     {
+        Self::check_path_with_related_mode(path, related_paths, cached, ContentHashMode::Full)
+    }
+
+    fn check_path_with_related_mode<I>(
+        path: &Path,
+        related_paths: I,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus>
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
         let related_paths: Vec<(String, PathBuf)> = related_paths.into_iter().collect();
         if cached.is_some_and(|fingerprint| {
             fingerprint_metadata_matches(path, &related_paths, fingerprint).unwrap_or(false)
@@ -371,18 +391,29 @@ impl SourceFingerprint {
             return Some(FingerprintStatus::Unchanged);
         }
 
-        Self::from_path_with_related(path, related_paths).map(FingerprintStatus::Changed)
+        Self::from_path_with_related_mode(path, related_paths, mode).map(FingerprintStatus::Changed)
     }
 
     fn from_path_with_related<I>(path: &Path, related_paths: I) -> Option<Self>
     where
         I: IntoIterator<Item = (String, PathBuf)>,
     {
-        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path)?;
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::Full)
+    }
+
+    fn from_path_with_related_mode<I>(
+        path: &Path,
+        related_paths: I,
+        mode: ContentHashMode,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
+        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path, mode)?;
         let mut related_files: Vec<RelatedFileFingerprint> = related_paths
             .into_iter()
             .filter_map(|(suffix, related_path)| {
-                RelatedFileFingerprint::from_path(suffix, &related_path)
+                RelatedFileFingerprint::from_path(suffix, &related_path, mode)
             })
             .collect();
         related_files.sort_by(|left, right| left.suffix.cmp(&right.suffix));
@@ -398,8 +429,8 @@ impl SourceFingerprint {
 }
 
 impl RelatedFileFingerprint {
-    fn from_path(suffix: String, path: &Path) -> Option<Self> {
-        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path)?;
+    fn from_path(suffix: String, path: &Path, mode: ContentHashMode) -> Option<Self> {
+        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path, mode)?;
         Some(Self {
             suffix,
             size,
@@ -1186,7 +1217,24 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn file_fingerprint_parts(path: &Path) -> Option<(u64, u64, Vec<FileSampleHash>, [u8; 32])> {
+/// Whether a fingerprint carries a whole-file `content_hash`.
+///
+/// Most sources are small and hash cheaply, but SQLite databases (OpenCode,
+/// MiMo Code, ...) can reach tens of gigabytes, and their `content_hash` is
+/// write-only: validation uses size + mtime + samples ([`fingerprint_metadata_matches`]),
+/// and only codex sources (never SQLite) read `content_hash`. Hashing a 14 GB
+/// db every cold build — and every submit after the db changes — was pure
+/// waste, so SQLite sources store a zero sentinel instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentHashMode {
+    Full,
+    SamplesOnly,
+}
+
+fn file_fingerprint_parts(
+    path: &Path,
+    mode: ContentHashMode,
+) -> Option<(u64, u64, Vec<FileSampleHash>, [u8; 32])> {
     let metadata = path.metadata().ok()?;
     let size = metadata.len();
     let modified_ns = metadata
@@ -1196,7 +1244,10 @@ fn file_fingerprint_parts(path: &Path) -> Option<(u64, u64, Vec<FileSampleHash>,
         .ok()?
         .as_nanos() as u64;
     let sample_hashes = compute_sample_hashes(path, size)?;
-    let content_hash = hash_prefix(path, size)?;
+    let content_hash = match mode {
+        ContentHashMode::Full => hash_prefix(path, size)?,
+        ContentHashMode::SamplesOnly => [0_u8; 32],
+    };
     Some((size, modified_ns, sample_hashes, content_hash))
 }
 
@@ -1513,6 +1564,61 @@ mod tests {
             full_hash_call_count(),
             full_hashes_before + 1,
             "a changed sample must rebuild the full fingerprint"
+        );
+    }
+
+    #[test]
+    fn test_sqlite_fingerprint_skips_full_hash() {
+        let file = write_temp_file(&vec![b'a'; 64 * 1024]);
+        let full_hashes_before = full_hash_call_count();
+
+        let fingerprint = SourceFingerprint::from_sqlite_path(file.path()).unwrap();
+
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "a SQLite fingerprint must not compute a whole-file SHA-256"
+        );
+        assert_eq!(
+            fingerprint.content_hash, [0_u8; 32],
+            "a SQLite fingerprint stores a zero content_hash sentinel"
+        );
+        assert!(
+            !fingerprint.sample_hashes.is_empty(),
+            "samples still guard SQLite change detection"
+        );
+    }
+
+    #[test]
+    fn test_sqlite_check_detects_change_without_full_hash() {
+        let original = vec![b'a'; 64 * 1024];
+        let file = write_temp_file(&original);
+        let fingerprint = SourceFingerprint::from_sqlite_path(file.path()).unwrap();
+
+        // Unchanged: metadata + samples match, no full hash.
+        let full_hashes_before = full_hash_call_count();
+        let status = SourceFingerprint::check_sqlite_path(file.path(), Some(&fingerprint)).unwrap();
+        assert!(matches!(status, FingerprintStatus::Unchanged));
+
+        // Changed: a same-size rewrite with a rolled-back mtime is still caught
+        // by the samples, and still without a whole-file hash.
+        let original_modified = std::fs::metadata(file.path()).unwrap().modified().unwrap();
+        let mut rewritten = original;
+        rewritten[0] = b'z';
+        std::fs::write(file.path(), rewritten).unwrap();
+        File::options()
+            .write(true)
+            .open(file.path())
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+
+        let status = SourceFingerprint::check_sqlite_path(file.path(), Some(&fingerprint)).unwrap();
+        assert!(matches!(status, FingerprintStatus::Changed(_)));
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "SQLite change detection must never compute a whole-file SHA-256"
         );
     }
 
