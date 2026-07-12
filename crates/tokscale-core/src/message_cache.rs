@@ -877,9 +877,31 @@ impl SourceMessageCache {
             return;
         }
 
+        // Bucket dirty and deleted keys by shard up front. CacheKey::shard()
+        // computes a SHA-256 digest, so grouping once keeps hashing at O(keys).
+        // The previous per-shard `.filter(|k| k.shard() == shard_key)` recomputed
+        // that digest for every key on every shard — O(shards * keys) — which
+        // dominated cold-cache builds (hundreds of shards * tens of thousands of
+        // files re-hashed).
+        let mut dirty_by_shard: HashMap<CacheShardKey, Vec<CacheKey>> = HashMap::new();
+        for key in &self.dirty_keys {
+            dirty_by_shard
+                .entry(key.shard())
+                .or_default()
+                .push(key.clone());
+        }
+        let mut deleted_by_shard: HashMap<CacheShardKey, Vec<(CacheKey, DeletionReason)>> =
+            HashMap::new();
+        for (key, reason) in &self.deleted_keys {
+            deleted_by_shard
+                .entry(key.shard())
+                .or_default()
+                .push((key.clone(), reason.clone()));
+        }
+
         let mut affected_shards = self.rewrite_shards.clone();
-        affected_shards.extend(self.dirty_keys.iter().map(CacheKey::shard));
-        affected_shards.extend(self.deleted_keys.keys().map(CacheKey::shard));
+        affected_shards.extend(dirty_by_shard.keys().cloned());
+        affected_shards.extend(deleted_by_shard.keys().cloned());
 
         let mut successful_shards = HashSet::new();
         for shard_key in affected_shards {
@@ -916,28 +938,24 @@ impl SourceMessageCache {
                     }
                 };
 
-            for (key, reason) in self
-                .deleted_keys
-                .iter()
-                .filter(|(key, _)| key.shard() == shard_key)
-            {
-                let should_remove = match reason {
-                    DeletionReason::Missing => !key.path.to_path_buf().exists(),
-                    DeletionReason::Invalidated(expected) => merged_entries
-                        .get(key)
-                        .is_some_and(|entry| entry.fingerprint == *expected),
-                };
-                if should_remove {
-                    merged_entries.remove(key);
+            if let Some(deleted) = deleted_by_shard.get(&shard_key) {
+                for (key, reason) in deleted {
+                    let should_remove = match reason {
+                        DeletionReason::Missing => !key.path.to_path_buf().exists(),
+                        DeletionReason::Invalidated(expected) => merged_entries
+                            .get(key)
+                            .is_some_and(|entry| entry.fingerprint == *expected),
+                    };
+                    if should_remove {
+                        merged_entries.remove(key);
+                    }
                 }
             }
-            for key in self
-                .dirty_keys
-                .iter()
-                .filter(|key| key.shard() == shard_key)
-            {
-                if let Some(entry) = self.entries.get(key) {
-                    merged_entries.insert(key.clone(), entry.clone());
+            if let Some(dirty) = dirty_by_shard.get(&shard_key) {
+                for key in dirty {
+                    if let Some(entry) = self.entries.get(key) {
+                        merged_entries.insert(key.clone(), entry.clone());
+                    }
                 }
             }
 
