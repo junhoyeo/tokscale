@@ -16,6 +16,14 @@ use std::path::Path;
 // Devin CLI (SQLite)
 // ---------------------------------------------------------------------------
 
+/// `sessions.model` can be set to `"adaptive"`, which is a Devin routing mode
+/// rather than a real model id. Exclude it from the session-model fallback so
+/// rows missing `generation_model` are skipped instead of reported under a
+/// fictitious model.
+fn is_devin_routing_mode(s: &str) -> bool {
+    matches!(s, "adaptive")
+}
+
 #[derive(Debug, Deserialize)]
 struct DevinChatMessage {
     role: String,
@@ -121,7 +129,7 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .and_then(|m| m.generation_model.as_deref())
             .filter(|s| !s.is_empty())
             .or(session_model.as_deref())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && !is_devin_routing_mode(s))
             .unwrap_or_default()
             .to_string();
         if model_id.is_empty() {
@@ -206,6 +214,7 @@ pub fn parse_devin_desktop_ndjson(path: &Path) -> Vec<UnifiedMessage> {
     let session_id = session_id_from_ndjson_path(path);
     let mut messages = Vec::new();
     let mut seen = HashSet::new();
+    let mut line_index: usize = 0;
 
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { continue };
@@ -282,9 +291,12 @@ pub fn parse_devin_desktop_ndjson(path: &Path) -> Vec<UnifiedMessage> {
             .and_then(super::utils::parse_timestamp_str)
             .unwrap_or(fallback_timestamp);
 
-        let dedup_key = format!(
-            "devin-desktop:{session_id}:{timestamp}:{model_id}:{input}:{output}:{cache_read}:{cache_write}"
-        );
+        // Dedup by file-position line index rather than timestamp+tokens.
+        // `created_at` is commonly absent, so all events in a file would share
+        // the file-mtime fallback and collide on identical model+token counts.
+        // Anchoring to the line position matches the qwen.rs pattern for
+        // NDJSON sources without stable per-event identifiers.
+        let dedup_key = format!("devin-desktop:{session_id}:{line_index}");
         if !seen.insert(dedup_key.clone()) {
             continue;
         }
@@ -307,6 +319,7 @@ pub fn parse_devin_desktop_ndjson(path: &Path) -> Vec<UnifiedMessage> {
         );
 
         messages.push(message);
+        line_index += 1;
     }
 
     messages
@@ -459,6 +472,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_devin_cli_sqlite_skips_adaptive_session_model() {
+        // When generation_model is absent and sessions.model is "adaptive"
+        // (a routing mode), the row should be skipped rather than reported
+        // under a fictitious "adaptive" model.
+        let dir = TempDir::new().unwrap();
+        let db_path = create_devin_cli_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+
+        insert_session(&conn, "sess-1", "/Users/alice/project", "adaptive");
+        insert_message(
+            &conn,
+            "sess-1",
+            r#"{"role":"assistant","metadata":{"metrics":{"input_tokens":10,"output_tokens":5}}}"#,
+            1_700_000_000,
+        );
+        drop(conn);
+
+        let messages = parse_devin_cli_sqlite(&db_path);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
     fn test_parse_devin_cli_sqlite_clamps_negative_values() {
         let dir = TempDir::new().unwrap();
         let db_path = create_devin_cli_db(&dir);
@@ -508,7 +543,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_devin_desktop_ndjson_deduplicates_identical_rows() {
+    fn test_parse_devin_desktop_ndjson_keeps_distinct_events_with_identical_usage() {
+        // Two events with identical model/tokens/timestamp at different line
+        // positions must both survive — they represent distinct API calls.
+        // The line-index dedup key prevents collision without undercounting.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("event.ndjson");
         std::fs::write(
@@ -520,7 +558,9 @@ mod tests {
         .unwrap();
 
         let messages = parse_devin_desktop_ndjson(&path);
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[1].tokens.input, 10);
     }
 
     #[test]

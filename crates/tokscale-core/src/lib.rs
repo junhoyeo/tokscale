@@ -1660,6 +1660,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
     // Devin Desktop streams ACP events as NDJSON. Usage is sparse in these
     // files, so the parser returns messages only when embedded metrics exist.
+    // The CLI database is authoritative, so skip any Desktop message whose
+    // session_id was already seen in the CLI output (matching the Copilot
+    // file-vs-desktop precedence pattern).
+    let devin_cli_session_ids: HashSet<String> = all_messages
+        .iter()
+        .filter(|message| message.client == "devin-cli")
+        .map(|message| message.session_id.clone())
+        .collect();
     let devin_desktop_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::DevinDesktop)
         .par_iter()
@@ -1670,7 +1678,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in devin_desktop_outcomes {
-        all_messages.extend(outcome.messages);
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| !devin_cli_session_ids.contains(&message.session_id)),
+        );
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
@@ -3078,28 +3091,33 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Warp, warp_count);
     messages.extend(warp_msgs);
 
-    // Devin CLI SQLite usage plus Desktop NDJSON event streams.
+    // Devin CLI SQLite usage plus Desktop NDJSON event streams. The CLI
+    // database is authoritative; Desktop NDJSON is treated as a fallback for
+    // sessions not present in the CLI database (matching the Copilot
+    // file-vs-desktop precedence pattern).
     let devin_cli_messages: Vec<UnifiedMessage> = scan_result
         .devin_db
         .as_ref()
         .map(|db_path| sessions::devin::parse_devin_cli_sqlite(db_path))
         .unwrap_or_default();
+    let cli_session_ids: HashSet<String> = devin_cli_messages
+        .iter()
+        .map(|message| message.session_id.clone())
+        .collect();
     let devin_desktop_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::DevinDesktop)
         .par_iter()
         .flat_map(|path| sessions::devin::parse_devin_desktop_ndjson(path))
+        .filter(|message| !cli_session_ids.contains(&message.session_id))
         .collect();
 
-    let mut devin_seen: HashSet<String> = HashSet::new();
     let devin_cli_parsed: Vec<ParsedMessage> = devin_cli_messages
         .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut devin_seen, message))
-        .map(|message| unified_to_parsed(&message))
+        .map(|msg| unified_to_parsed(&msg))
         .collect();
     let devin_desktop_parsed: Vec<ParsedMessage> = devin_desktop_messages
         .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut devin_seen, message))
-        .map(|message| unified_to_parsed(&message))
+        .map(|msg| unified_to_parsed(&msg))
         .collect();
     let devin_cli_count = summed_parsed_message_count(&devin_cli_parsed);
     let devin_desktop_count = summed_parsed_message_count(&devin_desktop_parsed);
