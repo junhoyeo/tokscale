@@ -4,12 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import styled from "styled-components";
 import { toast } from "react-toastify";
-import { EMBED_TEMPLATES, type EmbedTemplate } from "@/lib/embed/embedShared";
 import {
-  getPaletteNames,
-  getPalette,
-  type ColorPaletteName,
-} from "@/lib/themes";
+  EMBED_TEMPLATES,
+  resolvePalette,
+  type EmbedTemplate,
+} from "@/lib/embed/embedShared";
+import { getPaletteNames, type ColorPaletteName } from "@/lib/themes";
 import {
   buildEmbedPreviewPath,
   buildProfileEmbedLinks,
@@ -52,7 +52,8 @@ export function ProfileEmbedDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState<EmbedTheme>("dark");
   const [sortBy, setSortBy] = useState<EmbedSortBy>("tokens");
-  const [compact, setCompact] = useState(false);
+  const [layoutCompact, setLayoutCompact] = useState(false);
+  const [threeDCompact, setThreeDCompact] = useState(false);
   const [view, setView] = useState<EmbedView>("2d");
   const [template, setTemplate] = useState<EmbedTemplate>("classic");
   const [color, setColor] = useState<ColorPaletteName | null>(null);
@@ -61,6 +62,14 @@ export function ProfileEmbedDialog({
   const [costFormat, setCostFormat] = useState<EmbedNumberFormat>("compact");
   const [rankFormat, setRankFormat] = useState<EmbedRankFormat>("plain");
   const [graph, setGraph] = useState(false);
+  const compact = view === "3d" ? threeDCompact : layoutCompact;
+  const setCompactForView = (nextCompact: boolean) => {
+    if (view === "3d") {
+      setThreeDCompact(nextCompact);
+    } else {
+      setLayoutCompact(nextCompact);
+    }
+  };
 
   const capabilities = getEmbedDialogCapabilities({
     compact,
@@ -225,7 +234,6 @@ export function ProfileEmbedDialog({
           <ControlsPanel aria-label="Embed customization">
             <ControlsHeader>
               <ControlsTitle>Card settings</ControlsTitle>
-              <ControlsHint>Preview updates immediately</ControlsHint>
             </ControlsHeader>
 
             {capabilities.showTemplate && (
@@ -233,6 +241,7 @@ export function ProfileEmbedDialog({
                 <OptionLabel id="embed-template-label">Template</OptionLabel>
                 <SelectWrap>
                   <SelectControl
+                    name="profile-embed-template"
                     aria-labelledby="embed-template-label"
                     value={template}
                     onChange={(event) =>
@@ -304,7 +313,7 @@ export function ProfileEmbedDialog({
                   <Swatch
                     type="button"
                     $active={color === null}
-                    $color="var(--service-text-muted)"
+                    $color={resolvePalette(theme, null).brand}
                     aria-pressed={color === null}
                     aria-label="Default accent color"
                     title="Default"
@@ -315,7 +324,7 @@ export function ProfileEmbedDialog({
                       key={name}
                       type="button"
                       $active={color === name}
-                      $color={getPalette(name).grade3}
+                      $color={resolvePalette(theme, name).brand}
                       aria-pressed={color === name}
                       aria-label={`${name} accent color`}
                       title={titleCase(name)}
@@ -377,7 +386,9 @@ export function ProfileEmbedDialog({
 
             {capabilities.showLayout && (
               <OptionGroup>
-                <OptionLabel id="embed-layout-label">Layout</OptionLabel>
+                <OptionLabel id="embed-layout-label">
+                  {view === "3d" ? "Number format" : "Layout"}
+                </OptionLabel>
                 <SegmentedControl
                   role="group"
                   aria-labelledby="embed-layout-label"
@@ -386,7 +397,7 @@ export function ProfileEmbedDialog({
                     type="button"
                     $active={!compact}
                     aria-pressed={!compact}
-                    onClick={() => setCompact(false)}
+                    onClick={() => setCompactForView(false)}
                   >
                     Full
                   </SegmentButton>
@@ -394,7 +405,7 @@ export function ProfileEmbedDialog({
                     type="button"
                     $active={compact}
                     aria-pressed={compact}
-                    onClick={() => setCompact(true)}
+                    onClick={() => setCompactForView(true)}
                   >
                     Compact
                   </SegmentButton>
@@ -565,7 +576,6 @@ const Dialog = styled.div`
   border-radius: 14px;
   outline: none;
   background: var(--service-surface);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
 
   @media (max-width: 840px) {
     height: min(92dvh, 860px);
@@ -696,18 +706,6 @@ const DialogBody = styled.div`
     align-content: start;
     overflow-y: auto;
     padding-bottom: max(24px, env(safe-area-inset-bottom));
-    -webkit-mask-image: linear-gradient(
-      to bottom,
-      #000 0,
-      #000 calc(100% - 24px),
-      transparent 100%
-    );
-    mask-image: linear-gradient(
-      to bottom,
-      #000 0,
-      #000 calc(100% - 24px),
-      transparent 100%
-    );
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
     scroll-padding-bottom: max(24px, env(safe-area-inset-bottom));
@@ -724,12 +722,10 @@ const PreviewPanel = styled.div`
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 16px;
   border-right: 1px solid var(--service-border);
   background: var(--service-canvas);
-  overscroll-behavior: contain;
 
   @media (max-width: 840px) {
     overflow: visible;
@@ -745,7 +741,7 @@ const PreviewPanel = styled.div`
 const PreviewSurface = styled.div`
   display: flex;
   min-height: 0;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 8px;
 `;
@@ -759,30 +755,26 @@ const PreviewLabel = styled.span`
 
 const PreviewFrame = styled.div<{ $threeD: boolean }>`
   display: flex;
-  height: ${({ $threeD }) =>
-    $threeD ? "clamp(360px, 46dvh, 440px)" : "clamp(210px, 26dvh, 248px)"};
   min-height: 0;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 18px;
-  border: 1px solid var(--service-border);
-  border-radius: 8px;
-  background: #090c12;
+  padding: 20px 0;
 
   @media (max-width: 840px) {
-    height: ${({ $threeD }) => ($threeD ? "340px" : "220px")};
+    height: ${({ $threeD }) => ($threeD ? "320px" : "200px")};
+    flex: 0 0 auto;
   }
 
   @media (max-width: 640px) {
-    height: ${({ $threeD }) => ($threeD ? "280px" : "170px")};
-    padding: 10px;
+    height: ${({ $threeD }) => ($threeD ? "272px" : "160px")};
+    padding: 8px 0;
   }
 `;
 
 const PreviewImage = styled.img`
-  width: 100%;
+  width: auto;
   max-width: 100%;
   max-height: 100%;
   height: auto;
@@ -795,21 +787,8 @@ const ControlsPanel = styled.div`
   min-height: 0;
   flex-direction: column;
   overflow-y: auto;
-  padding: 15px 12px 28px 16px;
+  padding: 14px 16px 16px;
   background: var(--service-surface);
-  box-shadow: inset 0 -22px 20px -24px rgba(0, 0, 0, 0.95);
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 calc(100% - 24px),
-    transparent 100%
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 calc(100% - 24px),
-    transparent 100%
-  );
   overscroll-behavior: contain;
   scrollbar-color: color-mix(
       in srgb,
@@ -837,36 +816,18 @@ const ControlsPanel = styled.div`
 
   @media (max-width: 840px) {
     overflow: visible;
-    box-shadow: none;
-    -webkit-mask-image: none;
-    mask-image: none;
     scrollbar-gutter: auto;
-
-    &::after {
-      display: block;
-      min-height: max(24px, env(safe-area-inset-bottom));
-      flex: 0 0 max(24px, env(safe-area-inset-bottom));
-      content: "";
-    }
   }
 
   @media (max-width: 640px) {
-    padding: 14px 14px max(20px, env(safe-area-inset-bottom));
-    box-shadow: none;
-
-    &::after {
-      min-height: max(48px, calc(env(safe-area-inset-bottom) + 24px));
-      flex-basis: max(48px, calc(env(safe-area-inset-bottom) + 24px));
-    }
+    padding: 12px 14px max(16px, env(safe-area-inset-bottom));
   }
 `;
 
 const ControlsHeader = styled.div`
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 11px;
+  align-items: center;
+  padding-bottom: 9px;
   border-bottom: 1px solid var(--service-border);
 `;
 
@@ -878,25 +839,19 @@ const ControlsTitle = styled.h3`
   line-height: 1.3;
 `;
 
-const ControlsHint = styled.span`
-  color: color-mix(in srgb, var(--service-text-muted) 88%, var(--service-text));
-  font-size: 0.75rem;
-  line-height: 1.3;
-`;
-
 const OptionGroup = styled.div<{ $stacked?: boolean }>`
   display: grid;
   grid-template-columns: ${({ $stacked }) =>
-    $stacked ? "1fr" : "7.25rem minmax(0, 1fr)"};
+    $stacked ? "1fr" : "7rem minmax(0, 1fr)"};
   align-items: ${({ $stacked }) => ($stacked ? "start" : "center")};
-  gap: ${({ $stacked }) => ($stacked ? "8px" : "12px")};
-  padding: 10px 0;
+  gap: ${({ $stacked }) => ($stacked ? "7px" : "10px")};
+  padding: 8px 0;
   border-bottom: 1px solid var(--service-border);
 
   @media (max-width: 400px) {
-    grid-template-columns: 1fr;
-    align-items: start;
-    gap: 7px;
+    grid-template-columns: ${({ $stacked }) =>
+      $stacked ? "1fr" : "6.25rem minmax(0, 1fr)"};
+    gap: ${({ $stacked }) => ($stacked ? "7px" : "8px")};
   }
 `;
 
@@ -1000,7 +955,7 @@ const SegmentButton = styled.button<{ $active: boolean }>`
   }
 
   @media (pointer: coarse) {
-    min-height: 40px;
+    min-height: 44px;
     padding-right: 12px;
     padding-left: 12px;
   }
@@ -1019,14 +974,14 @@ const SwatchRow = styled.div`
 
   @media (pointer: coarse) {
     width: fit-content;
-    grid-template-columns: repeat(5, 40px);
+    grid-template-columns: repeat(5, 44px);
     justify-content: start;
     gap: 8px;
   }
 
   @media (max-width: 640px) {
     width: fit-content;
-    grid-template-columns: repeat(5, 40px);
+    grid-template-columns: repeat(5, 44px);
     justify-content: start;
     gap: 8px;
   }
@@ -1056,13 +1011,13 @@ const Swatch = styled.button<{ $active: boolean; $color: string }>`
   }
 
   @media (pointer: coarse) {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
 
   @media (max-width: 640px) {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -1074,7 +1029,7 @@ const SnippetSection = styled.div`
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 10px;
   padding: 12px;
   border: 1px solid var(--service-border-strong);
   border-radius: 10px;
@@ -1159,6 +1114,11 @@ const CodeBlock = styled.pre`
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+
+  @media (max-width: 840px) {
+    max-height: none;
+    overflow: visible;
+  }
 `;
 
 const PrimaryActions = styled.div`

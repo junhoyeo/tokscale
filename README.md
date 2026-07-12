@@ -1043,7 +1043,8 @@ customize the design.
 | `tokens`, `cost` | `compact` · `full` | Number format, set independently — `20.9B` vs `20,941,000,000` |
 | `rank` | `plain` (default, `#134`) · `percent` (`top 12%`) · `total` (`#134 / 1,174`) | How the leaderboard rank is shown |
 | `graph` | `1` to append the contribution graph (off by default) | Supported by `classic`, `minimal`, `terminal`, `orbit`, `blueprint`, `receipt` |
-| `compact` | `1` for the compact layout | `classic` only |
+| `view` | `2d` (default) · `3d` | Switch between the selected 2D card and the isometric contribution view |
+| `compact` | `1` | Uses the compact Classic layout or compact number formatting in the 3D view |
 
 Examples:
 
@@ -1052,6 +1053,7 @@ Examples:
 ![](https://tokscale.ai/api/embed/<username>/svg?template=orbit&color=pink&rank=percent)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=terminal&color=green&theme=light)
 ![](https://tokscale.ai/api/embed/<username>/svg?template=receipt&color=YlGnBu&graph=1)
+![](https://tokscale.ai/api/embed/<username>/svg?view=3d&compact=1)
 ```
 
 ### GitHub Profile Badge
