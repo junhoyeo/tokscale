@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import styled from "styled-components";
+import { SegmentButton, SegmentedGroup } from "@/components/leaderboard/RankingUI";
 
 // Top-of-page segmented control that swaps between the global user leaderboard
 // and the group browser. Pure-link nav (no client state), so SSR + back/forward
@@ -31,45 +32,6 @@ const Header = styled.header`
 
 const HeadingGroup = styled.div`
   min-width: 0;
-`;
-
-const Group = styled.nav`
-  display: inline-flex;
-  flex: 0 0 auto;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--service-border);
-  border-radius: 8px;
-  background: var(--service-surface-muted);
-`;
-
-const Item = styled(Link)<{ $active: boolean }>`
-  display: inline-flex;
-  align-items: center;
-  min-height: 30px;
-  padding: 0 12px;
-  border-radius: 6px;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  text-decoration: none;
-  color: ${({ $active }) => ($active ? "var(--service-text)" : "var(--service-text-muted)")};
-  background: ${({ $active }) => ($active ? "var(--service-surface)" : "transparent")};
-  white-space: nowrap;
-
-  &:hover {
-    color: var(--service-text);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 40px;
-    padding: 0 14px;
-    font-size: 1rem;
-  }
 `;
 
 const Title = styled.h1`
@@ -161,22 +123,24 @@ export default function ViewSelector({ current, searchParams }: ViewSelectorProp
             : "Global rankings across public Tokscale submissions."}
         </Description>
       </HeadingGroup>
-      <Group aria-label="Leaderboard view">
-        <Item
+      <SegmentedGroup as="nav" aria-label="Leaderboard view">
+        <SegmentButton
+          as={Link}
           href={buildLeaderboardViewHref(activeSearchParams, "users")}
           $active={current === "users"}
           aria-current={current === "users" ? "page" : undefined}
         >
           Users
-        </Item>
-        <Item
+        </SegmentButton>
+        <SegmentButton
+          as={Link}
           href={buildLeaderboardViewHref(activeSearchParams, "groups")}
           $active={current === "groups"}
           aria-current={current === "groups" ? "page" : undefined}
         >
           Groups
-        </Item>
-      </Group>
+        </SegmentButton>
+      </SegmentedGroup>
     </Header>
   );
 }

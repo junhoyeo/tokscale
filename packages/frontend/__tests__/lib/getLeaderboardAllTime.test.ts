@@ -193,6 +193,28 @@ describe("all-time leaderboard queries", () => {
     expect(searchSqlTexts.some((text) => text.includes("ROW_NUMBER() OVER"))).toBe(false);
   });
 
+  it("counts distinct users for all-time pagination and global stats", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 2 }]);
+
+    const list = await getLeaderboardData("all", 1, 50, "tokens");
+    expect(list.pagination.totalUsers).toBe(2);
+    expect(serializeSqlCalls().some((text) =>
+      text.includes("COUNT(DISTINCT submissions.userId)")
+    )).toBe(true);
+
+    mockState.reset();
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 2 }]);
+
+    const search = await getLeaderboardData("all", 1, 50, "tokens", "ali");
+    expect(search.stats.uniqueUsers).toBe(2);
+    expect(serializeSqlCalls().some((text) =>
+      text.includes("COUNT(DISTINCT submissions.userId)")
+    )).toBe(true);
+  });
+
   it("keeps tied all-time users at the same rank across list, search, and user rank", async () => {
     mockState.pushAwaitedResult([
       {

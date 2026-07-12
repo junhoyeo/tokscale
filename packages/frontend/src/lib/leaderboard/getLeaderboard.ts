@@ -369,7 +369,7 @@ async function fetchLeaderboardData(
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
         totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`,
-        uniqueUsers: sql<number>`COUNT(*)`,
+        uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
       .from(submissions);
 
@@ -432,7 +432,7 @@ async function fetchLeaderboardData(
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
         totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`,
-        uniqueUsers: sql<number>`COUNT(*)`,
+        uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
       .from(submissions),
   ]);

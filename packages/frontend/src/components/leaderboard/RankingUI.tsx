@@ -293,7 +293,7 @@ export function MobileRankingRow({
   );
 }
 
-const SegmentedGroup = styled.div`
+export const SegmentedGroup = styled.div`
   display: inline-flex;
   width: max-content;
   max-width: 100%;
@@ -313,7 +313,10 @@ const SegmentedGroup = styled.div`
   }
 `;
 
-const SegmentButton = styled.button<{ $active: boolean }>`
+export const SegmentButton = styled.button<{ $active: boolean }>`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 30px;
   padding: 0 10px;
   border: 0;
@@ -322,6 +325,7 @@ const SegmentButton = styled.button<{ $active: boolean }>`
   color: ${({ $active }) => $active ? "var(--service-text)" : "var(--service-text-muted)"};
   font-size: 0.8125rem;
   font-weight: 500;
+  text-decoration: none;
   white-space: nowrap;
 
   &:hover {
