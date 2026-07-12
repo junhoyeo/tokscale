@@ -37,6 +37,8 @@ export const SUPPORTED_CLIENT_TYPES = [
   "opencodereview",
   "codebuddy",
   "workbuddy",
+  "devin-cli",
+  "devin-desktop",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

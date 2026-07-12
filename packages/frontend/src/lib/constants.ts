@@ -65,6 +65,8 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   opencodereview: "OpenCodeReview",
   codebuddy: "CodeBuddy",
   workbuddy: "WorkBuddy",
+  "devin-cli": "Devin CLI",
+  "devin-desktop": "Devin Desktop",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -111,6 +113,8 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
     "https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png",
   workbuddy:
     "https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png",
+  "devin-cli": `${GITHUB_CDN_BASE}/client-devin.jpg`,
+  "devin-desktop": `${GITHUB_CDN_BASE}/client-devin.jpg`,
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -152,6 +156,8 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   opencodereview: "#FF6A00",
   codebuddy: "#00A4FF",
   workbuddy: "#2563EB",
+  "devin-cli": "#334155",
+  "devin-desktop": "#334155",
 };
 
 // Derived values
