@@ -372,6 +372,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "updates.jsonl" => file_name == "updates.jsonl",
+                "unified.jsonl" => file_name == "unified.jsonl",
                 "events.jsonl" => file_name == "events.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
@@ -1133,6 +1134,23 @@ fn scan_all_clients_with_env_strategy_inner(
         let def = client_id.data();
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
+    }
+
+    if enabled.contains(&ClientId::Grok) {
+        let grok_sessions = PathBuf::from(
+            ClientId::Grok
+                .data()
+                .resolve_path_with_env_strategy(home_dir, use_env_roots),
+        );
+        if let Some(grok_home) = grok_sessions.parent() {
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Grok,
+                grok_home.join("logs"),
+                "unified.jsonl",
+            );
+        }
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled_with_devin_lookup) {
@@ -4220,13 +4238,22 @@ mod tests {
         let home = dir.path();
         setup_mock_grok_dir(home);
 
+        let unified_dir = home.join(".grok/logs");
+        fs::create_dir_all(&unified_dir).unwrap();
+        let unified_log = unified_dir.join("unified.jsonl");
+        File::create(&unified_log).unwrap();
+
         let result = scan_all_clients_with_env_strategy(
             home.to_str().unwrap(),
             &["grok".to_string()],
             false,
         );
-        assert_eq!(result.get(ClientId::Grok).len(), 1);
-        assert!(result.get(ClientId::Grok)[0].ends_with("updates.jsonl"));
+        let grok_files = result.get(ClientId::Grok);
+        assert_eq!(grok_files.len(), 2);
+        assert!(grok_files
+            .iter()
+            .any(|path| path.ends_with("updates.jsonl")));
+        assert!(grok_files.iter().any(|path| path == &unified_log));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }
