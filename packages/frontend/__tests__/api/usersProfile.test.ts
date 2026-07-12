@@ -426,38 +426,17 @@ describe("GET /api/users/[username]", () => {
         cost: "0.5000",
         inputTokens: 7,
         outputTokens: 5,
-        sourceBreakdown: {
-          codex: {
-            tokens: 12,
+      sourceBreakdown: {
+        codex: {
+          tokens: 12,
             cost: 0.5,
             input: 7,
             output: 5,
             cacheRead: 0,
-            cacheWrite: 0,
-            reasoning: 0,
-            messages: 1,
-            models: {
-              "gpt-5.5": {
-                tokens: 12,
-                cost: 0.5,
-                input: 7,
-                output: 5,
-                cacheRead: 0,
-                cacheWrite: 0,
-                reasoning: 0,
-                messages: 1,
-              },
-              "<synthetic>": {
-                tokens: 0,
-                cost: 0.1,
-                input: 0,
-                output: 0,
-                cacheRead: 0,
-                cacheWrite: 0,
-                reasoning: 0,
-                messages: 0,
-              },
-            },
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 1,
+          modelId: "gpt-legacy",
           },
         },
       },
@@ -539,12 +518,24 @@ describe("GET /api/users/[username]", () => {
         }),
       }),
     );
+    expect(body.contributions[1].clients[0].models).toEqual(
+      expect.objectContaining({
+        "gpt-5.5": expect.objectContaining({ tokens: 15, cost: 0.75 }),
+        "gpt-legacy": expect.objectContaining({ tokens: 12, cost: 0.5 }),
+      }),
+    );
     expect(body.modelUsage).toEqual([
       expect.objectContaining({
         model: "gpt-5.5",
-        tokens: 27,
-        cost: 1.25,
-        percentage: 100,
+        tokens: 15,
+        cost: 0.75,
+        percentage: 60,
+      }),
+      expect.objectContaining({
+        model: "gpt-legacy",
+        tokens: 12,
+        cost: 0.5,
+        percentage: 40,
       }),
     ]);
   });
