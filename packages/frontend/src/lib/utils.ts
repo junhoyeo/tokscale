@@ -94,6 +94,54 @@ export function filterByYear(contributions: DailyContribution[], year: string): 
   return contributions.filter((c) => c.date.startsWith(year));
 }
 
+/**
+ * Toggle a client within the client filter, honoring the "empty means all" convention.
+ *
+ * An empty `clientFilter` is the show-all sentinel: every chip renders as active. To
+ * keep the toggle in sync with that affordance, we expand an empty filter to the full
+ * `availableClients` set before toggling, so clicking a highlighted chip deselects it
+ * instead of collapsing the selection to that single client.
+ *
+ * The result is normalized back to the empty sentinel whenever the toggle would leave
+ * every available client selected, or leave none selected — both states mean "show all"
+ * elsewhere in the UI (the Clear/Show-all actions), so we avoid introducing a new
+ * "nothing selected" sentinel.
+ */
+export function toggleClientFilter(
+  client: ClientType,
+  clientFilter: ClientType[],
+  availableClients: ClientType[]
+): ClientType[] {
+  const effective = clientFilter.length === 0 ? [...availableClients] : clientFilter;
+
+  const next = effective.includes(client)
+    ? effective.filter((c) => c !== client)
+    : [...effective, client];
+
+  if (next.length === 0 || next.length === availableClients.length) {
+    return [];
+  }
+
+  return next;
+}
+
+/**
+ * Resolve the currently selected day from a date string against the live contributions.
+ *
+ * Storing the selected date (instead of a snapshot of the day object) lets the
+ * breakdown panel re-derive its data whenever the underlying contributions change
+ * (e.g. after a client filter change), so it never shows stale pre-filter totals.
+ * Returns null when no date is selected or the date is absent from the current data,
+ * which the caller uses to close the panel.
+ */
+export function resolveSelectedDay(
+  selectedDate: string | null,
+  contributions: DailyContribution[]
+): DailyContribution | null {
+  if (!selectedDate) return null;
+  return contributions.find((c) => c.date === selectedDate) ?? null;
+}
+
 function recalculateDayTotals(day: DailyContribution): DailyContribution {
   const tokenBreakdown: TokenBreakdown = {
     input: 0,
