@@ -6,7 +6,10 @@ import { LeaderboardSkeleton } from "@/components/Skeleton";
 import { getLeaderboardData, getUserRank } from "@/lib/leaderboard/getLeaderboard";
 import type { LeaderboardData, Period, SortBy } from "@/lib/leaderboard/types";
 import { getSession } from "@/lib/auth/session";
-import { SORT_BY_COOKIE_NAME, isValidSortBy } from "@/lib/leaderboard/constants";
+import {
+  SORT_BY_COOKIE_NAME,
+  resolveSortByParam,
+} from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 import { listPublicGroups, listUserGroups } from "@/lib/groups/queries";
 import LeaderboardClient from "./LeaderboardClient";
@@ -92,11 +95,7 @@ async function LeaderboardWithPreferences({
     typeof searchParams.search === "string" ? searchParams.search.trim() : "";
 
   const sortBy: SortBy =
-    sortByParam && isValidSortBy(sortByParam)
-      ? sortByParam
-      : isValidSortBy(sortByCookie)
-      ? sortByCookie
-      : "tokens";
+    resolveSortByParam(sortByParam) ?? resolveSortByParam(sortByCookie) ?? "tokens";
 
   let period: Period =
     periodParam && VALID_PERIODS.includes(periodParam as Period)

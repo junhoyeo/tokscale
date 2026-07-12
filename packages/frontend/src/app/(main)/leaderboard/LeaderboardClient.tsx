@@ -19,7 +19,10 @@ import {
 import { getLeaderboardPeriodLabel } from "@/components/leaderboard/presentation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { useSettings } from "@/lib/useSettings";
-import { isValidSortBy, type LeaderboardSortBy } from "@/lib/leaderboard/constants";
+import {
+  resolveSortByParam,
+  type LeaderboardSortBy,
+} from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 import type { LeaderboardData, LeaderboardUser, Period } from "@/lib/leaderboard/types";
 
@@ -948,7 +951,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   const urlPeriod = parsePeriodParam(searchParams.get("period"));
   const urlPage = searchParams.get("page") ? Math.max(1, Number(searchParams.get("page")) || 1) : null;
   const sortByParam = searchParams.get("sortBy");
-  const urlSortBy = isValidSortBy(sortByParam) ? sortByParam : null;
+  const urlSortBy = resolveSortByParam(sortByParam);
   const urlFrom = searchParams.get("from") || "";
   const urlTo = searchParams.get("to") || "";
   const urlSearch = searchParams.get("search")?.trim() || "";
