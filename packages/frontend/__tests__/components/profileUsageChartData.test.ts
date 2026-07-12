@@ -17,6 +17,7 @@ import {
   buildUsageChartData,
   fillMissingUsageDays,
   getActiveTooltipRows,
+  reverseUsageChartData,
   selectLegendModels,
   sumTokenBreakdown,
   toTrailingAverage,
@@ -860,5 +861,66 @@ describe("profile usage chart legend", () => {
       `shared-model · ${codexSeries?.providerLabel}`,
     ]);
     expect(new Set(visible.map(({ label }) => label)).size).toBe(2);
+  });
+
+  it("mirrors every per-day array so the newest day renders first", () => {
+    const aggregated = aggregateDailyUsage([
+      day("2026-01-01", [client("claude", { input: 100 }, 1, "model-a")]),
+      day("2026-01-02", [client("codex", { input: 40 }, 2, "model-b")]),
+      day("2026-01-03", [client("claude", { input: 7 }, 3, "model-a")]),
+    ]);
+    const chart = buildUsageChartData(aggregated, "tokens", "all", "daily");
+
+    const reversed = reverseUsageChartData(chart);
+
+    expect(reversed.dates).toEqual([...chart.dates].reverse());
+    expect(reversed.dailyTotals).toEqual([...chart.dailyTotals].reverse());
+    expect(reversed.rawDailyTotals).toEqual(
+      [...chart.rawDailyTotals].reverse(),
+    );
+    for (const [index, series] of reversed.series.entries()) {
+      expect(series.values).toEqual([...chart.series[index].values].reverse());
+      expect(series.rawValues).toEqual(
+        [...chart.series[index].rawValues].reverse(),
+      );
+    }
+
+    // Dates and values stay index-aligned: the same day keeps the same total.
+    for (const [index, date] of reversed.dates.entries()) {
+      const chronologicalIndex = chart.dates.indexOf(date);
+      expect(reversed.dailyTotals[index]).toBe(
+        chart.dailyTotals[chronologicalIndex],
+      );
+    }
+
+    // Order-independent aggregates are untouched.
+    expect(reversed.total).toBe(chart.total);
+    expect(reversed.maxDailyTotal).toBe(chart.maxDailyTotal);
+    expect(reversed.rawMaxDailyTotal).toBe(chart.rawMaxDailyTotal);
+    expect(reversed.view).toBe(chart.view);
+    expect(reversed.averageWindowDays).toBe(chart.averageWindowDays);
+    for (const [index, series] of reversed.series.entries()) {
+      expect(series.total).toBe(chart.series[index].total);
+    }
+  });
+
+  it("does not mutate its input and round-trips to chronological order", () => {
+    const aggregated = aggregateDailyUsage([
+      day("2026-02-01", [client("claude", { input: 5 }, 1, "model-a")]),
+      day("2026-02-02", [client("claude", { input: 9 }, 2, "model-a")]),
+    ]);
+    const chart = buildUsageChartData(aggregated, "tokens", "all", "daily");
+    const datesBefore = [...chart.dates];
+    const valuesBefore = chart.series.map(({ values }) => [...values]);
+
+    const roundTrip = reverseUsageChartData(reverseUsageChartData(chart));
+
+    expect(chart.dates).toEqual(datesBefore);
+    expect(chart.series.map(({ values }) => values)).toEqual(valuesBefore);
+    expect(roundTrip.dates).toEqual(chart.dates);
+    expect(roundTrip.dailyTotals).toEqual(chart.dailyTotals);
+    expect(roundTrip.series.map(({ values }) => values)).toEqual(
+      chart.series.map(({ values }) => values),
+    );
   });
 });

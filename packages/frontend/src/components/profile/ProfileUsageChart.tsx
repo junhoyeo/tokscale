@@ -6,11 +6,13 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
 import styled, { css } from "styled-components";
 import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 import type { DailyContribution } from "@/lib/types";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
 import {
@@ -21,6 +23,7 @@ import {
   getActiveTooltipRows,
   getUsageProviderTotals,
   providerColor,
+  reverseUsageChartData,
   selectLegendModels,
   toTrailingAverage,
   type UsageChartSeries,
@@ -61,6 +64,12 @@ const TOOLTIP_GAP = 12;
 const TOOLTIP_EDGE = 8;
 const TOOLTIP_VIEWPORT_EDGE = 16;
 const TOOLTIP_MAX_HEIGHT = 416;
+const NEWEST_FIRST_STORAGE_KEY = "tokscale:usage-newest-first";
+// Matches the profile dashboard breakpoint where this card moves into the
+// right-hand column, which is when the newest-on-the-left default applies.
+const NEWEST_FIRST_DESKTOP_QUERY = "(min-width: 1360px)";
+
+const subscribeUsageChartMounted = () => () => {};
 
 type InteractionMode = "idle" | "hover" | "committed";
 
@@ -451,6 +460,33 @@ const SelectControl = styled.label`
 
 const SelectCaption = styled.span`
   flex: 0 0 auto;
+`;
+
+const NewestFirstControl = styled.label`
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  cursor: pointer;
+
+  input {
+    width: 0.8125rem;
+    height: 0.8125rem;
+    margin: 0;
+    accent-color: var(--service-focus);
+    cursor: pointer;
+  }
+
+  &:focus-within {
+    color: var(--service-text);
+  }
+
+  @media (pointer: coarse) {
+    min-height: 2.75rem;
+  }
 `;
 
 const CompactSelect = styled.select`
@@ -890,6 +926,42 @@ export function ProfileUsageChart({
   const [view, setView] = useState<UsageView>("average");
   const [providerFilter, setProviderFilter] =
     useState<UsageProviderFilter>(ALL_USAGE_PROVIDERS);
+  // Reversal is resolved after mount so the server render and the first client
+  // paint share a stable, chronological default (no hydration mismatch). The
+  // explicit toggle, once set, is persisted and wins over the responsive
+  // default (newest-first when this card sits in the desktop right-hand
+  // column, chronological below that breakpoint).
+  const isMounted = useSyncExternalStore(
+    subscribeUsageChartMounted,
+    () => true,
+    () => false,
+  );
+  const isDesktopReverseDefault = useMediaQuery(NEWEST_FIRST_DESKTOP_QUERY);
+  // Lazy initializer: reads once on the client; the server (and the hydration
+  // render, via the isMounted gate below) always resolves chronological.
+  const [storedNewestFirst, setStoredNewestFirst] = useState<boolean | null>(
+    () => {
+      if (typeof window === "undefined") return null;
+      try {
+        const stored = window.localStorage.getItem(NEWEST_FIRST_STORAGE_KEY);
+        return stored === "1" ? true : stored === "0" ? false : null;
+      } catch {
+        // localStorage may be unavailable (private mode / disabled).
+        return null;
+      }
+    },
+  );
+  const newestFirst = isMounted
+    ? (storedNewestFirst ?? isDesktopReverseDefault)
+    : false;
+  const commitNewestFirst = (next: boolean) => {
+    setStoredNewestFirst(next);
+    try {
+      window.localStorage.setItem(NEWEST_FIRST_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      // Ignore persistence failures; the in-memory choice still applies.
+    }
+  };
   const [activeDate, setActiveDate] = useState<string | null>(null);
   const [announcedDate, setAnnouncedDate] = useState<string | null>(null);
   const [interactionMode, setInteractionMode] =
@@ -920,7 +992,7 @@ export function ProfileUsageChart({
     providerTotals.some(({ provider }) => provider === providerFilter)
       ? providerFilter
       : ALL_USAGE_PROVIDERS;
-  const chartData = useMemo(
+  const chronologicalChartData = useMemo(
     () =>
       buildUsageChartData(
         days,
@@ -930,6 +1002,16 @@ export function ProfileUsageChart({
         averageWindowDays,
       ),
     [days, metric, selectedProvider, view, averageWindowDays],
+  );
+  // Everything below renders in visual order: with "Newest first" on, the
+  // whole per-day pipeline (dates, series, totals) is mirrored once here so
+  // pointer, keyboard, and tooltip index math needs no special cases.
+  const chartData = useMemo(
+    () =>
+      newestFirst
+        ? reverseUsageChartData(chronologicalChartData)
+        : chronologicalChartData,
+    [chronologicalChartData, newestFirst],
   );
   const chartStack = useMemo(
     () =>
@@ -988,23 +1070,32 @@ export function ProfileUsageChart({
   const requestedActiveIndex = activeDate
     ? chartData.dates.indexOf(activeDate)
     : -1;
+  // The idle inspection target is always the newest day, whichever edge it
+  // renders on.
   const activeIndex =
     requestedActiveIndex >= 0
       ? requestedActiveIndex
-      : chartData.dates.length - 1;
+      : newestFirst
+        ? 0
+        : chartData.dates.length - 1;
   const currentDate = chartData.dates[activeIndex] ?? null;
   const currentTotal = chartData.dailyTotals[activeIndex] ?? 0;
   const activeRows = useMemo(
     () => getActiveTooltipRows(chartData.series, activeIndex),
     [chartData.series, activeIndex],
   );
+  // `days` stays chronological, so the visual index is mapped back before
+  // indexing per-provider cost values.
+  const chronologicalActiveIndex = newestFirst
+    ? chartData.dates.length - 1 - activeIndex
+    : activeIndex;
   const providerCostRows = useMemo(
     () =>
       getProviderCostRows(
         days,
         costProviderTotals,
         selectedProvider,
-        activeIndex,
+        chronologicalActiveIndex,
         view,
         chartData.averageWindowDays,
       ),
@@ -1012,7 +1103,7 @@ export function ProfileUsageChart({
       days,
       costProviderTotals,
       selectedProvider,
-      activeIndex,
+      chronologicalActiveIndex,
       view,
       chartData.averageWindowDays,
     ],
@@ -1173,26 +1264,40 @@ export function ProfileUsageChart({
           </SelectControl>
         </ControlCluster>
 
-        <SelectControl>
-          <SelectCaption>Provider</SelectCaption>
-          <CompactSelect
-            name="profile-usage-provider"
-            aria-label="Usage provider"
-            value={selectedProvider}
-            onChange={(event) =>
-              setProviderFilter(
-                event.currentTarget.value as UsageProviderFilter,
-              )
-            }
-          >
-            <option value={ALL_USAGE_PROVIDERS}>All</option>
-            {providerTotals.map(({ provider }) => (
-              <option key={provider} value={provider}>
-                {providerName(provider)}
-              </option>
-            ))}
-          </CompactSelect>
-        </SelectControl>
+        <ControlCluster>
+          <NewestFirstControl title="Show newest activity on the left">
+            <input
+              type="checkbox"
+              name="profile-usage-newest-first"
+              aria-label="Show newest activity on the left"
+              checked={newestFirst}
+              onChange={(event) =>
+                commitNewestFirst(event.currentTarget.checked)
+              }
+            />
+            <span>Newest first</span>
+          </NewestFirstControl>
+          <SelectControl>
+            <SelectCaption>Provider</SelectCaption>
+            <CompactSelect
+              name="profile-usage-provider"
+              aria-label="Usage provider"
+              value={selectedProvider}
+              onChange={(event) =>
+                setProviderFilter(
+                  event.currentTarget.value as UsageProviderFilter,
+                )
+              }
+            >
+              <option value={ALL_USAGE_PROVIDERS}>All</option>
+              {providerTotals.map(({ provider }) => (
+                <option key={provider} value={provider}>
+                  {providerName(provider)}
+                </option>
+              ))}
+            </CompactSelect>
+          </SelectControl>
+        </ControlCluster>
       </Controls>
 
       <PlotRegion>

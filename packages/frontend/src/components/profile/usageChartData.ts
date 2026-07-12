@@ -876,6 +876,29 @@ export function buildUsageChartData(
   };
 }
 
+/**
+ * Mirror the chart's time axis so the newest day renders on the left. Every
+ * per-day array (dates, series values, daily totals) is reversed together,
+ * keeping index positions aligned, so hover, keyboard, and tooltip lookups
+ * work in visual order unchanged. Order-independent aggregates (totals,
+ * maximums, the averaging window) are untouched — trailing averages must
+ * already be computed on chronological data before mirroring. The input is
+ * not mutated, and applying this twice returns the chronological ordering.
+ */
+export function reverseUsageChartData(data: UsageChartData): UsageChartData {
+  return {
+    ...data,
+    dates: [...data.dates].reverse(),
+    series: data.series.map((item) => ({
+      ...item,
+      rawValues: [...item.rawValues].reverse(),
+      values: [...item.values].reverse(),
+    })),
+    rawDailyTotals: [...data.rawDailyTotals].reverse(),
+    dailyTotals: [...data.dailyTotals].reverse(),
+  };
+}
+
 export interface LegendModel {
   id: string;
   label: string;
