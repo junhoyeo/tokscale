@@ -2089,7 +2089,11 @@ function ContributionDayBreakdown({
                   <ClientHeader>
                     <ClientIdentity>
                       {clientHasLogo(client.client) ? (
-                        <SourceLogo sourceId={client.client} height={14} />
+                        <SourceLogo
+                          sourceId={client.client}
+                          height={14}
+                          decorative
+                        />
                       ) : (
                         <ClientDot
                           $color={getClientColor(client.client, palette)}
