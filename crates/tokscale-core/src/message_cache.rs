@@ -261,6 +261,22 @@ impl SourceFingerprint {
         Self::check_path_with_related(path, std::iter::empty(), cached)
     }
 
+    /// Check a non-Codex source without rebuilding its write-only whole-file
+    /// hash when metadata or samples changed. Codex uses `check_path` because
+    /// its incremental resume state compares the full content hash; generic
+    /// parsers only need the bounded samples for invalidation.
+    pub(crate) fn check_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_path_with_related_mode(
+            path,
+            std::iter::empty(),
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
     pub(crate) fn check_sqlite_path(
         path: &Path,
         cached: Option<&Self>,
@@ -279,30 +295,63 @@ impl SourceFingerprint {
         )
     }
 
-    pub(crate) fn check_jcode_path(
+    pub(crate) fn check_jcode_path_samples_only(
         path: &Path,
         cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_jcode_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_jcode_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
     ) -> Option<FingerprintStatus> {
         let related_paths = std::iter::once((
             ".journal.jsonl".to_string(),
             crate::sessions::jcode::jcode_journal_path(path),
         ));
-        Self::check_path_with_related(path, related_paths, cached)
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
     }
 
-    pub(crate) fn check_roo_path(path: &Path, cached: Option<&Self>) -> Option<FingerprintStatus> {
+    pub(crate) fn check_roo_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_roo_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_roo_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
         let history = path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("api_conversation_history.json");
         let related_paths = std::iter::once(("api_conversation_history.json".to_string(), history));
-        Self::check_path_with_related(path, related_paths, cached)
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
     }
 
-    pub(crate) fn check_claude_code_path_with_home(
+    pub(crate) fn check_claude_code_path_with_home_samples_only(
         path: &Path,
         cached: Option<&Self>,
         home_dir: Option<&Path>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_claude_code_path_with_home_mode(
+            path,
+            cached,
+            home_dir,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
+    fn check_claude_code_path_with_home_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        home_dir: Option<&Path>,
+        mode: ContentHashMode,
     ) -> Option<FingerprintStatus> {
         let mut related = Vec::new();
 
@@ -323,45 +372,86 @@ impl SourceFingerprint {
             related.push((format!("parent-session-{index}.jsonl"), parent_path));
         }
 
-        Self::check_path_with_related(path, related, cached)
+        Self::check_path_with_related_mode(path, related, cached, mode)
     }
 
-    pub(crate) fn check_grok_path(path: &Path, cached: Option<&Self>) -> Option<FingerprintStatus> {
+    pub(crate) fn check_grok_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_grok_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_grok_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let related_paths = ["signals.json", "summary.json", "events.jsonl"]
             .into_iter()
             .map(|name| (name.to_string(), parent.join(name)));
-        Self::check_path_with_related(path, related_paths, cached)
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
     }
 
-    pub(crate) fn check_kiro_path(path: &Path, cached: Option<&Self>) -> Option<FingerprintStatus> {
-        let Some(messages) = crate::sessions::kiro::kiro_related_messages_path(path) else {
-            return Self::check_path(path, cached);
-        };
-        let related_paths = std::iter::once(("messages.jsonl".to_string(), messages));
-        Self::check_path_with_related(path, related_paths, cached)
-    }
-
-    pub(crate) fn check_droid_path(
+    pub(crate) fn check_kiro_path_samples_only(
         path: &Path,
         cached: Option<&Self>,
     ) -> Option<FingerprintStatus> {
-        let Some(jsonl) = crate::sessions::droid::droid_jsonl_path(path) else {
-            return Self::check_path(path, cached);
-        };
-        let related_paths = std::iter::once(("session.jsonl".to_string(), jsonl));
-        Self::check_path_with_related(path, related_paths, cached)
+        Self::check_kiro_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
     }
 
-    pub(crate) fn check_kimi_path(path: &Path, cached: Option<&Self>) -> Option<FingerprintStatus> {
+    fn check_kiro_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        let Some(messages) = crate::sessions::kiro::kiro_related_messages_path(path) else {
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
+        };
+        let related_paths = std::iter::once(("messages.jsonl".to_string(), messages));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    pub(crate) fn check_droid_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_droid_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_droid_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        let Some(jsonl) = crate::sessions::droid::droid_jsonl_path(path) else {
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
+        };
+        let related_paths = std::iter::once(("session.jsonl".to_string(), jsonl));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    pub(crate) fn check_kimi_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_kimi_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_kimi_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
         if crate::sessions::kimi::is_kimi_code_path(path) {
-            return Self::check_path(path, cached);
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
         }
         let Some(config) = crate::sessions::kimi::kimi_config_path(path) else {
-            return Self::check_path(path, cached);
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
         };
         let related_paths = std::iter::once(("config.json".to_string(), config));
-        Self::check_path_with_related(path, related_paths, cached)
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
     }
 
     fn check_path_with_related<I>(
@@ -1219,12 +1309,10 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 
 /// Whether a fingerprint carries a whole-file `content_hash`.
 ///
-/// Most sources are small and hash cheaply, but SQLite databases (OpenCode,
-/// MiMo Code, ...) can reach tens of gigabytes, and their `content_hash` is
-/// write-only: validation uses size + mtime + samples ([`fingerprint_metadata_matches`]),
-/// and only codex sources (never SQLite) read `content_hash`. Hashing a 14 GB
-/// db every cold build — and every submit after the db changes — was pure
-/// waste, so SQLite sources store a zero sentinel instead.
+/// Validation uses size + mtime + samples ([`fingerprint_metadata_matches`])
+/// for every source. Only Codex reads `content_hash` for incremental resume;
+/// generic parsers and SQLite sources store a zero sentinel so changed or cold
+/// files do not pay for a second whole-file hash that cannot affect parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentHashMode {
     Full,
@@ -1284,6 +1372,7 @@ fn full_hash_call_count() -> usize {
     FULL_HASH_CALLS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
 pub(crate) fn build_codex_incremental_cache(
     path: &Path,
     consumed_offset: u64,
@@ -1299,6 +1388,29 @@ pub(crate) fn build_codex_incremental_cache(
         consumed_offset,
         ends_with_newline,
         prefix_hash: hash_prefix(path, consumed_offset)?,
+    })
+}
+
+/// Build Codex incremental state when the caller already hashed the complete
+/// consumed prefix. Full-file Codex fingerprints are also the prefix hash when
+/// `consumed_offset` equals the current file size, so accepting that digest
+/// avoids a second read of the transcript.
+pub(crate) fn build_codex_incremental_cache_with_prefix_hash(
+    path: &Path,
+    consumed_offset: u64,
+    state: CodexParseState,
+    prefix_hash: [u8; 32],
+) -> Option<CodexIncrementalCache> {
+    let ends_with_newline = consumed_offset == 0 || file_ends_with_newline(path, consumed_offset);
+    if !ends_with_newline {
+        return None;
+    }
+
+    Some(CodexIncrementalCache {
+        state,
+        consumed_offset,
+        ends_with_newline,
+        prefix_hash,
     })
 }
 
@@ -1519,6 +1631,29 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_incremental_cache_reuses_full_hash() {
+        let file = write_temp_file(b"line-1\nline-2\n");
+        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
+        let full_hashes_before = full_hash_call_count();
+
+        let incremental_cache = build_codex_incremental_cache_with_prefix_hash(
+            file.path(),
+            fingerprint.size,
+            CodexParseState::default(),
+            fingerprint.content_hash,
+        )
+        .unwrap();
+
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "a supplied Codex fingerprint must avoid a second whole-file SHA-256"
+        );
+        assert_eq!(incremental_cache.prefix_hash, fingerprint.content_hash);
+        assert!(incremental_cache.ends_with_newline);
+    }
+
+    #[test]
     fn test_check_path_returns_unchanged_for_matching_metadata_and_samples() {
         let file = write_temp_file(&vec![b'a'; 32 * 1024]);
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
@@ -1565,6 +1700,47 @@ mod tests {
             full_hashes_before + 1,
             "a changed sample must rebuild the full fingerprint"
         );
+    }
+
+    #[test]
+    fn test_generic_sources_skip_full_hash() {
+        let original = vec![b'a'; 64 * 1024];
+        let file = write_temp_file(&original);
+        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
+        let original_signature = metadata_signature(file.path()).unwrap();
+        let original_modified = std::fs::metadata(file.path()).unwrap().modified().unwrap();
+
+        let mut rewritten = original;
+        rewritten[0] = b'z';
+        std::fs::write(file.path(), rewritten).unwrap();
+        File::options()
+            .write(true)
+            .open(file.path())
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        assert_eq!(metadata_signature(file.path()).unwrap(), original_signature);
+
+        let full_hashes_before = full_hash_call_count();
+        let status =
+            SourceFingerprint::check_path_samples_only(file.path(), Some(&fingerprint)).unwrap();
+        let FingerprintStatus::Changed(changed) = status else {
+            panic!("changed sample must invalidate a generic source");
+        };
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "generic source fingerprints must not compute a whole-file SHA-256"
+        );
+        assert_eq!(changed.content_hash, [0_u8; 32]);
+
+        let full_hashes_before = full_hash_call_count();
+        let cold = SourceFingerprint::check_path_samples_only(file.path(), None).unwrap();
+        let FingerprintStatus::Changed(cold) = cold else {
+            panic!("an uncached generic source must build a fingerprint");
+        };
+        assert_eq!(full_hash_call_count(), full_hashes_before);
+        assert_eq!(cold.content_hash, [0_u8; 32]);
     }
 
     #[test]

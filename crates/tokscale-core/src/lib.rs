@@ -666,8 +666,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             return None;
         }
 
-        let codex_incremental =
-            message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
+        let codex_incremental = message_cache::build_codex_incremental_cache_with_prefix_hash(
+            path,
+            consumed_offset,
+            state,
+            fingerprint.content_hash,
+        )?;
 
         Some(message_cache::CachedSourceEntry::new(
             message_cache::CacheIdentity::for_client(ClientId::Codex),
@@ -796,7 +800,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             path,
             source_cache,
             pricing,
-            message_cache::SourceFingerprint::check_path,
+            message_cache::SourceFingerprint::check_path_samples_only,
             parse,
         )
     }
@@ -830,6 +834,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         let identity = message_cache::CacheIdentity::for_client(ClientId::Codex);
         let is_headless = is_headless_path(path, headless_roots);
         let cached = source_cache.get(identity, path);
+        if cached.is_none() {
+            // The post-parse cache build computes the authoritative fingerprint
+            // after reading the file. Avoid hashing an uncached source here
+            // only to discard that digest before parsing it.
+            return parse_full_log_source(path, pricing, is_headless);
+        }
         let Some(fingerprint_status) = message_cache::SourceFingerprint::check_path(
             path,
             cached.map(|entry| &entry.fingerprint),
@@ -920,7 +930,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             return reparse_from_start(true);
         }
 
-        parse_full_log_source(path, pricing, is_headless)
+        unreachable!("uncached Codex sources return before fingerprint validation")
     }
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
@@ -1051,7 +1061,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 &source_cache,
                 pricing,
                 |path, cached| {
-                    message_cache::SourceFingerprint::check_claude_code_path_with_home(
+                    message_cache::SourceFingerprint::check_claude_code_path_with_home_samples_only(
                         path,
                         cached,
                         Some(&claude_home),
@@ -1154,7 +1164,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_path,
+                message_cache::SourceFingerprint::check_path_samples_only,
                 |path| {
                     let parsed = sessions::gemini::parse_gemini_file_with_cache_status(path);
                     (parsed.messages, parsed.cacheable)
@@ -1227,7 +1237,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_grok_path,
+                message_cache::SourceFingerprint::check_grok_path_samples_only,
                 sessions::grok::parse_grok_updates_file,
             )
         })
@@ -1248,7 +1258,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_jcode_path,
+                message_cache::SourceFingerprint::check_jcode_path_samples_only,
                 sessions::jcode::parse_jcode_file,
             )
         })
@@ -1315,7 +1325,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_droid_path,
+                message_cache::SourceFingerprint::check_droid_path_samples_only,
                 sessions::droid::parse_droid_file,
             )
         })
@@ -1495,7 +1505,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_kimi_path,
+                message_cache::SourceFingerprint::check_kimi_path_samples_only,
                 parse,
             )
         })
@@ -1537,7 +1547,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_roo_path,
+                message_cache::SourceFingerprint::check_roo_path_samples_only,
                 sessions::roocode::parse_roocode_file,
             )
         })
@@ -1558,7 +1568,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_roo_path,
+                message_cache::SourceFingerprint::check_roo_path_samples_only,
                 sessions::kilocode::parse_kilocode_file,
             )
         })
@@ -1579,7 +1589,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_roo_path,
+                message_cache::SourceFingerprint::check_roo_path_samples_only,
                 sessions::cline::parse_cline_file,
             )
         })
@@ -1671,7 +1681,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::check_kiro_path,
+                message_cache::SourceFingerprint::check_kiro_path_samples_only,
                 sessions::kiro::parse_kiro_file,
             )
         })
