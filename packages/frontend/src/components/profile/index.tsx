@@ -10,14 +10,17 @@ export { ProfileUsageChart } from "./ProfileUsageChart";
 export type { ProfileUsageChartProps } from "./ProfileUsageChart";
 
 export {
+  createContributionRangeOptions,
   getContributionDayForDate,
   getDefaultContributionDate,
   ProfileContributionBreakdown,
   ProfileContributionGraph,
   reconcileContributionSelectionRange,
+  resolveContributionRange,
   resolveContributionSelectedDate,
 } from "./ProfileContributionGraph";
 export type {
+  ContributionRangeOption,
   ContributionSelectionState,
   ProfileContributionBreakdownProps,
   ProfileContributionGraphProps,

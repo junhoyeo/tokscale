@@ -2,6 +2,7 @@
 
 import {
   Fragment,
+  useEffect,
   useId,
   useMemo,
   useRef,
@@ -37,18 +38,29 @@ export interface ProfileContributionGraphProps {
   contributions: DailyContribution[];
   description?: string;
   onPaletteChange?: (palette: ColorPaletteName) => void;
+  onRangeChange?: (range: string) => void;
   onSelectedDateChange?: (date: string | null) => void;
   onViewChange?: (view: ProfileContributionView) => void;
   paletteName?: ColorPaletteName;
   persistentSelection?: boolean;
   rangeEnd?: string | null;
+  rangeOptions?: readonly ContributionRangeOption[];
   rangeStart?: string | null;
+  rangeValue?: string;
+  selectableRangeEnd?: string | null;
   selectedDate?: string | null;
   showBreakdown?: boolean;
   view?: ProfileContributionView;
 }
 
 export type ProfileContributionView = "2d" | "3d";
+
+export interface ContributionRangeOption {
+  endDate: string;
+  label: string;
+  startDate: string;
+  value: string;
+}
 
 export interface ContributionSelectionState {
   date: string | null;
@@ -78,6 +90,7 @@ export interface ContributionCell {
   date: string;
   intensity: 0 | 1 | 2 | 3 | 4;
   inRange: boolean;
+  selectable: boolean;
   tokens: number;
 }
 
@@ -127,6 +140,7 @@ export interface ContributionCalendar {
   freeTokenDays: number;
   highestDay: ContributionCell | null;
   monthMarkers: MonthMarker[];
+  selectableEndDate: string | null;
   startDate: string | null;
   weekCount: number;
 }
@@ -159,6 +173,25 @@ type ContributionNavigationKey =
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const LEGACY_COST_FLOAT_EPSILON = 1e-6;
+export const PROFILE_CONTRIBUTION_CELL_GAP = 2;
+export const PROFILE_CONTRIBUTION_CELL_RADIUS = 1.6;
+export const PROFILE_CONTRIBUTION_CELL_SIZE = 8;
+
+export function getContributionScrollOffset(
+  currentScrollLeft: number,
+  containerLeft: number,
+  containerRight: number,
+  targetLeft: number,
+  targetRight: number,
+): number {
+  if (targetRight > containerRight) {
+    return currentScrollLeft + targetRight - containerRight;
+  }
+  if (targetLeft < containerLeft) {
+    return Math.max(0, currentScrollLeft - (containerLeft - targetLeft));
+  }
+  return currentScrollLeft;
+}
 
 const dayFormatter = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
@@ -223,6 +256,61 @@ function parseUtcDate(date: string): number | null {
 
 function toDateKey(timestamp: number): string {
   return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+export function createContributionRangeOptions(
+  contributions: readonly DailyContribution[],
+  recentStart: string | null | undefined,
+  recentEnd: string | null | undefined,
+): ContributionRangeOption[] {
+  const startTimestamp = recentStart ? parseUtcDate(recentStart) : null;
+  const endTimestamp = recentEnd ? parseUtcDate(recentEnd) : null;
+  if (
+    startTimestamp === null ||
+    endTimestamp === null ||
+    endTimestamp < startTimestamp
+  ) {
+    return [];
+  }
+
+  const latestYear = new Date(endTimestamp).getUTCFullYear();
+  const years = new Set<number>([latestYear]);
+  for (const contribution of contributions) {
+    const timestamp = parseUtcDate(contribution.date);
+    if (timestamp === null) continue;
+
+    const year = new Date(timestamp).getUTCFullYear();
+    if (year <= latestYear) years.add(year);
+  }
+
+  return [
+    {
+      endDate: recentEnd!,
+      label: "Recent year",
+      startDate: recentStart!,
+      value: "recent",
+    },
+    ...[...years]
+      .sort((left, right) => right - left)
+      .map((year) => ({
+        endDate: `${year}-12-31`,
+        label: String(year),
+        startDate: `${year}-01-01`,
+        value: String(year),
+      })),
+  ];
+}
+
+export function resolveContributionRange(
+  options: readonly ContributionRangeOption[],
+  requestedValue: string,
+): ContributionRangeOption | null {
+  return (
+    options.find(({ value }) => value === requestedValue) ??
+    options.find(({ value }) => value === "recent") ??
+    options[0] ??
+    null
+  );
 }
 
 function safeTokens(value: number): number {
@@ -332,7 +420,13 @@ export function getContributionDayForDate(
 
   return (
     mergeDailyContributions(contributions).get(date) ??
-    createEmptyContribution({ date, inRange: true, intensity: 0, tokens: 0 })
+    createEmptyContribution({
+      date,
+      inRange: true,
+      intensity: 0,
+      selectable: true,
+      tokens: 0,
+    })
   );
 }
 
@@ -479,6 +573,7 @@ export function createContributionCalendar(
   contributions: readonly DailyContribution[],
   rangeStart?: string | null,
   rangeEnd?: string | null,
+  selectableRangeEnd?: string | null,
 ): ContributionCalendar {
   const contributionsByDate = new Map<
     string,
@@ -520,6 +615,7 @@ export function createContributionCalendar(
       freeTokenDays: 0,
       highestDay: null,
       monthMarkers: [],
+      selectableEndDate: null,
       startDate: null,
       weekCount: 0,
     };
@@ -531,13 +627,20 @@ export function createContributionCalendar(
   const lastTimestamp = hasRequestedRange
     ? requestedEnd
     : sorted[sorted.length - 1].timestamp;
-  const scopedContributions = sorted.filter(
+  const requestedSelectableEnd = selectableRangeEnd
+    ? parseUtcDate(selectableRangeEnd)
+    : null;
+  const selectableEndTimestamp =
+    requestedSelectableEnd === null
+      ? lastTimestamp
+      : Math.min(lastTimestamp, requestedSelectableEnd);
+  const selectableContributions = sorted.filter(
     ({ timestamp }) =>
-      timestamp >= firstTimestamp && timestamp <= lastTimestamp,
+      timestamp >= firstTimestamp && timestamp <= selectableEndTimestamp,
   );
   const maxTokens = Math.max(
     0,
-    ...scopedContributions.map(({ tokens }) => tokens),
+    ...selectableContributions.map(({ tokens }) => tokens),
   );
   const calendarStart =
     firstTimestamp - new Date(firstTimestamp).getUTCDay() * DAY_MS;
@@ -552,14 +655,16 @@ export function createContributionCalendar(
     const date = toDateKey(timestamp);
     const contribution = contributionsByDate.get(date);
     const inRange = timestamp >= firstTimestamp && timestamp <= lastTimestamp;
+    const selectable = inRange && timestamp <= selectableEndTimestamp;
 
     cells.push({
       date,
       inRange,
-      intensity: inRange
+      intensity: selectable
         ? getContributionIntensity(contribution?.tokens ?? 0, maxTokens)
         : 0,
-      tokens: inRange ? (contribution?.tokens ?? 0) : 0,
+      selectable,
+      tokens: selectable ? (contribution?.tokens ?? 0) : 0,
     });
   }
 
@@ -594,10 +699,11 @@ export function createContributionCalendar(
   }
 
   return {
-    activeDays: scopedContributions.filter(({ tokens }) => tokens > 0).length,
+    activeDays: selectableContributions.filter(({ tokens }) => tokens > 0)
+      .length,
     cells,
     endDate: toDateKey(lastTimestamp),
-    freeTokenDays: scopedContributions.filter(
+    freeTokenDays: selectableContributions.filter(
       ({ cost, tokens }) =>
         tokens > 0 &&
         Number.isFinite(cost) &&
@@ -611,6 +717,10 @@ export function createContributionCalendar(
             right.tokens - left.tokens || left.date.localeCompare(right.date),
         )[0] ?? null,
     monthMarkers,
+    selectableEndDate:
+      selectableEndTimestamp >= firstTimestamp
+        ? toDateKey(selectableEndTimestamp)
+        : null,
     startDate: toDateKey(firstTimestamp),
     weekCount,
   };
@@ -620,9 +730,15 @@ export function getDefaultContributionDate(
   contributions: readonly DailyContribution[],
   rangeStart?: string | null,
   rangeEnd?: string | null,
+  selectableRangeEnd?: string | null,
 ): string | null {
-  return createContributionCalendar(contributions, rangeStart, rangeEnd)
-    .endDate;
+  const calendar = createContributionCalendar(
+    contributions,
+    rangeStart,
+    rangeEnd,
+    selectableRangeEnd,
+  );
+  return calendar.selectableEndDate ?? calendar.endDate;
 }
 
 const ISOMETRIC_CELL_WIDTH = 7.5;
@@ -718,7 +834,9 @@ export function getContributionFocusDate(
   currentDate: string | null,
   key: ContributionNavigationKey,
 ): string | null {
-  const dates = cells.filter(({ inRange }) => inRange).map(({ date }) => date);
+  const dates = cells
+    .filter(({ selectable }) => selectable)
+    .map(({ date }) => date);
   if (dates.length === 0) return null;
 
   const currentIndex = currentDate ? dates.indexOf(currentDate) : -1;
@@ -844,12 +962,74 @@ const HeadingGroup = styled.div`
   min-width: 0;
 `;
 
+const HeadingRow = styled.div`
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+`;
+
 const Heading = styled.h2`
   margin: 0;
   color: var(--service-text);
   font-size: 0.9375rem;
   font-weight: 600;
   letter-spacing: -0.01em;
+`;
+
+const RangeSelectWrapper = styled.span`
+  position: relative;
+  display: inline-grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 0.75rem;
+  align-items: center;
+
+  &::after {
+    width: 0.3125rem;
+    height: 0.3125rem;
+    grid-column: 2;
+    grid-row: 1;
+    border-right: 1px solid var(--service-text-muted);
+    border-bottom: 1px solid var(--service-text-muted);
+    content: "";
+    pointer-events: none;
+    transform: translateY(-0.125rem) rotate(45deg);
+  }
+`;
+
+const RangeSelect = styled.select`
+  min-width: 0;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  padding: 0 1rem 0.125rem 0;
+  appearance: none;
+  overflow: hidden;
+  color: var(--service-text-muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px dotted var(--service-text-muted);
+  border-radius: 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  text-overflow: ellipsis;
+  cursor: pointer;
+
+  option {
+    color: var(--service-text);
+    background: var(--service-surface);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (pointer: coarse) {
+    min-height: 2.75rem;
+    padding-top: 0.625rem;
+    padding-bottom: 0.625rem;
+  }
 `;
 
 const Description = styled.p`
@@ -965,7 +1145,11 @@ const CalendarBody = styled.div`
   flex-direction: column;
   justify-content: center;
   min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
   padding: 0.875rem 1rem 0.75rem;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 
   @container (max-width: 24rem) {
     padding-right: 0.75rem;
@@ -999,6 +1183,11 @@ const IsometricSvg = styled.svg`
 const IsometricCell = styled.g<{ $active: boolean; $selected: boolean }>`
   cursor: pointer;
   outline: none;
+
+  &[aria-hidden="true"] {
+    pointer-events: none;
+    cursor: default;
+  }
 
   polygon {
     transition:
@@ -1034,19 +1223,20 @@ const IsometricTop = styled.polygon<{
 
 const MonthRow = styled.div<{ $weeks: number }>`
   display: grid;
-  grid-template-columns: repeat(${(props) => props.$weeks}, minmax(0, 1fr));
+  grid-template-columns: repeat(
+    ${(props) => props.$weeks},
+    ${(props) =>
+      props.$weeks <= 5 ? "1.25rem" : `${PROFILE_CONTRIBUTION_CELL_SIZE}px`}
+  );
+  column-gap: ${PROFILE_CONTRIBUTION_CELL_GAP}px;
   box-sizing: border-box;
-  width: 100%;
-  max-width: ${(props) =>
-    1.75 + props.$weeks * (props.$weeks <= 5 ? 1.25 : 0.875)}rem;
+  width: max-content;
   min-width: 0;
   height: 1.125rem;
   padding-left: 1.75rem;
   color: var(--service-text-muted);
 
   @container (max-width: 22rem) {
-    max-width: ${(props) =>
-      props.$weeks * (props.$weeks <= 5 ? 1.25 : 0.875)}rem;
     padding-left: 0;
   }
 `;
@@ -1084,20 +1274,21 @@ const Month = styled.span<{
 
 const CalendarRow = styled.div`
   display: grid;
-  grid-template-columns: 1.25rem minmax(0, 1fr);
+  grid-template-columns: 1.25rem max-content;
   align-items: stretch;
   gap: 0.5rem;
+  width: max-content;
   min-width: 0;
 
   @container (max-width: 22rem) {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: max-content;
   }
 `;
 
 const DayLabels = styled.div`
   display: grid;
   grid-template-rows: repeat(7, minmax(0, 1fr));
-  gap: clamp(1px, 0.25cqw, 2px);
+  gap: ${PROFILE_CONTRIBUTION_CELL_GAP}px;
   color: var(--service-text-muted);
   font-size: 0.625rem;
   line-height: 1;
@@ -1115,11 +1306,18 @@ const DayLabel = styled.span<{ $row: number }>`
 const Grid = styled.div<{ $weeks: number }>`
   display: grid;
   grid-auto-flow: column;
-  grid-template-columns: repeat(${(props) => props.$weeks}, minmax(0, 1fr));
-  grid-template-rows: repeat(7, auto);
-  gap: clamp(1px, 0.25cqw, 2px);
-  width: 100%;
-  max-width: ${(props) => props.$weeks * (props.$weeks <= 5 ? 1.25 : 0.875)}rem;
+  grid-template-columns: repeat(
+    ${(props) => props.$weeks},
+    ${(props) =>
+      props.$weeks <= 5 ? "1.25rem" : `${PROFILE_CONTRIBUTION_CELL_SIZE}px`}
+  );
+  grid-template-rows: repeat(
+    7,
+    ${(props) =>
+      props.$weeks <= 5 ? "1.25rem" : `${PROFILE_CONTRIBUTION_CELL_SIZE}px`}
+  );
+  gap: ${PROFILE_CONTRIBUTION_CELL_GAP}px;
+  width: max-content;
   min-width: 0;
 `;
 
@@ -1136,16 +1334,20 @@ const Cell = styled.button<{
   visibility: ${(props) => (props.$inRange ? "visible" : "hidden")};
   background: ${(props) => props.$color};
   border: 0;
-  border-radius: 0;
+  border-radius: ${PROFILE_CONTRIBUTION_CELL_RADIUS}px;
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.035),
     ${(props) =>
       props.$selected
-        ? "0 0 0 2px var(--service-focus), 0 0 0 4px var(--service-canvas)"
+        ? "0 0 0 1px var(--service-focus)"
         : props.$active
-          ? "0 0 0 2px var(--service-text), 0 0 0 4px var(--service-canvas)"
+          ? "0 0 0 1px var(--service-text)"
           : "0 0 0 0 transparent"};
   cursor: pointer;
+
+  &:disabled {
+    cursor: default;
+  }
 
   &:focus-visible {
     position: relative;
@@ -1900,12 +2102,16 @@ export function ProfileContributionGraph({
   contributions,
   description = "Daily token activity across the available history.",
   onPaletteChange,
+  onRangeChange,
   onSelectedDateChange,
   onViewChange,
   paletteName: providedPaletteName,
   persistentSelection = false,
   rangeEnd,
+  rangeOptions = [],
   rangeStart,
+  rangeValue,
+  selectableRangeEnd,
   selectedDate: providedSelectedDate,
   showBreakdown = true,
   view: providedView,
@@ -1917,6 +2123,7 @@ export function ProfileContributionGraph({
   const breakdownId = providedBreakdownId ?? generatedBreakdownId;
   const calendarId = useId();
   const calendarInstructionsId = useId();
+  const calendarScrollRef = useRef<HTMLDivElement>(null);
   const cellRefs = useRef(new Map<string, Element & { focus: () => void }>());
   const [tooltip, setTooltip] = useState<ContributionTooltipState | null>(null);
   const [keyboardDate, setKeyboardDate] = useState<string | null>(null);
@@ -1939,8 +2146,14 @@ export function ProfileContributionGraph({
     [contributions],
   );
   const calendar = useMemo(
-    () => createContributionCalendar(contributions, rangeStart, rangeEnd),
-    [contributions, rangeStart, rangeEnd],
+    () =>
+      createContributionCalendar(
+        contributions,
+        rangeStart,
+        rangeEnd,
+        selectableRangeEnd,
+      ),
+    [contributions, rangeStart, rangeEnd, selectableRangeEnd],
   );
   const activeDayLabel = `${calendar.activeDays.toLocaleString("en-US")} active ${
     calendar.activeDays === 1 ? "day" : "days"
@@ -1952,16 +2165,18 @@ export function ProfileContributionGraph({
     : "No active contribution days are available.";
   const inRangeDates = useMemo(
     () =>
-      calendar.cells.filter(({ inRange }) => inRange).map(({ date }) => date),
+      calendar.cells
+        .filter(({ selectable }) => selectable)
+        .map(({ date }) => date),
     [calendar.cells],
   );
   const tabbableDate =
     keyboardDate && inRangeDates.includes(keyboardDate)
       ? keyboardDate
-      : (calendar.endDate ?? inRangeDates.at(-1) ?? null);
+      : (calendar.selectableEndDate ?? inRangeDates.at(-1) ?? null);
   const selectedCell = selectedDate
     ? (calendar.cells.find(
-        ({ date, inRange }) => inRange && date === selectedDate,
+        ({ date, selectable }) => selectable && date === selectedDate,
       ) ?? null)
     : null;
   const selectedDay = selectedCell
@@ -1973,6 +2188,25 @@ export function ProfileContributionGraph({
     [calendar],
   );
 
+  useEffect(() => {
+    const scrollContainer = calendarScrollRef.current;
+    const target = tabbableDate ? cellRefs.current.get(tabbableDate) : null;
+    if (!scrollContainer || !target) return;
+
+    const containerBounds = scrollContainer.getBoundingClientRect();
+    const targetBounds = target.getBoundingClientRect();
+    const nextScrollLeft = getContributionScrollOffset(
+      scrollContainer.scrollLeft,
+      containerBounds.left,
+      containerBounds.right,
+      targetBounds.left,
+      targetBounds.right,
+    );
+    if (nextScrollLeft !== scrollContainer.scrollLeft) {
+      scrollContainer.scrollLeft = nextScrollLeft;
+    }
+  }, [rangeEnd, rangeStart, tabbableDate, view]);
+
   const commitSelectedDate = (date: string | null) => {
     if (providedSelectedDate === undefined) setInternalSelectedDate(date);
     onSelectedDateChange?.(date);
@@ -1983,6 +2217,12 @@ export function ProfileContributionGraph({
     onPaletteChange?.(name);
   };
 
+  const commitRange = (value: string) => {
+    setTooltip(null);
+    setKeyboardDate(null);
+    onRangeChange?.(value);
+  };
+
   const commitView = (nextView: ProfileContributionView) => {
     if (providedView === undefined) setInternalView(nextView);
     onViewChange?.(nextView);
@@ -1990,7 +2230,7 @@ export function ProfileContributionGraph({
 
   const positionCellTooltip = (cell: ContributionCell, target: Element) => {
     if (
-      !cell.inRange ||
+      !cell.selectable ||
       cell.date === selectedDate ||
       typeof window === "undefined"
     ) {
@@ -2093,7 +2333,7 @@ export function ProfileContributionGraph({
   };
 
   const selectCell = (cell: ContributionCell) => {
-    if (!cell.inRange) return;
+    if (!cell.selectable) return;
     setTooltip(null);
     setKeyboardDate(cell.date);
     commitSelectedDate(
@@ -2110,7 +2350,7 @@ export function ProfileContributionGraph({
     }
 
     const targets = calendar.cells.flatMap((cell) => {
-      if (!cell.inRange) return [];
+      if (!cell.selectable) return [];
       const node = cellRefs.current.get(cell.date);
       if (!node) return [];
       const bounds = node.getBoundingClientRect();
@@ -2132,7 +2372,7 @@ export function ProfileContributionGraph({
     if (!date) return;
 
     const cell = calendar.cells.find(
-      (candidate) => candidate.inRange && candidate.date === date,
+      (candidate) => candidate.selectable && candidate.date === date,
     );
     if (cell) selectCell(cell);
   };
@@ -2145,7 +2385,26 @@ export function ProfileContributionGraph({
     >
       <Header>
         <HeadingGroup>
-          <Heading id={titleId}>Contributions</Heading>
+          <HeadingRow>
+            <Heading id={titleId}>Contributions</Heading>
+            {rangeOptions.length > 1 && rangeValue && onRangeChange && (
+              <RangeSelectWrapper>
+                <RangeSelect
+                  name="profile-contribution-range"
+                  aria-label="Contribution date range"
+                  aria-controls={calendarId}
+                  value={rangeValue}
+                  onChange={(event) => commitRange(event.currentTarget.value)}
+                >
+                  {rangeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </RangeSelect>
+              </RangeSelectWrapper>
+            )}
+          </HeadingRow>
           <Description id={descriptionId}>{description}</Description>
         </HeadingGroup>
         <HeaderAside>
@@ -2163,7 +2422,7 @@ export function ProfileContributionGraph({
               </ViewButton>
             ))}
           </ViewToggle>
-          <Summary>
+          <Summary aria-live="polite">
             <ActiveDays>{activeDayLabel}</ActiveDays>
             <Range>{formatRange(calendar.startDate, calendar.endDate)}</Range>
           </Summary>
@@ -2174,7 +2433,7 @@ export function ProfileContributionGraph({
       {calendar.weekCount > 0 ? (
         <>
           {view === "2d" ? (
-            <CalendarBody id={calendarId}>
+            <CalendarBody id={calendarId} ref={calendarScrollRef}>
               <MonthRow $weeks={calendar.weekCount} aria-hidden="true">
                 {calendar.monthMarkers.map((marker) => (
                   <Month
@@ -2205,25 +2464,26 @@ export function ProfileContributionGraph({
                       key={cell.date}
                       type="button"
                       ref={(node) => {
-                        if (node) cellRefs.current.set(cell.date, node);
+                        if (node && cell.selectable)
+                          cellRefs.current.set(cell.date, node);
                         else cellRefs.current.delete(cell.date);
                       }}
-                      disabled={!cell.inRange}
+                      disabled={!cell.selectable}
                       tabIndex={
-                        cell.inRange && cell.date === tabbableDate ? 0 : -1
+                        cell.selectable && cell.date === tabbableDate ? 0 : -1
                       }
-                      aria-hidden={cell.inRange ? undefined : true}
-                      aria-label={cell.inRange ? cellTitle(cell) : undefined}
+                      aria-hidden={cell.selectable ? undefined : true}
+                      aria-label={cell.selectable ? cellTitle(cell) : undefined}
                       aria-current={
-                        cell.inRange && cell.date === selectedDate
+                        cell.selectable && cell.date === selectedDate
                           ? "date"
                           : undefined
                       }
                       aria-pressed={
-                        cell.inRange ? cell.date === selectedDate : undefined
+                        cell.selectable ? cell.date === selectedDate : undefined
                       }
                       aria-controls={
-                        cell.inRange && cell.date === selectedDate
+                        cell.selectable && cell.date === selectedDate
                           ? breakdownId
                           : undefined
                       }
@@ -2231,7 +2491,7 @@ export function ProfileContributionGraph({
                         tooltip?.cell.date === cell.date ? tooltipId : undefined
                       }
                       data-contribution-date={
-                        cell.inRange ? cell.date : undefined
+                        cell.selectable ? cell.date : undefined
                       }
                       $active={tooltip?.cell.date === cell.date}
                       $color={getContributionColor(palette, cell.intensity)}
@@ -2271,37 +2531,54 @@ export function ProfileContributionGraph({
                   const color = getContributionColor(palette, cell.intensity);
                   const active = tooltip?.cell.date === cell.date;
                   const selected = selectedDate === cell.date;
+                  const interactive = cell.selectable;
 
                   return (
                     <IsometricCell
                       key={cell.date}
                       ref={(node) => {
-                        if (node) cellRefs.current.set(cell.date, node);
+                        if (node && interactive)
+                          cellRefs.current.set(cell.date, node);
                         else cellRefs.current.delete(cell.date);
                       }}
-                      role="button"
-                      tabIndex={cell.date === tabbableDate ? 0 : -1}
-                      aria-label={cellTitle(cell)}
-                      aria-current={selected ? "date" : undefined}
-                      aria-pressed={selected}
-                      aria-controls={selected ? breakdownId : undefined}
-                      aria-describedby={active ? tooltipId : undefined}
-                      data-contribution-date={cell.date}
-                      data-contribution-view="3d"
+                      role={interactive ? "button" : undefined}
+                      tabIndex={
+                        interactive && cell.date === tabbableDate ? 0 : -1
+                      }
+                      aria-hidden={interactive ? undefined : true}
+                      aria-label={interactive ? cellTitle(cell) : undefined}
+                      aria-current={
+                        interactive && selected ? "date" : undefined
+                      }
+                      aria-pressed={interactive ? selected : undefined}
+                      aria-controls={
+                        interactive && selected ? breakdownId : undefined
+                      }
+                      aria-describedby={
+                        interactive && active ? tooltipId : undefined
+                      }
+                      data-contribution-date={
+                        interactive ? cell.date : undefined
+                      }
+                      data-contribution-view={interactive ? "3d" : undefined}
                       $active={active}
                       $selected={selected}
-                      onClick={() => selectCell(cell)}
+                      onClick={interactive ? () => selectCell(cell) : undefined}
                       onPointerEnter={(event) =>
-                        handleCellPointerEnter(cell, event)
+                        interactive && handleCellPointerEnter(cell, event)
                       }
                       onPointerLeave={(event) => {
                         if (document.activeElement !== event.currentTarget) {
                           setTooltip(null);
                         }
                       }}
-                      onFocus={(event) => handleCellFocus(cell, event)}
+                      onFocus={(event) =>
+                        interactive && handleCellFocus(cell, event)
+                      }
                       onBlur={() => setTooltip(null)}
-                      onKeyDown={(event) => handleCellKeyDown(cell, event)}
+                      onKeyDown={(event) =>
+                        interactive && handleCellKeyDown(cell, event)
+                      }
                     >
                       <polygon
                         points={faces.left}

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createContributionRangeOptions,
   createContributionIsometricGeometry,
   createContributionClientDetails,
   createContributionCalendar,
@@ -8,11 +9,16 @@ import {
   getContributionDayMessageCount,
   getContributionColor,
   getContributionFocusDate,
+  getContributionScrollOffset,
   getNearestContributionDate,
   mergeDailyContributions,
+  PROFILE_CONTRIBUTION_CELL_RADIUS,
+  PROFILE_CONTRIBUTION_CELL_SIZE,
   reconcileContributionSelectionRange,
+  resolveContributionRange,
   resolveContributionSelectedDate,
 } from "../../src/components/profile/ProfileContributionGraph";
+import { BOX_BORDER_RADIUS, BOX_WIDTH } from "../../src/lib/constants";
 import type { DailyContribution } from "../../src/lib/types";
 import { colorPalettes } from "../../src/lib/themes";
 
@@ -58,6 +64,141 @@ function contrastRatio(left: string, right: string): number {
 }
 
 describe("profile contribution calendar", () => {
+  it("offers a rolling year followed by complete calendar years", () => {
+    const options = createContributionRangeOptions(
+      [
+        contribution("2024-12-31", 10, 1),
+        contribution("2025-01-01", 20, 2),
+        contribution("2026-07-12", 30, 3),
+        contribution("not-a-date", 40, 4),
+      ],
+      "2025-07-12",
+      "2026-07-12",
+    );
+
+    expect(options).toEqual([
+      {
+        value: "recent",
+        label: "Recent year",
+        startDate: "2025-07-12",
+        endDate: "2026-07-12",
+      },
+      {
+        value: "2026",
+        label: "2026",
+        startDate: "2026-01-01",
+        endDate: "2026-12-31",
+      },
+      {
+        value: "2025",
+        label: "2025",
+        startDate: "2025-01-01",
+        endDate: "2025-12-31",
+      },
+      {
+        value: "2024",
+        label: "2024",
+        startDate: "2024-01-01",
+        endDate: "2024-12-31",
+      },
+    ]);
+  });
+
+  it("falls back to the rolling year when a stale range value is requested", () => {
+    const options = createContributionRangeOptions(
+      [contribution("2026-07-12", 30, 3)],
+      "2025-07-12",
+      "2026-07-12",
+    );
+
+    expect(resolveContributionRange(options, "2026")).toMatchObject({
+      value: "2026",
+      startDate: "2026-01-01",
+      endDate: "2026-12-31",
+    });
+    expect(resolveContributionRange(options, "2024")).toMatchObject({
+      value: "recent",
+      startDate: "2025-07-12",
+      endDate: "2026-07-12",
+    });
+  });
+
+  it("does not offer future years accepted through submission clock skew", () => {
+    const options = createContributionRangeOptions(
+      [
+        contribution("2024-12-31", 10, 1),
+        contribution("2026-01-01", 20, 2),
+      ],
+      "2025-01-01",
+      "2025-12-31",
+    );
+
+    expect(options.map(({ value }) => value)).toEqual([
+      "recent",
+      "2025",
+      "2024",
+    ]);
+  });
+
+  it("renders a complete current year while keeping future dates inert", () => {
+    const calendar = createContributionCalendar(
+      [
+        contribution("2026-07-12", 30, 3),
+        contribution("2026-07-13", 3_000, 0),
+      ],
+      "2026-01-01",
+      "2026-12-31",
+      "2026-07-12",
+    );
+
+    expect(calendar.startDate).toBe("2026-01-01");
+    expect(calendar.endDate).toBe("2026-12-31");
+    expect(calendar.selectableEndDate).toBe("2026-07-12");
+    expect(
+      calendar.cells.find(({ date }) => date === "2026-07-12"),
+    ).toMatchObject({
+      inRange: true,
+      intensity: 4,
+      selectable: true,
+      tokens: 30,
+    });
+    expect(
+      calendar.cells.find(({ date }) => date === "2026-07-13"),
+    ).toMatchObject({
+      inRange: true,
+      intensity: 0,
+      selectable: false,
+      tokens: 0,
+    });
+    expect(calendar.activeDays).toBe(1);
+    expect(calendar.freeTokenDays).toBe(0);
+    expect(getContributionFocusDate(calendar.cells, "2026-07-12", "End")).toBe(
+      "2026-07-12",
+    );
+    expect(
+      getDefaultContributionDate(
+        [contribution("2026-07-12", 30, 3)],
+        "2026-01-01",
+        "2026-12-31",
+        "2026-07-12",
+      ),
+    ).toBe("2026-07-12");
+  });
+
+  it("uses rounded contribution cells smaller than the main graph", () => {
+    expect(PROFILE_CONTRIBUTION_CELL_SIZE).toBeLessThan(BOX_WIDTH);
+    expect(PROFILE_CONTRIBUTION_CELL_RADIUS).toBeGreaterThan(0);
+    expect(
+      PROFILE_CONTRIBUTION_CELL_RADIUS / PROFILE_CONTRIBUTION_CELL_SIZE,
+    ).toBeCloseTo(BOX_BORDER_RADIUS / BOX_WIDTH, 5);
+  });
+
+  it("reveals the controlled selected date inside a horizontally scrolling calendar", () => {
+    expect(getContributionScrollOffset(0, 20, 360, 570, 578)).toBe(218);
+    expect(getContributionScrollOffset(218, 20, 360, -4, 4)).toBe(194);
+    expect(getContributionScrollOffset(218, 20, 360, 120, 128)).toBe(218);
+  });
+
   it("derives intensity from tokens so free usage remains visible", () => {
     const calendar = createContributionCalendar([
       contribution("2026-07-05", 100, 0, 0),

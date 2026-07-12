@@ -5,6 +5,7 @@ import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
 import {
+  createContributionRangeOptions,
   getContributionDayForDate,
   getDefaultContributionDate,
   ProfileContributionBreakdown,
@@ -15,6 +16,7 @@ import {
   ProfileTabBar,
   ProfileUsageChart,
   reconcileContributionSelectionRange,
+  resolveContributionRange,
   resolveContributionSelectedDate,
   TokenBreakdown,
   type ModelUsage,
@@ -30,7 +32,7 @@ import { useSettings } from "@/lib/useSettings";
 
 type ProfilePeriod = "all" | "week" | "month";
 
-interface ProfileData {
+export interface ProfileData {
   user: {
     id: string;
     username: string;
@@ -100,10 +102,47 @@ export default function ProfilePageClient({
   const contributionBreakdownId = useId();
   const data = initialData;
   const period = data.period ?? "all";
-  const chartRange = useMemo(
+  const rollingChartRange = useMemo(
     () => getProfileChartRange(period, data.dateRange, data.chartRange),
     [period, data.chartRange, data.dateRange],
   );
+  const contributionRangeOptions = useMemo(
+    () =>
+      period === "all"
+        ? createContributionRangeOptions(
+            data.contributions,
+            rollingChartRange.start,
+            rollingChartRange.end,
+          )
+        : [],
+    [data.contributions, period, rollingChartRange],
+  );
+  const [contributionRangeValue, setContributionRangeValue] =
+    useState("recent");
+  const selectedContributionRange = useMemo(
+    () =>
+      resolveContributionRange(
+        contributionRangeOptions,
+        contributionRangeValue,
+      ),
+    [contributionRangeOptions, contributionRangeValue],
+  );
+  const chartRange = useMemo(
+    () =>
+      selectedContributionRange
+        ? {
+            start: selectedContributionRange.startDate,
+            end: selectedContributionRange.endDate,
+          }
+        : rollingChartRange,
+    [rollingChartRange, selectedContributionRange],
+  );
+  const contributionSelectionEnd = useMemo(() => {
+    if (!chartRange.end || !rollingChartRange.end) return chartRange.end;
+    return chartRange.end > rollingChartRange.end
+      ? rollingChartRange.end
+      : chartRange.end;
+  }, [chartRange.end, rollingChartRange.end]);
   const contributionRangeIdentity = `${chartRange.start ?? ""}:${chartRange.end ?? ""}`;
   const [contributionSelection, setContributionSelection] = useState<{
     date: string | null;
@@ -121,9 +160,9 @@ export default function ProfilePageClient({
       getDefaultContributionDate(
         data.contributions,
         chartRange.start,
-        chartRange.end,
+        contributionSelectionEnd,
       ),
-    [data.contributions, chartRange.end, chartRange.start],
+    [data.contributions, chartRange.start, contributionSelectionEnd],
   );
   const selectedContributionDate = resolveContributionSelectedDate(
     reconciledContributionSelection,
@@ -220,6 +259,7 @@ export default function ProfilePageClient({
                         breakdownId={contributionBreakdownId}
                         contributions={data.contributions}
                         onPaletteChange={setContributionPalette}
+                        onRangeChange={setContributionRangeValue}
                         onSelectedDateChange={(date) => {
                           if (date) {
                             setContributionSelection({
@@ -233,12 +273,17 @@ export default function ProfilePageClient({
                         persistentSelection
                         rangeStart={chartRange.start}
                         rangeEnd={chartRange.end}
+                        rangeOptions={contributionRangeOptions}
+                        rangeValue={selectedContributionRange?.value}
+                        selectableRangeEnd={contributionSelectionEnd}
                         selectedDate={selectedContributionDate}
                         showBreakdown={false}
                         view={contributionView}
                         description={
                           period === "all"
-                            ? "Daily contribution density across the latest 12 months."
+                            ? selectedContributionRange?.value === "recent"
+                              ? "Daily contribution density across the latest 12 months."
+                              : `Daily contribution density across ${selectedContributionRange?.label ?? "the selected year"}.`
                             : period === "month"
                               ? "Daily contribution density across the last 30 days."
                               : "Daily contribution density across the last 7 days."
@@ -260,8 +305,8 @@ export default function ProfilePageClient({
                       <ProfileUsageChart
                         contributions={data.contributions}
                         averageWindowDays={period === "all" ? 30 : 7}
-                        rangeStart={chartRange.start}
-                        rangeEnd={chartRange.end}
+                        rangeStart={rollingChartRange.start}
+                        rangeEnd={rollingChartRange.end}
                         description={
                           period === "all"
                             ? "Model activity for the latest 12 months, grouped by provider."

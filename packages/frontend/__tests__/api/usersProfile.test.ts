@@ -363,9 +363,9 @@ describe("GET /api/users/[username]", () => {
     ]);
     mockState.pushSelectResult([
       {
-        totalTokens: 27,
-        totalCost: 1.25,
-        inputTokens: 17,
+        totalTokens: 37,
+        totalCost: 2.25,
+        inputTokens: 27,
         outputTokens: 10,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
@@ -387,6 +387,38 @@ describe("GET /api/users/[username]", () => {
       },
     ]);
     mockState.pushSelectResult([
+      {
+        date: "2024-06-06",
+        timestampMs: 50,
+        tokens: 10,
+        cost: "1.0000",
+        inputTokens: 10,
+        outputTokens: 0,
+        sourceBreakdown: {
+          codex: {
+            tokens: 10,
+            cost: 1,
+            input: 10,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            messages: 1,
+            models: {
+              "gpt-legacy": {
+                tokens: 10,
+                cost: 1,
+                input: 10,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            },
+          },
+        },
+      },
       {
         date: "2026-04-30",
         timestampMs: 100,
@@ -471,14 +503,18 @@ describe("GET /api/users/[username]", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.stats.totalTokens).toBe(27);
+    expect(mockState.gte).not.toHaveBeenCalled();
+    expect(body.stats.totalTokens).toBe(37);
     expect(body.chartRange).toEqual({
       start: "2025-07-12",
       end: "2026-07-12",
     });
     expect(body.stats.activeDays).toBe(1);
-    expect(body.contributions).toHaveLength(1);
-    expect(body.contributions[0]).toEqual(
+    expect(body.contributions).toHaveLength(2);
+    expect(body.contributions.map((day: { date: string }) => day.date)).toEqual(
+      ["2024-06-06", "2026-04-30"],
+    );
+    expect(body.contributions[1]).toEqual(
       expect.objectContaining({
         date: "2026-04-30",
         timestampMs: 100,
@@ -492,7 +528,7 @@ describe("GET /api/users/[username]", () => {
         }),
       }),
     );
-    expect(body.contributions[0].clients[0]).toEqual(
+    expect(body.contributions[1].clients[0]).toEqual(
       expect.objectContaining({
         client: "codex",
         cost: 1.25,
