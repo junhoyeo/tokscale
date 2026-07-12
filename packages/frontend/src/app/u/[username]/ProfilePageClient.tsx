@@ -4,6 +4,7 @@ import { useId, useMemo, useState } from "react";
 import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
+import { ServiceFooter } from "@/components/layout/ServiceFooter";
 import {
   createContributionRangeOptions,
   getContributionDayForDate,
@@ -360,21 +361,7 @@ export default function ProfilePageClient({
         </ContentWrapper>
       </MainContent>
 
-      <ServiceFooter>
-        <ServiceFooterInner>
-          <FooterProduct>Tokscale</FooterProduct>
-          <FooterLinks aria-label="Profile footer links">
-            <Link href="/leaderboard">Leaderboard</Link>
-            <a
-              href="https://github.com/junhoyeo/tokscale"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Source
-            </a>
-          </FooterLinks>
-        </ServiceFooterInner>
-      </ServiceFooter>
+      <ServiceFooter />
     </PageContainer>
   );
 }
@@ -852,53 +839,4 @@ const MetadataChip = styled.span`
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
-`;
-
-const ServiceFooter = styled.footer`
-  width: 100%;
-  border-top: 1px solid var(--service-border);
-`;
-
-const ServiceFooterInner = styled.div`
-  width: 100%;
-  max-width: 1500px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin: 0 auto;
-  padding: 20px 32px;
-
-  @media (max-width: 520px) {
-    padding-right: 16px;
-    padding-left: 16px;
-  }
-`;
-
-const FooterProduct = styled.span`
-  color: var(--service-text-muted);
-  font-size: 13px;
-  font-weight: 500;
-`;
-
-const FooterLinks = styled.nav`
-  display: flex;
-  align-items: center;
-  gap: 16px;
-
-  a {
-    color: var(--service-text-muted);
-    font-size: 13px;
-    text-decoration: none;
-  }
-
-  a:hover {
-    color: var(--service-text);
-  }
-
-  a:focus-visible {
-    border-radius: 4px;
-    outline: 2px solid var(--service-focus);
-    outline-offset: 3px;
-  }
 `;

@@ -128,6 +128,31 @@ a:hover {
   width: 100%;
 }
 
+.service-page-shell {
+  isolation: isolate;
+  color-scheme: dark;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--service-canvas);
+  color: var(--service-text);
+}
+
+.service-main {
+  width: 100%;
+  max-width: 1500px;
+  flex: 1;
+  margin-right: auto;
+  margin-left: auto;
+  padding: 96px 32px 48px;
+}
+
+@media (max-width: 520px) {
+  .service-main {
+    padding: 88px 16px 40px;
+  }
+}
+
 @media (max-width: 560px) {
   .main-container {
     padding-left: 12px;
