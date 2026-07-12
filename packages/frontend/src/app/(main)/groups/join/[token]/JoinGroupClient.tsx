@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
+import { SecondaryActionLink } from "@/components/leaderboard/RankingUI";
 
 interface InvitePreview {
   group: {
@@ -18,32 +18,62 @@ interface InvitePreview {
 
 const Shell = styled.section`
   max-width: 620px;
-  margin: 48px auto;
-  padding: 24px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-bg-default);
+  margin: 0 auto;
+  padding: 20px 0;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
 `;
 
 const Title = styled.h1`
-  margin: 0 0 8px;
-  color: var(--color-fg-default);
-  font-size: 28px;
-  font-weight: 700;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
 `;
 
 const Text = styled.p`
-  margin: 0 0 16px;
-  color: var(--color-fg-muted);
-  line-height: 1.6;
+  margin: 6px 0 16px;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
-const Meta = styled.div`
+const Meta = styled.dl`
   display: grid;
-  gap: 8px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 16px;
   margin: 18px 0;
-  color: var(--color-fg-muted);
-  font-size: 14px;
+  padding: 14px 0;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
+`;
+
+const MetaLabel = styled.dt`
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
+`;
+
+const MetaValue = styled.dd`
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const Actions = styled.div`
@@ -53,35 +83,39 @@ const Actions = styled.div`
 `;
 
 const Button = styled.button`
-  min-height: 40px;
-  padding: 0 16px;
+  min-height: 36px;
+  padding: 0 12px;
   border-radius: 8px;
-  border: 1px solid var(--color-primary);
-  background: var(--color-primary);
+  border: 1px solid var(--service-accent);
+  background: var(--service-accent);
   color: #fff;
+  font-size: 0.875rem;
   font-weight: 600;
-  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: var(--service-accent-hover);
+    background: var(--service-accent-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
 
   &:disabled {
     opacity: 0.65;
     cursor: not-allowed;
   }
-`;
 
-const SecondaryLink = styled(Link)`
-  display: inline-flex;
-  align-items: center;
-  min-height: 40px;
-  padding: 0 16px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border-default);
-  color: var(--color-fg-default);
-  text-decoration: none;
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
 `;
 
 const ErrorText = styled.p`
   margin: 0;
-  color: var(--color-danger-fg, #f85149);
+  color: #ff8c85;
 `;
 
 function formatRole(role: InvitePreview["role"]): string {
@@ -153,9 +187,9 @@ export default function JoinGroupClient({ token }: { token: string }) {
     return (
       <Shell>
         <Title>Invite unavailable</Title>
-        <ErrorText>{error || "This invite is invalid or expired."}</ErrorText>
+        <ErrorText role="alert">{error || "This invite is invalid or expired."}</ErrorText>
         <Actions>
-          <SecondaryLink href="/groups">Browse groups</SecondaryLink>
+          <SecondaryActionLink href="/leaderboard?view=groups">Browse groups</SecondaryActionLink>
         </Actions>
       </Shell>
     );
@@ -166,16 +200,30 @@ export default function JoinGroupClient({ token }: { token: string }) {
       <Title>Join {preview.group.name}</Title>
       <Text>You were invited to join this group leaderboard.</Text>
       <Meta>
-        <span>Role: {formatRole(preview.role)}</span>
-        <span>Visibility: {preview.group.isPublic ? "Public" : "Private"}</span>
-        {preview.invitedUsername && <span>For: @{preview.invitedUsername}</span>}
+        <MetaLabel>Role</MetaLabel>
+        <MetaValue>{formatRole(preview.role)}</MetaValue>
+        <MetaLabel>Visibility</MetaLabel>
+        <MetaValue>{preview.group.isPublic ? "Public" : "Private"}</MetaValue>
+        {preview.invitedUsername && (
+          <>
+            <MetaLabel>Invited account</MetaLabel>
+            <MetaValue>@{preview.invitedUsername}</MetaValue>
+          </>
+        )}
+        <MetaLabel>Expires</MetaLabel>
+        <MetaValue>
+          {new Date(preview.expiresAt).toLocaleString(undefined, {
+            dateStyle: "medium",
+            timeStyle: "short",
+          })}
+        </MetaValue>
       </Meta>
-      {error && <ErrorText>{error}</ErrorText>}
+      {error && <ErrorText role="alert">{error}</ErrorText>}
       <Actions>
-        <Button onClick={acceptInvite} disabled={isJoining}>
+        <Button type="button" onClick={acceptInvite} disabled={isJoining}>
           {isJoining ? "Joining..." : "Join group"}
         </Button>
-        <SecondaryLink href="/groups">Cancel</SecondaryLink>
+        <SecondaryActionLink href="/leaderboard?view=groups">Cancel</SecondaryActionLink>
       </Actions>
     </Shell>
   );

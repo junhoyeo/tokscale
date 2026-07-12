@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { Navigation } from "@/components/layout/Navigation";
-import { Footer } from "@/components/layout/Footer";
+import { ServiceFooter } from "@/components/layout/ServiceFooter";
 import { getSession } from "@/lib/auth/session";
 import CreateGroupClient from "./CreateGroupClient";
 
@@ -12,19 +12,12 @@ export default async function NewGroupPage() {
   }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: "var(--color-bg-default)",
-      }}
-    >
+    <div className="service-page-shell">
       <Navigation />
-      <main className="main-container">
+      <main className="service-main" id="main-content">
         <CreateGroupClient />
       </main>
-      <Footer />
+      <ServiceFooter />
     </div>
   );
 }
