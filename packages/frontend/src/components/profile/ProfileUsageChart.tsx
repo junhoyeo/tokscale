@@ -1432,7 +1432,7 @@ export function ProfileUsageChart({
         </VisuallyHidden>
       </PlotRegion>
 
-      {modelLegend.visible.length > 0 && (
+      {(modelLegend.visible.length > 0 || modelLegend.hiddenCount > 0) && (
         <Legend role="list" aria-label="Usage models">
           {modelLegend.visible.map((entry) => (
             <LegendItem key={entry.id}>

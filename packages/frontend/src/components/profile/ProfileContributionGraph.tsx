@@ -2308,7 +2308,9 @@ export function ProfileContributionGraph({
     // The pointer left, but keyboard focus may rest on a different cell whose
     // aria-describedby points at the tooltip. Re-anchor the tooltip to that
     // focused cell instead of stranding its description on a cleared tooltip.
-    if (active) {
+    // Only while a tooltip is open: if Escape already dismissed it, leaving
+    // the hovered cell must not resurrect it.
+    if (active && tooltip) {
       for (const [date, node] of cellRefs.current) {
         if (node !== active) continue;
         const focusedCell = calendar.cells.find(
