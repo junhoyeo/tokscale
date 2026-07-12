@@ -1180,13 +1180,21 @@ export function ProfileUsageChart({
   const activeTooltipLeft = tooltipLeft(activeOffset, plotWidth);
   const modeLabel = viewLabel(view, chartData.averageWindowDays);
   const chartTitle = `${modeLabel} ${metricLabel(metric).toLowerCase()} usage by model and provider`;
+  // Screen readers should hear the true chronological span, so build from/to
+  // from `chronologicalChartData` (unmirrored source) rather than the possibly
+  // reversed display order. When "Newest first" mirrors the visible axis, note
+  // it so AT users know the plotted direction is flipped.
+  const descriptionDates = chronologicalChartData.dates;
   const chartDescription = `${chartTitle} from ${
-    chartData.dates[0] ? formatDate(chartData.dates[0]) : "no start date"
+    descriptionDates[0] ? formatDate(descriptionDates[0]) : "no start date"
   } to ${
-    chartData.dates.at(-1)
-      ? formatDate(chartData.dates.at(-1) as string)
+    descriptionDates.at(-1)
+      ? formatDate(descriptionDates.at(-1) as string)
       : "no end date"
-  }. Raw range total: ${formatMetric(chartData.total, metric)}.`;
+  }${newestFirst ? ", displayed newest first" : ""}. Raw range total: ${formatMetric(
+    chartData.total,
+    metric,
+  )}.`;
   const announcedIndex = announcedDate
     ? chartData.dates.indexOf(announcedDate)
     : -1;

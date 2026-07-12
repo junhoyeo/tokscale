@@ -2249,7 +2249,10 @@ export function ProfileContributionGraph({
   };
 
   const positionCellTooltip = (cell: ContributionCell, target: Element) => {
-    if (!cell.inRange || typeof window === "undefined") {
+    // In-range-but-unselectable cells (e.g. future days in the current year)
+    // must stay fully inert: no tooltip on hover or focus. `selectable` implies
+    // `inRange`, and today remains selectable, so its tooltip is unaffected.
+    if (!cell.selectable || typeof window === "undefined") {
       setTooltip(null);
       return;
     }
@@ -2295,6 +2298,30 @@ export function ProfileContributionGraph({
   ) => {
     setKeyboardDate(cell.date);
     positionCellTooltip(cell, event.currentTarget);
+  };
+
+  const handleCellPointerLeave = (event: PointerEvent<Element>) => {
+    const active = document.activeElement;
+    // Still focused within the cell the pointer is leaving: keep its tooltip.
+    if (active === event.currentTarget) return;
+
+    // The pointer left, but keyboard focus may rest on a different cell whose
+    // aria-describedby points at the tooltip. Re-anchor the tooltip to that
+    // focused cell instead of stranding its description on a cleared tooltip.
+    if (active) {
+      for (const [date, node] of cellRefs.current) {
+        if (node !== active) continue;
+        const focusedCell = calendar.cells.find(
+          (candidate) => candidate.date === date,
+        );
+        if (focusedCell) {
+          positionCellTooltip(focusedCell, node);
+          return;
+        }
+      }
+    }
+
+    setTooltip(null);
   };
 
   const handleCellKeyDown = (
@@ -2483,7 +2510,7 @@ export function ProfileContributionGraph({
                           cellRefs.current.set(cell.date, node);
                         else cellRefs.current.delete(cell.date);
                       }}
-                      disabled={!cell.inRange}
+                      disabled={!cell.inRange || !cell.selectable}
                       tabIndex={
                         cell.selectable && cell.date === tabbableDate ? 0 : -1
                       }
@@ -2516,11 +2543,7 @@ export function ProfileContributionGraph({
                       onPointerEnter={(event) =>
                         handleCellPointerEnter(cell, event)
                       }
-                      onPointerLeave={(event) => {
-                        if (document.activeElement !== event.currentTarget) {
-                          setTooltip(null);
-                        }
-                      }}
+                      onPointerLeave={handleCellPointerLeave}
                       onFocus={(event) => handleCellFocus(cell, event)}
                       onBlur={() => setTooltip(null)}
                       onKeyDown={(event) => handleCellKeyDown(cell, event)}
@@ -2580,13 +2603,9 @@ export function ProfileContributionGraph({
                       $selected={selected}
                       onClick={interactive ? () => selectCell(cell) : undefined}
                       onPointerEnter={(event) =>
-                        handleCellPointerEnter(cell, event)
+                        interactive && handleCellPointerEnter(cell, event)
                       }
-                      onPointerLeave={(event) => {
-                        if (document.activeElement !== event.currentTarget) {
-                          setTooltip(null);
-                        }
-                      }}
+                      onPointerLeave={handleCellPointerLeave}
                       onFocus={(event) =>
                         interactive && handleCellFocus(cell, event)
                       }

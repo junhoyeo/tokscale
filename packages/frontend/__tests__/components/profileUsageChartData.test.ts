@@ -828,11 +828,64 @@ describe("profile usage chart legend", () => {
       ...legacy.series,
       ...capped.series,
     ];
-    const { visible } = selectLegendModels(combined, 10);
+    const { visible, hiddenCount } = selectLegendModels(combined, 10);
 
     expect(new Set(visible.map(({ label }) => label))).toEqual(
       new Set(["opus", "Synthetic", "r1"]),
     );
+
+    // The legend lists 3 model series (opus, Synthetic, r1) but the chart also
+    // paints 4 non-model bands (blank-model, provider-remainder,
+    // daily-remainder, series-remainder). "+N more" must count every plotted
+    // band the legend omits, not just hidden models.
+    const plottedBands = combined.filter(({ total }) => total > 0).length;
+    expect(plottedBands).toBe(7);
+    expect(hiddenCount).toBe(4);
+  });
+
+  it("counts non-model bands and skips zero-total series in hiddenCount", () => {
+    const chart = buildUsageChartData(
+      aggregateDailyUsage([
+        day("2026-08-06", [
+          nestedClient(
+            "claude",
+            {
+              opus: model({ input: 40 }, 4),
+              "": model({ input: 12 }, 1),
+            },
+            { input: 100 },
+            10,
+          ),
+        ]),
+      ]),
+      "tokens",
+      "all",
+      "daily",
+    );
+
+    // Real bands: opus (model), blank-model, provider-remainder — all nonzero.
+    expect(chart.series.map(({ kind }) => kind)).toEqual(
+      expect.arrayContaining(["model", "blank-model", "provider-remainder"]),
+    );
+    expect(chart.series.every(({ total }) => total > 0)).toBe(true);
+
+    // Legend lists only "opus"; the two non-model bands are hidden but drawn.
+    const { visible, hiddenCount } = selectLegendModels(chart.series, 5);
+    expect(visible.map(({ label }) => label)).toEqual(["opus"]);
+    expect(hiddenCount).toBe(2);
+
+    // A remainder band with a zero total is never drawn, so it must not inflate
+    // the "+N more" count.
+    const withZeroBand = [
+      ...chart.series,
+      {
+        ...chart.series[0],
+        id: "zero-band" as (typeof chart.series)[number]["id"],
+        kind: "daily-remainder" as const,
+        total: 0,
+      },
+    ];
+    expect(selectLegendModels(withZeroBand, 5).hiddenCount).toBe(2);
   });
 
   it("disambiguates duplicate model labels across providers", () => {

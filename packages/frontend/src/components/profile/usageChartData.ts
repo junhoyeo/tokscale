@@ -906,10 +906,18 @@ export interface LegendModel {
 }
 
 /**
- * Pick the highest-usage real model series for the chart legend. Remainder,
- * "Other", blank, and daily-remainder buckets are excluded so the legend mirrors
- * exactly what the model-shaded areas plot. Duplicate labels are disambiguated
- * with their provider the same way the tooltip does.
+ * Pick the highest-usage real model series for the chart legend. Legend ENTRIES
+ * stay models-only (real models plus synthetic) — remainder, "Other", blank,
+ * and daily-remainder buckets are never listed, so the legend keeps showing the
+ * user's best models. Duplicate labels are disambiguated with their provider the
+ * same way the tooltip does.
+ *
+ * `hiddenCount` ("+N more") counts every plotted series the legend does NOT
+ * list, including the non-model buckets (blank-model, provider-remainder,
+ * daily-remainder, series-remainder) that the chart still draws. Only series
+ * with a nonzero total are counted, because a band with total 0 is never
+ * visibly drawn. This keeps "+N more" aligned with the number of bands the
+ * chart actually paints rather than only the hidden model series.
  */
 export function selectLegendModels(
   series: readonly UsageChartSeries[],
@@ -941,7 +949,12 @@ export function selectLegendModels(
     color: item.color,
   }));
 
-  return { visible, hiddenCount: ranked.length - top.length };
+  const legendIds = new Set(top.map(({ id }) => id));
+  const hiddenCount = series.filter(
+    (item) => finiteUsage(item.total) > 0 && !legendIds.has(item.id),
+  ).length;
+
+  return { visible, hiddenCount };
 }
 
 /** Positive active-day rows in visual descending order with stable ties. */
