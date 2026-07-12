@@ -237,7 +237,6 @@ describe("group leaderboard data", () => {
       "displayName",
       "rank",
       "role",
-      "totalActiveTimeMs",
       "totalCost",
       "totalTokens",
       "userId",

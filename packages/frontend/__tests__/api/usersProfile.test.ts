@@ -45,7 +45,6 @@ const mockState = vi.hoisted(() => {
       submissionId: "dailyBreakdown.submissionId",
       date: "dailyBreakdown.date",
       timestampMs: "dailyBreakdown.timestampMs",
-      activeTimeMs: "dailyBreakdown.activeTimeMs",
       tokens: "dailyBreakdown.tokens",
       cost: "dailyBreakdown.cost",
       inputTokens: "dailyBreakdown.inputTokens",
@@ -373,7 +372,6 @@ describe("GET /api/users/[username]", () => {
         submissionCount: 2,
         earliestDate: "2026-04-30",
         latestDate: "2026-04-30",
-        totalActiveTimeMs: 0,
         sessionCount: 0,
       },
     ]);
@@ -609,7 +607,6 @@ describe("GET /api/users/[username]", () => {
         submissionCount: 3,
         earliestDate: "2026-01-01",
         latestDate: "2026-06-28",
-        totalActiveTimeMs: 1200000,
         sessionCount: 8,
       },
     ]);
@@ -626,7 +623,6 @@ describe("GET /api/users/[username]", () => {
       {
         date: "2026-06-22",
         timestampMs: 100,
-        activeTimeMs: 300000,
         tokens: 200,
         cost: "2.0000",
         inputTokens: 120,
@@ -659,7 +655,6 @@ describe("GET /api/users/[username]", () => {
       {
         date: "2026-06-28",
         timestampMs: 200,
-        activeTimeMs: 600000,
         tokens: 300,
         cost: "3.0000",
         inputTokens: 180,
@@ -719,7 +714,6 @@ describe("GET /api/users/[username]", () => {
         cacheWriteTokens: 30,
         reasoningTokens: 15,
         activeDays: 2,
-        totalActiveTimeMs: 900000,
         sessionCount: 0,
       }),
     );

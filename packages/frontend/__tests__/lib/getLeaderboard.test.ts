@@ -22,7 +22,6 @@ const mockState = vi.hoisted(() => {
       date: "dailyBreakdown.date",
       tokens: "dailyBreakdown.tokens",
       cost: "dailyBreakdown.cost",
-      activeTimeMs: "dailyBreakdown.activeTimeMs",
     },
   };
 
@@ -163,7 +162,6 @@ describe("period leaderboard data", () => {
       avatarUrl: null,
       tokens: 100,
       cost: 1.25,
-      activeTimeMs: 10,
     },
     {
       userId: "user-alice",
@@ -172,7 +170,6 @@ describe("period leaderboard data", () => {
       avatarUrl: null,
       tokens: 150,
       cost: 1.75,
-      activeTimeMs: 15,
     },
     {
       userId: "user-bob",
@@ -181,7 +178,6 @@ describe("period leaderboard data", () => {
       avatarUrl: null,
       tokens: 1000,
       cost: 9.5,
-      activeTimeMs: 100,
     },
   ];
 
@@ -207,27 +203,23 @@ describe("period leaderboard data", () => {
       username: "bob",
       totalTokens: 1000,
       totalCost: 9.5,
-      totalActiveTimeMs: 100,
     });
     expect(leaderboard.users[1]).toMatchObject({
       rank: 2,
       username: "alice",
       totalTokens: 250,
       totalCost: 3,
-      totalActiveTimeMs: 25,
     });
     expect(Object.keys(leaderboard.users[0]).sort()).toEqual([
       "avatarUrl",
       "displayName",
       "rank",
-      "totalActiveTimeMs",
       "totalCost",
       "totalTokens",
       "userId",
       "username",
     ]);
     expect(leaderboard.stats).toEqual({
-      totalActiveTimeMs: 125,
       totalTokens: 1250,
       totalCost: 12.5,
       uniqueUsers: 2,
@@ -239,7 +231,6 @@ describe("period leaderboard data", () => {
       "avatarUrl",
       "tokens",
       "cost",
-      "activeTimeMs",
     ]);
   });
 
@@ -306,7 +297,6 @@ describe("period leaderboard data", () => {
       username: "alice",
       totalTokens: 250,
       totalCost: 3,
-      totalActiveTimeMs: 25,
     });
   });
 
@@ -337,7 +327,6 @@ describe("period leaderboard data", () => {
         avatarUrl: null,
         tokens: 50,
         cost: 0.5,
-        activeTimeMs: 5,
       },
     ]);
 

@@ -17,7 +17,7 @@ import {
   SegmentedControl,
 } from "@/components/leaderboard/RankingUI";
 import { getLeaderboardPeriodLabel } from "@/components/leaderboard/presentation";
-import { formatCurrency, formatNumber, formatDuration } from "@/lib/utils";
+import { formatCurrency, formatNumber } from "@/lib/utils";
 import { useSettings } from "@/lib/useSettings";
 import { isValidSortBy, type LeaderboardSortBy } from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
@@ -823,7 +823,7 @@ const PaginationPages = styled.div`
 interface LeaderboardClientProps {
   initialData: LeaderboardData;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
-  initialSortBy: 'tokens' | 'cost' | 'time';
+  initialSortBy: LeaderboardSortBy;
   initialUserRank: LeaderboardUser | null;
 }
 
@@ -841,14 +841,12 @@ function isValidLeaderboardData(data: unknown): data is LeaderboardData {
 interface LeaderboardRowProps {
   user: LeaderboardUser;
   isCurrentUser: boolean;
-  showTime: boolean;
   onRowClick: (username: string) => void;
 }
 
 const LeaderboardRow = memo(function LeaderboardRow({
   user,
   isCurrentUser,
-  showTime,
   onRowClick,
 }: LeaderboardRowProps) {
   const formattedTokens = useMemo(() => user.totalTokens.toLocaleString('en-US'), [user.totalTokens]);
@@ -900,11 +898,6 @@ const LeaderboardRow = memo(function LeaderboardRow({
           </CostValue>
         </CombinedValueContainer>
       </TableCell>
-      {showTime && (
-        <TableCell className="text-right hidden-mobile w-24">
-          <StatSpan>{formatDuration(user.totalActiveTimeMs)}</StatSpan>
-        </TableCell>
-      )}
     </TableRow>
   );
 });
@@ -920,14 +913,10 @@ function LeaderboardMobileRow({
 }) {
   const primary = sortBy === "cost"
     ? { label: "Cost", value: formatCurrency(user.totalCost) }
-    : sortBy === "time"
-      ? { label: "Active time", value: formatDuration(user.totalActiveTimeMs) }
-      : { label: "Tokens", value: formatNumber(user.totalTokens) };
-  const secondary = [
-    sortBy !== "tokens" ? `${formatNumber(user.totalTokens)} tokens` : null,
-    sortBy !== "cost" ? formatCurrency(user.totalCost) : null,
-    sortBy !== "time" ? formatDuration(user.totalActiveTimeMs) : null,
-  ].filter(Boolean).join(" · ");
+    : { label: "Tokens", value: formatNumber(user.totalTokens) };
+  const secondary = sortBy === "cost"
+    ? `${formatNumber(user.totalTokens)} tokens`
+    : formatCurrency(user.totalCost);
 
   return (
     <MobileRankingRow
@@ -1157,7 +1146,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   }, [appliedFrom, appliedTo, debouncedSearch, effectiveSortBy, fetchData, isLoading, period, requestedPage, retryToken]);
 
   const sortedUsers = data.users || [];
-  const showTime = true;
 
   const handleCopyCommand = (command: string) => {
     navigator.clipboard.writeText(command);
@@ -1204,12 +1192,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
               </HoverTooltip>
             </MetricValue>
           </MetricItem>
-          {data.stats.totalActiveTimeMs !== null && (
-            <MetricItem>
-              <MetricLabel>Active time</MetricLabel>
-              <MetricValue>{formatDuration(data.stats.totalActiveTimeMs)}</MetricValue>
-            </MetricItem>
-          )}
         </MetricStrip>
       </Section>
 
@@ -1348,7 +1330,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             options={[
               { value: "tokens", label: "Tokens" },
               { value: "cost", label: "Cost" },
-              { value: "time", label: "Time" },
             ]}
             onChange={(value) => {
               setUrlSortOverride(null);
@@ -1398,9 +1379,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                       <TableHeaderCell>User</TableHeaderCell>
                       <TableHeaderCell className="text-right hidden-cost-mobile">Cost</TableHeaderCell>
                       <TableHeaderCell className="text-right">Tokens</TableHeaderCell>
-                      {showTime && (
-                        <TableHeaderCell className="text-right hidden-mobile w-24">Time</TableHeaderCell>
-                      )}
                     </tr>
                   </TableHead>
                   <TableBody>
@@ -1409,7 +1387,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                         key={user.userId}
                         user={user}
                         isCurrentUser={!!(currentUser && user.username === currentUser.username)}
-                        showTime={showTime}
                         onRowClick={handleRowClick}
                       />
                     ))}

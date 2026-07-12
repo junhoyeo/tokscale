@@ -152,7 +152,6 @@ export async function getPublicProfileResponse(
             submissionCount: sql<number>`COALESCE(MAX(${submissions.submitCount}), 0)`,
             earliestDate: sql<string>`MIN(${submissions.dateStart})`,
             latestDate: sql<string>`MAX(${submissions.dateEnd})`,
-            totalActiveTimeMs: sql<number>`COALESCE(SUM(${submissions.totalActiveTimeMs}), 0)`,
             sessionCount: sql<number>`COALESCE(SUM(${submissions.sessionCount}), 0)`,
           })
           .from(submissions)
@@ -193,7 +192,6 @@ export async function getPublicProfileResponse(
           .select({
             date: dailyBreakdown.date,
             timestampMs: dailyBreakdown.timestampMs,
-            activeTimeMs: dailyBreakdown.activeTimeMs,
             tokens: dailyBreakdown.tokens,
             cost: dailyBreakdown.cost,
             inputTokens: dailyBreakdown.inputTokens,
@@ -294,7 +292,6 @@ export async function getPublicProfileResponse(
       {
         date: string;
         timestampMs: number | null;
-        activeTimeMs: number;
         tokens: number;
         cost: number;
         inputTokens: number;
@@ -317,7 +314,6 @@ export async function getPublicProfileResponse(
         existing.cost += Number(day.cost);
         existing.inputTokens += Number(day.inputTokens);
         existing.outputTokens += Number(day.outputTokens);
-        existing.activeTimeMs += Number(day.activeTimeMs) || 0;
         if (day.sourceBreakdown) {
           for (const [rawClient, data] of Object.entries(day.sourceBreakdown)) {
             const client = normalizeClientId(rawClient);
@@ -443,7 +439,6 @@ export async function getPublicProfileResponse(
         aggregatedDaily.set(day.date, {
           date: day.date,
           timestampMs: day.timestampMs ?? null,
-          activeTimeMs: Number(day.activeTimeMs) || 0,
           tokens: Number(day.tokens),
           cost: Number(day.cost),
           inputTokens: Number(day.inputTokens),
@@ -466,7 +461,6 @@ export async function getPublicProfileResponse(
         totals.totalCost += day.cost;
         totals.inputTokens += day.inputTokens;
         totals.outputTokens += day.outputTokens;
-        totals.totalActiveTimeMs += day.activeTimeMs;
 
         for (const clientData of Object.values(day.clients)) {
           totals.cacheReadTokens += clientData.cacheRead || 0;
@@ -484,7 +478,6 @@ export async function getPublicProfileResponse(
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
         reasoningTokens: 0,
-        totalActiveTimeMs: 0,
       },
     );
 
@@ -610,9 +603,6 @@ export async function getPublicProfileResponse(
           : Number(stats?.reasoningTokens) || 0,
         submissionCount: Number(stats?.submissionCount) || 0,
         activeDays,
-        totalActiveTimeMs: isPeriodFiltered
-          ? periodTotals.totalActiveTimeMs
-          : Number(stats?.totalActiveTimeMs) || 0,
         // Session count is only stored at submission level, so hide it for rolling ranges.
         sessionCount: isPeriodFiltered ? 0 : Number(stats?.sessionCount) || 0,
       },

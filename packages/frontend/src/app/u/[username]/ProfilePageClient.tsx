@@ -28,7 +28,6 @@ import {
   type ProfileUser,
 } from "@/components/profile";
 import type { DailyContribution } from "@/lib/types";
-import { formatDuration } from "@/lib/format";
 import { useSettings } from "@/lib/useSettings";
 
 type ProfilePeriod = "all" | "week" | "month";
@@ -52,7 +51,6 @@ export interface ProfileData {
     reasoningTokens?: number;
     submissionCount: number;
     activeDays: number;
-    totalActiveTimeMs: number;
     sessionCount: number;
   };
   dateRange: {
@@ -198,7 +196,6 @@ export default function ProfilePageClient({
       reasoningTokens: data.stats.reasoningTokens ?? 0,
       activeDays: data.stats.activeDays,
       submissionCount: data.stats.submissionCount,
-      totalActiveTimeMs: data.stats.totalActiveTimeMs,
       sessionCount: data.stats.sessionCount,
     }),
     [data.stats],
@@ -383,17 +380,10 @@ function ProfileInsights({
 }) {
   const rangeLabel =
     period === "all" ? "1y" : period === "month" ? "30d" : "7d";
-  const activityLabel = period === "all" ? "all-time" : rangeLabel;
   const insights = [
     {
       label: `Favorite model (${rangeLabel})`,
       value: favoriteModel ?? "Not available",
-    },
-    {
-      label: `Active time (${activityLabel})`,
-      value: stats.totalActiveTimeMs
-        ? formatDuration(stats.totalActiveTimeMs)
-        : "Not available",
     },
     period === "all"
       ? {

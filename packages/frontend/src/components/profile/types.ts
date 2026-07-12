@@ -16,7 +16,6 @@ export interface ProfileStatsData {
   reasoningTokens?: number;
   activeDays: number;
   submissionCount?: number;
-  totalActiveTimeMs?: number;
   sessionCount?: number;
 }
 

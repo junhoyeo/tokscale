@@ -31,7 +31,6 @@ describe("GET /api/leaderboard", () => {
           avatarUrl: null,
           totalTokens: 1200,
           totalCost: 12.5,
-          totalActiveTimeMs: 3600000,
         },
       ],
       pagination: {
@@ -45,7 +44,6 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 1200,
         totalCost: 12.5,
-        totalActiveTimeMs: null,
         uniqueUsers: 1,
       },
       period: "all",
@@ -73,7 +71,6 @@ describe("GET /api/leaderboard", () => {
       "avatarUrl",
       "displayName",
       "rank",
-      "totalActiveTimeMs",
       "totalCost",
       "totalTokens",
       "userId",
@@ -81,7 +78,7 @@ describe("GET /api/leaderboard", () => {
     ]);
   });
 
-  it("accepts time sort requests", async () => {
+  it("falls back to tokens sort for retired time sort links", async () => {
     getLeaderboardData.mockResolvedValue({
       users: [],
       pagination: {
@@ -95,11 +92,10 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 0,
         totalCost: 0,
-        totalActiveTimeMs: 0,
         uniqueUsers: 0,
       },
       period: "all",
-      sortBy: "time",
+      sortBy: "tokens",
     });
 
     const response = await GET(
@@ -111,7 +107,7 @@ describe("GET /api/leaderboard", () => {
       "all",
       1,
       50,
-      "time",
+      "tokens",
       "",
       undefined,
       undefined,
@@ -132,7 +128,6 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 0,
         totalCost: 0,
-        totalActiveTimeMs: 0,
         uniqueUsers: 0,
       },
       period: "all",
@@ -169,7 +164,6 @@ describe("GET /api/leaderboard", () => {
       stats: {
         totalTokens: 0,
         totalCost: 0,
-        totalActiveTimeMs: 0,
         uniqueUsers: 0,
       },
       period: "all",

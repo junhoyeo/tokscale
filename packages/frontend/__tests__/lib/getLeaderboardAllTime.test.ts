@@ -225,7 +225,6 @@ describe("all-time leaderboard queries", () => {
         avatarUrl: null,
         totalTokens: 5000,
         totalCost: 50,
-        totalActiveTimeMs: 500,
       },
       {
         rank: 2,
@@ -235,7 +234,6 @@ describe("all-time leaderboard queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 400,
       },
       {
         rank: 2,
@@ -245,7 +243,6 @@ describe("all-time leaderboard queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 30,
-        totalActiveTimeMs: 300,
       },
     ]);
     mockState.pushAwaitedResult([
@@ -270,7 +267,6 @@ describe("all-time leaderboard queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 400,
       },
       {
         rank: 2,
@@ -280,7 +276,6 @@ describe("all-time leaderboard queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 30,
-        totalActiveTimeMs: 300,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 2 }]);
@@ -309,7 +304,6 @@ describe("all-time leaderboard queries", () => {
       {
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 400,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 1 }]);
@@ -333,7 +327,6 @@ describe("all-time leaderboard queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 30,
-        totalActiveTimeMs: 300,
       },
     ]);
     mockState.pushAwaitedResult([
@@ -353,7 +346,6 @@ describe("all-time leaderboard queries", () => {
       "avatarUrl",
       "totalTokens",
       "totalCost",
-      "totalActiveTimeMs",
     ]);
     expect(selectedKeys(1)).toEqual([
       "totalTokens",
@@ -364,7 +356,6 @@ describe("all-time leaderboard queries", () => {
       "avatarUrl",
       "displayName",
       "rank",
-      "totalActiveTimeMs",
       "totalCost",
       "totalTokens",
       "userId",
@@ -373,7 +364,6 @@ describe("all-time leaderboard queries", () => {
     expect(leaderboard.stats).toEqual({
       totalTokens: 3000,
       totalCost: 30,
-      totalActiveTimeMs: null,
       uniqueUsers: 1,
     });
 
@@ -391,7 +381,6 @@ describe("all-time leaderboard queries", () => {
       {
         totalTokens: 3000,
         totalCost: 30,
-        totalActiveTimeMs: 300,
       },
     ]);
     mockState.pushAwaitedResult([
@@ -405,13 +394,11 @@ describe("all-time leaderboard queries", () => {
     expect(selectedKeys(1)).toEqual([
       "totalTokens",
       "totalCost",
-      "totalActiveTimeMs",
     ]);
     expect(Object.keys(rank || {}).sort()).toEqual([
       "avatarUrl",
       "displayName",
       "rank",
-      "totalActiveTimeMs",
       "totalCost",
       "totalTokens",
       "userId",
@@ -432,7 +419,6 @@ describe("all-time leaderboard queries", () => {
       {
         totalTokens: 1200,
         totalCost: 12,
-        totalActiveTimeMs: 0,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 0 }]);
@@ -507,7 +493,6 @@ describe("all-time cost aggregation precision across query shapes (numeric overf
       {
         totalTokens: 3000,
         totalCost: 40,
-        totalActiveTimeMs: 0,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 0 }]);
