@@ -253,7 +253,13 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let path = e.path();
-            if !path.is_file() {
+            // WalkDir already knows the entry type from the directory read, so
+            // trust it for the common regular-file case and avoid a redundant
+            // stat() per file (warm scans over huge trees were stat-bound).
+            // Symlinks still fall back to a following stat to preserve behavior.
+            let file_type = e.file_type();
+            let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
+            if !is_file {
                 return false;
             }
 

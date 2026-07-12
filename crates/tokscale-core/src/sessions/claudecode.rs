@@ -154,8 +154,9 @@ fn is_workflow_journal(path: &Path) -> bool {
 ///   → parent at `.../projects/<key>/<session>.jsonl`
 /// Flat layout: `.../projects/<key>/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session-id>.jsonl`
-fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+fn parent_session_paths(sidechain_path: &Path, parent_session_id: &str) -> Vec<PathBuf> {
     let parent_filename = format!("{}.jsonl", parent_session_id);
+    let mut candidates = Vec::with_capacity(2);
 
     // Nested layout: locate the `subagents` directory anywhere in the ancestry.
     // The session dir is its parent and the project dir its grandparent, so the
@@ -165,24 +166,98 @@ fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> O
     for ancestor in sidechain_path.ancestors() {
         if ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents") {
             if let Some(project_dir) = ancestor.parent().and_then(|d| d.parent()) {
-                let candidate = project_dir.join(&parent_filename);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
+                candidates.push(project_dir.join(&parent_filename));
             }
             break;
         }
     }
 
-    // Flat layout: parent dir is 1 level up
-    if let Some(project_dir) = sidechain_path.parent() {
-        let candidate = project_dir.join(&parent_filename);
-        if candidate.exists() {
-            return Some(candidate);
+    // Flat layout, and the existing nested-layout fallback: parent dir is one
+    // level up. Preserve this as the lower-priority candidate when nested.
+    if let Some(parent_dir) = sidechain_path.parent() {
+        let candidate = parent_dir.join(parent_filename);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+    parent_session_paths(sidechain_path, parent_session_id)
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+/// How far the parent probe reads before giving up. A sidechain transcript's
+/// first row is already a sidechain row in practice, so the probe stops almost
+/// immediately; this cap only prevents a mislabeled or corrupt file that
+/// matches the `agent-*` / `subagents/` layout but carries no sidechain row
+/// from triggering a whole-file read on every warm cache validation.
+const PARENT_PROBE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Resolve the parent transcript that can influence a sidechain's cached agent
+/// attribution. The probe follows the parser until its first parseable
+/// sidechain row, then returns every candidate in parser precedence order.
+/// Missing candidates are retained so their later appearance invalidates the
+/// cache.
+pub(crate) fn parent_session_paths_for_cache(sidechain_path: &Path) -> Vec<PathBuf> {
+    parent_session_paths_for_cache_bounded(sidechain_path, PARENT_PROBE_MAX_BYTES)
+}
+
+/// Cap-parameterized core of [`parent_session_paths_for_cache`]. The current
+/// line is always read and parsed in full, so a marker on the first row is
+/// found regardless of `max_probe_bytes`; the cap only bounds how many *later*
+/// rows a marker-less file is scanned for before the probe gives up.
+fn parent_session_paths_for_cache_bounded(
+    sidechain_path: &Path,
+    max_probe_bytes: u64,
+) -> Vec<PathBuf> {
+    if is_workflow_journal(sidechain_path) {
+        return Vec::new();
+    }
+    let likely_nested = sidechain_path
+        .ancestors()
+        .any(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents"));
+    let likely_flat = sidechain_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.starts_with("agent-"));
+    if !likely_nested && !likely_flat {
+        return Vec::new();
+    }
+
+    let Ok(file) = std::fs::File::open(sidechain_path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    let mut consumed: u64 = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        consumed = consumed.saturating_add(read as u64);
+        if let Ok(entry) = serde_json::from_str::<ClaudeEntry>(line.trim_end()) {
+            if entry.is_sidechain {
+                if let Some(parent_session_id) = entry
+                    .session_id
+                    .as_deref()
+                    .filter(|session_id| !session_id.trim().is_empty())
+                {
+                    return parent_session_paths(sidechain_path, parent_session_id);
+                }
+            }
+        }
+        if consumed >= max_probe_bytes {
+            break;
         }
     }
 
-    None
+    Vec::new()
 }
 
 /// Scan a parent session JSONL to recover `subagent_type` for a given `agent_id`.
@@ -1503,6 +1578,40 @@ mod tests {
     fn is_human_turn_skips_array_content() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#;
         assert!(!is_human_turn(line));
+    }
+
+    #[test]
+    fn parent_probe_resolves_first_row_marker_under_tiny_budget() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let content =
+            format!("{{\"isSidechain\":true,\"sessionId\":\"{session_id}\",\"type\":\"user\"}}\n");
+        let (_dir, path) = create_project_file(&content, "proj", "agent-abc.jsonl");
+
+        // The current row is always parsed in full, so a first-row marker is
+        // found even with a probe budget smaller than the row itself.
+        let candidates = parent_session_paths_for_cache_bounded(&path, 8);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.file_name().and_then(|name| name.to_str())
+                == Some("11111111-2222-3333-4444-555555555555.jsonl")
+        }));
+    }
+
+    #[test]
+    fn parent_probe_stops_at_byte_cap_for_late_marker() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let mut content = String::new();
+        while content.len() < 4096 {
+            content.push_str("{\"type\":\"summary\",\"isSidechain\":false}\n");
+        }
+        content.push_str(&format!(
+            "{{\"isSidechain\":true,\"sessionId\":\"{session_id}\",\"type\":\"user\"}}\n"
+        ));
+        let (_dir, path) = create_project_file(&content, "proj", "agent-late.jsonl");
+
+        // A budget smaller than the marker's offset gives up before reaching it.
+        assert!(parent_session_paths_for_cache_bounded(&path, 1024).is_empty());
+        // An ample budget still finds it — the cap only bounds marker-less scans.
+        assert!(!parent_session_paths_for_cache_bounded(&path, 1024 * 1024).is_empty());
     }
 
     fn create_test_file(content: &str) -> NamedTempFile {

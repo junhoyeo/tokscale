@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
@@ -118,13 +118,7 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         return parse_kiro_ide_session_file(path);
     }
 
-    if is_kiro_global_storage_path(path)
-        || path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("chat"))
-            .unwrap_or(false)
-    {
+    if is_kiro_global_storage_path(path) || is_kiro_chat_path(path) {
         return parse_kiro_global_storage_file(path);
     }
 
@@ -167,7 +161,9 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         .and_then(|metadata| metadata.user_turn_metadatas)
         .unwrap_or_default();
 
-    let jsonl_path = path.with_extension("jsonl");
+    let Some(jsonl_path) = kiro_related_messages_path(path) else {
+        return Vec::new();
+    };
     let mut content_by_message_id: HashMap<String, KiroMessageContent> = HashMap::new();
 
     if let Ok(jsonl_file) = std::fs::File::open(&jsonl_path) {
@@ -362,6 +358,26 @@ fn session_id_from_path(path: &Path) -> String {
 fn is_kiro_global_storage_path(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     path_str.contains("globalStorage") && path_str.contains("kiro.kiroagent")
+}
+
+fn is_kiro_chat_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("chat"))
+}
+
+/// Return the conversation sidecar consumed by `parse_kiro_file`, if this
+/// Kiro source format has one. IDE sessions use `messages.jsonl`; CLI session
+/// headers use the same stem with a `.jsonl` extension. Global-storage and
+/// `.chat` snapshots are self-contained.
+pub(crate) fn kiro_related_messages_path(path: &Path) -> Option<PathBuf> {
+    if is_kiro_ide_session_path(path) {
+        return Some(path.with_file_name("messages.jsonl"));
+    }
+    if is_kiro_global_storage_path(path) || is_kiro_chat_path(path) {
+        return None;
+    }
+    Some(path.with_extension("jsonl"))
 }
 
 /// A Kiro IDE session file is `session.json` sitting inside a `sess_<uuid>`

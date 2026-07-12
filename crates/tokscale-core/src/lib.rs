@@ -666,10 +666,15 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             return None;
         }
 
-        let codex_incremental =
-            message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
+        let codex_incremental = message_cache::build_codex_incremental_cache_with_prefix_hash(
+            path,
+            consumed_offset,
+            state,
+            fingerprint.content_hash,
+        )?;
 
         Some(message_cache::CachedSourceEntry::new(
+            message_cache::CacheIdentity::for_client(ClientId::Codex),
             path,
             fingerprint,
             raw_messages,
@@ -679,6 +684,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     fn load_or_parse_source_with_fingerprint_and_policy<F, FingerprintFn>(
+        identity: message_cache::CacheIdentity,
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
@@ -687,9 +693,15 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     ) -> CachedParseOutcome
     where
         F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
-        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
+        FingerprintFn: Fn(
+            &Path,
+            Option<&message_cache::SourceFingerprint>,
+        ) -> Option<message_cache::FingerprintStatus>,
     {
-        let Some(fingerprint) = fingerprint_from_path(path) else {
+        let cached = source_cache.get(identity, path);
+        let Some(fingerprint_status) =
+            fingerprint_from_path(path, cached.map(|entry| &entry.fingerprint))
+        else {
             let (mut messages, _) = parse(path);
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
@@ -699,7 +711,24 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             };
         };
 
-        if let Some(cached) = source_cache.get(path) {
+        let fingerprint = match fingerprint_status {
+            message_cache::FingerprintStatus::Unchanged => {
+                let Some(cached) = cached else {
+                    unreachable!("an uncached source always builds a complete fingerprint")
+                };
+                if !cached.messages.is_empty() {
+                    return CachedParseOutcome {
+                        messages: cached_messages(cached, pricing),
+                        cache_entry: None,
+                        invalidate_cache: false,
+                    };
+                }
+                cached.fingerprint.clone()
+            }
+            message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
+        };
+
+        if let Some(cached) = cached {
             if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
                 return CachedParseOutcome {
                     messages: cached_messages(cached, pricing),
@@ -714,6 +743,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             None
         } else {
             Some(message_cache::CachedSourceEntry::new(
+                identity,
                 path,
                 fingerprint,
                 messages.clone(),
@@ -731,6 +761,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     fn load_or_parse_source_with_fingerprint<F, FingerprintFn>(
+        identity: message_cache::CacheIdentity,
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
@@ -739,9 +770,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     ) -> CachedParseOutcome
     where
         F: Fn(&Path) -> Vec<UnifiedMessage>,
-        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
+        FingerprintFn: Fn(
+            &Path,
+            Option<&message_cache::SourceFingerprint>,
+        ) -> Option<message_cache::FingerprintStatus>,
     {
         load_or_parse_source_with_fingerprint_and_policy(
+            identity,
             path,
             source_cache,
             pricing,
@@ -751,6 +786,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     fn load_or_parse_source<F>(
+        identity: message_cache::CacheIdentity,
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
@@ -760,15 +796,17 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         F: Fn(&Path) -> Vec<UnifiedMessage>,
     {
         load_or_parse_source_with_fingerprint(
+            identity,
             path,
             source_cache,
             pricing,
-            message_cache::SourceFingerprint::from_path,
+            message_cache::SourceFingerprint::check_path_samples_only,
             parse,
         )
     }
 
     fn load_or_parse_sqlite_source<F>(
+        identity: message_cache::CacheIdentity,
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
@@ -778,10 +816,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         F: Fn(&Path) -> Vec<UnifiedMessage>,
     {
         load_or_parse_source_with_fingerprint(
+            identity,
             path,
             source_cache,
             pricing,
-            message_cache::SourceFingerprint::from_sqlite_path,
+            message_cache::SourceFingerprint::check_sqlite_path,
             parse,
         )
     }
@@ -792,13 +831,31 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         pricing: Option<&pricing::PricingService>,
         headless_roots: &[PathBuf],
     ) -> CachedParseOutcome {
+        let identity = message_cache::CacheIdentity::for_client(ClientId::Codex);
         let is_headless = is_headless_path(path, headless_roots);
-        let Some(fingerprint) = message_cache::SourceFingerprint::from_path(path) else {
+        let cached = source_cache.get(identity, path);
+        if cached.is_none() {
+            // The post-parse cache build computes the authoritative fingerprint
+            // after reading the file. Avoid hashing an uncached source here
+            // only to discard that digest before parsing it.
             return parse_full_log_source(path, pricing, is_headless);
+        }
+        let Some(fingerprint_status) = message_cache::SourceFingerprint::check_path(
+            path,
+            cached.map(|entry| &entry.fingerprint),
+        ) else {
+            return parse_full_log_source(path, pricing, is_headless);
+        };
+        let fingerprint = match fingerprint_status {
+            message_cache::FingerprintStatus::Unchanged => cached
+                .expect("an uncached source always builds a complete fingerprint")
+                .fingerprint
+                .clone(),
+            message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
         };
         let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(path);
 
-        if let Some(cached) = source_cache.get(path) {
+        if let Some(cached) = cached {
             let reparse_from_start = |invalidate_cache: bool| {
                 let mut outcome = parse_full_log_source(path, pricing, is_headless);
                 outcome.invalidate_cache = invalidate_cache && outcome.cache_entry.is_none();
@@ -873,7 +930,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             return reparse_from_start(true);
         }
 
-        parse_full_log_source(path, pricing, is_headless)
+        unreachable!("uncached Codex sources return before fingerprint validation")
     }
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
@@ -898,9 +955,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             messages,
             cache_entry,
             ..
-        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
-            sessions::opencode::parse_opencode_sqlite(path)
-        });
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::OpenCode),
+            db_path,
+            &source_cache,
+            pricing,
+            sessions::opencode::parse_opencode_sqlite,
+        );
 
         // Dedup across channel-suffixed dbs: the same session can end up in
         // both `opencode.db` and `opencode-<channel>.db` if the user
@@ -922,11 +983,17 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::OpenCode)
         .par_iter()
         .filter_map(|path| {
-            Some(load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::opencode::parse_opencode_file(path)
-                    .into_iter()
-                    .collect()
-            }))
+            Some(load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::OpenCode),
+                path,
+                &source_cache,
+                pricing,
+                |path| {
+                    sessions::opencode::parse_opencode_file(path)
+                        .into_iter()
+                        .collect()
+                },
+            ))
         })
         .collect();
     for outcome in opencode_outcomes {
@@ -953,9 +1020,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             messages,
             cache_entry,
             ..
-        } = load_or_parse_sqlite_source(db_path, &source_cache, None, |path| {
-            sessions::micode::parse_micode_sqlite(path)
-        });
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::MiMoCode),
+            db_path,
+            &source_cache,
+            None,
+            sessions::micode::parse_micode_sqlite,
+        );
 
         all_messages.extend(
             messages
@@ -985,12 +1056,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .par_iter()
         .map(|path| {
             load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::Claude),
                 path,
                 &source_cache,
                 pricing,
-                |path| {
-                    message_cache::SourceFingerprint::from_claude_code_path_with_home(
+                |path, cached| {
+                    message_cache::SourceFingerprint::check_claude_code_path_with_home_samples_only(
                         path,
+                        cached,
                         Some(&claude_home),
                     )
                 },
@@ -1038,7 +1111,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         } else if outcome.invalidate_cache {
-            source_cache.remove(&path);
+            source_cache.remove(
+                message_cache::CacheIdentity::for_client(ClientId::Codex),
+                &path,
+            );
         }
     }
 
@@ -1046,9 +1122,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Copilot)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::copilot::parse_copilot_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Copilot),
+                path,
+                &source_cache,
+                pricing,
+                sessions::copilot::parse_copilot_file,
+            )
         })
         .collect();
     for outcome in copilot_outcomes {
@@ -1080,10 +1160,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .par_iter()
         .map(|path| {
             let outcome = load_or_parse_source_with_fingerprint_and_policy(
+                message_cache::CacheIdentity::for_client(ClientId::Gemini),
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_path,
+                message_cache::SourceFingerprint::check_path_samples_only,
                 |path| {
                     let parsed = sessions::gemini::parse_gemini_file_with_cache_status(path);
                     (parsed.messages, parsed.cacheable)
@@ -1097,7 +1178,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         } else if outcome.invalidate_cache {
-            source_cache.remove(&path);
+            source_cache.remove(
+                message_cache::CacheIdentity::for_client(ClientId::Gemini),
+                &path,
+            );
         }
     }
 
@@ -1105,9 +1189,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Cursor)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::cursor::parse_cursor_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Cursor),
+                path,
+                &source_cache,
+                pricing,
+                sessions::cursor::parse_cursor_file,
+            )
         })
         .collect();
     for outcome in cursor_outcomes {
@@ -1121,9 +1209,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Warp)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::warp::parse_warp_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Warp),
+                path,
+                &source_cache,
+                pricing,
+                sessions::warp::parse_warp_file,
+            )
         })
         .collect();
     for outcome in warp_outcomes {
@@ -1141,10 +1233,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             // signals.json rollup, so that file must participate in the cache key
             // or a late/updated rollup is ignored forever for cached sessions.
             load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::Grok),
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_grok_path,
+                message_cache::SourceFingerprint::check_grok_path_samples_only,
                 sessions::grok::parse_grok_updates_file,
             )
         })
@@ -1161,10 +1254,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .par_iter()
         .map(|path| {
             load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::Jcode),
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_jcode_path,
+                message_cache::SourceFingerprint::check_jcode_path_samples_only,
                 sessions::jcode::parse_jcode_file,
             )
         })
@@ -1186,9 +1280,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Amp)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::amp::parse_amp_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Amp),
+                path,
+                &source_cache,
+                pricing,
+                sessions::amp::parse_amp_file,
+            )
         })
         .collect();
     for outcome in amp_outcomes {
@@ -1202,9 +1300,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Codebuff)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::codebuff::parse_codebuff_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Codebuff),
+                path,
+                &source_cache,
+                pricing,
+                sessions::codebuff::parse_codebuff_file,
+            )
         })
         .collect();
     for outcome in codebuff_outcomes {
@@ -1218,9 +1320,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Droid)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::droid::parse_droid_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::Droid),
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::check_droid_path_samples_only,
+                sessions::droid::parse_droid_file,
+            )
         })
         .collect();
     for outcome in droid_outcomes {
@@ -1234,9 +1341,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::OpenClaw)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::openclaw::parse_openclaw_transcript(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::OpenClaw),
+                path,
+                &source_cache,
+                pricing,
+                sessions::openclaw::parse_openclaw_transcript,
+            )
         })
         .collect();
     for outcome in openclaw_outcomes {
@@ -1250,9 +1361,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Pi)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::pi::parse_pi_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Pi),
+                path,
+                &source_cache,
+                pricing,
+                sessions::pi::parse_pi_file,
+            )
         })
         .collect();
     for outcome in pi_outcomes {
@@ -1345,9 +1460,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             messages,
             cache_entry,
             ..
-        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
-            sessions::zcode::parse_zcode_sqlite(path)
-        });
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::Zcode),
+            db_path,
+            &source_cache,
+            pricing,
+            sessions::zcode::parse_zcode_sqlite,
+        );
         all_messages.extend(messages);
         if let Some(entry) = cache_entry {
             source_cache.insert(entry);
@@ -1381,7 +1500,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             } else {
                 sessions::kimi::parse_kimi_file
             };
-            load_or_parse_source(path, &source_cache, pricing, parse)
+            load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::Kimi),
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::check_kimi_path_samples_only,
+                parse,
+            )
         })
         .collect();
     for outcome in kimi_outcomes {
@@ -1396,9 +1522,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Qwen)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::qwen::parse_qwen_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Qwen),
+                path,
+                &source_cache,
+                pricing,
+                sessions::qwen::parse_qwen_file,
+            )
         })
         .collect();
     for outcome in qwen_outcomes {
@@ -1413,10 +1543,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .par_iter()
         .map(|path| {
             load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::RooCode),
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_roo_path,
+                message_cache::SourceFingerprint::check_roo_path_samples_only,
                 sessions::roocode::parse_roocode_file,
             )
         })
@@ -1433,10 +1564,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .par_iter()
         .map(|path| {
             load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::KiloCode),
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_roo_path,
+                message_cache::SourceFingerprint::check_roo_path_samples_only,
                 sessions::kilocode::parse_kilocode_file,
             )
         })
@@ -1453,10 +1585,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .par_iter()
         .map(|path| {
             load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::Cline),
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_roo_path,
+                message_cache::SourceFingerprint::check_roo_path_samples_only,
                 sessions::cline::parse_cline_file,
             )
         })
@@ -1472,9 +1605,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Mux)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::mux::parse_mux_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Mux),
+                path,
+                &source_cache,
+                pricing,
+                sessions::mux::parse_mux_file,
+            )
         })
         .collect();
     for outcome in mux_outcomes {
@@ -1518,9 +1655,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     for db_path in scan_result.zed_db_paths() {
-        let outcome = load_or_parse_sqlite_source(&db_path, &source_cache, pricing, |path| {
-            sessions::zed::parse_zed_sqlite(path)
-        });
+        let outcome = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::Zed),
+            &db_path,
+            &source_cache,
+            pricing,
+            sessions::zed::parse_zed_sqlite,
+        );
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -1536,10 +1677,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             // file must participate in the cache key or an append landing
             // after the last `session.json` write is ignored forever.
             load_or_parse_source_with_fingerprint(
+                message_cache::CacheIdentity::for_client(ClientId::Kiro),
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_kiro_path,
+                message_cache::SourceFingerprint::check_kiro_path_samples_only,
                 sessions::kiro::parse_kiro_file,
             )
         })
@@ -1625,9 +1767,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::CodeBuddy)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::codebuddy::parse_codebuddy_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::CodeBuddy),
+                path,
+                &source_cache,
+                pricing,
+                sessions::codebuddy::parse_codebuddy_file,
+            )
         })
         .collect();
     let mut codebuddy_seen: HashSet<String> = HashSet::new();
@@ -1647,17 +1793,25 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let workbuddy_detailed_outcomes: Vec<CachedParseOutcome> = workbuddy_detailed_paths
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::workbuddy::parse_workbuddy_file(path)
-            })
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::WorkBuddy),
+                path,
+                &source_cache,
+                pricing,
+                sessions::workbuddy::parse_workbuddy_file,
+            )
         })
         .collect();
     let workbuddy_fallback_outcomes: Vec<CachedParseOutcome> = workbuddy_fallback_paths
         .par_iter()
         .map(|path| {
-            load_or_parse_sqlite_source(path, &source_cache, pricing, |path| {
-                sessions::workbuddy::parse_workbuddy_file(path)
-            })
+            load_or_parse_sqlite_source(
+                message_cache::CacheIdentity::for_client(ClientId::WorkBuddy),
+                path,
+                &source_cache,
+                pricing,
+                sessions::workbuddy::parse_workbuddy_file,
+            )
         })
         .collect();
     let mut workbuddy_detailed_messages = Vec::new();
@@ -1681,9 +1835,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
-            let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
-                sessions::synthetic::parse_octofriend_sqlite(path)
-            });
+            let outcome = load_or_parse_sqlite_source(
+                message_cache::CacheIdentity::synthetic(),
+                db_path,
+                &source_cache,
+                pricing,
+                sessions::synthetic::parse_octofriend_sqlite,
+            );
             all_messages.extend(outcome.messages);
             if let Some(entry) = outcome.cache_entry {
                 source_cache.insert(entry);
@@ -4508,6 +4666,7 @@ mod tests {
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
+                message_cache::CacheIdentity::for_client(ClientId::OpenCode),
                 &path,
                 fingerprint,
                 vec![stale_message],
@@ -4586,7 +4745,12 @@ mod tests {
             assert!(first_messages.is_empty());
 
             let cache = message_cache::SourceMessageCache::load();
-            assert!(cache.get(&path).is_none());
+            assert!(cache
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::OpenCode),
+                    &path,
+                )
+                .is_none());
 
             let mut readable_permissions = std::fs::metadata(&path).unwrap().permissions();
             readable_permissions.set_mode(0o644);
@@ -4629,6 +4793,7 @@ mod tests {
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
+                message_cache::CacheIdentity::for_client(ClientId::OpenCode),
                 &path,
                 fingerprint,
                 Vec::new(),
@@ -4645,7 +4810,12 @@ mod tests {
             assert_eq!(messages.len(), 1);
 
             let loaded = message_cache::SourceMessageCache::load();
-            let repaired_entry = loaded.get(&path).unwrap();
+            let repaired_entry = loaded
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::OpenCode),
+                    &path,
+                )
+                .unwrap();
             assert_eq!(repaired_entry.messages.len(), 1);
         }
 
@@ -5549,7 +5719,10 @@ mod tests {
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id, "gpt-5.4");
             assert!(message_cache::SourceMessageCache::load()
-                .get(&path)
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
                 .and_then(|entry| entry.codex_incremental.as_ref())
                 .is_some());
 
@@ -5713,7 +5886,10 @@ mod tests {
                 None,
             );
             assert!(message_cache::SourceMessageCache::load()
-                .get(&path)
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
                 .is_none());
 
             std::env::set_var("HOME", fresh_cache_home.path());
@@ -5765,6 +5941,7 @@ mod tests {
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
+                message_cache::CacheIdentity::for_client(ClientId::Codex),
                 &path,
                 fingerprint,
                 vec![stale_message],
@@ -5878,7 +6055,12 @@ mod tests {
             assert_eq!(messages[0].model_id, "gpt-5.4");
 
             let cache = message_cache::SourceMessageCache::load();
-            assert!(cache.get(&path).is_none());
+            assert!(cache
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
+                .is_none());
         }
 
         match original_home {
@@ -5919,7 +6101,10 @@ mod tests {
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id, "unknown");
             assert!(message_cache::SourceMessageCache::load()
-                .get(&path)
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
                 .is_none());
 
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -5956,7 +6141,10 @@ mod tests {
 
             std::env::set_var("HOME", cache_home.path());
             assert!(message_cache::SourceMessageCache::load()
-                .get(&path)
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
                 .is_some());
         }
 
@@ -5996,7 +6184,10 @@ mod tests {
             );
             assert_eq!(initial_messages.len(), 1);
             assert!(message_cache::SourceMessageCache::load()
-                .get(&path)
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::Codex),
+                    &path,
+                )
                 .is_none());
 
             std::thread::sleep(std::time::Duration::from_millis(5));
