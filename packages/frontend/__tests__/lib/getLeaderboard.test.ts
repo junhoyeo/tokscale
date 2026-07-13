@@ -231,6 +231,7 @@ describe("period leaderboard data", () => {
       "avatarUrl",
       "tokens",
       "cost",
+      "sourceBreakdown",
     ]);
   });
 

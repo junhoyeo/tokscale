@@ -2,6 +2,7 @@ import { unstable_cache } from "next/cache";
 import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { db, dailyBreakdown, groupMembers, submissions, users } from "@/lib/db";
 import type { LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
+import { parseSearchDirectives, hasDirectives } from "@/lib/leaderboard/searchDirectives";
 
 interface GroupLeaderboardPeriodRow {
   userId: string;
@@ -11,6 +12,7 @@ interface GroupLeaderboardPeriodRow {
   role: string;
   tokens: number;
   cost: number;
+  sourceBreakdown: Record<string, { models: Record<string, unknown> }> | null;
 }
 
 interface GroupLeaderboardDbRow {
@@ -88,7 +90,8 @@ function compareGroupUsers(
 }
 
 function matchesSearch(user: Pick<GroupLeaderboardUser, "username">, search: string): boolean {
-  return !search || user.username.toLowerCase().includes(search.toLowerCase());
+  const parsed = parseSearchDirectives(search);
+  return !parsed.text || user.username.toLowerCase().includes(parsed.text.toLowerCase());
 }
 
 function paginateRankedUsers(
@@ -134,9 +137,39 @@ function buildPeriodGroupLeaderboardData(
   search: string,
   totalMembers: number
 ): GroupLeaderboardData {
+  const parsed = parseSearchDirectives(search);
+
+  let filteredRows = rows;
+  if (hasDirectives(parsed)) {
+    filteredRows = rows.filter((row) => {
+      if (!row.sourceBreakdown) return false;
+
+      const clientKeys = Object.keys(row.sourceBreakdown).map((k) => k.toLowerCase());
+      const modelKeys = Object.values(row.sourceBreakdown).flatMap((client) =>
+        client.models ? Object.keys(client.models).map((m) => m.toLowerCase()) : []
+      );
+
+      if (parsed.clients.length > 0) {
+        const hasMatchingClient = parsed.clients.some((c) =>
+          clientKeys.some((k) => k.includes(c))
+        );
+        if (!hasMatchingClient) return false;
+      }
+
+      if (parsed.models.length > 0) {
+        const hasMatchingModel = parsed.models.some((m) =>
+          modelKeys.some((k) => k.includes(m))
+        );
+        if (!hasMatchingModel) return false;
+      }
+
+      return true;
+    });
+  }
+
   const usersById = new Map<string, Omit<GroupLeaderboardUser, "rank">>();
 
-  for (const row of rows) {
+  for (const row of filteredRows) {
     const existing = usersById.get(row.userId);
     if (existing) {
       existing.totalTokens += row.tokens;
@@ -195,6 +228,7 @@ async function fetchPeriodRows(
       role: groupMembers.role,
       tokens: dailyBreakdown.tokens,
       cost: dailyBreakdown.cost,
+      sourceBreakdown: dailyBreakdown.sourceBreakdown,
     })
     .from(dailyBreakdown)
     .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
@@ -216,16 +250,31 @@ async function fetchPeriodRows(
     role: row.role,
     tokens: Number(row.tokens) || 0,
     cost: Number(row.cost) || 0,
+    sourceBreakdown: (row.sourceBreakdown as Record<string, { models: Record<string, unknown> }>) ?? null,
   }));
 }
 
-async function fetchAllTimeRows(groupId: string, sortBy: SortBy): Promise<GroupLeaderboardUser[]> {
+async function fetchAllTimeRows(groupId: string, sortBy: SortBy, search: string = ""): Promise<GroupLeaderboardUser[]> {
+  const parsed = parseSearchDirectives(search);
+
   const primaryOrderByColumn = sortBy === "cost"
     ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`
     : sql`SUM(${submissions.totalTokens})`;
   const secondaryOrderByColumn = sortBy === "cost"
     ? sql`SUM(${submissions.totalTokens})`
     : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`;
+
+  const conditions: ReturnType<typeof sql>[] = [];
+  for (const client of parsed.clients) {
+    conditions.push(
+      sql`EXISTS (SELECT 1 FROM unnest(${submissions.sourcesUsed}) AS s WHERE LOWER(s) LIKE ${`%${client}%`})`
+    );
+  }
+  for (const model of parsed.models) {
+    conditions.push(
+      sql`EXISTS (SELECT 1 FROM unnest(${submissions.modelsUsed}) AS m WHERE LOWER(m) LIKE ${`%${model}%`})`
+    );
+  }
 
   const rows = await db
     .select({
@@ -246,6 +295,7 @@ async function fetchAllTimeRows(groupId: string, sortBy: SortBy): Promise<GroupL
         eq(groupMembers.groupId, groupId)
       )
     )
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
     .groupBy(users.id, users.username, users.displayName, users.avatarUrl, groupMembers.role)
     .orderBy(
       desc(primaryOrderByColumn),
@@ -281,7 +331,7 @@ async function fetchGroupLeaderboardData(
     return buildPeriodGroupLeaderboardData(rows, page, limit, period, sortBy, search, totalMembers);
   }
 
-  const usersWithRanks = await fetchAllTimeRows(groupId, sortBy);
+  const usersWithRanks = await fetchAllTimeRows(groupId, sortBy, search);
 
   return paginateRankedUsers(
     usersWithRanks,

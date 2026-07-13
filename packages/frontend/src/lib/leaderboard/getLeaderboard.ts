@@ -8,6 +8,7 @@ import {
 } from "@/lib/db/usernameLookup";
 import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
 import type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
+import { parseSearchDirectives, hasDirectives } from "@/lib/leaderboard/searchDirectives";
 
 export type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
 
@@ -18,6 +19,7 @@ interface LeaderboardPeriodRow {
   avatarUrl: string | null;
   tokens: number;
   cost: number;
+  sourceBreakdown: Record<string, { models: Record<string, unknown> }> | null;
 }
 
 interface PeriodDateRange {
@@ -32,6 +34,7 @@ interface PeriodLeaderboardDbRow {
   avatarUrl: string | null;
   tokens: number | string | null;
   cost: number | string | null;
+  sourceBreakdown: Record<string, { models: Record<string, unknown> }> | null;
 }
 
 interface AllTimeLeaderboardDbRow {
@@ -153,13 +156,13 @@ function aggregatePeriodRows(
 
 function matchesLeaderboardSearch(
   user: Pick<LeaderboardUser, "username" | "displayName">,
-  search: string
+  textSearch: string
 ): boolean {
-  if (!search) {
+  if (!textSearch) {
     return true;
   }
 
-  const lowerSearch = search.toLowerCase();
+  const lowerSearch = textSearch.toLowerCase();
   if (user.username.toLowerCase().includes(lowerSearch)) {
     return true;
   }
@@ -178,24 +181,54 @@ function buildPeriodLeaderboardData(
   search: string = ""
 ): LeaderboardData {
   const offset = (page - 1) * limit;
-  const aggregatedUsers = aggregatePeriodRows(rows, sortBy);
+  const parsed = parseSearchDirectives(search);
+
+  let filteredRows = rows;
+  if (hasDirectives(parsed)) {
+    filteredRows = rows.filter((row) => {
+      if (!row.sourceBreakdown) return false;
+
+      const clientKeys = Object.keys(row.sourceBreakdown).map((k) => k.toLowerCase());
+      const modelKeys = Object.values(row.sourceBreakdown).flatMap((client) =>
+        client.models ? Object.keys(client.models).map((m) => m.toLowerCase()) : []
+      );
+
+      if (parsed.clients.length > 0) {
+        const hasMatchingClient = parsed.clients.some((c) =>
+          clientKeys.some((k) => k.includes(c))
+        );
+        if (!hasMatchingClient) return false;
+      }
+
+      if (parsed.models.length > 0) {
+        const hasMatchingModel = parsed.models.some((m) =>
+          modelKeys.some((k) => k.includes(m))
+        );
+        if (!hasMatchingModel) return false;
+      }
+
+      return true;
+    });
+  }
+
+  const aggregatedUsers = aggregatePeriodRows(filteredRows, sortBy);
   const rankedUsers = aggregatedUsers.map((user, index) => ({
     ...user,
     rank: index + 1,
   }));
-  const filteredUsers = rankedUsers.filter((user) =>
-    matchesLeaderboardSearch(user, search)
+  const textFilteredUsers = rankedUsers.filter((user) =>
+    matchesLeaderboardSearch(user, parsed.text)
   );
-  const pagedUsers = filteredUsers.slice(offset, offset + limit);
+  const pagedUsers = textFilteredUsers.slice(offset, offset + limit);
 
   return {
     users: pagedUsers,
     pagination: {
       page,
       limit,
-      totalUsers: filteredUsers.length,
-      totalPages: Math.ceil(filteredUsers.length / limit),
-      hasNext: offset + limit < filteredUsers.length,
+      totalUsers: textFilteredUsers.length,
+      totalPages: Math.ceil(textFilteredUsers.length / limit),
+      hasNext: offset + limit < textFilteredUsers.length,
       hasPrev: page > 1,
     },
     stats: {
@@ -249,6 +282,7 @@ async function fetchPeriodLeaderboardRows(
       avatarUrl: users.avatarUrl,
       tokens: dailyBreakdown.tokens,
       cost: dailyBreakdown.cost,
+      sourceBreakdown: dailyBreakdown.sourceBreakdown,
     })
     .from(dailyBreakdown)
     .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
@@ -267,6 +301,7 @@ async function fetchPeriodLeaderboardRows(
     avatarUrl: row.avatarUrl,
     tokens: Number(row.tokens) || 0,
     cost: Number(row.cost) || 0,
+    sourceBreakdown: row.sourceBreakdown ?? null,
   }));
 }
 
@@ -285,6 +320,7 @@ async function fetchLeaderboardData(
   }
 
   const offset = (page - 1) * limit;
+  const parsed = parseSearchDirectives(search);
 
   const orderByColumn = sortBy === "cost"
     ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`
@@ -293,9 +329,22 @@ async function fetchLeaderboardData(
     ? sql`SUM(${submissions.totalTokens})`
     : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`;
 
-  if (search) {
-    // When searching, use a subquery to compute global ranks for ALL users,
-    // then filter by username. This preserves each user's true rank.
+  const directiveConditions: ReturnType<typeof sql>[] = [];
+  for (const client of parsed.clients) {
+    directiveConditions.push(
+      sql`EXISTS (SELECT 1 FROM unnest(${submissions.sourcesUsed}) AS s WHERE LOWER(s) LIKE ${`%${client}%`})`
+    );
+  }
+  for (const model of parsed.models) {
+    directiveConditions.push(
+      sql`EXISTS (SELECT 1 FROM unnest(${submissions.modelsUsed}) AS m WHERE LOWER(m) LIKE ${`%${model}%`})`
+    );
+  }
+
+  const hasTextSearch = parsed.text.length > 0;
+  const hasDirectiveFilters = directiveConditions.length > 0;
+
+  if (hasTextSearch || hasDirectiveFilters) {
     const rankedSubquery = db
       .select({
         rank: sql<number>`RANK() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
@@ -308,18 +357,24 @@ async function fetchLeaderboardData(
       })
       .from(submissions)
       .innerJoin(users, eq(submissions.userId, users.id))
+      .where(hasDirectiveFilters ? and(...directiveConditions) : undefined)
       .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
       .as("ranked");
     const rankedSecondaryOrderByColumn = sortBy === "cost"
       ? rankedSubquery.totalTokens
       : rankedSubquery.totalCost;
 
-    const escapedSearch = search.toLowerCase().replace(/[%_\\]/g, "\\$&");
-    const searchPattern = `%${escapedSearch}%`;
+    let textFilter: ReturnType<typeof sql> | undefined;
+    if (hasTextSearch) {
+      const escapedSearch = parsed.text.toLowerCase().replace(/[%_\\]/g, "\\$&");
+      const searchPattern = `%${escapedSearch}%`;
+      textFilter = sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`;
+    }
+
     const results = await db
       .select()
       .from(rankedSubquery)
-      .where(sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`)
+      .where(textFilter)
       .orderBy(
         sql`${rankedSubquery.rank} ASC`,
         sql`${rankedSecondaryOrderByColumn} DESC`,
@@ -328,16 +383,14 @@ async function fetchLeaderboardData(
       .limit(limit)
       .offset(offset);
 
-    // Count total matching users for pagination
     const countResult = await db
       .select({ count: sql<number>`COUNT(*)`.as("count") })
       .from(rankedSubquery)
-      .where(sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`);
+      .where(textFilter);
 
     const totalUsers = Number(countResult[0]?.count) || 0;
     const totalPages = Math.ceil(totalUsers / limit);
 
-    // Global stats remain unfiltered
     const globalStats = await db
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,

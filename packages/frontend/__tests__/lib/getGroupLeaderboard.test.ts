@@ -250,6 +250,7 @@ describe("group leaderboard data", () => {
       "role",
       "tokens",
       "cost",
+      "sourceBreakdown",
     ]);
   });
 
