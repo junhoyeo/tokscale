@@ -6,7 +6,6 @@ import { useRouter } from "nextjs-toploader/app";
 import { useSearchParams, usePathname } from "next/navigation";
 import styled from "styled-components";
 import { CopyIcon, CheckIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
-import { LeaderboardSkeleton } from "@/components/Skeleton";
 import {
   MetricItem,
   MetricLabel,
@@ -53,6 +52,12 @@ const TabSection = styled.div`
 const TableContainer = styled.div`
   border-top: 1px solid var(--service-border);
   border-bottom: 1px solid var(--service-border);
+`;
+
+const LoadingNotice = styled.p`
+  margin: 0 0 10px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
 `;
 
 const EmptyState = styled.div`
@@ -835,7 +840,6 @@ interface LeaderboardClientProps {
   initialData: LeaderboardData;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
   initialSortBy: LeaderboardSortBy;
-  initialUserRank: LeaderboardUser | null;
 }
 
 function isValidLeaderboardData(data: unknown): data is LeaderboardData {
@@ -951,7 +955,7 @@ function parsePeriodParam(value: string | null): Period | null {
   return VALID_PERIODS.includes(value as Period) ? (value as Period) : null;
 }
 
-export default function LeaderboardClient({ initialData, currentUser, initialSortBy, initialUserRank }: LeaderboardClientProps) {
+export default function LeaderboardClient({ initialData, currentUser, initialSortBy }: LeaderboardClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -975,7 +979,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   // date range (isCustomWithoutDates guard), so no mismatched data is shown.
   const [period, setPeriod] = useState<Period>(initialData.period);
   const [page, setPage] = useState(urlPage || initialData.pagination.page);
-  const [currentUserRank, setCurrentUserRank] = useState<LeaderboardUser | null>(initialUserRank);
+  const [currentUserRank, setCurrentUserRank] = useState<LeaderboardUser | null>(null);
   const [currentUserRankError, setCurrentUserRankError] = useState(false);
   const [searchQuery, setSearchQuery] = useState(urlSearch);
   const [debouncedSearch, setDebouncedSearch] = useState(urlSearch);
@@ -1019,7 +1023,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
     || (period === "custom" && (appliedFrom !== resolvedRequest.customFrom || appliedTo !== resolvedRequest.customTo))
   );
 
-  const isFirstRankFetch = useRef(true);
   const isFirstUrlSync = useRef(true);
 
   useEffect(() => {
@@ -1059,11 +1062,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   useEffect(() => {
     if (!currentUser) {
-      return;
-    }
-
-    if (isFirstRankFetch.current) {
-      isFirstRankFetch.current = false;
       return;
     }
 
@@ -1360,9 +1358,13 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         </SortToggleInner>
       </SearchSortRow>
 
-      {isLoading ? (
-        <LeaderboardSkeleton />
-      ) : error ? (
+      {isLoading && (
+        <LoadingNotice role="status" aria-live="polite">
+          Updating leaderboard…
+        </LoadingNotice>
+      )}
+
+      {error ? (
         <TableContainer>
           <EmptyState>
             <EmptyMessage>Failed to load leaderboard</EmptyMessage>

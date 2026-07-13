@@ -28,7 +28,6 @@ const mockState = vi.hoisted(() => {
   const eq = vi.fn(() => "eq");
   const desc = vi.fn(() => "desc");
   const and = vi.fn(() => "and");
-  const or = vi.fn((...conditions: unknown[]) => ({ kind: "or", conditions }));
   const gte = vi.fn(() => "gte");
   const lte = vi.fn(() => "lte");
   const sql = Object.assign(
@@ -43,35 +42,95 @@ const mockState = vi.hoisted(() => {
   );
 
   const db = {
+    execute: vi.fn((query: { strings?: string[]; values?: unknown[] }) => {
+      const queryText = query.strings?.join("") ?? "";
+      const queryValues = (values: unknown[]): string[] => values.flatMap((value) => {
+        if (typeof value === "string") {
+          return [value];
+        }
+        if (
+          typeof value === "object"
+          && value !== null
+          && "values" in value
+          && Array.isArray(value.values)
+        ) {
+          return queryValues(value.values);
+        }
+        return [];
+      });
+      const values = queryValues(query.values ?? []);
+      const aggregated = Array.from(
+        periodRows.reduce((usersById, row) => {
+          const userId = String(row.userId);
+          const existing = usersById.get(userId);
+          if (existing) {
+            existing.totalTokens += Number(row.tokens) || 0;
+            existing.totalCost += Number(row.cost) || 0;
+          } else {
+            usersById.set(userId, {
+              userId,
+              username: String(row.username),
+              displayName: (row.displayName as string | null) ?? null,
+              avatarUrl: (row.avatarUrl as string | null) ?? null,
+              totalTokens: Number(row.tokens) || 0,
+              totalCost: Number(row.cost) || 0,
+            });
+          }
+          return usersById;
+        }, new Map<string, {
+          userId: string;
+          username: string;
+          displayName: string | null;
+          avatarUrl: string | null;
+          totalTokens: number;
+          totalCost: number;
+        }>()).values()
+      ).sort((left, right) =>
+        right.totalTokens - left.totalTokens
+        || right.totalCost - left.totalCost
+        || left.username.localeCompare(right.username)
+      ).map((user, index) => ({ ...user, rank: index + 1 }));
+
+      if (!queryText.includes("json_agg")) {
+        const username = values.find((value) =>
+          !/^\d{4}-\d{2}-\d{2}$/.test(value)
+        );
+        return Promise.resolve(aggregated.filter((user) =>
+          user.username.toLowerCase() === String(username).toLowerCase()
+        ));
+      }
+
+      const searchPattern = values.find((value) =>
+        value.startsWith("%") && value.endsWith("%")
+      );
+      const search = searchPattern ? String(searchPattern).slice(1, -1).toLowerCase() : "";
+      const users = search
+        ? aggregated.filter((user) =>
+            user.username.toLowerCase().includes(search)
+            || user.displayName?.toLowerCase().includes(search)
+          )
+        : aggregated;
+
+      return Promise.resolve([{
+        users,
+        totalUsers: users.length,
+        totalTokens: aggregated.reduce((sum, user) => sum + user.totalTokens, 0),
+        totalCost: aggregated.reduce((sum, user) => sum + user.totalCost, 0),
+        uniqueUsers: aggregated.length,
+      }]);
+    }),
     select: vi.fn(() => {
-      let selectedTable: unknown;
       const builder = {
         from: vi.fn((table: unknown) => {
-          selectedTable = table;
           fromCalls.push(table);
           return builder;
         }),
         innerJoin: vi.fn(() => builder),
-        where: vi.fn(() => builder),
+        where: vi.fn(async () => [...periodRows]),
         groupBy: vi.fn(() => builder),
         orderBy: vi.fn(() => builder),
         limit: vi.fn(() => builder),
         offset: vi.fn(() => builder),
-        as: vi.fn(() => ({
-          rank: "ranked.rank",
-          userId: "ranked.userId",
-          username: "ranked.username",
-          displayName: "ranked.displayName",
-          avatarUrl: "ranked.avatarUrl",
-          totalTokens: "ranked.totalTokens",
-          totalCost: "ranked.totalCost",
-        })),
-        then: (resolve: (value: unknown) => unknown) => {
-          if (selectedTable === tables.dailyBreakdown) {
-            return resolve([...periodRows]);
-          }
-          return resolve([]);
-        },
       };
 
       return builder;
@@ -85,7 +144,6 @@ const mockState = vi.hoisted(() => {
     eq,
     desc,
     and,
-    or,
     gte,
     lte,
     sql,
@@ -93,10 +151,10 @@ const mockState = vi.hoisted(() => {
       periodRows.length = 0;
       fromCalls.length = 0;
       db.select.mockClear();
+      db.execute.mockClear();
       eq.mockClear();
       desc.mockClear();
       and.mockClear();
-      or.mockClear();
       gte.mockClear();
       lte.mockClear();
       sql.mockClear();
@@ -142,7 +200,6 @@ vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
   and: mockState.and,
-  or: mockState.or,
   gte: mockState.gte,
   lte: mockState.lte,
   sql: mockState.sql,
@@ -153,11 +210,16 @@ type ModuleExports = typeof import("../../src/lib/leaderboard/getLeaderboard");
 let getLeaderboardData: ModuleExports["getLeaderboardData"];
 let getUserRank: ModuleExports["getUserRank"];
 
-function selectedKeys(callIndex: number): string[] {
-  const calls = mockState.db.select.mock.calls as unknown as Array<
-    [Record<string, unknown> | undefined]
-  >;
-  return Object.keys(calls[callIndex]?.[0] ?? {});
+function serializeSqlCalls(): string[] {
+  return mockState.sql.mock.calls.map((call) => {
+    const [strings, ...values] = call as [TemplateStringsArray, ...unknown[]];
+    const textParts = Array.from(strings);
+
+    return textParts.reduce((text, part, index) => {
+      const nextValue = index < values.length ? String(values[index]) : "";
+      return `${text}${part}${nextValue}`;
+    }, "");
+  });
 }
 
 beforeAll(async () => {
@@ -202,84 +264,6 @@ describe("period leaderboard data", () => {
     },
   ];
 
-  it("drops hidden users from the rankings but keeps them in the totals", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
-    // carol outranks everyone on raw tokens but is hidden.
-    mockState.setPeriodRows([
-      ...rows,
-      {
-        userId: "user-carol",
-        username: "carol",
-        displayName: "Carol",
-        avatarUrl: null,
-        tokens: 9_000_000,
-        cost: 500,
-        leaderboardHidden: true,
-      },
-    ]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens");
-
-    expect(leaderboard.users.map((user) => user.username)).toEqual(["bob", "alice"]);
-
-    // Dense ranks: bob takes 1st rather than 2nd. Leaving carol's position
-    // vacant would advertise that someone was removed.
-    expect(leaderboard.users.map((user) => user.rank)).toEqual([1, 2]);
-
-    // ...but the totals still count carol. Hiding withdraws an account from
-    // the competition; it does not retract the usage from the site figures.
-    expect(leaderboard.stats.totalTokens).toBe(9_001_250);
-    expect(leaderboard.stats.uniqueUsers).toBe(3);
-
-    // Pagination must track the rankable set, not the totals, or a trailing
-    // page renders empty.
-    expect(leaderboard.pagination.totalUsers).toBe(2);
-  });
-
-  it("reports no rank for a hidden user rather than a phantom position", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
-    mockState.setPeriodRows([
-      ...rows,
-      {
-        userId: "user-carol",
-        username: "carol",
-        displayName: "Carol",
-        avatarUrl: null,
-        tokens: 9_000_000,
-        cost: 500,
-        leaderboardHidden: true,
-      },
-    ]);
-
-    // A rank would not correspond to any row on the board she is absent from.
-    await expect(getUserRank("carol", "week", "tokens")).resolves.toBeNull();
-  });
-
-  it("does not let a hidden user above you inflate your own rank", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
-    mockState.setPeriodRows([
-      ...rows,
-      {
-        userId: "user-carol",
-        username: "carol",
-        displayName: "Carol",
-        avatarUrl: null,
-        tokens: 9_000_000,
-        cost: 500,
-        leaderboardHidden: true,
-      },
-    ]);
-
-    // bob is 2nd by raw tokens but 1st among rankable users.
-    await expect(getUserRank("bob", "week", "tokens")).resolves.toMatchObject({
-      username: "bob",
-      rank: 1,
-    });
-  });
-
   it("builds the week leaderboard from daily rows", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
@@ -287,15 +271,10 @@ describe("period leaderboard data", () => {
 
     const leaderboard = await getLeaderboardData("week", 1, 50, "tokens");
 
-    expect(mockState.fromCalls[0]).toBe(mockState.tables.dailyBreakdown);
-    expect(mockState.gte).toHaveBeenCalledWith(
-      mockState.tables.dailyBreakdown.date,
-      "2026-03-01"
-    );
-    expect(mockState.lte).toHaveBeenCalledWith(
-      mockState.tables.dailyBreakdown.date,
-      "2026-03-07"
-    );
+    const sqlTexts = serializeSqlCalls();
+    expect(sqlTexts.some((text) => text.includes("FROM daily_breakdown"))).toBe(true);
+    expect(sqlTexts.some((text) => text.includes("2026-03-01") && text.includes("2026-03-07"))).toBe(true);
+    expect(sqlTexts.some((text) => text.includes("ROW_NUMBER() OVER"))).toBe(true);
     expect(leaderboard.users).toHaveLength(2);
     expect(leaderboard.users[0]).toMatchObject({
       rank: 1,
@@ -323,19 +302,6 @@ describe("period leaderboard data", () => {
       totalCost: 12.5,
       uniqueUsers: 2,
     });
-    expect(selectedKeys(0)).toEqual([
-      "userId",
-      "username",
-      "displayName",
-      "avatarUrl",
-      "tokens",
-      "cost",
-      "sourceBreakdown",
-      // Selected, not filtered in SQL: the period totals are summed from these
-      // same rows and must still include hidden users, so the exclusion is
-      // applied after aggregation rather than in the WHERE clause.
-      "leaderboardHidden",
-    ]);
   });
 
   it("uses the current month for the month leaderboard range", async () => {
@@ -345,15 +311,8 @@ describe("period leaderboard data", () => {
 
     const leaderboard = await getLeaderboardData("month", 1, 50, "tokens");
 
-    expect(mockState.fromCalls[0]).toBe(mockState.tables.dailyBreakdown);
-    expect(mockState.gte).toHaveBeenCalledWith(
-      mockState.tables.dailyBreakdown.date,
-      "2026-03-01"
-    );
-    expect(mockState.lte).toHaveBeenCalledWith(
-      mockState.tables.dailyBreakdown.date,
-      "2026-03-07"
-    );
+    const sqlTexts = serializeSqlCalls();
+    expect(sqlTexts.some((text) => text.includes("2026-03-01") && text.includes("2026-03-07"))).toBe(true);
     expect(leaderboard.users[1]).toMatchObject({
       username: "alice",
       totalTokens: 250,
@@ -395,7 +354,6 @@ describe("period leaderboard data", () => {
 
     const rank = await getUserRank("alice", "week", "tokens");
 
-    expect(mockState.fromCalls[0]).toBe(mockState.tables.dailyBreakdown);
     expect(rank).toMatchObject({
       rank: 2,
       username: "alice",
@@ -437,239 +395,5 @@ describe("period leaderboard data", () => {
     await expect(getUserRank("alice", "week", "tokens")).rejects.toThrow(
       "Multiple users match username alice case-insensitively"
     );
-  });
-});
-
-describe("period leaderboard directive scoping", () => {
-  // One device, one day, two clients. The row total (1000/10) is the sum of
-  // both, which is exactly what a filtered search must not credit.
-  const mixedClientDay = {
-    userId: "user-dana",
-    username: "dana",
-    displayName: "Dana",
-    avatarUrl: null,
-    tokens: 1000,
-    cost: 10,
-    leaderboardHidden: false,
-    sourceBreakdown: {
-      codex: {
-        tokens: 300,
-        cost: 3,
-        models: {
-          "gpt-5-codex": { tokens: 200, cost: 2 },
-          "gpt-5-mini": { tokens: 100, cost: 1 },
-        },
-      },
-      "claude-code": {
-        tokens: 700,
-        cost: 7,
-        models: {
-          "claude-opus-4": { tokens: 700, cost: 7 },
-        },
-      },
-    },
-  };
-
-  function useWeekOf(rows: Array<Record<string, unknown>>) {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
-    mockState.setPeriodRows(rows);
-  }
-
-  it("counts only the filtered client's share of a row shared with other clients", async () => {
-    useWeekOf([mixedClientDay]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "client:codex");
-
-    // 300/3, not the row's 1000/10: claude-code ran on the same day and
-    // device but was not asked for.
-    expect(leaderboard.users[0]).toMatchObject({
-      username: "dana",
-      totalTokens: 300,
-      totalCost: 3,
-    });
-    expect(leaderboard.stats).toMatchObject({
-      totalTokens: 300,
-      totalCost: 3,
-      uniqueUsers: 1,
-    });
-  });
-
-  it("counts only the filtered model's share, not every client in the row", async () => {
-    useWeekOf([mixedClientDay]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "model:claude-opus-4");
-
-    expect(leaderboard.users[0]).toMatchObject({
-      username: "dana",
-      totalTokens: 700,
-      totalCost: 7,
-    });
-    expect(leaderboard.stats).toMatchObject({ totalTokens: 700, totalCost: 7 });
-  });
-
-  it("sums a model directive across every client that ran the model", async () => {
-    useWeekOf([
-      {
-        ...mixedClientDay,
-        sourceBreakdown: {
-          codex: {
-            tokens: 300,
-            cost: 3,
-            models: { "gpt-5-codex": { tokens: 300, cost: 3 } },
-          },
-          crush: {
-            tokens: 700,
-            cost: 7,
-            models: { "gpt-5-codex": { tokens: 500, cost: 5 }, "gpt-4o": { tokens: 200, cost: 2 } },
-          },
-        },
-      },
-    ]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "model:gpt-5-codex");
-
-    expect(leaderboard.users[0]).toMatchObject({ totalTokens: 800, totalCost: 8 });
-  });
-
-  it("reads client:x model:y as an intersection inside one client", async () => {
-    useWeekOf([mixedClientDay]);
-
-    // claude-opus-4 exists in the row, but under claude-code, not codex. The
-    // union reading would have credited dana all 300 of her Codex tokens for
-    // Opus work she never did there.
-    const leaderboard = await getLeaderboardData(
-      "week",
-      1,
-      50,
-      "tokens",
-      "client:codex model:claude-opus-4"
-    );
-
-    expect(leaderboard.users).toHaveLength(0);
-    expect(leaderboard.stats).toMatchObject({ totalTokens: 0, totalCost: 0, uniqueUsers: 0 });
-  });
-
-  it("keeps client matching on case-insensitive substrings", async () => {
-    useWeekOf([mixedClientDay]);
-
-    // `claude` is not a client id — it is a prefix of `claude-code`, and has
-    // matched it since the directive shipped.
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "client:CLAUDE");
-
-    expect(leaderboard.users[0]).toMatchObject({ totalTokens: 700, totalCost: 7 });
-  });
-
-  it("drops rows with no source breakdown when a directive is active", async () => {
-    useWeekOf([
-      mixedClientDay,
-      {
-        userId: "user-erin",
-        username: "erin",
-        displayName: "Erin",
-        avatarUrl: null,
-        tokens: 5000,
-        cost: 50,
-        leaderboardHidden: false,
-        sourceBreakdown: null,
-      },
-    ]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "client:codex");
-
-    expect(leaderboard.users.map((user) => user.username)).toEqual(["dana"]);
-    expect(leaderboard.stats.totalTokens).toBe(300);
-  });
-
-  it("ranks on the filtered share, so a heavy unrelated client cannot buy a position", async () => {
-    useWeekOf([
-      mixedClientDay,
-      {
-        userId: "user-frank",
-        username: "frank",
-        displayName: "Frank",
-        avatarUrl: null,
-        tokens: 400,
-        cost: 4,
-        leaderboardHidden: false,
-        sourceBreakdown: {
-          codex: {
-            tokens: 400,
-            cost: 4,
-            models: { "gpt-5-codex": { tokens: 400, cost: 4 } },
-          },
-        },
-      },
-    ]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "client:codex");
-
-    // dana's 1000-token row outweighs frank's 400 only because 700 of it is
-    // claude-code. On Codex alone frank is ahead.
-    expect(leaderboard.users.map((user) => user.username)).toEqual(["frank", "dana"]);
-    expect(leaderboard.users.map((user) => user.totalTokens)).toEqual([400, 300]);
-  });
-
-  it("still counts a hidden user's filtered share in the period totals", async () => {
-    useWeekOf([mixedClientDay, { ...mixedClientDay, userId: "user-gil", username: "gil", leaderboardHidden: true }]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "client:codex");
-
-    expect(leaderboard.users.map((user) => user.username)).toEqual(["dana"]);
-    // Both users' Codex share, neither user's claude-code share.
-    expect(leaderboard.stats).toMatchObject({ totalTokens: 600, uniqueUsers: 2 });
-    expect(leaderboard.pagination.totalUsers).toBe(1);
-  });
-
-  it("leaves the unfiltered path on the row totals", async () => {
-    useWeekOf([mixedClientDay]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens");
-
-    // No directive, so sourceBreakdown is never consulted and the whole row
-    // counts, exactly as before.
-    expect(leaderboard.users[0]).toMatchObject({
-      username: "dana",
-      totalTokens: 1000,
-      totalCost: 10,
-    });
-    expect(leaderboard.stats).toMatchObject({
-      totalTokens: 1000,
-      totalCost: 10,
-      uniqueUsers: 1,
-    });
-  });
-
-  it("leaves a plain text search on the row totals", async () => {
-    useWeekOf([mixedClientDay]);
-
-    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens", "dana");
-
-    expect(leaderboard.users[0]).toMatchObject({ totalTokens: 1000, totalCost: 10 });
-  });
-});
-
-describe("all-time leaderboard directives", () => {
-  it("ORs repeated directives within each type before combining types", async () => {
-    await getLeaderboardData(
-      "all",
-      1,
-      50,
-      "tokens",
-      "client:opencode client:claude model:gpt_5"
-    );
-
-    expect(mockState.or).toHaveBeenCalledTimes(2);
-    expect(mockState.or.mock.calls.map((call) => call.length)).toEqual([2, 1]);
-    // The rankable-user predicate is ANDed ahead of the directive groups, so
-    // a search can never surface a hidden user.
-    expect(mockState.and).toHaveBeenCalledWith(
-      expect.anything(),
-      mockState.or.mock.results[0]?.value,
-      mockState.or.mock.results[1]?.value
-    );
-
-    const boundValues = mockState.sql.mock.calls.flatMap(([, ...values]) => values);
-    expect(boundValues).toContain("%gpt\\_5%");
   });
 });

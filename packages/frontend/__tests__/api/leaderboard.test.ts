@@ -56,6 +56,9 @@ describe("GET /api/leaderboard", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=60, stale-while-revalidate=300"
+    );
     // #522 added customFrom/customTo as the 6th and 7th positional args; this
     // request doesn't pass them, so they arrive as `undefined`.
     expect(getLeaderboardData).toHaveBeenCalledWith(

@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { Navigation } from "@/components/layout/Navigation";
 import { ServiceFooter } from "@/components/layout/ServiceFooter";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
-import { getLeaderboardData, getUserRank } from "@/lib/leaderboard/getLeaderboard";
+import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import type { LeaderboardData, Period, SortBy } from "@/lib/leaderboard/types";
 import { getSession } from "@/lib/auth/session";
 import {
@@ -171,15 +171,6 @@ async function LeaderboardWithPreferences({
     }),
   ]);
 
-  const initialUserRank = session
-    ? await getUserRank(session.username, period, sortBy, customFrom, customTo).catch((error) => {
-        if (isMissingDatabaseUrl(error)) {
-          return null;
-        }
-        throw error;
-      })
-    : null;
-
   return (
     <>
       <ViewSelector current="users" searchParams={searchParams} />
@@ -187,7 +178,6 @@ async function LeaderboardWithPreferences({
         initialData={initialData}
         currentUser={session}
         initialSortBy={sortBy}
-        initialUserRank={initialUserRank}
       />
     </>
   );
