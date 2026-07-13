@@ -298,6 +298,37 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
     tmp
 }
 
+fn create_positive_utc_offset_submit_fixture_dir() -> (TempDir, String) {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let utc_today = chrono::Utc::now().date_naive();
+    let utc_noon = utc_today.and_hms_opt(12, 0, 0).unwrap().and_utc();
+    let local_date = utc_today.succ_opt().unwrap().format("%Y-%m-%d").to_string();
+    let session = base.join(".local/share/opencode/storage/message/session1");
+    fs::create_dir_all(&session).unwrap();
+
+    let message = serde_json::json!({
+        "id": "msg_ahead_of_utc",
+        "sessionID": "session1",
+        "role": "assistant",
+        "modelID": "gpt-4o",
+        "providerID": "openai",
+        "cost": 0.02,
+        "tokens": {
+            "input": 1000,
+            "output": 500,
+            "reasoning": 0,
+            "cache": { "read": 200, "write": 50 }
+        },
+        "time": { "created": utc_noon.timestamp_millis() as f64 }
+    });
+    fs::write(session.join("msg_ahead_of_utc.json"), message.to_string()).unwrap();
+
+    (tmp, local_date)
+}
+
 fn create_qwen_workspace_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -1637,6 +1668,22 @@ fn test_submit_cursor_explicit_missing_cache_reports_setup_warning_text() {
         .success()
         .stderr(predicate::str::contains("Cursor usage requires"))
         .stderr(predicate::str::contains("tokscale cursor login"));
+}
+
+#[test]
+fn test_submit_dry_run_preserves_local_date_ahead_of_utc() {
+    let (tmp, expected_local_date) = create_positive_utc_offset_submit_fixture_dir();
+
+    cmd_with_home(tmp.path())
+        .env("TZ", "Pacific/Kiritimati")
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["submit", "--client", "opencode", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Date range: {expected_local_date} to {expected_local_date}"
+        )))
+        .stdout(predicate::str::contains("Total tokens: 1,750"));
 }
 
 #[test]
