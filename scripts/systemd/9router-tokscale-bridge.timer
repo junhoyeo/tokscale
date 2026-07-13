@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the 9Router → tokscale bridge every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+# Catch the boot-time case where the timer was missed during downtime;
+# run once shortly after login rather than waiting up to 10 min.
+AccuracySec=30s
+Persistent=true
+Unit=9router-tokscale-bridge.service
+
+[Install]
+WantedBy=timers.target

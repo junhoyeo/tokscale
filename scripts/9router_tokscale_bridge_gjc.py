@@ -28,7 +28,6 @@ from datetime import datetime, timezone
 ROUTER_DB = Path.home() / ".9router" / "db" / "data.sqlite"
 BRIDGE_DIR = Path.home() / ".local" / "share" / "9router-tokscale" / "sessions"
 
-
 def discover_router_dbs() -> list[Path]:
     """Discover the current 9Router DB and all backup DBs.
 
@@ -47,13 +46,11 @@ def discover_router_dbs() -> list[Path]:
         ))
     return [db for db in dbs if db.exists()]
 
-
 def ensure_bridge_dir():
     """Create output directory. Existing files are NOT deleted — each date's
     file is overwritten individually by the write loop, preserving historical
     data from previous bridge runs."""
     BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
-
 
 def parse_iso_timestamp(ts: str) -> int:
     """Convert ISO-8601 timestamp to Unix milliseconds."""
@@ -62,7 +59,6 @@ def parse_iso_timestamp(ts: str) -> int:
         return int(dt.timestamp() * 1000)
     except Exception:
         return int(datetime.now(timezone.utc).timestamp() * 1000)
-
 
 def run():
     dbs = discover_router_dbs()
@@ -113,7 +109,9 @@ def run():
         ts_ms = parse_iso_timestamp(row["timestamp"])
         model = req_data.get("model", row["model"]) or "unknown"
         provider = row["provider"] or None
-        date_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        # Use local timezone (not UTC) so bridge file dates align with
+        # tokscale --today / --since/--until, which use chrono::Local.
+        date_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone().strftime("%Y-%m-%d")
 
         total = prompt + completion
 
@@ -174,7 +172,6 @@ def run():
     )
     print()
     print("Then run: tokscale graph --client 9router")
-
 
 if __name__ == "__main__":
     run()
