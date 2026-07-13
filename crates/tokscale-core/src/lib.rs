@@ -1217,6 +1217,39 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 }),
         );
     }
+    {
+        let existing_dedup_keys: HashSet<String> = all_messages
+            .iter()
+            .filter(|m| m.client == "copilot")
+            .filter_map(|m| m.dedup_key.clone())
+            .collect();
+        let existing_copilot_session_timestamps: HashSet<(String, i64)> = all_messages
+            .iter()
+            .filter(|m| m.client == "copilot")
+            .map(|m| (m.session_id.clone(), m.timestamp))
+            .collect();
+        let vscode_msgs = sessions::copilot_vscode::parse_copilot_vscode_sessions(
+            &scan_result.copilot_vscode_sessions,
+        );
+        all_messages.extend(
+            vscode_msgs
+                .into_iter()
+                .filter(|m| {
+                    let key_unique = m
+                        .dedup_key
+                        .as_deref()
+                        .map(|k| !existing_dedup_keys.contains(k))
+                        .unwrap_or(true);
+                    let session_ts_unique = !existing_copilot_session_timestamps
+                        .contains(&(m.session_id.clone(), m.timestamp));
+                    key_unique && session_ts_unique
+                })
+                .map(|mut message| {
+                    apply_pricing_if_available(&mut message, pricing);
+                    message
+                }),
+        );
+    }
 
     let gemini_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Gemini)
@@ -2945,6 +2978,32 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             sessions::copilot_desktop::parse_copilot_desktop_db(db_path)
                 .into_iter()
                 .filter(|message| !otel_sessions.contains(&message.session_id)),
+        );
+    }
+    {
+        let existing_dedup_keys: HashSet<String> = copilot_unified_msgs
+            .iter()
+            .filter_map(|m| m.dedup_key.clone())
+            .collect();
+        let existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
+            .iter()
+            .map(|m| (m.session_id.clone(), m.timestamp))
+            .collect();
+        copilot_unified_msgs.extend(
+            sessions::copilot_vscode::parse_copilot_vscode_sessions(
+                &scan_result.copilot_vscode_sessions,
+            )
+            .into_iter()
+            .filter(|m| {
+                let key_unique = m
+                    .dedup_key
+                    .as_deref()
+                    .map(|k| !existing_dedup_keys.contains(k))
+                    .unwrap_or(true);
+                let session_ts_unique = !existing_copilot_session_timestamps
+                    .contains(&(m.session_id.clone(), m.timestamp));
+                key_unique && session_ts_unique
+            }),
         );
     }
     let copilot_msgs: Vec<ParsedMessage> =

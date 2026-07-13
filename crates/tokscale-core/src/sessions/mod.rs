@@ -13,6 +13,7 @@ pub mod codex;
 pub mod commandcode;
 pub mod copilot;
 pub mod copilot_desktop;
+pub mod copilot_vscode;
 pub mod crush;
 pub mod cursor;
 pub mod devin;

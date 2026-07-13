@@ -98,6 +98,9 @@ pub struct ScanResult {
     /// Devin CLI SQLite databases, including the default data path and any
     /// user-configured scan roots.
     pub devin_dbs: Vec<PathBuf>,
+    /// VS Code Copilot chat session JSONL files discovered under
+    /// `workspaceStorage/*/chatSessions/*.jsonl`.
+    pub copilot_vscode_sessions: Vec<PathBuf>,
 }
 
 impl Default for ScanResult {
@@ -117,6 +120,7 @@ impl Default for ScanResult {
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
             devin_dbs: Vec::new(),
+            copilot_vscode_sessions: Vec::new(),
         }
     }
 }
@@ -971,6 +975,63 @@ pub(crate) fn merge_user_opencode_db_paths(discovered: &mut Vec<PathBuf>, extra_
     }
 }
 
+fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    roots.push(PathBuf::from(format!(
+        "{}/Library/Application Support/Code/User/workspaceStorage",
+        home_dir
+    )));
+    roots.push(PathBuf::from(format!(
+        "{}/.config/Code/User/workspaceStorage",
+        home_dir
+    )));
+
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(app_data) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+            roots.push(PathBuf::from(app_data).join("Code/User/workspaceStorage"));
+        }
+    }
+    roots.push(PathBuf::from(home_dir).join("AppData/Roaming/Code/User/workspaceStorage"));
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+    for workspace_storage in &roots {
+        let hash_dirs = match std::fs::read_dir(workspace_storage) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in hash_dirs.filter_map(|e| e.ok()) {
+            let chat_sessions_dir = entry.path().join("chatSessions");
+            if !chat_sessions_dir.is_dir() {
+                continue;
+            }
+            let chat_entries = match std::fs::read_dir(&chat_sessions_dir) {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            for chat_entry in chat_entries.filter_map(|e| e.ok()) {
+                let path = chat_entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.ends_with(".jsonl") {
+                    continue;
+                }
+                if !path.is_file() {
+                    continue;
+                }
+                let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if seen.insert(key) {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    files.sort_unstable();
+    files
+}
+
 /// Scan all session client directories in parallel, with user-controlled
 /// [`ScannerSettings`] merged in.
 ///
@@ -1724,6 +1785,8 @@ fn scan_all_clients_with_env_strategy_inner(
         if desktop_db.is_file() {
             result.copilot_desktop_db = Some(desktop_db);
         }
+
+        result.copilot_vscode_sessions = discover_copilot_vscode_sessions(home_dir, use_env_roots);
 
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
             if path.is_file() && seen.insert(path.clone()) {
