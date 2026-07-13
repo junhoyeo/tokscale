@@ -4930,12 +4930,29 @@ fn run_graph_command(
 struct SubmitResponse {
     #[serde(rename = "submissionId")]
     submission_id: Option<String>,
+    #[serde(rename = "trustState")]
+    trust_state: Option<String>,
+    #[serde(rename = "competitiveWriteApplied")]
+    competitive_write_applied: Option<bool>,
     #[allow(dead_code)]
     username: Option<String>,
     metrics: Option<SubmitMetrics>,
+    #[serde(rename = "reviewMetrics")]
+    review_metrics: Option<SubmitMetrics>,
     warnings: Option<Vec<String>>,
     error: Option<String>,
     details: Option<Vec<String>>,
+}
+
+fn submit_confirmation_message(
+    trust_state: Option<&str>,
+    competitive_write_applied: bool,
+) -> &'static str {
+    match (trust_state, competitive_write_applied) {
+        (Some("review_required"), true) => "Submitted; flagged days queued for review.",
+        (Some("review_required"), false) => "Submitted for review.",
+        _ => "Successfully submitted!",
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -4950,6 +4967,25 @@ struct SubmitMetrics {
     sources: Option<Vec<String>>,
 }
 
+fn print_submit_metrics(label: &str, metrics: &SubmitMetrics) {
+    use colored::Colorize;
+    println!("{}", format!("  {label}:").white());
+    if let Some(tokens) = metrics.total_tokens {
+        println!(
+            "{}",
+            format!("    Total tokens: {}", format_tokens_with_commas(tokens)).bright_black()
+        );
+    }
+    if let Some(cost) = metrics.total_cost {
+        println!(
+            "{}",
+            format!("    Total cost: {}", format_currency(cost)).bright_black()
+        );
+    }
+    if let Some(days) = metrics.active_days {
+        println!("{}", format!("    Active days: {days}").bright_black());
+    }
+}
 /// A client row dropped from a submission because it carried cost without any
 /// token attribution. See [`exclude_tokenless_cost_contributions`].
 #[derive(Debug, Clone, PartialEq)]
@@ -5333,8 +5369,11 @@ fn run_submit_command(
                 rt.block_on(async { resp.json().await })
                     .unwrap_or_else(|_| SubmitResponse {
                         submission_id: None,
+                        trust_state: None,
+                        competitive_write_applied: None,
                         username: None,
                         metrics: None,
+                        review_metrics: None,
                         warnings: None,
                         error: Some(format!(
                             "Server returned {} with unparseable response",
@@ -5361,29 +5400,25 @@ fn run_submit_command(
                 std::process::exit(1);
             }
 
-            println!("\n  {}", "Successfully submitted!".green());
+            let competitive_write_applied = body
+                .competitive_write_applied
+                .unwrap_or(body.submission_id.is_some());
+            let confirmation =
+                submit_confirmation_message(body.trust_state.as_deref(), competitive_write_applied);
+            if body.trust_state.as_deref() == Some("review_required") {
+                println!("\n  {}", confirmation.yellow());
+            } else {
+                println!("\n  {}", confirmation.green());
+            }
             println!();
-            println!("{}", "  Summary:".white());
             if let Some(id) = body.submission_id {
-                println!("{}", format!("    Submission ID: {}", id).bright_black());
+                println!("{}", format!("  Submission ID: {}", id).bright_black());
             }
             if let Some(metrics) = &body.metrics {
-                if let Some(tokens) = metrics.total_tokens {
-                    println!(
-                        "{}",
-                        format!("    Total tokens: {}", format_tokens_with_commas(tokens))
-                            .bright_black()
-                    );
-                }
-                if let Some(cost) = metrics.total_cost {
-                    println!(
-                        "{}",
-                        format!("    Total cost: {}", format_currency(cost)).bright_black()
-                    );
-                }
-                if let Some(days) = metrics.active_days {
-                    println!("{}", format!("    Active days: {}", days).bright_black());
-                }
+                print_submit_metrics("Competitive summary", metrics);
+            }
+            if let Some(metrics) = &body.review_metrics {
+                print_submit_metrics("Queued for review", metrics);
             }
             if let Some(username) = body
                 .username
@@ -6002,6 +6037,64 @@ mod tests {
         calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
         GraphMeta, GraphResult, TokenBreakdown,
     };
+
+    #[test]
+    fn review_required_response_never_uses_success_confirmation() {
+        let response: SubmitResponse = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "trustState": "review_required",
+            "submissionId": null,
+            "reviewMetrics": {
+                "totalTokens": 100,
+                "totalCost": 0.25,
+                "activeDays": 1
+            }
+        }))
+        .unwrap();
+
+        assert!(response.metrics.is_none());
+        assert_eq!(
+            response
+                .review_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_tokens),
+            Some(100)
+        );
+
+        assert_eq!(
+            submit_confirmation_message(
+                response.trust_state.as_deref(),
+                response.competitive_write_applied.unwrap_or(false),
+            ),
+            "Submitted for review."
+        );
+        assert_ne!(
+            submit_confirmation_message(
+                response.trust_state.as_deref(),
+                response.competitive_write_applied.unwrap_or(false),
+            ),
+            "Successfully submitted!"
+        );
+    }
+
+    #[test]
+    fn partial_review_response_reports_accepted_and_queued_days() {
+        let response: SubmitResponse = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "trustState": "review_required",
+            "submissionId": "submission-1",
+            "competitiveWriteApplied": true
+        }))
+        .unwrap();
+
+        assert_eq!(
+            submit_confirmation_message(
+                response.trust_state.as_deref(),
+                response.competitive_write_applied.unwrap_or(false),
+            ),
+            "Submitted; flagged days queued for review."
+        );
+    }
 
     #[test]
     fn test_parse_variant_arg_accepts_known_values() {
