@@ -10,6 +10,14 @@ export interface TokenBreakdownProps {
   className?: string;
 }
 
+const TOKEN_MIX_COLORS = {
+  input: "#56b4e9",
+  output: "#009e73",
+  cacheRead: "#cc79a7",
+  cacheWrite: "#e69f00",
+  reasoning: "#d7dde8",
+} as const;
+
 const BreakdownPanel = styled.section`
   overflow: hidden;
   border: 1px solid var(--service-border);
@@ -127,31 +135,29 @@ export function TokenBreakdown({ stats, className }: TokenBreakdownProps) {
     {
       label: "Input",
       value: finiteNonnegative(stats.inputTokens),
-      color: "var(--service-accent)",
+      color: TOKEN_MIX_COLORS.input,
     },
     {
       label: "Output",
       value: finiteNonnegative(stats.outputTokens),
-      color: "var(--service-accent-hover)",
+      color: TOKEN_MIX_COLORS.output,
     },
     {
       label: "Cache read",
       value: finiteNonnegative(stats.cacheReadTokens),
-      color:
-        "color-mix(in srgb, var(--service-accent) 55%, var(--service-text-muted))",
+      color: TOKEN_MIX_COLORS.cacheRead,
     },
     {
       label: "Cache write",
       value: finiteNonnegative(stats.cacheWriteTokens),
-      color:
-        "color-mix(in srgb, var(--service-accent) 30%, var(--service-text-muted))",
+      color: TOKEN_MIX_COLORS.cacheWrite,
     },
     ...(finiteNonnegative(stats.reasoningTokens) > 0
       ? [
           {
             label: "Reasoning",
             value: finiteNonnegative(stats.reasoningTokens),
-            color: "var(--service-text-muted)",
+            color: TOKEN_MIX_COLORS.reasoning,
           },
         ]
       : []),
