@@ -12,7 +12,6 @@ import {
 } from "react";
 import styled, { css } from "styled-components";
 import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
-import { useMediaQuery } from "@/lib/useMediaQuery";
 import type { DailyContribution } from "@/lib/types";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
 import {
@@ -65,9 +64,6 @@ const TOOLTIP_EDGE = 8;
 const TOOLTIP_VIEWPORT_EDGE = 16;
 const TOOLTIP_MAX_HEIGHT = 416;
 const NEWEST_FIRST_STORAGE_KEY = "tokscale:usage-newest-first";
-// Matches the profile dashboard breakpoint where this card moves into the
-// right-hand column, which is when the newest-on-the-left default applies.
-const NEWEST_FIRST_DESKTOP_QUERY = "(min-width: 1360px)";
 
 const subscribeUsageChartMounted = () => () => {};
 
@@ -927,16 +923,13 @@ export function ProfileUsageChart({
   const [providerFilter, setProviderFilter] =
     useState<UsageProviderFilter>(ALL_USAGE_PROVIDERS);
   // Reversal is resolved after mount so the server render and the first client
-  // paint share a stable, chronological default (no hydration mismatch). The
-  // explicit toggle, once set, is persisted and wins over the responsive
-  // default (newest-first when this card sits in the desktop right-hand
-  // column, chronological below that breakpoint).
+  // paint stay chronological (no hydration mismatch). A persisted explicit
+  // choice is the only way to start newest-first.
   const isMounted = useSyncExternalStore(
     subscribeUsageChartMounted,
     () => true,
     () => false,
   );
-  const isDesktopReverseDefault = useMediaQuery(NEWEST_FIRST_DESKTOP_QUERY);
   // Lazy initializer: reads once on the client; the server (and the hydration
   // render, via the isMounted gate below) always resolves chronological.
   const [storedNewestFirst, setStoredNewestFirst] = useState<boolean | null>(
@@ -951,9 +944,7 @@ export function ProfileUsageChart({
       }
     },
   );
-  const newestFirst = isMounted
-    ? (storedNewestFirst ?? isDesktopReverseDefault)
-    : false;
+  const newestFirst = isMounted && storedNewestFirst === true;
   const commitNewestFirst = (next: boolean) => {
     setStoredNewestFirst(next);
     try {
