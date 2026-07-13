@@ -323,6 +323,7 @@ const CostValue = styled.span`
   font-weight: 400;
   font-size: 12px;
   color: var(--color-fg-muted);
+  font-variant-numeric: tabular-nums;
   
   @media (min-width: 561px) {
     display: none;
