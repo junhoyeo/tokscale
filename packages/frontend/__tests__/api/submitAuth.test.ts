@@ -1,9 +1,11 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as SubmissionTrustModule from "../../src/lib/validation/submissionTrust";
 
 const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
   const validateSubmission = vi.fn();
   const generateSubmissionHash = vi.fn(() => "submission-hash");
+  const assessSubmissionTrust = vi.fn();
   const revalidateTag = vi.fn();
   const revalidateUsernamePaths = vi.fn();
   const revalidateUserGroupLeaderboards = vi.fn();
@@ -26,6 +28,7 @@ const mockState = vi.hoisted(() => {
     authenticatePersonalToken,
     validateSubmission,
     generateSubmissionHash,
+    assessSubmissionTrust,
     revalidateTag,
     revalidateUsernamePaths,
     revalidateUserGroupLeaderboards,
@@ -40,6 +43,15 @@ const mockState = vi.hoisted(() => {
       authenticatePersonalToken.mockReset();
       validateSubmission.mockReset();
       generateSubmissionHash.mockClear();
+      assessSubmissionTrust.mockReset();
+      assessSubmissionTrust.mockReturnValue({
+        trustState: "trusted",
+        reasonCodes: [],
+        rejectionReasonCodes: [],
+        reviewDates: [],
+        errors: [],
+        warnings: [],
+      });
       revalidateTag.mockClear();
       revalidateUsernamePaths.mockReset();
       revalidateUserGroupLeaderboards.mockReset();
@@ -85,6 +97,9 @@ vi.mock("@/lib/db", () => ({
     submissionHash: "submissions.submissionHash",
     schemaVersion: "submissions.schemaVersion",
   },
+  submissionReviews: {
+    id: "submissionReviews.id",
+  },
   submittedDevices: {
     id: "submittedDevices.id",
     userId: "submittedDevices.userId",
@@ -112,6 +127,17 @@ vi.mock("@/lib/validation/submission", () => ({
   generateSubmissionHash: mockState.generateSubmissionHash,
 }));
 
+vi.mock(
+  "@/lib/validation/submissionTrust",
+  async (importOriginal) => {
+    const actual = await importOriginal<typeof SubmissionTrustModule>();
+    return {
+      ...actual,
+      assessSubmissionTrust: mockState.assessSubmissionTrust,
+    };
+  }
+);
+
 vi.mock("@/lib/db/helpers", () => ({
   mergeClientBreakdowns: mockState.mergeClientBreakdowns,
   mergeClientBreakdownsWithRegressionGuard: mockState.mergeClientBreakdownsWithRegressionGuard,
@@ -130,9 +156,7 @@ vi.mock("@/lib/groups/cache", () => ({
   revalidateUserGroupLeaderboards: mockState.revalidateUserGroupLeaderboards,
 }));
 
-type ModuleExports = typeof import("../../src/app/api/submit/route");
-
-let POST: ModuleExports["POST"];
+let POST: (request: Request) => Promise<Response>;
 
 beforeAll(async () => {
   const routeModule = await import("../../src/app/api/submit/route");
@@ -234,6 +258,7 @@ describe("POST /api/submit auth path", () => {
     expect(await response.json()).toEqual({
       error: "Validation failed",
       details: ["bad payload"],
+      trustState: "rejected",
     });
   });
 
@@ -303,6 +328,7 @@ describe("POST /api/submit auth path", () => {
     expect(await response.json()).toEqual({
       error: "Validation failed",
       details: ["Submission data must be an object"],
+      trustState: "rejected",
     });
   });
 
@@ -1625,5 +1651,451 @@ describe("POST /api/submit auth path", () => {
       }),
       mode: "merge",
     }));
+  });
+
+  it("hard-rejects trust failures before opening a transaction", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        summary: { clients: ["codex"] },
+        contributions: [{ date: "2026-07-10", clients: [] }],
+      },
+      errors: [],
+      warnings: [],
+    });
+    mockState.assessSubmissionTrust.mockReturnValue({
+      trustState: "rejected",
+      reasonCodes: [],
+      rejectionReasonCodes: ["timestamp_day_mismatch"],
+      reviewDates: [],
+      errors: ["timestamp is outside its claimed UTC bucket"],
+      warnings: [],
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Submission rejected by trust policy",
+      details: ["timestamp is outside its claimed UTC bucket"],
+      trustState: "rejected",
+      errorCodes: ["timestamp_day_mismatch"],
+    });
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(mockState.revalidateUserGroupLeaderboards).not.toHaveBeenCalled();
+    expect(mockState.revalidateUsernamePaths).not.toHaveBeenCalled();
+  });
+
+  it("queues an all-review payload without touching competitive tables", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+    const oldDay = {
+      date: "2026-01-01",
+      totals: { tokens: 100, cost: 0.25, messages: 1 },
+      intensity: 1,
+      tokenBreakdown: {
+        input: 100,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+      },
+      clients: [{
+        client: "codex",
+        modelId: "gpt-5.5",
+        tokens: {
+          input: 100,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+        },
+        cost: 0.25,
+        messages: 1,
+      }],
+    };
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        meta: {
+          generatedAt: "2026-07-14T00:00:00.000Z",
+          version: "2.1.1",
+          dateRange: { start: oldDay.date, end: oldDay.date },
+        },
+        summary: {
+          totalTokens: 100,
+          totalCost: 0.25,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 100,
+          maxCostInSingleDay: 0.25,
+          clients: ["codex"],
+          models: ["gpt-5.5"],
+        },
+        years: [{
+          year: "2026",
+          totalTokens: 100,
+          totalCost: 0.25,
+          range: { start: oldDay.date, end: oldDay.date },
+        }],
+        contributions: [oldDay],
+      },
+      errors: [],
+      warnings: [],
+    });
+    mockState.assessSubmissionTrust.mockReturnValue({
+      trustState: "review_required",
+      reasonCodes: ["historical_day_missing_timestamp"],
+      rejectionReasonCodes: [],
+      reviewDates: [oldDay.date],
+      errors: [],
+      warnings: ["old day needs review"],
+    });
+
+    let reviewValues: Record<string, unknown> | undefined;
+    const reviewBuilder = {
+      values: vi.fn((values: Record<string, unknown>) => {
+        reviewValues = values;
+        return reviewBuilder;
+      }),
+      onConflictDoUpdate: vi.fn(() => reviewBuilder),
+      returning: vi.fn(() => Promise.resolve([{ id: "review-1" }])),
+    };
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      insert: vi.fn(() => reviewBuilder),
+    };
+    type ReviewOnlyTransaction = typeof tx;
+    mockState.db.transaction.mockImplementation(
+      async (
+        callback: (transaction: ReviewOnlyTransaction) => Promise<unknown>
+      ) => callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      })
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual(
+      expect.objectContaining({
+        trustState: "review_required",
+        submissionId: null,
+        reviewId: "review-1",
+        reviewMetrics: expect.objectContaining({
+          totalTokens: 100,
+          totalCost: 0.25,
+          activeDays: 1,
+        }),
+        mode: "review",
+        competitiveWriteApplied: false,
+      })
+    );
+    expect(body).not.toHaveProperty("metrics");
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(reviewBuilder.onConflictDoUpdate).toHaveBeenCalled();
+    expect(reviewValues).toEqual(
+      expect.objectContaining({
+        totalTokens: 100,
+        totalCost: "0.2500",
+      })
+    );
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
+    expect(mockState.revalidateUserGroupLeaderboards).not.toHaveBeenCalled();
+    expect(mockState.revalidateUsernamePaths).not.toHaveBeenCalled();
+  });
+
+  it("queues only flagged days while persisting trusted days in one transaction", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    const oldDay = {
+      date: "2026-01-01",
+      totals: { tokens: 400, cost: 1, messages: 1 },
+      intensity: 1,
+      tokenBreakdown: {
+        input: 400,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+      },
+      clients: [{
+        client: "codex",
+        modelId: "gpt-5.5",
+        tokens: {
+          input: 400,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+        },
+        cost: 1,
+        messages: 1,
+      }],
+    };
+    const trustedDay = {
+      date: "2026-07-10",
+      timestampMs: Date.parse("2026-07-10T12:00:00.000Z"),
+      totals: { tokens: 100, cost: 0.25, messages: 1 },
+      intensity: 1,
+      tokenBreakdown: {
+        input: 100,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+      },
+      clients: [{
+        client: "codex",
+        modelId: "gpt-5.5",
+        tokens: {
+          input: 100,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+        },
+        cost: 0.25,
+        messages: 1,
+      }],
+    };
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        meta: {
+          generatedAt: "2026-07-14T00:00:00.000Z",
+          version: "2.1.1",
+          dateRange: { start: oldDay.date, end: trustedDay.date },
+        },
+        summary: {
+          totalTokens: 500,
+          totalCost: 1.25,
+          totalDays: 2,
+          activeDays: 2,
+          averagePerDay: 250,
+          maxCostInSingleDay: 1,
+          clients: ["codex"],
+          models: ["gpt-5.5"],
+        },
+        years: [{
+          year: "2026",
+          totalTokens: 500,
+          totalCost: 1.25,
+          range: { start: oldDay.date, end: trustedDay.date },
+        }],
+        contributions: [oldDay, trustedDay],
+      },
+      errors: [],
+      warnings: [],
+    });
+    mockState.assessSubmissionTrust.mockReturnValue({
+      trustState: "review_required",
+      reasonCodes: ["historical_day_missing_timestamp"],
+      rejectionReasonCodes: [],
+      reviewDates: [oldDay.date],
+      errors: [],
+      warnings: ["old day needs review"],
+    });
+    mockState.clientContributionToBreakdownData.mockReturnValue({
+      tokens: 100,
+      cost: 0.25,
+      input: 100,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    });
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 100,
+      cost: 0.25,
+      inputTokens: 100,
+      outputTokens: 0,
+    });
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      [],
+      [{
+        totalTokens: 100,
+        totalCost: "0.2500",
+        inputTokens: 100,
+        outputTokens: 0,
+        dateStart: trustedDay.date,
+        dateEnd: trustedDay.date,
+        activeDays: 1,
+        totalActiveTimeMs: 0,
+        rowCount: 1,
+      }],
+      [{
+        sourceBreakdown: {
+          codex: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            models: { "gpt-5.5": { tokens: 100 } },
+          },
+        },
+      }],
+    ];
+    let insertCall = 0;
+    let reviewInsertValues: Record<string, unknown> | undefined;
+    let dailyInsertValues: Array<Record<string, unknown>> | undefined;
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        insertCall += 1;
+        if (insertCall === 1) {
+          const builder = {
+            values: vi.fn((values: Record<string, unknown>) => {
+              reviewInsertValues = values;
+              return builder;
+            }),
+            onConflictDoUpdate: vi.fn(() => builder),
+            returning: vi.fn(() => Promise.resolve([{ id: "review-1" }])),
+          };
+          return builder;
+        }
+        if (insertCall === 2) {
+          const builder = {
+            values: vi.fn(() => builder),
+            onConflictDoUpdate: vi.fn(() => builder),
+            returning: vi.fn(() =>
+              Promise.resolve([{ id: "submitted-device-1" }])
+            ),
+          };
+          return builder;
+        }
+        return {
+          values: vi.fn((values: Array<Record<string, unknown>>) => {
+            dailyInsertValues = values;
+            return Promise.resolve();
+          }),
+        };
+      }),
+      execute: vi.fn(() => Promise.resolve()),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+    mockState.db.transaction.mockImplementation(
+      async (callback: (transaction: MockTransaction) => Promise<unknown>) =>
+        callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ mcpServers: ["github"] }),
+      })
+    );
+    const body = await response.json();
+    const reviewPayload = reviewInsertValues?.payload;
+
+    expect(response.status).toBe(200);
+    expect(tx.insert).toHaveBeenCalledTimes(3);
+    expect(reviewInsertValues).toEqual(
+      expect.objectContaining({
+        totalTokens: 400,
+        totalCost: "1.0000",
+        dateStart: oldDay.date,
+        dateEnd: oldDay.date,
+        reasonCodes: ["historical_day_missing_timestamp"],
+        schemaVersion: 1,
+      })
+    );
+    expect(reviewPayload).toBeDefined();
+    if (
+      !reviewPayload ||
+      typeof reviewPayload !== "object" ||
+      !("contributions" in reviewPayload) ||
+      !("mcpServers" in reviewPayload)
+    ) {
+      throw new Error("Expected the queued review payload fields");
+    }
+    expect(reviewPayload.contributions).toEqual([
+      expect.objectContaining({ date: oldDay.date }),
+    ]);
+    expect(reviewPayload.mcpServers).toEqual(["github"]);
+    expect(dailyInsertValues).toEqual([
+      expect.objectContaining({ date: trustedDay.date, tokens: 100 }),
+    ]);
+    expect(body).toEqual(
+      expect.objectContaining({
+        success: true,
+        trustState: "review_required",
+        submissionId: "submission-1",
+        reviewId: "review-1",
+        reviewMetrics: expect.objectContaining({
+          totalTokens: 400,
+          totalCost: 1,
+          activeDays: 1,
+        }),
+        mode: "merge",
+        competitiveWriteApplied: true,
+        reasonCodes: ["historical_day_missing_timestamp"],
+      })
+    );
+    expect(mockState.revalidateTag).toHaveBeenCalled();
   });
 });

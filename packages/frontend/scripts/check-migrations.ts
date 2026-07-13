@@ -115,6 +115,7 @@ try {
         'groups',
         'sessions',
         'submissions',
+        'submission_reviews',
         'submitted_devices',
         'users'
       )
@@ -129,6 +130,7 @@ try {
     "groups",
     "sessions",
     "submissions",
+    "submission_reviews",
     "submitted_devices",
     "users",
   ].filter((tableName) => !tableNames.has(tableName));
@@ -176,6 +178,40 @@ try {
     ].every((columnName) => columns.has(columnName))
   );
 
+  const [reviewCostColumn] = await sql<
+    { numeric_precision: number; numeric_scale: number }[]
+  >`
+    SELECT numeric_precision::int, numeric_scale::int
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'submission_reviews'
+      AND column_name = 'total_cost'
+  `;
+  expect(
+    "submission review cost uses numeric(18,4)",
+    reviewCostColumn?.numeric_precision === 18 &&
+      reviewCostColumn.numeric_scale === 4
+  );
+
+  const [{ count: reviewConstraintCount }] = await sql<{ count: number }[]>`
+    SELECT count(*)::int AS count
+    FROM pg_constraint
+    WHERE conrelid = 'submission_reviews'::regclass
+      AND conname IN (
+        'submission_reviews_trust_state_check',
+        'submission_reviews_total_tokens_check',
+        'submission_reviews_total_cost_check',
+        'submission_reviews_active_days_check',
+        'submission_reviews_schema_version_check',
+        'submission_reviews_date_range_check'
+      )
+  `;
+  expect(
+    "submission review integrity constraints exist",
+    reviewConstraintCount === 6,
+    `expected 6, got ${reviewConstraintCount}`
+  );
+
   const removedColumns = await sql<{ count: number }[]>`
     SELECT count(*)::int AS count
     FROM information_schema.columns
@@ -198,6 +234,7 @@ try {
         'idx_group_invites_invited_by',
         'idx_group_members_invited_by',
         'idx_submissions_leaderboard',
+        'submission_reviews_pending_user_hash_unique',
         'users_username_lower_unique'
       )
   `;
@@ -210,6 +247,7 @@ try {
       "idx_group_invites_invited_by",
       "idx_group_members_invited_by",
       "idx_submissions_leaderboard",
+      "submission_reviews_pending_user_hash_unique",
       "users_username_lower_unique",
     ].every((indexName) => indexes.has(indexName))
   );
@@ -218,6 +256,15 @@ try {
     indexes.get("users_username_lower_unique")?.includes("UNIQUE INDEX") === true &&
       indexes.get("users_username_lower_unique")?.includes("lower((username)::text)") ===
         true
+  );
+  expect(
+    "pending review hashes are unique per user",
+    indexes
+      .get("submission_reviews_pending_user_hash_unique")
+      ?.includes("UNIQUE INDEX") === true &&
+      indexes
+        .get("submission_reviews_pending_user_hash_unique")
+        ?.includes("review_required") === true
   );
 
   const extensionRows = await sql<{ count: number }[]>`
@@ -234,6 +281,36 @@ try {
       INSERT INTO "users" ("github_id", "username")
       VALUES (1001, 'ci_migration_replay')
       RETURNING "id"
+    `;
+    await sql`
+      INSERT INTO "submission_reviews" (
+        "user_id",
+        "submission_hash",
+        "trust_state",
+        "reason_codes",
+        "payload",
+        "total_tokens",
+        "total_cost",
+        "active_days",
+        "date_start",
+        "date_end",
+        "sources_used",
+        "models_used"
+      )
+      VALUES (
+        ${user.id},
+        'runtime-migration-review-hash',
+        'review_required',
+        ARRAY['historical_day_missing_timestamp'],
+        '{"contributions":[]}'::jsonb,
+        100000000,
+        100000000.2500,
+        1,
+        '2025-12-31',
+        '2025-12-31',
+        ARRAY['codex'],
+        ARRAY['gpt-5']
+      )
     `;
     const [submission] = await sql<{ id: string }[]>`
       INSERT INTO "submissions" (

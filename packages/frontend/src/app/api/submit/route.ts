@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
-import { db, apiTokens, submissions, submittedDevices, dailyBreakdown } from "@/lib/db";
+import {
+  db,
+  apiTokens,
+  submissions,
+  submittedDevices,
+  dailyBreakdown,
+  submissionReviews,
+} from "@/lib/db";
 import { and, eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
@@ -8,6 +15,11 @@ import {
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import {
+  assessSubmissionTrust,
+  subsetSubmissionByDates,
+  SUBMISSION_TRUST_STATE,
+} from "@/lib/validation/submissionTrust";
 import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
   mergeClientBreakdownsWithRegressionGuard,
@@ -148,20 +160,54 @@ export async function POST(request: Request) {
 
     if (!validation.valid || !validation.data) {
       return NextResponse.json(
-        { error: "Validation failed", details: validation.errors },
+        {
+          error: "Validation failed",
+          details: validation.errors,
+          trustState: SUBMISSION_TRUST_STATE.REJECTED,
+        },
         { status: 400 }
       );
     }
 
-    const data = validation.data;
+    const validatedData = validation.data;
     const warnings = [...validation.warnings];
 
-    if (data.contributions.length === 0) {
+    if (validatedData.contributions.length === 0) {
       return NextResponse.json(
-        { error: "No contribution data to submit" },
+        {
+          error: "No contribution data to submit",
+          trustState: SUBMISSION_TRUST_STATE.REJECTED,
+        },
         { status: 400 }
       );
     }
+
+    const trustAssessment = assessSubmissionTrust(validatedData);
+    warnings.push(...trustAssessment.warnings);
+    if (trustAssessment.trustState === SUBMISSION_TRUST_STATE.REJECTED) {
+      return NextResponse.json(
+        {
+          error: "Submission rejected by trust policy",
+          details: trustAssessment.errors,
+          trustState: trustAssessment.trustState,
+          errorCodes: trustAssessment.rejectionReasonCodes,
+        },
+        { status: 400 }
+      );
+    }
+
+    const submitDevice = getSubmitDevice(validatedData);
+    const reviewDates = new Set(trustAssessment.reviewDates);
+    const trustedDates = new Set(
+      validatedData.contributions
+        .filter((day) => !reviewDates.has(day.date))
+        .map((day) => day.date)
+    );
+    const reviewData = subsetSubmissionByDates(validatedData, reviewDates);
+    const trustedData = reviewData
+      ? subsetSubmissionByDates(validatedData, trustedDates)
+      : validatedData;
+    const data = trustedData ?? validatedData;
 
     const submittedClients = new Set<SubmissionData["summary"]["clients"][number]>(data.summary.clients);
     for (const contribution of data.contributions) {
@@ -188,6 +234,73 @@ export async function POST(request: Request) {
         .update(apiTokens)
         .set({ lastUsedAt: new Date() })
         .where(eq(apiTokens.id, tokenRecord.tokenId));
+
+      let reviewId: string | null = null;
+      if (reviewData) {
+        const reviewPayload = {
+          ...(reviewData as unknown as Record<string, unknown>),
+          ...(mcpServers && mcpServers.length > 0 ? { mcpServers } : {}),
+        };
+        const [review] = await tx
+          .insert(submissionReviews)
+          .values({
+            userId: tokenRecord.userId,
+            submissionHash: generateSubmissionHash(reviewData),
+            trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
+            reasonCodes: trustAssessment.reasonCodes,
+            payload: reviewPayload,
+            totalTokens: reviewData.summary.totalTokens,
+            totalCost: reviewData.summary.totalCost.toFixed(4),
+            activeDays: reviewData.summary.activeDays,
+            dateStart: reviewData.meta.dateRange.start,
+            dateEnd: reviewData.meta.dateRange.end,
+            sourcesUsed: reviewData.summary.clients,
+            modelsUsed: reviewData.summary.models,
+            cliVersion: reviewData.meta.version,
+            schemaVersion: submitDevice.schemaVersion,
+          })
+          .onConflictDoUpdate({
+            target: [
+              submissionReviews.userId,
+              submissionReviews.submissionHash,
+            ],
+            targetWhere: sql`${submissionReviews.trustState} = 'review_required'`,
+            set: {
+              reasonCodes: trustAssessment.reasonCodes,
+              payload: reviewPayload,
+              totalTokens: reviewData.summary.totalTokens,
+              totalCost: reviewData.summary.totalCost.toFixed(4),
+              activeDays: reviewData.summary.activeDays,
+              dateStart: reviewData.meta.dateRange.start,
+              dateEnd: reviewData.meta.dateRange.end,
+              sourcesUsed: reviewData.summary.clients,
+              modelsUsed: reviewData.summary.models,
+              cliVersion: reviewData.meta.version,
+              schemaVersion: submitDevice.schemaVersion,
+              updatedAt: new Date(),
+            },
+          })
+          .returning({ id: submissionReviews.id });
+        reviewId = review.id;
+      }
+
+      if (!trustedData) {
+        return {
+          trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
+          reviewId,
+          submissionId: null,
+          isNewSubmission: false,
+          competitiveWriteApplied: false,
+          metrics: undefined,
+          reviewMetrics: {
+            totalTokens: reviewData!.summary.totalTokens,
+            totalCost: reviewData!.summary.totalCost,
+            dateRange: reviewData!.meta.dateRange,
+            activeDays: reviewData!.summary.activeDays,
+            clients: reviewData!.summary.clients,
+          },
+        };
+      }
 
       // ------------------------------------------
       // STEP 3a: Get or create user's submission
@@ -249,7 +362,6 @@ export async function POST(request: Request) {
         }
       }
 
-      const submitDevice = getSubmitDevice(data);
       const submittedAt = new Date();
       const [submittedDevice] = await tx
         .insert(submittedDevices)
@@ -590,49 +702,75 @@ export async function POST(request: Request) {
         .where(eq(submissions.id, submissionId));
 
       return {
+        trustState: trustAssessment.trustState,
+        reviewId,
+        competitiveWriteApplied: true,
         submissionId,
         isNewSubmission,
+        reviewMetrics: reviewData
+          ? {
+              totalTokens: reviewData.summary.totalTokens,
+              totalCost: reviewData.summary.totalCost,
+              dateRange: reviewData.meta.dateRange,
+              activeDays: reviewData.summary.activeDays,
+              clients: reviewData.summary.clients,
+            }
+          : undefined,
         metrics: {
-          totalTokens: aggregates.totalTokens,
+          totalTokens: Number(aggregates.totalTokens ?? 0),
           totalCost: parseFloat(aggregates.totalCost),
           dateRange: {
             start: aggregates.dateStart,
             end: aggregates.dateEnd,
           },
-          activeDays: aggregates.activeDays,
+          activeDays: Number(aggregates.activeDays ?? 0),
           clients: Array.from(allClients),
         },
       };
     });
 
-    const usernameCacheKey = normalizeUsernameCacheKey(tokenRecord.username);
-    try {
-      revalidateTag("leaderboard", "max");
-      revalidateTag(`user:${usernameCacheKey}`, "max");
-      revalidateTag("user-rank", "max");
-      revalidateTag(`user-rank:${usernameCacheKey}`, "max");
-    } catch (e) {
-      console.error("Public cache invalidation failed:", e);
-    }
+    if (result.competitiveWriteApplied) {
+      const usernameCacheKey = normalizeUsernameCacheKey(tokenRecord.username);
+      try {
+        revalidateTag("leaderboard", "max");
+        revalidateTag(`user:${usernameCacheKey}`, "max");
+        revalidateTag("user-rank", "max");
+        revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+      } catch (e) {
+        console.error("Public cache invalidation failed:", e);
+      }
 
-    try {
-      await revalidateUserGroupLeaderboards(tokenRecord.userId);
-    } catch (e) {
-      console.error("Group leaderboard cache invalidation failed:", e);
-    }
+      try {
+        await revalidateUserGroupLeaderboards(tokenRecord.userId);
+      } catch (e) {
+        console.error("Group leaderboard cache invalidation failed:", e);
+      }
 
-    try {
-      revalidateUsernamePaths(tokenRecord.username);
-    } catch (e) {
-      console.error("Username path revalidation failed:", e);
+      try {
+        revalidateUsernamePaths(tokenRecord.username);
+      } catch (e) {
+        console.error("Username path revalidation failed:", e);
+      }
     }
 
     return NextResponse.json({
       success: true,
+      trustState: result.trustState,
       submissionId: result.submissionId,
+      reviewId: result.reviewId,
       username: tokenRecord.username,
       metrics: result.metrics,
-      mode: result.isNewSubmission ? "create" : "merge",
+      reviewMetrics: result.reviewMetrics,
+      mode: result.competitiveWriteApplied
+        ? result.isNewSubmission
+          ? "create"
+          : "merge"
+        : "review",
+      reasonCodes:
+        trustAssessment.reasonCodes.length > 0
+          ? trustAssessment.reasonCodes
+          : undefined,
+      competitiveWriteApplied: result.competitiveWriteApplied,
       warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (error) {

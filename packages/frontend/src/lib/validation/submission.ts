@@ -369,6 +369,10 @@ export function validateSubmission(data: unknown): ValidationResult {
 
   // 3c. Day token breakdown should sum to totals
   for (const day of submission.contributions) {
+    if (day.clients.length === 0) {
+      errors.push(`Contribution day ${day.date} has no client data`);
+      continue;
+    }
     {
       // Cursor legacy: subtract premium-tool-call cost before both sanity
       // caps so legacy charges that share a day with normal token-bearing
