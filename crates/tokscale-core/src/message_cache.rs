@@ -794,7 +794,7 @@ fn parser_version(client: ClientId) -> u32 {
         // so future changes have an obvious local version to increment.
         ClientId::Codex => 4,
         ClientId::Jcode => 4,
-        ClientId::Copilot => 3,
+        ClientId::Copilot => 4,
         // Pi subagent sessions now derive agent attribution from session_info
         // names; version-1 caches carry those messages without agent metadata.
         ClientId::Pi => 2,
@@ -2617,6 +2617,118 @@ mod tests {
         assert!(SourceMessageCache::load()
             .get(claude, source.path())
             .is_some());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_copilot_v3_cache_is_rejected_and_rebuilt_with_root_agent() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let source_path = source_dir.path().join("copilot-otel.jsonl");
+        std::fs::write(
+            &source_path,
+            concat!(
+                r#"{"type":"span","traceId":"trace-cache","spanId":"invoke-sub","parentSpanId":"tool-task","name":"invoke_agent","attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.agent.id":"github.copilot.subagent"}}"#,
+                "\n",
+                r#"{"type":"span","traceId":"trace-cache","spanId":"tool-task","parentSpanId":"invoke-root","name":"execute_tool task"}"#,
+                "\n",
+                r#"{"type":"span","traceId":"trace-cache","spanId":"invoke-root","name":"invoke_agent","attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.agent.id":"github.copilot.default"}}"#,
+                "\n",
+                r#"{"type":"span","traceId":"trace-cache","spanId":"chat","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":1,"gen_ai.usage.output_tokens":1}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let current_identity = CacheIdentity::for_client(ClientId::Copilot);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 3,
+        };
+        let mut stale_message = UnifiedMessage::new(
+            "copilot",
+            "gpt-5.4-mini",
+            "github-copilot",
+            "trace-cache",
+            1,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+        stale_message.agent = Some("github.copilot.subagent".to_string());
+        let fingerprint = SourceFingerprint::from_path(&source_path).unwrap();
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source_path,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let shard_key = CacheKey::new(current_identity, &source_path).shard();
+        let stale_path = shard_path(&cache_shard_dir().unwrap(), &shard_key);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let mut loaded = SourceMessageCache::load();
+        assert!(
+            loaded.get(current_identity, &source_path).is_none(),
+            "a v3 Copilot cache entry must not be served after the parser output change"
+        );
+        assert!(loaded.rewrite_shards.contains(&shard_key));
+        assert_eq!(
+            SourceFingerprint::from_path(&source_path).unwrap(),
+            fingerprint,
+            "the source fingerprint must remain unchanged; parser version causes invalidation"
+        );
+
+        let rebuilt = crate::sessions::copilot::parse_copilot_file(&source_path);
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(
+            rebuilt[0].agent.as_deref(),
+            Some("github.copilot.default"),
+            "a cold rebuild must use the root invoke_agent attribution"
+        );
+        loaded.insert(CachedSourceEntry::new(
+            current_identity,
+            &source_path,
+            fingerprint,
+            rebuilt,
+            Vec::new(),
+            None,
+        ));
+        loaded.save_if_dirty();
+
+        let reloaded = SourceMessageCache::load();
+        let cached = reloaded
+            .get(current_identity, &source_path)
+            .expect("rebuilt Copilot cache entry should survive reload");
+        assert_eq!(cached.parser_version, current_identity.parser_version);
+        assert_eq!(
+            cached.messages[0].agent.as_deref(),
+            Some("github.copilot.default")
+        );
+        assert!(matches!(
+            read_shard(&stale_path, current_identity),
+            ShardReadStatus::Loaded(entries)
+                if entries.len() == 1
+                    && entries[0].messages[0].agent.as_deref()
+                        == Some("github.copilot.default")
+        ));
 
         restore_cache_env(prev_env);
     }
