@@ -792,7 +792,7 @@ fn parser_version(client: ClientId) -> u32 {
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
-        ClientId::Codex => 4,
+        ClientId::Codex => 5,
         ClientId::Jcode => 4,
         ClientId::Copilot => 3,
         // Pi subagent sessions now derive agent attribution from session_info
@@ -1995,6 +1995,11 @@ mod tests {
     fn test_devin_parser_versions_invalidate_v1_entries() {
         assert_eq!(parser_version(ClientId::DevinCli), 2);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
+    }
+
+    #[test]
+    fn test_codex_duration_parser_version_invalidates_v4_entries() {
+        assert_eq!(parser_version(ClientId::Codex), 5);
     }
 
     #[test]
