@@ -110,18 +110,33 @@ function isUniqueConstraintViolation(error: unknown): boolean {
   );
 }
 
+export function shouldApplyLatestSubmissionMetadata(
+  previousMetadataReceivedAt: Date | null,
+  incomingMetadataReceivedAt: Date
+): boolean {
+  return (
+    previousMetadataReceivedAt === null ||
+    previousMetadataReceivedAt.getTime() <= incomingMetadataReceivedAt.getTime()
+  );
+}
+
 export async function applyTrustedSubmission(
   tx: SubmissionTransaction,
   {
     userId,
     data,
     mcpServers = null,
+    metadataReceivedAt,
+    incrementSubmitCount = true,
   }: {
     userId: string;
     data: SubmissionData;
     mcpServers?: string[] | null;
+    metadataReceivedAt?: Date;
+    incrementSubmitCount?: boolean;
   }
 ): Promise<TrustedSubmissionResult> {
+  const incomingMetadataReceivedAt = metadataReceivedAt ?? new Date();
   const warnings: string[] = [];
   const submitDevice = getSubmitDevice(data);
   const submittedClients = collectSubmittedClients(data);
@@ -132,9 +147,13 @@ export async function applyTrustedSubmission(
       clients: Array.from(submittedClients).sort(),
     },
   };
+  const incomingSubmissionHash = generateSubmissionHash(hashData);
 
   const [existingSubmission] = await tx
-    .select({ id: submissions.id })
+    .select({
+      id: submissions.id,
+      metadataReceivedAt: submissions.metadataReceivedAt,
+    })
     .from(submissions)
     .where(eq(submissions.userId, userId))
     .for("update")
@@ -142,9 +161,12 @@ export async function applyTrustedSubmission(
 
   let submissionId: string;
   let isNewSubmission = false;
+  let previousMetadataReceivedAt =
+    existingSubmission?.metadataReceivedAt ?? null;
 
   if (existingSubmission) {
     submissionId = existingSubmission.id;
+    previousMetadataReceivedAt = existingSubmission.metadataReceivedAt ?? null;
   } else {
     try {
       const [newSubmission] = await tx.transaction(async (savepoint: SubmissionTransaction) =>
@@ -163,7 +185,8 @@ export async function applyTrustedSubmission(
             sourcesUsed: [],
             modelsUsed: [],
             cliVersion: data.meta.version,
-            submissionHash: generateSubmissionHash(hashData),
+            submissionHash: incomingSubmissionHash,
+            metadataReceivedAt: incomingMetadataReceivedAt,
           })
           .returning({ id: submissions.id })
       );
@@ -176,7 +199,10 @@ export async function applyTrustedSubmission(
       }
 
       const [racedSubmission] = await tx
-        .select({ id: submissions.id })
+        .select({
+          id: submissions.id,
+          metadataReceivedAt: submissions.metadataReceivedAt,
+        })
         .from(submissions)
         .where(eq(submissions.userId, userId))
         .for("update")
@@ -187,8 +213,14 @@ export async function applyTrustedSubmission(
       }
 
       submissionId = racedSubmission.id;
+      previousMetadataReceivedAt = racedSubmission.metadataReceivedAt ?? null;
     }
   }
+
+  const shouldApplyLatestMetadata = shouldApplyLatestSubmissionMetadata(
+    previousMetadataReceivedAt,
+    incomingMetadataReceivedAt
+  );
 
   const submittedAt = new Date();
   const [submittedDevice] = await tx
@@ -494,19 +526,35 @@ export async function applyTrustedSubmission(
       dateEnd: aggregates.dateEnd,
       sourcesUsed: Array.from(allClients),
       modelsUsed: Array.from(allModels),
-      cliVersion: data.meta.version,
-      submissionHash: generateSubmissionHash(hashData),
-      submitCount: sql`COALESCE(submit_count, 0) + 1`,
-      schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
+      ...(shouldApplyLatestMetadata
+        ? {
+            cliVersion: data.meta.version,
+            submissionHash: incomingSubmissionHash,
+            metadataReceivedAt: incomingMetadataReceivedAt,
+          }
+        : {}),
+      submitCount: isNewSubmission
+        ? 1
+        : incrementSubmitCount
+          ? sql`COALESCE(submit_count, 0) + 1`
+          : submissions.submitCount,
+      schemaVersion: shouldApplyLatestMetadata
+        ? sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`
+        : submissions.schemaVersion,
       totalActiveTimeMs: aggregates.totalActiveTimeMs,
-      ...(data.timeMetrics
+      ...(shouldApplyLatestMetadata && data.timeMetrics
         ? {
             longestContinuousMs: data.timeMetrics.longestContinuousMs,
             maxConcurrentSessions: data.timeMetrics.maxConcurrentSessions,
             sessionCount: data.timeMetrics.sessionCount,
           }
         : {}),
-      mcpServers: mcpServers && mcpServers.length > 0 ? mcpServers : null,
+      ...(shouldApplyLatestMetadata
+        ? {
+            mcpServers:
+              mcpServers && mcpServers.length > 0 ? mcpServers : null,
+          }
+        : {}),
       updatedAt: new Date(),
     })
     .where(eq(submissions.id, submissionId));

@@ -81,6 +81,7 @@ type SubmissionReviewRow = {
   avatarUrl: string | null;
   submissionHash: string | null;
   trustState: string;
+  competitiveWriteApplied: boolean;
   reasonCodes: string[] | null;
   payload: Record<string, unknown>;
   totalTokens: number | string;
@@ -101,7 +102,11 @@ type SubmissionReviewRow = {
 
 type SubmissionReviewSummaryRow = Omit<
   SubmissionReviewRow,
-  "submissionHash" | "payload" | "cliVersion" | "schemaVersion"
+  | "submissionHash"
+  | "payload"
+  | "cliVersion"
+  | "schemaVersion"
+  | "competitiveWriteApplied"
 >;
 
 function mapSubmissionReviewSummary(
@@ -185,6 +190,7 @@ function buildSubmissionReviewSelect() {
     avatarUrl: users.avatarUrl,
     submissionHash: submissionReviews.submissionHash,
     trustState: submissionReviews.trustState,
+    competitiveWriteApplied: submissionReviews.competitiveWriteApplied,
     reasonCodes: submissionReviews.reasonCodes,
     payload: submissionReviews.payload,
     totalTokens: submissionReviews.totalTokens,
@@ -360,6 +366,8 @@ export async function adjudicateSubmissionReview({
         userId: currentReview.userId,
         data: validation.data,
         mcpServers,
+        metadataReceivedAt: currentReview.updatedAt,
+        incrementSubmitCount: !currentReview.competitiveWriteApplied,
       });
       const afterSnapshot = await fetchCompetitiveRankSnapshot(tx);
       affectedCompetitiveUsernames = getAffectedCompetitiveUsernames(

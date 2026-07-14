@@ -101,6 +101,7 @@ vi.mock("@/lib/db", () => ({
     cliVersion: "submissions.cliVersion",
     submissionHash: "submissions.submissionHash",
     submitCount: "submissions.submitCount",
+    metadataReceivedAt: "submissions.metadataReceivedAt",
     schemaVersion: "submissions.schemaVersion",
   },
   submissionReviews: {
@@ -647,7 +648,7 @@ describe("POST /api/submit auth path", () => {
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
   });
 
-  it("replaces same-device daily rows without inserting duplicate dates", async () => {
+  it("replaces same-device rows while preserving newer submission metadata", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",
       tokenId: "token-1",
@@ -691,6 +692,11 @@ describe("POST /api/submit auth path", () => {
             ],
           },
         ],
+        timeMetrics: {
+          longestContinuousMs: 1_000,
+          maxConcurrentSessions: 2,
+          sessionCount: 3,
+        },
       },
       errors: [],
       warnings: [],
@@ -740,7 +746,10 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeTimestampMs.mockReturnValue(456);
 
     const selectResults = [
-      [{ id: "submission-1" }],
+      [{
+        id: "submission-1",
+        metadataReceivedAt: new Date("2099-01-01T00:00:00.000Z"),
+      }],
       [{
         id: "daily-1",
         date: "2026-04-30",
@@ -760,10 +769,20 @@ describe("POST /api/submit auth path", () => {
       [{ sourceBreakdown: mergedBreakdown }],
     ];
 
+    let submissionUpdateValues: Record<string, unknown> | undefined;
     const tx = {
-      update: vi.fn(() => {
+      update: vi.fn((table: unknown) => {
         const builder = {
-          set: vi.fn(() => builder),
+          set: vi.fn((values: Record<string, unknown>) => {
+            if (
+              table &&
+              typeof table === "object" &&
+              (table as { userId?: unknown }).userId === "submissions.userId"
+            ) {
+              submissionUpdateValues = values;
+            }
+            return builder;
+          }),
           where: vi.fn(() => Promise.resolve()),
         };
         return builder;
@@ -798,7 +817,11 @@ describe("POST /api/submit auth path", () => {
           Authorization: "Bearer tt_valid",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ meta: {}, contributions: [] }),
+        body: JSON.stringify({
+          meta: {},
+          contributions: [],
+          mcpServers: ["stale-server"],
+        }),
       })
     );
 
@@ -808,6 +831,19 @@ describe("POST /api/submit auth path", () => {
       id: "submittedDevices.id",
     }));
     expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(submissionUpdateValues).toEqual(
+      expect.objectContaining({
+        totalTokens: 15,
+        totalCost: "0.7500",
+      })
+    );
+    expect(submissionUpdateValues).not.toHaveProperty("cliVersion");
+    expect(submissionUpdateValues).not.toHaveProperty("submissionHash");
+    expect(submissionUpdateValues).not.toHaveProperty("metadataReceivedAt");
+    expect(submissionUpdateValues).not.toHaveProperty("longestContinuousMs");
+    expect(submissionUpdateValues).not.toHaveProperty("maxConcurrentSessions");
+    expect(submissionUpdateValues).not.toHaveProperty("sessionCount");
+    expect(submissionUpdateValues).not.toHaveProperty("mcpServers");
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       existingBreakdown,
       {
@@ -1901,9 +1937,12 @@ describe("POST /api/submit auth path", () => {
         reviewValues = values;
         return reviewBuilder;
       }),
-      onConflictDoUpdate: vi.fn(
-        (_config: ReviewConflictConfig) => reviewBuilder
-      ),
+      onConflictDoUpdate: vi.fn((config: ReviewConflictConfig) => {
+        if (!config) {
+          throw new Error("Expected the review upsert configuration");
+        }
+        return reviewBuilder;
+      }),
       returning: vi.fn(() => Promise.resolve([{ id: "review-1" }])),
     };
     const tx = {

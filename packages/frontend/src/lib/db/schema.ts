@@ -205,6 +205,11 @@ export const submissions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    metadataReceivedAt: timestamp("metadata_received_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

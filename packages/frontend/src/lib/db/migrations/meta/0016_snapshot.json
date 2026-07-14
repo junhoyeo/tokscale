@@ -1081,6 +1081,13 @@
           "notNull": true,
           "default": "'review_required'"
         },
+        "competitive_write_applied": {
+          "name": "competitive_write_applied",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "reason_codes": {
           "name": "reason_codes",
           "type": "text[]",
@@ -1441,6 +1448,13 @@
         },
         "created_at": {
           "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "metadata_received_at": {
+          "name": "metadata_received_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,

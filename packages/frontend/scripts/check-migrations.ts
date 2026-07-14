@@ -153,11 +153,11 @@ try {
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND (
-        (table_name = 'submissions' AND column_name IN ('reasoning_tokens', 'schema_version', 'submit_count'))
+        (table_name = 'submissions' AND column_name IN ('reasoning_tokens', 'schema_version', 'submit_count', 'metadata_received_at'))
         OR (table_name = 'daily_breakdown' AND column_name IN ('submitted_device_id', 'active_time_ms'))
         OR (
           table_name = 'submission_reviews'
-          AND column_name IN ('reviewed_at', 'reviewed_by_username', 'review_note')
+          AND column_name IN ('reviewed_at', 'reviewed_by_username', 'review_note', 'competitive_write_applied')
         )
       )
   `;
@@ -188,6 +188,19 @@ try {
       "submission_reviews.reviewed_by_username",
       "submission_reviews.review_note",
     ].every((columnName) => columns.has(columnName))
+  );
+  expect(
+    "submission metadata receipt watermark is required",
+    columns.get("submissions.metadata_received_at")?.is_nullable === "NO" &&
+      columns.get("submissions.metadata_received_at")?.column_default ===
+        "now()"
+  );
+  expect(
+    "submission review competitive write marker is required",
+    columns.get("submission_reviews.competitive_write_applied")
+      ?.is_nullable === "NO" &&
+      columns.get("submission_reviews.competitive_write_applied")
+        ?.column_default === "false"
   );
 
   const [reviewCostColumn] = await sql<
