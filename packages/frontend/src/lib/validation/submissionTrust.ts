@@ -85,7 +85,7 @@ export function assessSubmissionTrust(
   now: Date = new Date()
 ): SubmissionTrustAssessment {
   const errors: string[] = [];
-  const warnings: string[] = [];
+  const warnings = new Set<string>();
   const rejectionReasonCodes = new Set<SubmissionReasonCode>();
   const reviewReasonCodes = new Set<SubmissionReasonCode>();
   const reviewDates = new Set<string>();
@@ -108,7 +108,7 @@ export function assessSubmissionTrust(
       reviewReasonCodes.add(
         SUBMISSION_REASON_CODE.HISTORICAL_DAY_MISSING_TIMESTAMP
       );
-      warnings.push(
+      warnings.add(
         `Day ${day.date} is older than ${TRUSTED_RETROACTIVE_WINDOW_DAYS} days and has no timestampMs audit metadata`
       );
     }
@@ -120,7 +120,7 @@ export function assessSubmissionTrust(
         reviewReasonCodes.add(
           SUBMISSION_REASON_CODE.MODEL_PREDATES_PUBLIC_AVAILABILITY
         );
-        warnings.push(
+        warnings.add(
           `Model ${client.modelId} is reported for ${day.date} before its parsed availability date ${availabilityDate}`
         );
       }
@@ -134,7 +134,7 @@ export function assessSubmissionTrust(
       rejectionReasonCodes: Array.from(rejectionReasonCodes),
       reviewDates: [],
       errors,
-      warnings,
+      warnings: Array.from(warnings),
     };
   }
 
@@ -145,7 +145,7 @@ export function assessSubmissionTrust(
       rejectionReasonCodes: [],
       reviewDates: Array.from(reviewDates).sort(),
       errors: [],
-      warnings,
+      warnings: Array.from(warnings),
     };
   }
 
@@ -185,6 +185,12 @@ export function subsetSubmissionByDates(
     (sum, day) => sum + day.totals.cost,
     0
   );
+  const activeDays = contributions.filter(
+    (day) =>
+      day.totals.tokens > 0 ||
+      day.totals.cost > 0 ||
+      day.totals.messages > 0
+  ).length;
   const clients = Array.from(
     new Set(contributions.flatMap((day) => day.clients.map((client) => client.client)))
   ).sort();
@@ -223,8 +229,8 @@ export function subsetSubmissionByDates(
       totalTokens,
       totalCost,
       totalDays: contributions.length,
-      activeDays: contributions.filter((day) => day.totals.tokens > 0).length,
-      averagePerDay: totalTokens / contributions.length,
+      activeDays,
+      averagePerDay: activeDays > 0 ? totalCost / activeDays : 0,
       maxCostInSingleDay: Math.max(
         ...contributions.map((day) => day.totals.cost)
       ),

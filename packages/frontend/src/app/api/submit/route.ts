@@ -35,6 +35,43 @@ import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 
 const LEGACY_SUBMIT_DEVICE_KEY = LEGACY_DEVICE_KEY;
 const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
+const MAX_PENDING_SUBMISSION_REVIEWS = 20;
+const MAX_SUBMISSION_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_MCP_SERVERS = 100;
+const MAX_MCP_SERVER_NAME_LENGTH = 128;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
+
+class PendingReviewLimitError extends Error {}
+
+async function readBoundedRequestBody(
+  request: Request,
+  maxBytes: number
+): Promise<string | null> {
+  if (!request.body) return "";
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const bodyBytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bodyBytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bodyBytes);
+}
 
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -139,22 +176,64 @@ export async function POST(request: Request) {
     // ========================================
     // STEP 2: Parse and Validate
     // ========================================
+    const declaredBodyBytes = Number(request.headers.get("Content-Length"));
+    if (
+      Number.isFinite(declaredBodyBytes) &&
+      declaredBodyBytes > MAX_SUBMISSION_BODY_BYTES
+    ) {
+      return NextResponse.json(
+        { error: "Submission body is too large" },
+        { status: 413 }
+      );
+    }
+
     let rawData: unknown;
     try {
-      rawData = await request.json();
+      const rawBody = await readBoundedRequestBody(
+        request,
+        MAX_SUBMISSION_BODY_BYTES
+      );
+      if (rawBody == null) {
+        return NextResponse.json(
+          { error: "Submission body is too large" },
+          { status: 413 }
+        );
+      }
+      rawData = JSON.parse(rawBody);
     } catch {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
     normalizeSubmissionData(rawData);
 
-    const mcpServers: string[] | null =
-      rawData != null && typeof rawData === "object" &&
+    let mcpServers: string[] | null = null;
+    if (
+      rawData != null &&
+      typeof rawData === "object" &&
       Array.isArray((rawData as Record<string, unknown>).mcpServers)
-        ? ((rawData as Record<string, unknown>).mcpServers as unknown[]).filter(
-            (s): s is string => typeof s === "string" && s.length > 0
-          )
-        : null;
+    ) {
+      const rawServerNames = (
+        (rawData as Record<string, unknown>).mcpServers as unknown[]
+      );
+      const serverNames = rawServerNames.filter(
+        (server): server is string =>
+          typeof server === "string" && server.length > 0
+      );
+      if (
+        rawServerNames.length > MAX_MCP_SERVERS ||
+        serverNames.some(
+          (server) =>
+            server.length > MAX_MCP_SERVER_NAME_LENGTH ||
+            CONTROL_CHARACTER_PATTERN.test(server)
+        )
+      ) {
+        return NextResponse.json(
+          { error: "Invalid MCP server metadata" },
+          { status: 400 }
+        );
+      }
+      mcpServers = Array.from(new Set(serverNames));
+    }
 
     const validation = validateSubmission(rawData);
 
@@ -241,11 +320,39 @@ export async function POST(request: Request) {
           ...(reviewData as unknown as Record<string, unknown>),
           ...(mcpServers && mcpServers.length > 0 ? { mcpServers } : {}),
         };
+        const reviewHash = generateSubmissionHash(reviewData);
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${tokenRecord.userId}::text, 0))`
+        );
+        const [pendingReviewStats] = await tx
+          .select({
+            pendingCount: sql<number>`count(*)::int`,
+            matchingHashCount: sql<number>`count(*) FILTER (
+              WHERE ${submissionReviews.submissionHash} = ${reviewHash}
+            )::int`,
+          })
+          .from(submissionReviews)
+          .where(
+            and(
+              eq(submissionReviews.userId, tokenRecord.userId),
+              eq(
+                submissionReviews.trustState,
+                SUBMISSION_TRUST_STATE.REVIEW_REQUIRED
+              )
+            )
+          );
+        if (
+          Number(pendingReviewStats.pendingCount) >=
+            MAX_PENDING_SUBMISSION_REVIEWS &&
+          Number(pendingReviewStats.matchingHashCount) === 0
+        ) {
+          throw new PendingReviewLimitError();
+        }
         const [review] = await tx
           .insert(submissionReviews)
           .values({
             userId: tokenRecord.userId,
-            submissionHash: generateSubmissionHash(reviewData),
+            submissionHash: reviewHash,
             trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
             reasonCodes: trustAssessment.reasonCodes,
             payload: reviewPayload,
@@ -774,6 +881,15 @@ export async function POST(request: Request) {
       warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (error) {
+    if (error instanceof PendingReviewLimitError) {
+      return NextResponse.json(
+        {
+          error: "Pending submission review limit reached",
+          trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
+        },
+        { status: 429 }
+      );
+    }
     console.error("Submit error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

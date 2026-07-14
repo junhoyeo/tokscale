@@ -25,9 +25,34 @@ const COST_ABSOLUTE_TOLERANCE = 0.1;
 const LEGACY_COST_FLOAT_EPSILON = 1e-6;
 const TOKEN_RELATIVE_TOLERANCE = 0.01;
 const TOKEN_ABSOLUTE_TOLERANCE = 100;
+const MAX_MODEL_ID_LENGTH = 512;
+const MAX_PROVIDER_ID_LENGTH = 512;
+const MAX_CLIENT_ROWS_PER_DAY = 2_048;
+const MAX_SUMMARY_MODELS = 20_000;
+const MAX_YEARS = 100;
+const MAX_CONTRIBUTION_DAYS = 10_000;
+const MAX_META_STRING_LENGTH = 128;
+const PRINTABLE_TEXT_PATTERN = /^[^\u0000-\u001f\u007f-\u009f]+$/;
+const MAX_DAILY_COST = 9_999_999_999.999;
+const MAX_AGGREGATE_COST = 99_999_999_999_999;
+
+function isValidCalendarDate(value: string): boolean {
+  if (!/^(?!0000)\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return (
+    Number.isFinite(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value
+  );
+}
 
 const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const NonNegativeNumberSchema = z.number().finite().min(0);
+const DailyCostSchema = NonNegativeNumberSchema.max(MAX_DAILY_COST);
+const AggregateCostSchema = NonNegativeNumberSchema.max(MAX_AGGREGATE_COST);
+const CalendarDateSchema = z
+  .string()
+  .refine(isValidCalendarDate, "Invalid calendar date");
+const YearSchema = z.string().regex(/^(?!0000)\d{4}$/, "Invalid calendar year");
 
 const TokenBreakdownSchema = z.object({
   input: NonNegativeIntegerSchema,
@@ -51,55 +76,79 @@ const SourceSchema = z.union([z.enum(SUPPORTED_CLIENT_TYPES), CcMirrorSourceSche
 
 const ClientContributionSchema = z.object({
   client: SourceSchema,
-  modelId: z.string().min(1),
-  providerId: z.string().optional(),
+  modelId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_MODEL_ID_LENGTH)
+    .regex(PRINTABLE_TEXT_PATTERN),
+  providerId: z
+    .string()
+    .trim()
+    .max(MAX_PROVIDER_ID_LENGTH)
+    .regex(PRINTABLE_TEXT_PATTERN)
+    .optional(),
   tokens: TokenBreakdownSchema,
-  cost: NonNegativeNumberSchema,
+  cost: DailyCostSchema,
   messages: NonNegativeIntegerSchema,
   provenance: ClientContributionProvenanceSchema.optional(),
 });
 
 const DailyContributionSchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  date: CalendarDateSchema,
   timestampMs: z.number().int().min(1e12).max(Number.MAX_SAFE_INTEGER).optional(),
   activeTimeMs: z.number().int().min(0).optional(),
   totals: z.object({
     tokens: NonNegativeIntegerSchema,
-    cost: NonNegativeNumberSchema,
+    cost: DailyCostSchema,
     messages: NonNegativeIntegerSchema,
   }),
   intensity: NonNegativeIntegerSchema.max(4),
   tokenBreakdown: TokenBreakdownSchema,
-  clients: z.array(ClientContributionSchema),
+  clients: z.array(ClientContributionSchema).max(MAX_CLIENT_ROWS_PER_DAY),
 });
 
 const YearSummarySchema = z.object({
-  year: z.string().regex(/^\d{4}$/),
+  year: YearSchema,
   totalTokens: NonNegativeIntegerSchema,
-  totalCost: NonNegativeNumberSchema,
+  totalCost: AggregateCostSchema,
   range: z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    start: CalendarDateSchema,
+    end: CalendarDateSchema,
   }),
 });
 
 const DataSummarySchema = z.object({
   totalTokens: NonNegativeIntegerSchema,
-  totalCost: NonNegativeNumberSchema,
+  totalCost: AggregateCostSchema,
   totalDays: NonNegativeIntegerSchema,
   activeDays: NonNegativeIntegerSchema,
-  averagePerDay: NonNegativeNumberSchema,
-  maxCostInSingleDay: NonNegativeNumberSchema,
+  averagePerDay: AggregateCostSchema,
+  maxCostInSingleDay: DailyCostSchema,
   clients: z.array(SourceSchema),
-  models: z.array(z.string()),
+  models: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAX_MODEL_ID_LENGTH)
+        .regex(PRINTABLE_TEXT_PATTERN)
+    )
+    .max(MAX_SUMMARY_MODELS),
 });
 
 const ExportMetaSchema = z.object({
-  generatedAt: z.string(),
-  version: z.string(),
+  generatedAt: z.string().max(MAX_META_STRING_LENGTH),
+  version: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_META_STRING_LENGTH)
+    .regex(PRINTABLE_TEXT_PATTERN),
   dateRange: z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    start: CalendarDateSchema,
+    end: CalendarDateSchema,
   }),
 });
 
@@ -182,8 +231,8 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   meta: ExportMetaSchema,
   device: SubmitDeviceSchema.optional(),
   summary: DataSummarySchema,
-  years: z.array(YearSummarySchema),
-  contributions: z.array(DailyContributionSchema),
+  years: z.array(YearSummarySchema).max(MAX_YEARS),
+  contributions: z.array(DailyContributionSchema).max(MAX_CONTRIBUTION_DAYS),
   timeMetrics: TimeMetricsSchema.optional(),
 }));
 
@@ -360,7 +409,12 @@ export function validateSubmission(data: unknown): ValidationResult {
   }
 
   // 3b. Active days should match
-  const activeDays = submission.contributions.filter((d) => d.totals.tokens > 0).length;
+  const activeDays = submission.contributions.filter(
+    (day) =>
+      day.totals.tokens > 0 ||
+      day.totals.cost > 0 ||
+      day.totals.messages > 0
+  ).length;
   if (activeDays !== submission.summary.activeDays) {
     warnings.push(
       `Active days mismatch: summary=${submission.summary.activeDays}, calculated=${activeDays}`

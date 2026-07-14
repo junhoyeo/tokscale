@@ -222,10 +222,30 @@ pub fn generate_graph_result(
 // Internal helpers
 // =============================================================================
 
+const MIN_VALID_TIMESTAMP_MS: i64 = 1_000_000_000_000;
+
+fn matching_day_timestamp_ms(date: &str, timestamp: i64) -> Option<i64> {
+    let timestamp_ms = if timestamp >= MIN_VALID_TIMESTAMP_MS {
+        timestamp
+    } else if timestamp > 0 {
+        timestamp.checked_mul(1000)?
+    } else {
+        return None;
+    };
+    if timestamp_ms < MIN_VALID_TIMESTAMP_MS {
+        return None;
+    }
+
+    let bucket_date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let event_date = chrono::DateTime::from_timestamp_millis(timestamp_ms)?.date_naive();
+    (event_date == bucket_date).then_some(timestamp_ms)
+}
+
 struct DayAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
     clients: HashMap<String, ClientContribution>,
+    timestamp_ms: Option<i64>,
 }
 
 impl Default for DayAccumulator {
@@ -234,6 +254,7 @@ impl Default for DayAccumulator {
             totals: DailyTotals::default(),
             token_breakdown: TokenBreakdown::default(),
             clients: HashMap::with_capacity(8),
+            timestamp_ms: None,
         }
     }
 }
@@ -254,6 +275,13 @@ impl DayAccumulator {
             .totals
             .messages
             .saturating_add(msg.message_count.max(0));
+
+        if let Some(timestamp_ms) = matching_day_timestamp_ms(&msg.date, msg.timestamp) {
+            self.timestamp_ms = Some(
+                self.timestamp_ms
+                    .map_or(timestamp_ms, |current| current.min(timestamp_ms)),
+            );
+        }
 
         self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
         self.token_breakdown.output = self
@@ -333,6 +361,11 @@ impl DayAccumulator {
         self.totals.tokens = self.totals.tokens.saturating_add(other.totals.tokens);
         self.totals.cost += other.totals.cost;
         self.totals.messages = self.totals.messages.saturating_add(other.totals.messages);
+
+        self.timestamp_ms = match (self.timestamp_ms, other.timestamp_ms) {
+            (Some(current), Some(incoming)) => Some(current.min(incoming)),
+            (current, incoming) => current.or(incoming),
+        };
 
         self.token_breakdown.input = self
             .token_breakdown
@@ -441,6 +474,7 @@ impl DayAccumulator {
             intensity: 0,
             token_breakdown,
             clients,
+            timestamp_ms: self.timestamp_ms,
             active_time_ms: None,
         }
     }
@@ -800,6 +834,39 @@ mod tests {
         assert_eq!(result[0].totals.tokens, 1000);
         assert_eq!(result[0].totals.cost, 0.05);
         assert_eq!(result[0].totals.messages, 1);
+        assert_eq!(
+            result[0].timestamp_ms,
+            Some(
+                "2024-01-01T00:00:00Z"
+                    .parse::<DateTime<Utc>>()
+                    .unwrap()
+                    .timestamp_millis()
+            )
+        );
+    }
+
+    #[test]
+    fn test_aggregate_by_date_keeps_earliest_matching_millisecond_timestamp() {
+        let mut later = mock_unified_message("2024-01-01", 1000, 0.05, "model-a", "opencode");
+        later.timestamp += 2 * 60 * 60 * 1000;
+        let mut earlier = mock_unified_message("2024-01-01", 1000, 0.05, "model-b", "opencode");
+        earlier.timestamp += 60 * 60 * 1000;
+
+        let result = aggregate_by_date(vec![later, earlier.clone()]);
+
+        assert_eq!(result[0].timestamp_ms, Some(earlier.timestamp));
+    }
+
+    #[test]
+    fn test_aggregate_by_date_omits_invalid_or_cross_date_timestamps() {
+        let mut zero = mock_unified_message("2024-01-01", 1000, 0.05, "model-a", "opencode");
+        zero.timestamp = 0;
+        let mut cross_date = mock_unified_message("2024-01-01", 1000, 0.05, "model-b", "opencode");
+        cross_date.timestamp += 24 * 60 * 60 * 1000;
+
+        let result = aggregate_by_date(vec![zero, cross_date]);
+
+        assert_eq!(result[0].timestamp_ms, None);
     }
 
     #[test]
@@ -925,6 +992,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -937,6 +1005,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
         ];
@@ -960,6 +1029,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -972,6 +1042,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -984,6 +1055,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
         ];
@@ -1072,6 +1144,7 @@ mod tests {
             intensity: 0,
             token_breakdown: TokenBreakdown::default(),
             clients: Vec::new(),
+            timestamp_ms: None,
             active_time_ms: None,
         }];
 
@@ -1130,6 +1203,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1142,6 +1216,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
         ];
@@ -1164,6 +1239,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1176,6 +1252,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1188,6 +1265,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1200,6 +1278,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1212,6 +1291,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
         ];
@@ -1238,6 +1318,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1250,6 +1331,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1262,6 +1344,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
             DailyContribution {
@@ -1274,6 +1357,7 @@ mod tests {
                 intensity: 0,
                 token_breakdown: TokenBreakdown::default(),
                 clients: Vec::new(),
+                timestamp_ms: None,
                 active_time_ms: None,
             },
         ];

@@ -99,6 +99,9 @@ vi.mock("@/lib/db", () => ({
   },
   submissionReviews: {
     id: "submissionReviews.id",
+    userId: "submissionReviews.userId",
+    submissionHash: "submissionReviews.submissionHash",
+    trustState: "submissionReviews.trustState",
   },
   submittedDevices: {
     id: "submittedDevices.id",
@@ -330,6 +333,100 @@ describe("POST /api/submit auth path", () => {
       details: ["Submission data must be an object"],
       trustState: "rejected",
     });
+  });
+
+  it("rejects oversized submission bodies before JSON parsing", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+          "Content-Length": String(5 * 1024 * 1024 + 1),
+        },
+        body: "{}",
+      })
+    );
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      error: "Submission body is too large",
+    });
+    const untrustedLengthRequest = new Request(
+      "http://localhost:3000/api/submit",
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: " ".repeat(5 * 1024 * 1024 + 1),
+      }
+    );
+    expect(untrustedLengthRequest.headers.get("Content-Length")).toBeNull();
+    const streamedResponse = await POST(untrustedLengthRequest);
+    expect(streamedResponse.status).toBe(413);
+    expect(await streamedResponse.json()).toEqual({
+      error: "Submission body is too large",
+    });
+    expect(mockState.validateSubmission).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized or control-bearing MCP metadata", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    const oversizedResponse = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mcpServers: Array.from({ length: 101 }, (_, index) => `server-${index}`),
+        }),
+      })
+    );
+    const controlResponse = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ mcpServers: ["server\u001b[31m"] }),
+      })
+    );
+
+    expect(oversizedResponse.status).toBe(400);
+    expect(await oversizedResponse.json()).toEqual({
+      error: "Invalid MCP server metadata",
+    });
+    expect(controlResponse.status).toBe(400);
+    expect(await controlResponse.json()).toEqual({
+      error: "Invalid MCP server metadata",
+    });
+    expect(mockState.validateSubmission).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
   });
 
   it("revalidates username ISR paths after a successful submit", async () => {
@@ -1748,6 +1845,10 @@ describe("POST /api/submit auth path", () => {
           version: "2.1.1",
           dateRange: { start: oldDay.date, end: oldDay.date },
         },
+        device: {
+          id: "device-review",
+          name: "Review laptop",
+        },
         summary: {
           totalTokens: 100,
           totalCost: 0.25,
@@ -1795,7 +1896,11 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
+      select: vi.fn(() =>
+        makeAwaitableBuilder([{ pendingCount: 0, matchingHashCount: 0 }])
+      ),
       insert: vi.fn(() => reviewBuilder),
+      execute: vi.fn(() => Promise.resolve()),
     };
     type ReviewOnlyTransaction = typeof tx;
     mockState.db.transaction.mockImplementation(
@@ -1834,12 +1939,59 @@ describe("POST /api/submit auth path", () => {
     expect(body).not.toHaveProperty("metrics");
     expect(tx.insert).toHaveBeenCalledTimes(1);
     expect(reviewBuilder.onConflictDoUpdate).toHaveBeenCalled();
+    expect(tx.execute.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.select.mock.invocationCallOrder[0]
+    );
     expect(reviewValues).toEqual(
       expect.objectContaining({
         totalTokens: 100,
         totalCost: "0.2500",
+        schemaVersion: 2,
+        payload: expect.objectContaining({
+          device: {
+            id: "device-review",
+            name: "Review laptop",
+          },
+        }),
       })
     );
+    tx.select.mockReturnValueOnce(
+      makeAwaitableBuilder([{ pendingCount: 20, matchingHashCount: 0 }])
+    );
+    const limitedResponse = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      })
+    );
+    expect(limitedResponse.status).toBe(429);
+    expect(await limitedResponse.json()).toEqual({
+      error: "Pending submission review limit reached",
+      trustState: "review_required",
+    });
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    tx.select.mockReturnValueOnce(
+      makeAwaitableBuilder([{ pendingCount: 20, matchingHashCount: 1 }])
+    );
+    const matchingResponse = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      })
+    );
+    expect(matchingResponse.status).toBe(200);
+    expect(await matchingResponse.json()).toEqual(
+      expect.objectContaining({ reviewId: "review-1" })
+    );
+    expect(tx.insert).toHaveBeenCalledTimes(2);
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
     expect(mockState.revalidateUserGroupLeaderboards).not.toHaveBeenCalled();
     expect(mockState.revalidateUsernamePaths).not.toHaveBeenCalled();
@@ -1962,6 +2114,7 @@ describe("POST /api/submit auth path", () => {
     });
 
     const selectResults = [
+      [{ pendingCount: 0, matchingHashCount: 0 }],
       [{ id: "submission-1" }],
       [],
       [{
