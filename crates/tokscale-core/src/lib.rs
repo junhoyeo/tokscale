@@ -3445,7 +3445,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .iter()
         .map(|message| message.session_id.clone())
         .collect();
-    let devin_desktop_messages: Vec<UnifiedMessage> = if include_devin_desktop {
+    let devin_desktop_messages_raw: Vec<UnifiedMessage> = if include_devin_desktop {
         let devin_desktop_lookup =
             sessions::devin::load_devin_desktop_session_lookup(&scan_result.devin_dbs);
         scan_result
@@ -3454,11 +3454,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             .flat_map(|path| {
                 sessions::devin::parse_devin_desktop_ndjson_with_lookup(path, &devin_desktop_lookup)
             })
-            .filter(|message| !cli_session_ids.contains(&message.session_id))
             .collect()
     } else {
         Vec::new()
     };
+    // Count before dedup so the `clients` command reflects how many Desktop
+    // sessions were actually found, even when they overlap with the CLI DB.
+    let devin_desktop_raw_count: i32 = devin_desktop_messages_raw
+        .iter()
+        .map(|msg| msg.message_count.max(0))
+        .sum();
+    let devin_desktop_messages: Vec<UnifiedMessage> = devin_desktop_messages_raw
+        .into_iter()
+        .filter(|message| !cli_session_ids.contains(&message.session_id))
+        .collect();
 
     let devin_cli_parsed: Vec<ParsedMessage> = devin_cli_messages
         .into_iter()
@@ -3469,7 +3478,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .map(|msg| unified_to_parsed(&msg))
         .collect();
     let devin_cli_count = summed_parsed_message_count(&devin_cli_parsed);
-    let devin_desktop_count = summed_parsed_message_count(&devin_desktop_parsed);
+    // Use the pre-dedup count for the `clients` command display so users see
+    // all discovered Desktop sessions. The dedup-filtered messages are still
+    // what gets added to the combined `messages` vector.
+    let devin_desktop_count = devin_desktop_raw_count;
     counts.set(ClientId::DevinCli, devin_cli_count);
     counts.set(ClientId::DevinDesktop, devin_desktop_count);
     messages.extend(devin_cli_parsed);

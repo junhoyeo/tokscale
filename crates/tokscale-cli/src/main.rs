@@ -3878,6 +3878,20 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         exists: path.exists(),
                     });
                 }
+                if client == ClientId::DevinDesktop {
+                    for root in tokscale_core::scanner::devin_desktop_additional_roots(
+                        &home_dir_str,
+                        use_env_roots,
+                    ) {
+                        let path_str = root.to_string_lossy().to_string();
+                        if !additional_paths.iter().any(|p| p.path == path_str) {
+                            additional_paths.push(AdditionalPath {
+                                path: path_str,
+                                exists: root.exists(),
+                            });
+                        }
+                    }
+                }
                 let legacy_paths = if client == ClientId::OpenClaw {
                     vec![
                         LegacyPath {
