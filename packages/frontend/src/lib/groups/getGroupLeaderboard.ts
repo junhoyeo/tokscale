@@ -1,8 +1,12 @@
 import { unstable_cache } from "next/cache";
-import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, or, sql } from "drizzle-orm";
 import { db, dailyBreakdown, groupMembers, submissions, users } from "@/lib/db";
 import type { LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
-import { parseSearchDirectives, hasDirectives } from "@/lib/leaderboard/searchDirectives";
+import {
+  escapeLikePattern,
+  hasDirectives,
+  parseSearchDirectives,
+} from "@/lib/leaderboard/searchDirectives";
 
 interface GroupLeaderboardPeriodRow {
   userId: string;
@@ -264,17 +268,16 @@ async function fetchAllTimeRows(groupId: string, sortBy: SortBy, search: string 
     ? sql`SUM(${submissions.totalTokens})`
     : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`;
 
-  const conditions: ReturnType<typeof sql>[] = [];
-  for (const client of parsed.clients) {
-    conditions.push(
-      sql`EXISTS (SELECT 1 FROM unnest(${submissions.sourcesUsed}) AS s WHERE LOWER(s) LIKE ${`%${client}%`})`
-    );
-  }
-  for (const model of parsed.models) {
-    conditions.push(
-      sql`EXISTS (SELECT 1 FROM unnest(${submissions.modelsUsed}) AS m WHERE LOWER(m) LIKE ${`%${model}%`})`
-    );
-  }
+  const clientConditions = parsed.clients.map((client) =>
+    sql`EXISTS (SELECT 1 FROM unnest(${submissions.sourcesUsed}) AS s WHERE LOWER(s) LIKE ${`%${escapeLikePattern(client)}%`})`
+  );
+  const modelConditions = parsed.models.map((model) =>
+    sql`EXISTS (SELECT 1 FROM unnest(${submissions.modelsUsed}) AS m WHERE LOWER(m) LIKE ${`%${escapeLikePattern(model)}%`})`
+  );
+  const conditions = [
+    clientConditions.length > 0 ? or(...clientConditions) : undefined,
+    modelConditions.length > 0 ? or(...modelConditions) : undefined,
+  ].filter((condition): condition is ReturnType<typeof sql> => condition !== undefined);
 
   const rows = await db
     .select({

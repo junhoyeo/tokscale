@@ -26,6 +26,10 @@ export interface ParsedSearchDirectives {
 
 const DIRECTIVE_REGEX = /\b(client|model):([\w.:\-/]+)/gi;
 
+export function escapeLikePattern(value: string): string {
+  return value.replace(/[%_\\]/g, "\\$&");
+}
+
 export function parseSearchDirectives(raw: string): ParsedSearchDirectives {
   const clients: string[] = [];
   const models: string[] = [];

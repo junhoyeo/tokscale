@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseSearchDirectives, hasDirectives } from "@/lib/leaderboard/searchDirectives";
+import {
+  escapeLikePattern,
+  hasDirectives,
+  parseSearchDirectives,
+} from "@/lib/leaderboard/searchDirectives";
 
 describe("parseSearchDirectives", () => {
   it("returns empty directives and original text when no directives present", () => {
@@ -106,5 +110,11 @@ describe("hasDirectives", () => {
 
   it("returns true when both present", () => {
     expect(hasDirectives({ text: "", clients: ["claude"], models: ["gpt-5"] })).toBe(true);
+  });
+});
+
+describe("escapeLikePattern", () => {
+  it("escapes SQL LIKE wildcard and escape characters", () => {
+    expect(escapeLikePattern("gpt_5%\\")).toBe("gpt\\_5\\%\\\\");
   });
 });

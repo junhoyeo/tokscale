@@ -30,6 +30,7 @@ const mockState = vi.hoisted(() => {
   const eq = vi.fn(() => "eq");
   const desc = vi.fn(() => "desc");
   const and = vi.fn(() => "and");
+  const or = vi.fn(() => "or");
   const gte = vi.fn(() => "gte");
   const lte = vi.fn(() => "lte");
   const sql = Object.assign(
@@ -72,6 +73,7 @@ const mockState = vi.hoisted(() => {
     eq,
     desc,
     and,
+    or,
     gte,
     lte,
     sql,
@@ -82,6 +84,7 @@ const mockState = vi.hoisted(() => {
       eq.mockClear();
       desc.mockClear();
       and.mockClear();
+      or.mockClear();
       gte.mockClear();
       lte.mockClear();
       sql.mockClear();
@@ -127,6 +130,7 @@ vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
   and: mockState.and,
+  or: mockState.or,
   gte: mockState.gte,
   lte: mockState.lte,
   sql: mockState.sql,

@@ -28,6 +28,7 @@ const mockState = vi.hoisted(() => {
   const eq = vi.fn(() => "eq");
   const desc = vi.fn(() => "desc");
   const and = vi.fn(() => "and");
+  const or = vi.fn((...conditions: unknown[]) => ({ kind: "or", conditions }));
   const gte = vi.fn(() => "gte");
   const lte = vi.fn(() => "lte");
   const sql = Object.assign(
@@ -43,17 +44,34 @@ const mockState = vi.hoisted(() => {
 
   const db = {
     select: vi.fn(() => {
+      let selectedTable: unknown;
       const builder = {
         from: vi.fn((table: unknown) => {
+          selectedTable = table;
           fromCalls.push(table);
           return builder;
         }),
         innerJoin: vi.fn(() => builder),
-        where: vi.fn(async () => [...periodRows]),
+        where: vi.fn(() => builder),
         groupBy: vi.fn(() => builder),
         orderBy: vi.fn(() => builder),
         limit: vi.fn(() => builder),
         offset: vi.fn(() => builder),
+        as: vi.fn(() => ({
+          rank: "ranked.rank",
+          userId: "ranked.userId",
+          username: "ranked.username",
+          displayName: "ranked.displayName",
+          avatarUrl: "ranked.avatarUrl",
+          totalTokens: "ranked.totalTokens",
+          totalCost: "ranked.totalCost",
+        })),
+        then: (resolve: (value: unknown) => unknown) => {
+          if (selectedTable === tables.dailyBreakdown) {
+            return resolve([...periodRows]);
+          }
+          return resolve([]);
+        },
       };
 
       return builder;
@@ -67,6 +85,7 @@ const mockState = vi.hoisted(() => {
     eq,
     desc,
     and,
+    or,
     gte,
     lte,
     sql,
@@ -77,6 +96,7 @@ const mockState = vi.hoisted(() => {
       eq.mockClear();
       desc.mockClear();
       and.mockClear();
+      or.mockClear();
       gte.mockClear();
       lte.mockClear();
       sql.mockClear();
@@ -122,6 +142,7 @@ vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
   and: mockState.and,
+  or: mockState.or,
   gte: mockState.gte,
   lte: mockState.lte,
   sql: mockState.sql,
@@ -334,5 +355,27 @@ describe("period leaderboard data", () => {
     await expect(getUserRank("alice", "week", "tokens")).rejects.toThrow(
       "Multiple users match username alice case-insensitively"
     );
+  });
+});
+
+describe("all-time leaderboard directives", () => {
+  it("ORs repeated directives within each type before combining types", async () => {
+    await getLeaderboardData(
+      "all",
+      1,
+      50,
+      "tokens",
+      "client:opencode client:claude model:gpt_5"
+    );
+
+    expect(mockState.or).toHaveBeenCalledTimes(2);
+    expect(mockState.or.mock.calls.map((call) => call.length)).toEqual([2, 1]);
+    expect(mockState.and).toHaveBeenCalledWith(
+      mockState.or.mock.results[0]?.value,
+      mockState.or.mock.results[1]?.value
+    );
+
+    const boundValues = mockState.sql.mock.calls.flatMap(([, ...values]) => values);
+    expect(boundValues).toContain("%gpt\\_5%");
   });
 });

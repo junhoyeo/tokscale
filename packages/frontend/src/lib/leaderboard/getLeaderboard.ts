@@ -6,9 +6,13 @@ import {
   normalizeUsernameCacheKey,
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
-import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
+import { eq, desc, sql, and, or, gte, lte } from "drizzle-orm";
 import type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
-import { parseSearchDirectives, hasDirectives } from "@/lib/leaderboard/searchDirectives";
+import {
+  escapeLikePattern,
+  hasDirectives,
+  parseSearchDirectives,
+} from "@/lib/leaderboard/searchDirectives";
 
 export type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
 
@@ -329,17 +333,16 @@ async function fetchLeaderboardData(
     ? sql`SUM(${submissions.totalTokens})`
     : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`;
 
-  const directiveConditions: ReturnType<typeof sql>[] = [];
-  for (const client of parsed.clients) {
-    directiveConditions.push(
-      sql`EXISTS (SELECT 1 FROM unnest(${submissions.sourcesUsed}) AS s WHERE LOWER(s) LIKE ${`%${client}%`})`
-    );
-  }
-  for (const model of parsed.models) {
-    directiveConditions.push(
-      sql`EXISTS (SELECT 1 FROM unnest(${submissions.modelsUsed}) AS m WHERE LOWER(m) LIKE ${`%${model}%`})`
-    );
-  }
+  const clientConditions = parsed.clients.map((client) =>
+    sql`EXISTS (SELECT 1 FROM unnest(${submissions.sourcesUsed}) AS s WHERE LOWER(s) LIKE ${`%${escapeLikePattern(client)}%`})`
+  );
+  const modelConditions = parsed.models.map((model) =>
+    sql`EXISTS (SELECT 1 FROM unnest(${submissions.modelsUsed}) AS m WHERE LOWER(m) LIKE ${`%${escapeLikePattern(model)}%`})`
+  );
+  const directiveConditions = [
+    clientConditions.length > 0 ? or(...clientConditions) : undefined,
+    modelConditions.length > 0 ? or(...modelConditions) : undefined,
+  ].filter((condition): condition is ReturnType<typeof sql> => condition !== undefined);
 
   const hasTextSearch = parsed.text.length > 0;
   const hasDirectiveFilters = directiveConditions.length > 0;
@@ -366,7 +369,7 @@ async function fetchLeaderboardData(
 
     let textFilter: ReturnType<typeof sql> | undefined;
     if (hasTextSearch) {
-      const escapedSearch = parsed.text.toLowerCase().replace(/[%_\\]/g, "\\$&");
+      const escapedSearch = escapeLikePattern(parsed.text.toLowerCase());
       const searchPattern = `%${escapedSearch}%`;
       textFilter = sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`;
     }

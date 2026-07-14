@@ -40,6 +40,7 @@ const mockState = vi.hoisted(() => {
   const desc = vi.fn(() => "desc");
   const asc = vi.fn(() => "asc");
   const and = vi.fn(() => "and");
+  const or = vi.fn((...conditions: unknown[]) => ({ kind: "or", conditions }));
   const gte = vi.fn(() => "gte");
   const lte = vi.fn(() => "lte");
   const sql = Object.assign(
@@ -101,6 +102,7 @@ const mockState = vi.hoisted(() => {
     desc,
     asc,
     and,
+    or,
     gte,
     lte,
     sql,
@@ -116,6 +118,7 @@ const mockState = vi.hoisted(() => {
       desc.mockClear();
       asc.mockClear();
       and.mockClear();
+      or.mockClear();
       gte.mockClear();
       lte.mockClear();
       sql.mockClear();
@@ -149,6 +152,7 @@ vi.mock("drizzle-orm", () => ({
   desc: mockState.desc,
   asc: mockState.asc,
   and: mockState.and,
+  or: mockState.or,
   gte: mockState.gte,
   lte: mockState.lte,
   sql: mockState.sql,
@@ -326,5 +330,25 @@ describe("group leaderboard data", () => {
     });
 
     expectNoNarrowedCostCast(sqlTexts);
+  });
+
+  it("ORs repeated directives in all-time group leaderboards", async () => {
+    mockState.setAllTimeRows([]);
+
+    await getGroupLeaderboardData(
+      "group-1",
+      "all",
+      1,
+      50,
+      "tokens",
+      "client:opencode client:claude model:gpt-5"
+    );
+
+    expect(mockState.or).toHaveBeenCalledTimes(2);
+    expect(mockState.or.mock.calls.map((call) => call.length)).toEqual([2, 1]);
+    expect(mockState.and).toHaveBeenLastCalledWith(
+      mockState.or.mock.results[0]?.value,
+      mockState.or.mock.results[1]?.value
+    );
   });
 });
