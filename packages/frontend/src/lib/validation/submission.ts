@@ -178,6 +178,28 @@ const TimeMetricsSchema = z.object({
   sessionCount: z.number().int().min(0),
 });
 
+/**
+ * Submission-level provenance: distinguishes usage the CLI computed from raw
+ * local session files ("cli") from usage recovered out of a third-party
+ * aggregate export via `tokscale import` ("backfill"). Backfilled aggregates
+ * are not independently verifiable the way locally-scanned sessions are.
+ *
+ * NOTE (https://github.com/junhoyeo/tokscale/issues/888): this is accepted and
+ * carried through so backfilled submissions can be *tagged*. Persisting it and
+ * segregating backfilled data in ranking (e.g. excluding it from competitive
+ * totals, or surfacing it under a separate "imported" view) is still TODO in
+ * the submission handler + leaderboard queries. Until that lands, a "backfill"
+ * submission must not be treated as ranked-equivalent to live CLI usage.
+ *
+ * Optional, so existing CLIs (which omit it) are unaffected, and excluded from
+ * `generateSubmissionHash` below since it is derived metadata.
+ */
+const SubmissionProvenanceSchema = z.object({
+  origin: z.enum(["cli", "backfill"]),
+  // Free-form importer id (e.g. "clawdboard"); bounded so it stays a label.
+  importer: z.string().trim().min(1).max(64).optional(),
+});
+
 const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   meta: ExportMetaSchema,
   device: SubmitDeviceSchema.optional(),
@@ -185,6 +207,7 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   years: z.array(YearSummarySchema),
   contributions: z.array(DailyContributionSchema),
   timeMetrics: TimeMetricsSchema.optional(),
+  provenance: SubmissionProvenanceSchema.optional(),
 }));
 
 export type SubmissionData = z.infer<typeof SubmissionDataSchema>;
