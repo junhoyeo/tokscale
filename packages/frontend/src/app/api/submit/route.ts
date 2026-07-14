@@ -476,9 +476,30 @@ export async function POST(request: Request) {
         }
       }
 
-      // Batch INSERT new days
       if (toInsert.length > 0) {
-        await tx.insert(dailyBreakdown).values(toInsert);
+        for (const row of toInsert) {
+          await tx.execute(sql`
+            INSERT INTO daily_breakdown (
+              submission_id, submitted_device_id, date, tokens, cost,
+              input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown
+            ) VALUES (
+              ${row.submissionId}::uuid, ${row.submittedDeviceId}::uuid, ${row.date},
+              ${row.tokens}::bigint, ${row.cost}::numeric(14,4),
+              ${row.inputTokens}::bigint, ${row.outputTokens}::bigint,
+              ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint,
+              ${JSON.stringify(row.sourceBreakdown)}::jsonb
+            )
+            ON CONFLICT (submission_id, date) DO UPDATE SET
+              submitted_device_id = EXCLUDED.submitted_device_id,
+              tokens = EXCLUDED.tokens,
+              cost = EXCLUDED.cost,
+              input_tokens = EXCLUDED.input_tokens,
+              output_tokens = EXCLUDED.output_tokens,
+              timestamp_ms = EXCLUDED.timestamp_ms,
+              active_time_ms = EXCLUDED.active_time_ms,
+              source_breakdown = EXCLUDED.source_breakdown
+          `);
+        }
       }
 
       // Batch UPDATE existing days via raw SQL VALUES list

@@ -405,7 +405,6 @@ describe("POST /api/submit auth path", () => {
 
     let insertCall = 0;
     let submittedDeviceValues: unknown;
-    let dailyInsertValues: unknown;
     let submissionUpdateValues: unknown;
     const tx = {
       update: vi.fn((table: unknown) => {
@@ -448,10 +447,7 @@ describe("POST /api/submit auth path", () => {
         }
 
         return {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
       }),
       execute: vi.fn(() => Promise.resolve()),
@@ -484,6 +480,7 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(tx.insert).toHaveBeenCalledTimes(2);
     expect(tx.insert).toHaveBeenNthCalledWith(2, expect.objectContaining({
       id: "submittedDevices.id",
     }));
@@ -492,13 +489,22 @@ describe("POST /api/submit auth path", () => {
       deviceKey: "dev_test",
       displayName: "Test device",
     }));
-    expect(dailyInsertValues).toEqual([
+    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenNthCalledWith(
+      1,
       expect.objectContaining({
-        submissionId: "submission-1",
-        submittedDeviceId: "submitted-device-1",
-        date: "2026-04-30",
+        queryChunks: expect.arrayContaining([
+          expect.objectContaining({
+            value: expect.arrayContaining([
+              expect.stringContaining("INSERT INTO daily_breakdown"),
+            ]),
+          }),
+          "submission-1",
+          "submitted-device-1",
+          "2026-04-30",
+        ]),
       }),
-    ]);
+    );
     expect(submissionUpdateValues).toEqual(
       expect.objectContaining({
         mcpServers: ["github", "slack"],
@@ -1013,7 +1019,6 @@ describe("POST /api/submit auth path", () => {
 
     const submissionUpdateSets: Array<Record<string, unknown>> = [];
     let insertCall = 0;
-    let dailyInsertValues: unknown;
     const tx = {
       update: vi.fn((table: unknown) => {
         const builder = {
@@ -1040,10 +1045,7 @@ describe("POST /api/submit auth path", () => {
         }
 
         const builder = {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
         return builder;
       }),
@@ -1070,9 +1072,24 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(dailyInsertValues).toEqual([expect.objectContaining({
-      activeTimeMs: 4_000,
-    })]);
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(tx.execute).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        queryChunks: expect.arrayContaining([
+          expect.objectContaining({
+            value: expect.arrayContaining([
+              expect.stringContaining("INSERT INTO daily_breakdown"),
+            ]),
+          }),
+          "submission-1",
+          "submitted-device-2",
+          "2026-04-30",
+          4_000,
+        ]),
+      }),
+    );
     expect(submissionUpdateSets.at(-1)).toEqual(expect.objectContaining({
       totalActiveTimeMs: 10_000,
       longestContinuousMs: 4_000,
@@ -1382,7 +1399,6 @@ describe("POST /api/submit auth path", () => {
     ];
 
     let insertCall = 0;
-    let dailyInsertValues: unknown;
     const tx = {
       update: vi.fn(() => {
         const builder = {
@@ -1404,10 +1420,7 @@ describe("POST /api/submit auth path", () => {
         }
 
         const builder = {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
         return builder;
       }),
@@ -1438,7 +1451,6 @@ describe("POST /api/submit auth path", () => {
 
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
-    expect(dailyInsertValues).toBeUndefined();
     expect(tx.execute).toHaveBeenCalledTimes(2);
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       legacyBreakdown,
@@ -1553,7 +1565,6 @@ describe("POST /api/submit auth path", () => {
     ];
 
     let insertCall = 0;
-    let dailyInsertValues: unknown;
     const tx = {
       update: vi.fn(() => {
         const builder = {
@@ -1575,10 +1586,7 @@ describe("POST /api/submit auth path", () => {
         }
 
         const builder = {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
         return builder;
       }),
@@ -1608,14 +1616,25 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(tx.insert).toHaveBeenCalledTimes(2);
-    expect(tx.execute).toHaveBeenCalledTimes(1);
-    expect(dailyInsertValues).toEqual([expect.objectContaining({
-      submittedDeviceId: "submitted-device-2",
-      date: "2026-04-30",
-      tokens: 15,
-      sourceBreakdown: insertedBreakdown,
-    })]);
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(tx.execute).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        queryChunks: expect.arrayContaining([
+          expect.objectContaining({
+            value: expect.arrayContaining([
+              expect.stringContaining("INSERT INTO daily_breakdown"),
+            ]),
+          }),
+          "submission-1",
+          "submitted-device-2",
+          "2026-04-30",
+          15,
+          JSON.stringify(insertedBreakdown),
+        ]),
+      }),
+    );
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).not.toHaveBeenCalled();
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
