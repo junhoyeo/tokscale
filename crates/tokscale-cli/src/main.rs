@@ -228,6 +228,26 @@ enum Commands {
         #[arg(long, help = "Disable spinner")]
         no_spinner: bool,
     },
+    #[command(
+        about = "Import historical usage from a third-party aggregate export (e.g. clawdboard) into tokscale JSON"
+    )]
+    Import {
+        #[arg(help = "Path to the export file to import")]
+        file: String,
+        #[arg(
+            long,
+            default_value = "clawdboard",
+            help = "Export format (currently only 'clawdboard')"
+        )]
+        format: String,
+        #[arg(
+            long,
+            help = "Write normalized tokscale JSON to this file instead of stdout"
+        )]
+        output: Option<String>,
+        #[arg(long, help = "Parse and summarize only; do not emit normalized JSON")]
+        dry_run: bool,
+    },
     #[command(about = "Launch interactive TUI with optional filters")]
     Tui {
         #[command(flatten)]
@@ -693,6 +713,15 @@ fn main() -> Result<()> {
                 benchmark,
                 no_spinner,
             )
+        }
+        Some(Commands::Import {
+            file,
+            format,
+            output,
+            dry_run,
+        }) => {
+            reject_unsupported_home_override(&cli.home, "import")?;
+            run_import_command(file, format, output, dry_run)
         }
         Some(Commands::Tui { clients, date }) => {
             ensure_home_supported_for_tui(&cli.home)?;
@@ -4922,6 +4951,122 @@ fn run_graph_command(
     } else {
         println!("{}", json_output);
     }
+
+    Ok(())
+}
+
+/// Import a third-party aggregate export (currently clawdboard) and emit it as
+/// standard tokscale JSON — the same shape `tokscale graph` produces.
+///
+/// This deliberately does NOT upload: backfilled aggregates cannot be verified
+/// the way locally-scanned sessions are, so submitting them requires
+/// server-side support for tagging backfilled data distinctly from live CLI
+/// usage. See https://github.com/junhoyeo/tokscale/issues/888.
+fn run_import_command(
+    file: String,
+    format: String,
+    output: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    use colored::Colorize;
+
+    let fmt = format.trim().to_lowercase();
+    if !commands::import::SUPPORTED_FORMATS.contains(&fmt.as_str()) {
+        return Err(anyhow::anyhow!(
+            "Unsupported import format '{}'. Supported: {}",
+            format,
+            commands::import::SUPPORTED_FORMATS.join(", ")
+        ));
+    }
+
+    println!("\n  {}\n", "Tokscale - Import Usage Data".cyan());
+
+    let contents = std::fs::read_to_string(&file)
+        .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", file, e))?;
+    let outcome = commands::import::parse_export(&fmt, &contents)?;
+    let graph = &outcome.graph;
+
+    println!("{}", "  Imported data:".white());
+    println!(
+        "{}",
+        format!(
+            "    Date range: {} to {}",
+            graph.meta.date_range_start, graph.meta.date_range_end
+        )
+        .bright_black()
+    );
+    println!(
+        "{}",
+        format!("    Active days: {}", graph.summary.active_days).bright_black()
+    );
+    println!(
+        "{}",
+        format!(
+            "    Total tokens: {}",
+            format_tokens_with_commas(graph.summary.total_tokens)
+        )
+        .bright_black()
+    );
+    println!(
+        "{}",
+        format!(
+            "    Total cost: {}",
+            format_currency(graph.summary.total_cost)
+        )
+        .bright_black()
+    );
+    if !graph.summary.clients.is_empty() {
+        println!(
+            "{}",
+            format!("    Clients: {}", graph.summary.clients.join(", ")).bright_black()
+        );
+    }
+    println!(
+        "{}",
+        format!("    Models: {}", graph.summary.models.len()).bright_black()
+    );
+
+    if !outcome.unknown_clients.is_empty() {
+        println!(
+            "\n  {}",
+            format!(
+                "Warning: unrecognized client id(s): {}. The leaderboard only \
+                 accepts known clients, so these would be rejected on submit.",
+                outcome.unknown_clients.join(", ")
+            )
+            .yellow()
+        );
+    }
+
+    if dry_run {
+        println!("{}", "\n  Dry run - not emitting normalized JSON.\n".yellow());
+        return Ok(());
+    }
+
+    let payload = to_ts_token_contribution_data(graph, None);
+    let json_output = serde_json::to_string_pretty(&payload)?;
+
+    if let Some(output_path) = output {
+        std::fs::write(&output_path, json_output)?;
+        println!(
+            "{}",
+            format!("\n  ✓ Normalized tokscale data written to {}", output_path).green()
+        );
+    } else {
+        println!();
+        println!("{}", json_output);
+    }
+
+    // Be explicit about the upload boundary so nobody assumes `import` puts
+    // data on the leaderboard.
+    eprintln!(
+        "{}",
+        "\n  Note: import only converts data to tokscale's format; it does not \
+         upload to the leaderboard.\n  Uploading backfilled history needs \
+         server-side support for tagging it distinctly from live CLI usage \
+         (see https://github.com/junhoyeo/tokscale/issues/888).\n"
+            .bright_black()
+    );
 
     Ok(())
 }

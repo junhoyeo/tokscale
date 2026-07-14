@@ -1,0 +1,445 @@
+//! Import historical usage from third-party aggregate exports.
+//!
+//! Currently supports the clawdboard.ai account export ("daily aggregates").
+//! The importer normalizes that export into tokscale's native [`GraphResult`],
+//! which the CLI then writes out as standard tokscale JSON (identical in shape
+//! to `tokscale graph`) for review, archival, or a future server-supported
+//! backfill.
+//!
+//! Motivation: `tokscale submit` computes totals from *raw* local session
+//! files. Once those files are gone (Claude Code deletes transcripts after
+//! `cleanupPeriodDays`, default 30), earlier months can never be re-scanned,
+//! even though a competing dashboard may still hold the aggregates. This
+//! importer recovers that history into tokscale's format.
+//!
+//! IMPORTANT — upload boundary: importing only *normalizes* data to a file. It
+//! does not submit anything to the leaderboard. Backfilled aggregates are not
+//! independently verifiable the way locally-scanned sessions are, so uploading
+//! them requires server-side support for tagging backfilled submissions
+//! distinctly from live CLI usage (so the two are not ranked identically).
+//! See <https://github.com/junhoyeo/tokscale/issues/888>.
+
+use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
+use tokscale_core::{
+    generate_graph_result, ClientContribution, ClientId, DailyContribution, DailyTotals,
+    GraphResult, TokenBreakdown,
+};
+
+/// Import source formats understood by [`parse_export`].
+pub const SUPPORTED_FORMATS: &[&str] = &["clawdboard"];
+
+/// Result of a successful import.
+pub struct ImportOutcome {
+    /// Normalized usage, ready to serialize as tokscale JSON.
+    pub graph: GraphResult,
+    /// Client ids present in the export that tokscale does not recognize.
+    /// The leaderboard rejects unknown clients, so these are surfaced to the
+    /// caller as a warning rather than silently dropped or silently kept.
+    pub unknown_clients: Vec<String>,
+}
+
+/// Parse an export of the given `format` into normalized tokscale data.
+pub fn parse_export(format: &str, json: &str) -> Result<ImportOutcome> {
+    match format {
+        "clawdboard" => parse_clawdboard_export(json),
+        other => bail!(
+            "unsupported import format '{}' (supported: {})",
+            other,
+            SUPPORTED_FORMATS.join(", ")
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// clawdboard export schema (only the subset we consume)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClawdboardExport {
+    #[serde(default)]
+    daily_aggregates: Vec<ClawdboardDailyAggregate>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClawdboardDailyAggregate {
+    date: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    cache_creation_tokens: i64,
+    #[serde(default)]
+    cache_read_tokens: i64,
+    /// clawdboard serializes the aggregate-level cost as a string (e.g.
+    /// "0.5859"). Per-model `cost` in `modelBreakdowns` is a plain number.
+    #[serde(default)]
+    total_cost: Option<String>,
+    #[serde(default)]
+    models_used: Vec<String>,
+    #[serde(default)]
+    model_breakdowns: Vec<ClawdboardModelBreakdown>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClawdboardModelBreakdown {
+    model_name: String,
+    #[serde(default)]
+    cost: f64,
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    cache_read_tokens: i64,
+    #[serde(default)]
+    cache_creation_tokens: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Normalization
+// ---------------------------------------------------------------------------
+
+/// Map a clawdboard `source` id to a canonical tokscale client id.
+fn normalize_client_id(source: &str) -> String {
+    match source.trim().to_lowercase().as_str() {
+        "claude-code" | "claude_code" | "claudecode" => "claude".to_string(),
+        "codex-cli" => "codex".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Accumulates per-(client, model) rows within a single day.
+#[derive(Default)]
+struct DayBuilder {
+    clients: BTreeMap<String, ClientContribution>,
+}
+
+/// Parse a clawdboard account export into normalized tokscale data.
+///
+/// Grouping: one [`DailyContribution`] per calendar date; within a day, one
+/// [`ClientContribution`] per (client, model), summed across every aggregate
+/// row that shares that date (clawdboard splits rows by machine).
+pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
+    let export: ClawdboardExport =
+        serde_json::from_str(json).context("failed to parse clawdboard export JSON")?;
+
+    if export.daily_aggregates.is_empty() {
+        bail!("clawdboard export contains no dailyAggregates to import");
+    }
+
+    let mut days: BTreeMap<String, DayBuilder> = BTreeMap::new();
+    let mut unknown: BTreeSet<String> = BTreeSet::new();
+
+    for agg in &export.daily_aggregates {
+        if !is_iso_date(&agg.date) {
+            bail!("invalid date {:?} in export (expected YYYY-MM-DD)", agg.date);
+        }
+
+        let client = agg
+            .source
+            .as_deref()
+            .map(normalize_client_id)
+            .unwrap_or_else(|| "unknown".to_string());
+        if ClientId::from_str(&client).is_none() {
+            unknown.insert(client.clone());
+        }
+
+        let day = days.entry(agg.date.clone()).or_default();
+
+        if agg.model_breakdowns.is_empty() {
+            // No per-model breakdown: synthesize a single row from the
+            // aggregate totals so no usage is lost.
+            let model = agg
+                .models_used
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            let cost = agg
+                .total_cost
+                .as_deref()
+                .and_then(|c| c.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            add_row(
+                day,
+                &client,
+                &model,
+                TokenBreakdown {
+                    input: agg.input_tokens.max(0),
+                    output: agg.output_tokens.max(0),
+                    cache_read: agg.cache_read_tokens.max(0),
+                    cache_write: agg.cache_creation_tokens.max(0),
+                    reasoning: 0,
+                },
+                cost.max(0.0),
+            );
+        } else {
+            for mb in &agg.model_breakdowns {
+                add_row(
+                    day,
+                    &client,
+                    &mb.model_name,
+                    TokenBreakdown {
+                        input: mb.input_tokens.max(0),
+                        output: mb.output_tokens.max(0),
+                        cache_read: mb.cache_read_tokens.max(0),
+                        cache_write: mb.cache_creation_tokens.max(0),
+                        reasoning: 0,
+                    },
+                    mb.cost.max(0.0),
+                );
+            }
+        }
+    }
+
+    // BTreeMap iterates dates in sorted order already; the explicit sort keeps
+    // the invariant obvious and independent of the map type.
+    let mut contributions: Vec<DailyContribution> = days
+        .into_iter()
+        .map(|(date, builder)| finalize_day(date, builder))
+        .collect();
+    contributions.sort_by(|a, b| a.date.cmp(&b.date));
+    apply_intensities(&mut contributions);
+
+    // `processing_time_ms = 0`: this data was imported, not scanned.
+    let graph = generate_graph_result(contributions, 0);
+
+    Ok(ImportOutcome {
+        graph,
+        unknown_clients: unknown.into_iter().collect(),
+    })
+}
+
+fn add_row(day: &mut DayBuilder, client: &str, model: &str, tokens: TokenBreakdown, cost: f64) {
+    let entry = day
+        .clients
+        .entry(format!("{client}\u{0}{model}"))
+        .or_insert_with(|| ClientContribution {
+            client: client.to_string(),
+            model_id: model.to_string(),
+            provider_id: String::new(),
+            tokens: TokenBreakdown::default(),
+            cost: 0.0,
+            messages: 0,
+        });
+    entry.tokens.input = entry.tokens.input.saturating_add(tokens.input);
+    entry.tokens.output = entry.tokens.output.saturating_add(tokens.output);
+    entry.tokens.cache_read = entry.tokens.cache_read.saturating_add(tokens.cache_read);
+    entry.tokens.cache_write = entry.tokens.cache_write.saturating_add(tokens.cache_write);
+    entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(tokens.reasoning);
+    entry.cost += cost;
+}
+
+/// Roll a day's per-client rows up into a [`DailyContribution`], deriving day
+/// totals and the token breakdown *from* the client rows so the result is
+/// internally consistent (the server validator requires client rows to sum to
+/// day totals, and `tokenBreakdown` to equal day totals).
+fn finalize_day(date: String, builder: DayBuilder) -> DailyContribution {
+    let mut token_breakdown = TokenBreakdown::default();
+    let mut cost = 0.0;
+    let mut clients: Vec<ClientContribution> = Vec::with_capacity(builder.clients.len());
+
+    for client in builder.clients.into_values() {
+        token_breakdown.input = token_breakdown.input.saturating_add(client.tokens.input);
+        token_breakdown.output = token_breakdown.output.saturating_add(client.tokens.output);
+        token_breakdown.cache_read = token_breakdown
+            .cache_read
+            .saturating_add(client.tokens.cache_read);
+        token_breakdown.cache_write = token_breakdown
+            .cache_write
+            .saturating_add(client.tokens.cache_write);
+        token_breakdown.reasoning = token_breakdown
+            .reasoning
+            .saturating_add(client.tokens.reasoning);
+        cost += client.cost;
+        clients.push(client);
+    }
+
+    // Deterministic output order.
+    clients.sort_by(|a, b| a.client.cmp(&b.client).then_with(|| a.model_id.cmp(&b.model_id)));
+
+    DailyContribution {
+        date,
+        totals: DailyTotals {
+            tokens: token_breakdown.total(),
+            cost,
+            // clawdboard does not export per-model message counts; leaving this
+            // at 0 keeps the day internally consistent (0 == sum of client 0s).
+            messages: 0,
+        },
+        intensity: 0,
+        token_breakdown,
+        clients,
+        active_time_ms: None,
+    }
+}
+
+/// Cost-relative intensity buckets (0-4), mirroring
+/// `tokscale_core::aggregator::calculate_intensities`.
+fn apply_intensities(contributions: &mut [DailyContribution]) {
+    let max_cost = contributions
+        .iter()
+        .map(|c| c.totals.cost)
+        .fold(0.0, f64::max);
+    if max_cost == 0.0 {
+        return;
+    }
+    for c in contributions.iter_mut() {
+        let ratio = c.totals.cost / max_cost;
+        c.intensity = if ratio >= 0.75 {
+            4
+        } else if ratio >= 0.5 {
+            3
+        } else if ratio >= 0.25 {
+            2
+        } else if ratio > 0.0 {
+            1
+        } else {
+            0
+        };
+    }
+}
+
+/// Strict `YYYY-MM-DD` check (matches the server's `^\d{4}-\d{2}-\d{2}$`).
+fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"{
+      "exportedAt": "2026-07-14T17:45:44.315Z",
+      "profile": { "name": "example", "githubUsername": "example" },
+      "dailyAggregates": [
+        {
+          "date": "2026-05-11",
+          "source": "codex",
+          "machineId": "m1",
+          "inputTokens": 157910,
+          "outputTokens": 5224,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 112640,
+          "totalCost": "0.5859",
+          "premiumRequests": 0,
+          "modelsUsed": ["gpt-5.5"],
+          "modelBreakdowns": [
+            { "modelName": "gpt-5.5", "cost": 0.585882, "inputTokens": 157910,
+              "outputTokens": 5224, "cacheReadTokens": 112640, "cacheCreationTokens": 0 }
+          ]
+        },
+        {
+          "date": "2026-05-11",
+          "source": "claude",
+          "machineId": "m2",
+          "modelsUsed": ["claude-sonnet"],
+          "modelBreakdowns": [
+            { "modelName": "claude-sonnet", "cost": 1.0, "inputTokens": 100,
+              "outputTokens": 200, "cacheReadTokens": 0, "cacheCreationTokens": 50 }
+          ]
+        },
+        {
+          "date": "2026-05-12",
+          "source": "codex",
+          "machineId": "m1",
+          "modelsUsed": ["gpt-5.5"],
+          "modelBreakdowns": [
+            { "modelName": "gpt-5.5", "cost": 0.10, "inputTokens": 10,
+              "outputTokens": 20, "cacheReadTokens": 5, "cacheCreationTokens": 0 }
+          ]
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn parses_dates_and_client_rows() {
+        let out = parse_clawdboard_export(SAMPLE).unwrap();
+        let g = &out.graph;
+        assert_eq!(g.contributions.len(), 2, "two distinct dates");
+        assert_eq!(g.meta.date_range_start, "2026-05-11");
+        assert_eq!(g.meta.date_range_end, "2026-05-12");
+        assert!(out.unknown_clients.is_empty(), "codex + claude are known");
+
+        let day1 = &g.contributions[0];
+        assert_eq!(day1.date, "2026-05-11");
+        assert_eq!(day1.clients.len(), 2, "codex + claude on the same day");
+    }
+
+    #[test]
+    fn days_are_internally_consistent() {
+        // The server validator requires tokenBreakdown == day totals and the
+        // client rows to sum to day totals; verify both hold by construction.
+        let out = parse_clawdboard_export(SAMPLE).unwrap();
+        for day in &out.graph.contributions {
+            assert_eq!(day.totals.tokens, day.token_breakdown.total());
+
+            let mut summed = TokenBreakdown::default();
+            let mut cost = 0.0;
+            for c in &day.clients {
+                summed.input += c.tokens.input;
+                summed.output += c.tokens.output;
+                summed.cache_read += c.tokens.cache_read;
+                summed.cache_write += c.tokens.cache_write;
+                summed.reasoning += c.tokens.reasoning;
+                cost += c.cost;
+            }
+            assert_eq!(summed.total(), day.totals.tokens);
+            assert!((cost - day.totals.cost).abs() < 1e-9);
+            assert!(day.intensity <= 4);
+        }
+    }
+
+    #[test]
+    fn summary_tokens_match_contributions() {
+        let out = parse_clawdboard_export(SAMPLE).unwrap();
+        let g = &out.graph;
+        let summed: i64 = g.contributions.iter().map(|c| c.totals.tokens).sum();
+        assert_eq!(g.summary.total_tokens, summed);
+        // day1 codex 157910+5224+112640=275774; day1 claude 100+200+50=350;
+        // day2 codex 10+20+5=35
+        assert_eq!(summed, 275774 + 350 + 35);
+    }
+
+    #[test]
+    fn highest_cost_day_has_max_intensity() {
+        let out = parse_clawdboard_export(SAMPLE).unwrap();
+        // day1 cost (0.585882 + 1.0) is the max → intensity 4.
+        assert_eq!(out.graph.contributions[0].intensity, 4);
+    }
+
+    #[test]
+    fn unknown_clients_are_flagged() {
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"totally-not-a-client",
+            "modelBreakdowns":[{"modelName":"x","cost":0.0,"inputTokens":1,"outputTokens":0,
+            "cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.unknown_clients, vec!["totally-not-a-client".to_string()]);
+    }
+
+    #[test]
+    fn empty_export_is_an_error() {
+        assert!(parse_clawdboard_export(r#"{"dailyAggregates":[]}"#).is_err());
+        assert!(parse_clawdboard_export("not json").is_err());
+    }
+
+    #[test]
+    fn bad_date_is_rejected() {
+        let json = r#"{"dailyAggregates":[{"date":"2026-5-1","source":"codex",
+            "modelBreakdowns":[{"modelName":"x","cost":0.0,"inputTokens":1,"outputTokens":0,
+            "cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        assert!(parse_clawdboard_export(json).is_err());
+    }
+}
