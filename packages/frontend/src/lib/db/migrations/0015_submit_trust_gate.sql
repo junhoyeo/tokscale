@@ -3,6 +3,7 @@ CREATE TABLE "submission_reviews" (
 	"user_id" uuid NOT NULL,
 	"submission_hash" varchar(64) NOT NULL,
 	"trust_state" varchar(20) DEFAULT 'review_required' NOT NULL,
+	"competitive_write_applied" boolean DEFAULT false NOT NULL,
 	"reason_codes" text[] DEFAULT ARRAY[]::text[] NOT NULL,
 	"payload" jsonb NOT NULL,
 	"total_tokens" bigint NOT NULL,

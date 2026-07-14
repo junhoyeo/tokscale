@@ -241,6 +241,9 @@ export const submissionReviews = pgTable(
     trustState: varchar("trust_state", { length: 20 })
       .notNull()
       .default("review_required"),
+    competitiveWriteApplied: boolean("competitive_write_applied")
+      .notNull()
+      .default(false),
     reasonCodes: text("reason_codes")
       .array()
       .notNull()

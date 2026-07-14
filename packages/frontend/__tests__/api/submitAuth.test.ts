@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as SubmissionTrustModule from "../../src/lib/validation/submissionTrust";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
@@ -95,6 +96,7 @@ vi.mock("@/lib/db", () => ({
     modelsUsed: "submissions.modelsUsed",
     cliVersion: "submissions.cliVersion",
     submissionHash: "submissions.submissionHash",
+    submitCount: "submissions.submitCount",
     schemaVersion: "submissions.schemaVersion",
   },
   submissionReviews: {
@@ -102,6 +104,7 @@ vi.mock("@/lib/db", () => ({
     userId: "submissionReviews.userId",
     submissionHash: "submissionReviews.submissionHash",
     trustState: "submissionReviews.trustState",
+    competitiveWriteApplied: "submissionReviews.competitiveWriteApplied",
   },
   submittedDevices: {
     id: "submittedDevices.id",
@@ -625,6 +628,7 @@ describe("POST /api/submit auth path", () => {
     expect(submissionUpdateValues).toEqual(
       expect.objectContaining({
         mcpServers: ["github", "slack"],
+        submitCount: 1,
       })
     );
     expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "leaderboard", "max");
@@ -1880,12 +1884,17 @@ describe("POST /api/submit auth path", () => {
     });
 
     let reviewValues: Record<string, unknown> | undefined;
+    type ReviewConflictConfig = {
+      set: { competitiveWriteApplied: Parameters<PgDialect["sqlToQuery"]>[0] };
+    };
     const reviewBuilder = {
       values: vi.fn((values: Record<string, unknown>) => {
         reviewValues = values;
         return reviewBuilder;
       }),
-      onConflictDoUpdate: vi.fn(() => reviewBuilder),
+      onConflictDoUpdate: vi.fn(
+        (_config: ReviewConflictConfig) => reviewBuilder
+      ),
       returning: vi.fn(() => Promise.resolve([{ id: "review-1" }])),
     };
     const tx = {
@@ -1992,6 +2001,19 @@ describe("POST /api/submit auth path", () => {
       expect.objectContaining({ reviewId: "review-1" })
     );
     expect(tx.insert).toHaveBeenCalledTimes(2);
+    const retryUpsert =
+      reviewBuilder.onConflictDoUpdate.mock.calls[1]?.[0];
+    if (!retryUpsert) {
+      throw new Error("Expected the review retry upsert configuration");
+    }
+    const compiledWriteMarker = new PgDialect().sqlToQuery(
+      retryUpsert.set.competitiveWriteApplied
+    );
+    expect(compiledWriteMarker.sql).toBe("$1 OR $2");
+    expect(compiledWriteMarker.params).toEqual([
+      "submissionReviews.competitiveWriteApplied",
+      false,
+    ]);
     expect(mockState.revalidateTag).not.toHaveBeenCalled();
     expect(mockState.revalidateUserGroupLeaderboards).not.toHaveBeenCalled();
     expect(mockState.revalidateUsernamePaths).not.toHaveBeenCalled();
@@ -2215,6 +2237,7 @@ describe("POST /api/submit auth path", () => {
         dateEnd: oldDay.date,
         reasonCodes: ["historical_day_missing_timestamp"],
         schemaVersion: 1,
+        competitiveWriteApplied: true,
       })
     );
     expect(reviewPayload).toBeDefined();

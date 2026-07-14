@@ -354,6 +354,7 @@ export async function POST(request: Request) {
             userId: tokenRecord.userId,
             submissionHash: reviewHash,
             trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
+            competitiveWriteApplied: trustedData !== null,
             reasonCodes: trustAssessment.reasonCodes,
             payload: reviewPayload,
             totalTokens: reviewData.summary.totalTokens,
@@ -373,6 +374,7 @@ export async function POST(request: Request) {
             ],
             targetWhere: sql`${submissionReviews.trustState} = 'review_required'`,
             set: {
+              competitiveWriteApplied: sql`${submissionReviews.competitiveWriteApplied} OR ${trustedData !== null}`,
               reasonCodes: trustAssessment.reasonCodes,
               payload: reviewPayload,
               totalTokens: reviewData.summary.totalTokens,
@@ -794,7 +796,9 @@ export async function POST(request: Request) {
            modelsUsed: Array.from(allModels),
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
-          submitCount: sql`COALESCE(submit_count, 0) + 1`,
+          submitCount: isNewSubmission
+            ? 1
+            : sql`COALESCE(submit_count, 0) + 1`,
           schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
           totalActiveTimeMs: aggregates.totalActiveTimeMs,
           // Session-shape metrics cannot be safely recomputed from daily active-time buckets.
