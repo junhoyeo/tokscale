@@ -611,7 +611,6 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -631,7 +630,6 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -663,7 +661,8 @@ pub fn parse_claude_file_with_cache_and_home(
                 let model = canonicalize_claude_model(&raw_model);
 
                 let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
-                let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
+                let timestamp = pending_request_start_timestamp_ms
+                    .unwrap_or_else(|| parsed_timestamp.unwrap_or(fallback_timestamp));
                 let duration_ms =
                     duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
 
@@ -865,7 +864,6 @@ fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
     usage: &ClaudeUsage,
     parsed_timestamp: Option<i64>,
-    request_start_timestamp_ms: Option<i64>,
 ) {
     // Per-field max merge: each token field is updated independently.
     let t = &mut existing.tokens;
@@ -880,20 +878,8 @@ fn merge_claude_duplicate(
 
     if let Some(timestamp_ms) = parsed_timestamp {
         if timestamp_ms >= existing.timestamp {
-            // Recover the original request-start timestamp from the existing
-            // message's recorded duration. The parent loop clears
-            // `pending_request_start_timestamp_ms` after the first chunk of a
-            // message commits (so a NEW message with no preceding user doesn't
-            // inflate by reusing a stale start), which would otherwise blank
-            // out streaming duplicates' duration. Recovering from
-            // `existing.timestamp - existing.duration_ms` keeps the duration
-            // honest for late chunks of the same logical message.
-            let recovered_start = existing
-                .duration_ms
-                .map(|d| existing.timestamp - d)
-                .or(request_start_timestamp_ms);
-            existing.set_timestamp(timestamp_ms);
-            if let Some(new_duration) = duration_between_ms(recovered_start, Some(timestamp_ms)) {
+            let new_duration = timestamp_ms.saturating_sub(existing.timestamp);
+            if new_duration > 0 {
                 existing.duration_ms = Some(new_duration);
             }
         }
@@ -1884,7 +1870,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 250);
-        assert_eq!(messages[0].timestamp, 1_733_047_203_500);
+        assert_eq!(messages[0].timestamp, 1_733_047_200_000);
         assert_eq!(messages[0].duration_ms, Some(3500));
         assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
     }

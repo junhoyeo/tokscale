@@ -557,7 +557,9 @@ fn parse_codex_reader<R: BufRead>(
                     state.previous_totals = next_totals;
 
                     let parsed_timestamp = parse_codex_entry_timestamp(entry.timestamp.as_deref());
-                    let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
+                    let timestamp = state
+                        .last_accepted_token_timestamp_ms
+                        .unwrap_or_else(|| parsed_timestamp.unwrap_or(fallback_timestamp));
                     let duration_ms = duration_between_ms(
                         state.last_accepted_token_timestamp_ms,
                         parsed_timestamp,
@@ -2640,5 +2642,19 @@ mod tests {
             !incremental.state.pending_turn_start,
             "the pending flag is consumed once applied"
         );
+    }
+
+    #[test]
+    fn test_token_count_timestamp_is_start_anchored() {
+        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.005Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let content = format!("{}\n{}", line1, line2);
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_000, "timestamp must be the turn_context start (1000ms epoch)");
+        assert_eq!(messages[0].duration_ms, Some(5), "duration_ms must span from turn start to token_count event (5ms)");
     }
 }
