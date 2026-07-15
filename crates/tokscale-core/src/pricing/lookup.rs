@@ -2798,13 +2798,18 @@ mod tests {
             ),
             (
                 "MODEL_PLACEHOLDER_M133",
-                "google/gemini-3.5-flash",
-                "Models.dev",
+                "vertex_ai/gemini-3-flash-preview",
+                "LiteLLM",
             ),
             (
                 "gemini-3-flash-agent",
                 "google/gemini-3.5-flash",
                 "Models.dev",
+            ),
+            (
+                "gemini-3-flash-b",
+                "vertex_ai/gemini-3-flash-preview",
+                "LiteLLM",
             ),
             (
                 "MODEL_PLACEHOLDER_M187",

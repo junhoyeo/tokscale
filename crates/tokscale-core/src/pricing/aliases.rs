@@ -37,13 +37,13 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("model_placeholder_m18", "gemini-3-flash-preview");
     m.insert("model_placeholder_m84", "gemini-3-flash-preview");
     m.insert("model_placeholder_m132", "gemini-3.5-flash-high");
-    m.insert("model_placeholder_m133", "gemini-3.5-flash-high");
+    m.insert("model_placeholder_m133", "gemini-3-flash-preview");
     m.insert("model_placeholder_m187", "gemini-3.5-flash-low");
     m.insert("model_placeholder_m20", "gemini-3.5-flash-medium");
     m.insert("gemini-pro-default", "gemini-3.1-pro");
     m.insert("gemini-pro-agent", "gemini-3.1-pro");
     m.insert("gemini-3-flash-agent", "gemini-3.5-flash-high");
-    m.insert("gemini-3-flash-b", "gemini-3.5-flash-high");
+    m.insert("gemini-3-flash-b", "gemini-3-flash-preview");
     m.insert("gemini-3.5-flash-low", "gemini-3.5-flash-medium");
     m.insert("model_placeholder_m47", "gemini-3-flash-preview");
     m.insert("model_openai_gpt_oss_120b_medium", "gpt-oss-120b-medium");
@@ -96,13 +96,13 @@ mod tests {
             ("model_placeholder_m18", "gemini-3-flash-preview"),
             ("MODEL_PLACEHOLDER_M84", "gemini-3-flash-preview"),
             ("model_placeholder_m132", "gemini-3.5-flash-high"),
-            ("model_placeholder_m133", "gemini-3.5-flash-high"),
+            ("model_placeholder_m133", "gemini-3-flash-preview"),
             ("model_placeholder_m187", "gemini-3.5-flash-low"),
             ("model_placeholder_m20", "gemini-3.5-flash-medium"),
             ("gemini-pro-default", "gemini-3.1-pro"),
             ("gemini-pro-agent", "gemini-3.1-pro"),
             ("gemini-3-flash-agent", "gemini-3.5-flash-high"),
-            ("gemini-3-flash-b", "gemini-3.5-flash-high"),
+            ("gemini-3-flash-b", "gemini-3-flash-preview"),
             ("gemini-3.5-flash-low", "gemini-3.5-flash-medium"),
             ("MODEL_OPENAI_GPT_OSS_120B_MEDIUM", "gpt-oss-120b-medium"),
             ("gemini-3-flash-c", "gemini-3-flash-preview"),
