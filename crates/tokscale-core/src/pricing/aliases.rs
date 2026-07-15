@@ -18,6 +18,23 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("model_placeholder_m35", "claude-sonnet-4-6");
     m.insert("model_placeholder_m36", "gemini-3.1-pro");
     m.insert("model_placeholder_m37", "gemini-3.1-pro");
+    // Antigravity's language server emits placeholder IDs in IDE metadata and
+    // response-model aliases in CLI conversation protobufs. The current
+    // server-provided labels/mappings are documented by the Antigravity model
+    // monitor, while Antigravity Manager confirms model metadata itself comes
+    // from fetchAvailableModels rather than a stable local model list.
+    m.insert("model_placeholder_m16", "gemini-3.1-pro");
+    m.insert("model_placeholder_m18", "gemini-3-flash-preview");
+    m.insert("model_placeholder_m84", "gemini-3-flash-preview");
+    m.insert("model_placeholder_m132", "gemini-3.5-flash-high");
+    m.insert("model_placeholder_m133", "gemini-3.5-flash-high");
+    m.insert("model_placeholder_m187", "gemini-3.5-flash-low");
+    m.insert("model_placeholder_m20", "gemini-3.5-flash-medium");
+    m.insert("gemini-pro-default", "gemini-3.1-pro");
+    m.insert("gemini-pro-agent", "gemini-3.1-pro");
+    m.insert("gemini-3-flash-agent", "gemini-3.5-flash-high");
+    m.insert("gemini-3-flash-b", "gemini-3.5-flash-high");
+    m.insert("gemini-3.5-flash-low", "gemini-3.5-flash-medium");
     m.insert("model_placeholder_m47", "gemini-3-flash-preview");
     m.insert("model_openai_gpt_oss_120b_medium", "gpt-oss-120b-medium");
     m.insert("claude-opus-4-6-thinking", "claude-opus-4-6");
@@ -71,6 +88,26 @@ mod tests {
             Some("gemini-3.1-pro")
         );
         assert_eq!(
+            resolve_alias("model_placeholder_m16"),
+            Some("gemini-3.1-pro")
+        );
+        assert_eq!(
+            resolve_alias("MODEL_PLACEHOLDER_M84"),
+            Some("gemini-3-flash-preview")
+        );
+        assert_eq!(
+            resolve_alias("model_placeholder_m133"),
+            Some("gemini-3.5-flash-high")
+        );
+        assert_eq!(
+            resolve_alias("gemini-3-flash-agent"),
+            Some("gemini-3.5-flash-high")
+        );
+        assert_eq!(
+            resolve_alias("gemini-3.5-flash-low"),
+            Some("gemini-3.5-flash-medium")
+        );
+        assert_eq!(
             resolve_alias("MODEL_OPENAI_GPT_OSS_120B_MEDIUM"),
             Some("gpt-oss-120b-medium")
         );
@@ -94,8 +131,6 @@ mod tests {
             resolve_alias("anthropic/claude-4-6-sonnet"),
             Some("claude-sonnet-4-6")
         );
-        assert_eq!(resolve_alias("model_placeholder_m84"), None);
-        assert_eq!(resolve_alias("model_placeholder_m16"), None);
     }
 
     #[test]

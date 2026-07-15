@@ -410,6 +410,10 @@ mod tests {
     }
 
     fn build_gen_metadata() -> Vec<u8> {
+        build_gen_metadata_with_model("gemini-3-flash-a")
+    }
+
+    fn build_gen_metadata_with_model(model: &str) -> Vec<u8> {
         // usage message (#4 of chatModel)
         let mut usage = Vec::new();
         usage.extend(enc_varint(1, 1132)); // fixed system prompt
@@ -422,7 +426,7 @@ mod tests {
         // chatModel message (#1 of gen_metadata)
         let mut chat_model = Vec::new();
         chat_model.extend(enc_len(4, &usage));
-        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        chat_model.extend(enc_len(19, model.as_bytes()));
 
         enc_len(1, &chat_model)
     }
@@ -506,6 +510,17 @@ mod tests {
             Some("C:/Users/Frank/obsidian-vault")
         );
         assert_eq!(message.workspace_label.as_deref(), Some("obsidian-vault"));
+    }
+
+    #[test]
+    fn resolves_current_antigravity_cli_response_model() {
+        let blob = build_gen_metadata_with_model("gemini-3-flash-agent");
+        let mut seen = HashSet::new();
+
+        let message = parse_gen_metadata(&blob, "session", 1_000, &mut seen).unwrap();
+
+        assert_eq!(message.model_id, "gemini-3.5-flash-high");
+        assert_eq!(message.provider_id, "google");
     }
 
     #[test]

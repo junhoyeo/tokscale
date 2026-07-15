@@ -8086,13 +8086,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(graph.summary.clients, vec!["antigravity"]);
-        assert_eq!(graph.summary.models, vec!["model_placeholder_m84"]);
+        assert_eq!(graph.summary.models, vec!["gemini-3-flash-preview"]);
         assert_eq!(graph.summary.total_tokens, 19);
         assert_eq!(graph.contributions.len(), 1);
         assert_eq!(graph.contributions[0].clients[0].client, "antigravity");
         assert_eq!(
             graph.contributions[0].clients[0].model_id,
-            "model_placeholder_m84"
+            "gemini-3-flash-preview"
         );
     }
 
