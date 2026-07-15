@@ -41,6 +41,9 @@ pub struct CodexPayload {
     pub model_info: Option<CodexModelInfo>,
     pub info: Option<CodexInfo>,
     pub turn_id: Option<String>,
+    /// Unix timestamp (seconds) from `task_started` events. Legacy Codex turns
+    /// may use UUID v4 ids, so this is their only causal ordering signal.
+    pub started_at: Option<i64>,
     pub source: Option<Value>,
     /// Thread origin from session_meta. `"user"` marks a human-initiated fork
     /// (e.g. a VS Code "fork conversation"), which replays parent history but
@@ -337,9 +340,19 @@ fn parse_codex_reader<R: BufRead>(
                             && payload.payload_type.as_deref() == Some("task_started")
                         {
                             // The child's own turn is introduced by a
-                            // `task_started`; remember its turn_id so the gate can
-                            // recognize the child's own same-millisecond turn.
-                            if let Some(turn_id) = payload.turn_id.as_deref() {
+                            // `task_started`; remember it only when its id or
+                            // timestamp places it at/after the child session.
+                            // Nested child logs can replay ancestor task_started
+                            // events before the child's live turn.
+                            if forked_child_task_starts_own_session(
+                                &state,
+                                payload.turn_id.as_deref(),
+                                payload.started_at,
+                            ) {
+                                let turn_id = payload
+                                    .turn_id
+                                    .as_deref()
+                                    .expect("recognized child task_started events have a turn_id");
                                 state
                                     .forked_child_task_started_turn_ids
                                     .insert(turn_id.to_string());
@@ -743,7 +756,12 @@ fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option
     match (turn_id, codex_uuid_v7_order_key(child_session_id)) {
         (Some(turn_id), Some(child_key)) => {
             let Some(turn_key) = codex_uuid_v7_order_key(turn_id) else {
-                return true;
+                // Nested child logs can replay legacy UUID v4 turns from an
+                // ancestor. Only a child-local task_started event may end the
+                // replay gate for a non-v7 subagent turn. Human forks do not
+                // emit task_started, so retain their existing fallback.
+                return state.forked_child_is_user_fork
+                    || state.forked_child_task_started_turn_ids.contains(turn_id);
             };
             // Compare only the UUID v7 48-bit millisecond timestamp (the first
             // 12 hex of the order key), not the full id. The child's own turn is
@@ -783,6 +801,34 @@ fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option
         }
         _ => true,
     }
+}
+
+fn forked_child_task_starts_own_session(
+    state: &CodexParseState,
+    turn_id: Option<&str>,
+    started_at: Option<i64>,
+) -> bool {
+    let (Some(turn_id), Some(child_session_id)) =
+        (turn_id, state.forked_child_session_id.as_deref())
+    else {
+        return false;
+    };
+    let Some(child_key) = codex_uuid_v7_order_key(child_session_id) else {
+        return true;
+    };
+
+    if let Some(turn_key) = codex_uuid_v7_order_key(turn_id) {
+        return turn_key[..12] >= child_key[..12];
+    }
+
+    let Some(started_at) = started_at else {
+        return false;
+    };
+    let Ok(child_started_at_ms) = i64::from_str_radix(&child_key[..12], 16) else {
+        return false;
+    };
+
+    started_at >= child_started_at_ms / 1000
 }
 
 fn codex_uuid_v7_order_key(id: &str) -> Option<String> {
@@ -2268,6 +2314,40 @@ mod tests {
             r#"{"timestamp":"2026-05-05T21:52:20.100Z","type":"turn_context","payload":{"turn_id":"019e5c03-1e99-7000-8000-000000000002","model":"gpt-5.5","cwd":"/repo"}}"#,
             "\n",
             r#"{"timestamp":"2026-05-05T21:52:20.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":520,"output_tokens":52,"total_tokens":572},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+            "\n"
+        ));
+
+        let child_messages = parse_codex_file(child.path());
+
+        assert_eq!(child_messages.len(), 1);
+        assert_eq!(child_messages[0].tokens.input, 20);
+        assert_eq!(child_messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_nested_child_skips_replayed_legacy_uuid_v4_turn() {
+        // Nested Codex child logs can replay an ancestor turn whose legacy UUID
+        // v4 id cannot be ordered against the child's UUID v7 session id. Its
+        // task_started timestamp still predates the child, so it must not open
+        // the gate or count the inherited token snapshot.
+        let child = create_test_file(concat!(
+            r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"session_meta","payload":{"id":"019e5c03-1f5d-7000-8000-000000000001","forked_from_id":"019e5c03-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5c03-0000-7000-8000-000000000001","depth":2}}},"thread_source":"subagent","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"session_meta","payload":{"id":"019e5c03-0000-7000-8000-000000000001","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"thread_source":"subagent","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"cli","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"event_msg","payload":{"type":"task_started","turn_id":"81d2f55b-894b-4d67-b75b-436ead477f65","started_at":1778017800}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"turn_context","payload":{"turn_id":"81d2f55b-894b-4d67-b75b-436ead477f65","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.198Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.610Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-2100-7000-8000-000000000001","started_at":1779660169}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.611Z","type":"turn_context","payload":{"turn_id":"019e5c03-2100-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-05T21:52:10.612Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":320,"output_tokens":32,"total_tokens":352},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
             "\n"
         ));
 
