@@ -146,6 +146,13 @@ fn is_workflow_journal(path: &Path) -> bool {
         .any(|ancestor| ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents"))
 }
 
+fn is_in_transcripts_dir(path: &Path) -> bool {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("transcripts")
+}
+
 /// Locate the parent main-session JSONL for a sidechain transcript.
 ///
 /// Nested layout: `.../projects/<key>/<session>/subagents/agent-X.jsonl`
@@ -448,6 +455,13 @@ pub fn parse_claude_file_with_cache_and_home(
         .unwrap_or("unknown")
         .to_string();
 
+    // Bare transcripts (files under ~/.claude/transcripts/ with no workspace/project
+    // context) must not use char-based token estimation. These files may be written by
+    // third-party tools (e.g. OpenCode) that log tool outputs without Claude API usage
+    // metadata. Estimating tokens from their content would double-count usage already
+    // tracked by the originating client's own parser.
+    let is_bare_transcript = is_in_transcripts_dir(path) && cc_mirror_metadata.is_none();
+
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     if path.extension().and_then(|s| s.to_str()) == Some("json") {
@@ -525,21 +539,25 @@ pub fn parse_claude_file_with_cache_and_home(
             }
 
             if entry.entry_type == "user" || entry.entry_type == "tool_result" {
-                let tool_result_message = extract_claude_tool_result_message(
-                    trimmed,
-                    ClaudeToolResultContext {
-                        entry: &entry,
-                        last_model: last_model.as_deref(),
-                        last_provider_hint: last_provider_hint.as_deref(),
-                        client_id: &client_id,
-                        default_provider_hint: metadata_provider_hint,
-                        session_id: &session_id,
-                        fallback_timestamp,
-                        workspace_key: workspace_key.clone(),
-                        workspace_label: workspace_label.clone(),
-                        sidechain_agent: sidechain_agent.clone(),
-                    },
-                );
+                let tool_result_message = if is_bare_transcript {
+                    None
+                } else {
+                    extract_claude_tool_result_message(
+                        trimmed,
+                        ClaudeToolResultContext {
+                            entry: &entry,
+                            last_model: last_model.as_deref(),
+                            last_provider_hint: last_provider_hint.as_deref(),
+                            client_id: &client_id,
+                            default_provider_hint: metadata_provider_hint,
+                            session_id: &session_id,
+                            fallback_timestamp,
+                            workspace_key: workspace_key.clone(),
+                            workspace_label: workspace_label.clone(),
+                            sidechain_agent: sidechain_agent.clone(),
+                        },
+                    )
+                };
 
                 if let Some(timestamp_ms) = parse_claude_entry_timestamp(entry.timestamp.as_deref())
                 {
@@ -2326,6 +2344,43 @@ mod tests {
         assert!(
             messages.is_empty(),
             "wrapper transcripts without usage metadata must not be estimated"
+        );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_tool_outputs_is_not_estimated() {
+        let content = r#"{"type":"tool_use","timestamp":"2026-04-01T10:00:00.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"},"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:02.000Z","tool_name":"bash","tool_input":{"command":"cargo build"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:03.000Z","tool_name":"bash","tool_input":{"command":"cargo build"},"tool_output":{"output":"   Compiling myproject v0.1.0\n    Finished dev [unoptimized + debuginfo] target(s) in 2.34s\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_aabbccdd11223344556677889.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "bare transcripts with only tool outputs must not produce estimated token messages"
+        );
+    }
+
+    #[test]
+    fn test_project_transcript_with_tool_outputs_is_estimated() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","content":[{"type":"text","text":"fn main() { println!(\"hello\"); }"}]}]}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject")
+            .join("ses_project123.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            !messages.is_empty(),
+            "project transcripts with tool results should still estimate tokens"
         );
     }
 
