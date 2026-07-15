@@ -792,15 +792,16 @@ fn parser_version(client: ClientId) -> u32 {
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
-        ClientId::Codex => 5,
+        ClientId::Codex => 6,
         ClientId::Jcode => 4,
-        ClientId::Copilot => 4,
+        ClientId::Copilot => 5,
         // Pi subagent sessions now derive agent attribution from session_info
         // names; version-1 caches carry those messages without agent metadata.
         ClientId::Pi => 2,
         // Devin CLI v1 could stop at a malformed chat_message. Desktop v1
         // parsed a non-ACP shape and did not track its CLI title lookup.
         ClientId::DevinCli | ClientId::DevinDesktop => 2,
+        ClientId::Claude => 2,
         _ => 1,
     }
 }
@@ -1999,7 +2000,9 @@ mod tests {
 
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
-        assert_eq!(parser_version(ClientId::Codex), 5);
+        assert_eq!(parser_version(ClientId::Codex), 6);
+        assert_eq!(parser_version(ClientId::Copilot), 5);
+        assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
     #[test]
