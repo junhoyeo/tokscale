@@ -18,11 +18,21 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("model_placeholder_m35", "claude-sonnet-4-6");
     m.insert("model_placeholder_m36", "gemini-3.1-pro");
     m.insert("model_placeholder_m37", "gemini-3.1-pro");
-    // Antigravity's language server emits placeholder IDs in IDE metadata and
-    // response-model aliases in CLI conversation protobufs. The current
-    // server-provided labels/mappings are documented by the Antigravity model
-    // monitor, while Antigravity Manager confirms model metadata itself comes
-    // from fetchAvailableModels rather than a stable local model list.
+    // Antigravity uses opaque placeholder IDs in IDE metadata and shorter
+    // responseModel aliases in CLI conversation protobufs. These mappings are
+    // cross-checked against two independent open-source integrations:
+    //
+    // - Antigravity Manager is a third-party account/quota manager. Its quota
+    //   client shows that Antigravity obtains the available model IDs and
+    //   display names from Google Cloud Code Assist's fetchAvailableModels API:
+    //   https://github.com/lbjlaq/Antigravity-Manager/blob/dfe876548d572237da92fe4c3e070a9db33c0910/src-tauri/src/modules/quota.rs
+    // - Antigravity Context Window Monitor reads the running language server's
+    //   GetUserStatus model config and records the placeholder/responseModel
+    //   aliases observed in Antigravity session metadata:
+    //   https://github.com/AGI-is-going-to-arrive/Antigravity-Context-Window-Monitor/blob/603e3ea00a0ee94f1beecc162cf47a4ed68d3a6f/src/models.ts
+    //
+    // Keep these as machine-ID aliases. Do not use server-provided display
+    // labels as pricing keys because labels may be renamed or localized.
     m.insert("model_placeholder_m16", "gemini-3.1-pro");
     m.insert("model_placeholder_m18", "gemini-3-flash-preview");
     m.insert("model_placeholder_m84", "gemini-3-flash-preview");
