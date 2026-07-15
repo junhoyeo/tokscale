@@ -2654,7 +2654,14 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].timestamp, 1_000, "timestamp must be the turn_context start (1000ms epoch)");
-        assert_eq!(messages[0].duration_ms, Some(5), "duration_ms must span from turn start to token_count event (5ms)");
+        assert_eq!(
+            messages[0].timestamp, 1_000,
+            "timestamp must be the turn_context start (1000ms epoch)"
+        );
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(5),
+            "duration_ms must span from turn start to token_count event (5ms)"
+        );
     }
 }
