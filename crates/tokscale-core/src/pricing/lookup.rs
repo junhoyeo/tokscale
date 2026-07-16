@@ -2812,6 +2812,15 @@ mod tests {
                 "Models.dev",
             ),
             (
+                // Legacy CLI responseModel for M132, the retired predecessor
+                // of M133 — prices as the High tier, same catalog entry as
+                // `gemini-3-flash-agent`/`gemini-3-flash-b` above (see
+                // aliases.rs source-citation comment, models.ts@603e3ea).
+                "gemini-3-flash-a",
+                "google/gemini-3.5-flash",
+                "Models.dev",
+            ),
+            (
                 "MODEL_PLACEHOLDER_M187",
                 "google/gemini-3.5-flash",
                 "Models.dev",

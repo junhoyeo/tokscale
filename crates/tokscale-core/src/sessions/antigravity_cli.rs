@@ -496,7 +496,10 @@ mod tests {
         assert_eq!(message.client, "antigravity-cli");
         // `gemini-3-flash-a` (raw #19 responseModel) is alias-resolved to the
         // priced canonical model so cost lookups don't fall through to 0.
-        assert_eq!(message.model_id, "gemini-3-flash-preview");
+        // Per upstream (models.ts@603e3ea), `gemini-3-flash-a` is the legacy
+        // responseModel for M132, the retired predecessor of M133 — i.e. the
+        // High tier, not the unrelated gemini-3-flash-preview family.
+        assert_eq!(message.model_id, "gemini-3.5-flash-high");
         assert_eq!(message.provider_id, "google");
         assert_eq!(message.session_id, "session-test");
         assert_eq!(message.tokens.input, 1632); // 1132 + 500
@@ -615,7 +618,7 @@ mod tests {
         // dataset, which is unavailable in unit tests).
         assert_eq!(
             pricing::aliases::resolve_alias("gemini-3-flash-a"),
-            Some("gemini-3-flash-preview")
+            Some("gemini-3.5-flash-high")
         );
     }
 
