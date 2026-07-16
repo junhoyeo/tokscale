@@ -3,7 +3,7 @@
 //! OpenCodeReview stores sessions as JSONL files under
 //! `~/.opencodereview/sessions/<encoded-repo-path>/<session-id>.jsonl`.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_value};
+use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, parse_timestamp_value};
 use super::UnifiedMessage;
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde_json::Value;
@@ -58,10 +58,11 @@ pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
-        let timestamp = value
-            .get("timestamp")
-            .and_then(parse_timestamp_value)
-            .unwrap_or(fallback_timestamp);
+        // `explicit_timestamp` is this record's own recorded `timestamp`
+        // field, as opposed to `fallback_timestamp` (a file-mtime fallback
+        // used when it's absent or unparseable).
+        let explicit_timestamp = value.get("timestamp").and_then(parse_timestamp_value);
+        let recorded_timestamp = explicit_timestamp.unwrap_or(fallback_timestamp);
 
         let model_raw = value
             .get("model")
@@ -80,8 +81,26 @@ pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
             .and_then(Value::as_i64)
             .filter(|d| *d > 0);
 
+        // The `llm_response` record's `timestamp` is written when the
+        // response is logged, i.e. the call's *end*, not its start.
+        // `duration_ms` is that call's elapsed time, so sessionize()'s
+        // `[timestamp, timestamp + duration_ms]` span would otherwise
+        // project forward past the actual completion into phantom idle time.
+        // Back-calculate the start anchor the same way #890 did for
+        // Copilot's `endTime`-only records.
+        //
+        // Only do this when `explicit_timestamp` is a real recorded end
+        // timestamp: when it's absent, `recorded_timestamp` is
+        // `fallback_timestamp` (the file's mtime), not this record's own end
+        // time, and subtracting `duration_ms` from it would shift the
+        // message into the wrong day rather than anchor it correctly.
+        let timestamp = match (explicit_timestamp, duration_ms) {
+            (Some(end), Some(duration)) => back_anchor_timestamp(end, duration),
+            _ => recorded_timestamp,
+        };
+
         let dedup_key = format!(
-            "opencodereview:{session_id}:{timestamp}:{model_id}:{}:{}:{}:{}",
+            "opencodereview:{session_id}:{recorded_timestamp}:{model_id}:{}:{}:{}:{}",
             tokens.input, tokens.output, tokens.cache_read, tokens.cache_write,
         );
         if !seen.insert(dedup_key.clone()) {
@@ -288,5 +307,32 @@ mod tests {
         let msgs = parse_opencodereview_file(&path);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].session_id, "my-unique-session");
+    }
+
+    #[test]
+    fn test_llm_response_timestamp_is_start_anchored() {
+        // Regression (follow-up to #890): an `llm_response` record's
+        // `timestamp` is written when the response is logged, i.e. the
+        // call's *end*, not its start. `duration_ms` is that call's elapsed
+        // time, so sessionize()'s `[timestamp, timestamp + duration_ms]`
+        // span would otherwise project forward past the actual completion
+        // into phantom idle time. The parser must back-calculate the start
+        // anchor instead.
+        let content = llm_response("2026-01-15T10:00:05Z", "gpt-4o", 100, 50, 0, 0);
+        let msgs = parse_events(&format!("{content}\n"));
+
+        assert_eq!(msgs.len(), 1);
+        let expected_end =
+            parse_timestamp_value(&Value::String("2026-01-15T10:00:05Z".to_string())).unwrap();
+        assert_eq!(
+            msgs[0].timestamp,
+            expected_end - 1500,
+            "timestamp must be back-calculated to the call start (end - duration)"
+        );
+        assert_eq!(
+            msgs[0].duration_ms,
+            Some(1500),
+            "duration_ms must still span from start to the recorded end timestamp"
+        );
     }
 }

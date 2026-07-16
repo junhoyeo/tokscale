@@ -2760,6 +2760,90 @@ mod tests {
         assert_eq!(result.source, "LiteLLM");
     }
 
+    #[test]
+    fn antigravity_model_aliases_reach_priced_catalog_entries() {
+        let mut litellm = mock_litellm();
+        litellm.insert(
+            "gemini-3.1-pro".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                output_cost_per_token: Some(0.000012),
+                ..Default::default()
+            },
+        );
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "google/gemini-3.5-flash".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0000015),
+                output_cost_per_token: Some(0.000009),
+                cache_read_input_token_cost: Some(0.00000015),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            litellm,
+            mock_openrouter(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let cases = [
+            ("MODEL_PLACEHOLDER_M16", "gemini-3.1-pro", "LiteLLM"),
+            (
+                "MODEL_PLACEHOLDER_M84",
+                "vertex_ai/gemini-3-flash-preview",
+                "LiteLLM",
+            ),
+            (
+                "MODEL_PLACEHOLDER_M133",
+                "google/gemini-3.5-flash",
+                "Models.dev",
+            ),
+            (
+                "gemini-3-flash-agent",
+                "google/gemini-3.5-flash",
+                "Models.dev",
+            ),
+            (
+                "gemini-3-flash-b",
+                "google/gemini-3.5-flash",
+                "Models.dev",
+            ),
+            (
+                // Legacy CLI responseModel for M132, the retired predecessor
+                // of M133 — prices as the High tier, same catalog entry as
+                // `gemini-3-flash-agent`/`gemini-3-flash-b` above (see
+                // aliases.rs source-citation comment, models.ts@603e3ea).
+                "gemini-3-flash-a",
+                "google/gemini-3.5-flash",
+                "Models.dev",
+            ),
+            (
+                "MODEL_PLACEHOLDER_M187",
+                "google/gemini-3.5-flash",
+                "Models.dev",
+            ),
+            (
+                "MODEL_PLACEHOLDER_M20",
+                "google/gemini-3.5-flash",
+                "Models.dev",
+            ),
+        ];
+
+        for (raw, expected_key, expected_source) in cases {
+            let result = lookup
+                .lookup(raw)
+                .unwrap_or_else(|| panic!("unpriced alias: {raw}"));
+            assert_eq!(result.matched_key, expected_key, "raw model: {raw}");
+            assert_eq!(result.source, expected_source, "raw model: {raw}");
+        }
+
+        let cost = lookup.calculate_cost("gemini-3-flash-agent", 1_000_000, 100_000, 50_000, 0, 0);
+        assert!((cost - 2.4075).abs() < 1e-10);
+    }
+
     // =========================================================================
     // OPENCODE ZEN MODELS - KIMI FAMILY
     // =========================================================================

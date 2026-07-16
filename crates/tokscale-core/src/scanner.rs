@@ -830,7 +830,7 @@ fn cline_additional_vscode_task_roots(home_dir: &str, use_env_roots: bool) -> Ve
     roots
 }
 
-fn devin_desktop_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+pub fn devin_desktop_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     let mut roots = vec![
         PathBuf::from(home_dir).join(".config/Devin/User/acp-events"),
         PathBuf::from(home_dir).join(".config/devin/User/acp-events"),

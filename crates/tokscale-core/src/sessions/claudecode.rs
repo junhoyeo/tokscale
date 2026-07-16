@@ -146,6 +146,13 @@ fn is_workflow_journal(path: &Path) -> bool {
         .any(|ancestor| ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents"))
 }
 
+fn is_in_transcripts_dir(path: &Path) -> bool {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("transcripts")
+}
+
 /// Locate the parent main-session JSONL for a sidechain transcript.
 ///
 /// Nested layout: `.../projects/<key>/<session>/subagents/agent-X.jsonl`
@@ -448,6 +455,15 @@ pub fn parse_claude_file_with_cache_and_home(
         .unwrap_or("unknown")
         .to_string();
 
+    // Bare transcripts (files under ~/.claude/transcripts/ with no workspace/project
+    // context) must not use char-based token estimation. These files may be written by
+    // third-party tools (e.g. OpenCode) that log tool outputs without Claude API usage
+    // metadata. Estimating tokens from their content would double-count usage already
+    // tracked by the originating client's own parser. Explicit tool-result token counts
+    // are still honored — only the char-based fallback estimate is suppressed.
+    let is_bare_transcript =
+        is_in_transcripts_dir(path) && cc_mirror_metadata.is_none() && workspace_key.is_none();
+
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     if path.extension().and_then(|s| s.to_str()) == Some("json") {
@@ -538,6 +554,7 @@ pub fn parse_claude_file_with_cache_and_home(
                         workspace_key: workspace_key.clone(),
                         workspace_label: workspace_label.clone(),
                         sidechain_agent: sidechain_agent.clone(),
+                        allow_char_estimate: !is_bare_transcript,
                     },
                 );
 
@@ -611,7 +628,6 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -631,7 +647,6 @@ pub fn parse_claude_file_with_cache_and_home(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
@@ -663,7 +678,8 @@ pub fn parse_claude_file_with_cache_and_home(
                 let model = canonicalize_claude_model(&raw_model);
 
                 let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
-                let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
+                let timestamp = pending_request_start_timestamp_ms
+                    .unwrap_or_else(|| parsed_timestamp.unwrap_or(fallback_timestamp));
                 let duration_ms =
                     duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
 
@@ -865,7 +881,6 @@ fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
     usage: &ClaudeUsage,
     parsed_timestamp: Option<i64>,
-    request_start_timestamp_ms: Option<i64>,
 ) {
     // Per-field max merge: each token field is updated independently.
     let t = &mut existing.tokens;
@@ -880,21 +895,14 @@ fn merge_claude_duplicate(
 
     if let Some(timestamp_ms) = parsed_timestamp {
         if timestamp_ms >= existing.timestamp {
-            // Recover the original request-start timestamp from the existing
-            // message's recorded duration. The parent loop clears
-            // `pending_request_start_timestamp_ms` after the first chunk of a
-            // message commits (so a NEW message with no preceding user doesn't
-            // inflate by reusing a stale start), which would otherwise blank
-            // out streaming duplicates' duration. Recovering from
-            // `existing.timestamp - existing.duration_ms` keeps the duration
-            // honest for late chunks of the same logical message.
-            let recovered_start = existing
-                .duration_ms
-                .map(|d| existing.timestamp - d)
-                .or(request_start_timestamp_ms);
-            existing.set_timestamp(timestamp_ms);
-            if let Some(new_duration) = duration_between_ms(recovered_start, Some(timestamp_ms)) {
-                existing.duration_ms = Some(new_duration);
+            let new_duration = timestamp_ms.saturating_sub(existing.timestamp);
+            if new_duration > 0 {
+                // Duplicates can arrive out of order (e.g. late-processed
+                // streaming chunks), so never let a later-processed duplicate
+                // with an earlier completion timestamp shrink a duration
+                // already established by another duplicate.
+                existing.duration_ms =
+                    Some(existing.duration_ms.unwrap_or(0).max(new_duration));
             }
         }
     }
@@ -927,6 +935,12 @@ struct ClaudeToolResultContext<'a> {
     workspace_key: Option<String>,
     workspace_label: Option<String>,
     sidechain_agent: Option<String>,
+    /// Whether char-based token estimation may be used as a fallback when no
+    /// explicit tool-result token count is present. Bare transcripts (see
+    /// `is_bare_transcript`) set this to `false` to avoid double-counting
+    /// usage already tracked by the originating client's own parser, while
+    /// still honoring any explicit tool-result token counts.
+    allow_char_estimate: bool,
 }
 
 fn extract_claude_tool_result_message(
@@ -934,7 +948,7 @@ fn extract_claude_tool_result_message(
     context: ClaudeToolResultContext<'_>,
 ) -> Option<UnifiedMessage> {
     let value: Value = serde_json::from_str(line).ok()?;
-    let usage = extract_claude_tool_result_usage(&value)?;
+    let usage = extract_claude_tool_result_usage(&value, context.allow_char_estimate)?;
 
     let raw_model = extract_claude_model(&value)
         .or_else(|| {
@@ -991,7 +1005,10 @@ fn extract_claude_tool_result_message(
     Some(message)
 }
 
-fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsage> {
+fn extract_claude_tool_result_usage(
+    value: &Value,
+    allow_char_estimate: bool,
+) -> Option<ClaudeToolResultUsage> {
     let mut total_tokens = 0;
     let mut first_dedup_id: Option<String> = None;
     let mut seen_ids = HashSet::new();
@@ -1006,7 +1023,8 @@ fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsa
         if first_dedup_id.is_none() {
             first_dedup_id = tool_result_id;
         }
-        total_tokens += extract_tool_result_input_tokens(tool_result).unwrap_or(0);
+        total_tokens +=
+            extract_tool_result_input_tokens(tool_result, allow_char_estimate).unwrap_or(0);
     }
 
     if total_tokens <= 0 {
@@ -1072,8 +1090,11 @@ fn extract_tool_result_id(tool_result: &Value) -> Option<String> {
         .or_else(|| extract_string(tool_result.get("tool_result_id")))
 }
 
-fn extract_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
+fn extract_tool_result_input_tokens(tool_result: &Value, allow_char_estimate: bool) -> Option<i64> {
     explicit_tool_result_input_tokens(tool_result).or_else(|| {
+        if !allow_char_estimate {
+            return None;
+        }
         let chars = tool_result_output_char_count(tool_result);
         (chars > 0).then(|| estimate_tokens_from_chars(chars))
     })
@@ -1884,9 +1905,49 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 250);
-        assert_eq!(messages[0].timestamp, 1_733_047_203_500);
+        assert_eq!(messages[0].timestamp, 1_733_047_200_000);
         assert_eq!(messages[0].duration_ms, Some(3500));
         assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
+    }
+
+    #[test]
+    fn test_dedup_merge_duration_is_monotonic_across_out_of_order_duplicates() {
+        // Regression: several streaming duplicates of one message can be
+        // processed out of order (e.g. a late-arriving chunk carrying an
+        // earlier completion timestamp than one already merged). The start
+        // anchor (existing.timestamp) must survive every merge, and
+        // duration_ms must never shrink below a value already established by
+        // an earlier-processed duplicate — it must track the latest
+        // (largest) end timestamp seen so far.
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":30}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:05.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:07.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":200}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "all streaming duplicates should collapse to one message"
+        );
+        assert_eq!(
+            messages[0].timestamp, 1_733_047_200_000,
+            "the start anchor must survive every merge (the user entry's timestamp)"
+        );
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(7_000),
+            "duration_ms must equal the latest end timestamp minus the start \
+             anchor (7s), not shrink when an out-of-order duplicate with an \
+             earlier timestamp is merged"
+        );
+        assert_eq!(
+            messages[0].tokens.output, 200,
+            "token fields keep the per-field max across all duplicates"
+        );
     }
 
     #[test]
@@ -2327,6 +2388,85 @@ mod tests {
             messages.is_empty(),
             "wrapper transcripts without usage metadata must not be estimated"
         );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_tool_outputs_is_not_estimated() {
+        let content = r#"{"type":"tool_use","timestamp":"2026-04-01T10:00:00.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"},"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:02.000Z","tool_name":"bash","tool_input":{"command":"cargo build"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:03.000Z","tool_name":"bash","tool_input":{"command":"cargo build"},"tool_output":{"output":"   Compiling myproject v0.1.0\n    Finished dev [unoptimized + debuginfo] target(s) in 2.34s\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_aabbccdd11223344556677889.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "bare transcripts with only tool outputs must not produce estimated token messages"
+        );
+    }
+
+    #[test]
+    fn test_project_transcript_with_tool_outputs_is_estimated() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","content":[{"type":"text","text":"fn main() { println!(\"hello\"); }"}]}]}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject")
+            .join("ses_project123.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            !messages.is_empty(),
+            "project transcripts with tool results should still estimate tokens"
+        );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_explicit_tool_result_tokens_is_counted() {
+        // Bare transcripts must not char-estimate tokens, but explicit tool-result
+        // token counts (e.g. reported by the originating client) should still be honored.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","input_tokens":42,"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_explicit112233445566778899.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "bare transcripts must still count explicit tool-result token usage"
+        );
+        assert_eq!(messages[0].tokens.input, 42);
+    }
+
+    #[test]
+    fn test_transcripts_dir_under_project_is_not_treated_as_bare() {
+        // A `transcripts/` directory nested under a resolvable `projects/<key>/` path
+        // must not be treated as a bare transcript, since its workspace can still be
+        // attributed. Char-based estimation should proceed normally.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("projects")
+            .join("myproject")
+            .join("transcripts")
+            .join("ses_scoped112233445566778899.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            !messages.is_empty(),
+            "transcripts nested under a resolvable projects/<key>/ path should still be estimated"
+        );
+        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
     }
 
     // --- Sidechain / Agent tracking tests ---

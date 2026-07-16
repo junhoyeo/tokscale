@@ -753,9 +753,14 @@ fn value_as_i64(value: &Value) -> Option<i64> {
 
 fn timestamp_ms_from_record(value: &Value) -> Option<i64> {
     value
-        .get("endTime")
+        .get("startTime")
         .and_then(timestamp_ms_from_value)
-        .or_else(|| value.get("startTime").and_then(timestamp_ms_from_value))
+        .or_else(|| {
+            // When only endTime is available, back-calculate the start if duration is known.
+            let end_ms = value.get("endTime").and_then(timestamp_ms_from_value)?;
+            let duration = duration_ms_from_record(value).unwrap_or(0);
+            Some(end_ms.saturating_sub(duration))
+        })
         .or_else(|| value.get("hrTime").and_then(timestamp_ms_from_value))
         .or_else(|| value.get("_hrTime").and_then(timestamp_ms_from_value))
         .or_else(|| value.get("time").and_then(timestamp_ms_from_value))
@@ -869,7 +874,7 @@ mod tests {
         assert_eq!(message.tokens.output, 281);
         assert_eq!(message.tokens.cache_read, 123);
         assert_eq!(message.tokens.reasoning, 128);
-        assert_eq!(message.timestamp, 1_775_934_264_967);
+        assert_eq!(message.timestamp, 1_775_934_260_133);
         assert_eq!(message.duration_ms, Some(4834));
         assert_eq!(message.dedup_key.as_deref(), Some("trace-1:span-1"));
     }

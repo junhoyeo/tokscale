@@ -319,9 +319,8 @@ export const dailyBreakdown = pgTable(
     index("idx_daily_breakdown_submission_id").on(table.submissionId),
     index("idx_daily_breakdown_submitted_device_id").on(table.submittedDeviceId),
     index("idx_daily_breakdown_date").on(table.date),
-    unique("daily_breakdown_submission_device_date_unique").on(
+    unique("daily_breakdown_submission_id_date_key").on(
       table.submissionId,
-      table.submittedDeviceId,
       table.date
     ),
   ]

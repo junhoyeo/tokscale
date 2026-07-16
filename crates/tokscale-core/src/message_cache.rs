@@ -792,15 +792,46 @@ fn parser_version(client: ClientId) -> u32 {
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
-        ClientId::Codex => 5,
-        ClientId::Jcode => 4,
-        ClientId::Copilot => 4,
+        ClientId::Codex => 6,
+        // v4->v5: jcode's assistant-message timestamp is now back-calculated
+        // to the turn start (timestamp - tool_duration_ms) instead of using
+        // the recorded (end-anchored) timestamp directly. Follow-up to #890.
+        ClientId::Jcode => 5,
+        ClientId::Copilot => 5,
         // Pi subagent sessions now derive agent attribution from session_info
         // names; version-1 caches carry those messages without agent metadata.
         ClientId::Pi => 2,
-        // Devin CLI v1 could stop at a malformed chat_message. Desktop v1
-        // parsed a non-ACP shape and did not track its CLI title lookup.
-        ClientId::DevinCli | ClientId::DevinDesktop => 2,
+        // Devin CLI v1 could stop at a malformed chat_message. v2->v3:
+        // message timestamp is now back-calculated to the turn start
+        // (created_at - total_time_ms) instead of the recorded (end-anchored)
+        // created_at. Follow-up to #890.
+        ClientId::DevinCli => 3,
+        // Desktop v1 parsed a non-ACP shape and did not track its CLI title
+        // lookup; its timestamp handling is unaffected by the #890 follow-up.
+        ClientId::DevinDesktop => 2,
+        ClientId::Claude => 2,
+        // Junie's usage-event timestamp is now back-calculated to the call
+        // start (timestampMs - usage.time) instead of the recorded
+        // (end-anchored) timestampMs. Follow-up to #890.
+        ClientId::Junie => 2,
+        // zcode's model_usage timestamp now prefers `started_at` over
+        // `completed_at`. Follow-up to #890. v2->v3: rows with a NULL
+        // `started_at` now back-calculate `completed_at - duration_ms`
+        // instead of staying end-anchored at `completed_at`, and
+        // `is_turn_start` is now assigned to the earliest-STARTED request
+        // per turn instead of the first one seen in completed_at order.
+        // Second-round follow-up to #890.
+        ClientId::Zcode => 3,
+        // opencodereview's llm_response timestamp is now back-calculated to
+        // the call start (timestamp - duration_ms) instead of the recorded
+        // (end-anchored) timestamp. Follow-up to #890.
+        ClientId::OpenCodeReview => 2,
+        // Kiro's structured messages.jsonl turns now back-calculate the
+        // start anchor from `turn_end - elapsedTime` when the user prompt's
+        // own timestamp is missing/unparseable, instead of falling through
+        // to the (end-anchored) turn_end timestamp. Second-round follow-up
+        // to #890.
+        ClientId::Kiro => 2,
         _ => 1,
     }
 }
@@ -1993,13 +2024,37 @@ mod tests {
 
     #[test]
     fn test_devin_parser_versions_invalidate_v1_entries() {
-        assert_eq!(parser_version(ClientId::DevinCli), 2);
+        assert_eq!(parser_version(ClientId::DevinCli), 3);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
     }
 
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
-        assert_eq!(parser_version(ClientId::Codex), 5);
+        assert_eq!(parser_version(ClientId::Codex), 6);
+        assert_eq!(parser_version(ClientId::Copilot), 5);
+        assert_eq!(parser_version(ClientId::Claude), 2);
+    }
+
+    #[test]
+    fn test_duration_anchor_audit_remaining_parsers_bumps_versions() {
+        // Follow-up to #890: junie, jcode, devin-cli, zcode, and
+        // opencodereview were re-anchored to start-anchored duration
+        // timestamps; their cache-invalidating parser versions must bump so
+        // stale end-anchored-timestamp cache entries are not reused.
+        //
+        // Second-round review found gaps in that first pass: zcode's
+        // NULL-`started_at` fallback stayed end-anchored and its
+        // `is_turn_start` marking didn't follow the new start-anchored
+        // timestamps, and kiro's structured messages.jsonl turns stayed
+        // end-anchored when the prompt timestamp was missing. Both bump
+        // again here so those stale (start-anchored-but-still-wrong) v2/v1
+        // cache entries are also invalidated.
+        assert_eq!(parser_version(ClientId::Junie), 2);
+        assert_eq!(parser_version(ClientId::Jcode), 5);
+        assert_eq!(parser_version(ClientId::DevinCli), 3);
+        assert_eq!(parser_version(ClientId::Zcode), 3);
+        assert_eq!(parser_version(ClientId::OpenCodeReview), 2);
+        assert_eq!(parser_version(ClientId::Kiro), 2);
     }
 
     #[test]

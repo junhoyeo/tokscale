@@ -4,7 +4,7 @@
 //! Jcode stores authoritative assistant token usage on messages under
 //! `token_usage`; user/tool messages without usage are skipped.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
+use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -181,11 +181,29 @@ fn parse_jcode_messages(
             if tokens.total() <= 0 {
                 return None;
             }
-            let timestamp = message
-                .timestamp
-                .as_deref()
-                .and_then(parse_timestamp_str)
-                .unwrap_or(fallback_timestamp);
+            // `explicit_timestamp` is the message's own recorded `timestamp`
+            // field, as opposed to `fallback_timestamp` (a session/file-level
+            // fallback used when it's absent or unparseable).
+            let explicit_timestamp = message.timestamp.as_deref().and_then(parse_timestamp_str);
+            let recorded_timestamp = explicit_timestamp.unwrap_or(fallback_timestamp);
+            // The assistant message's `timestamp` is written once the message
+            // (including `token_usage`) is finalized, i.e. the turn's *end*,
+            // not its start. `tool_duration_ms` is that turn's elapsed time,
+            // so `sessionize()`'s `[timestamp, timestamp + duration_ms]` span
+            // would otherwise project forward past completion into phantom
+            // idle time. Back-calculate the start anchor the same way #890
+            // did for Copilot's `endTime`-only records.
+            //
+            // Only do this when `explicit_timestamp` is a real recorded end
+            // timestamp: when it's absent, `recorded_timestamp` is the
+            // session/file-level fallback, not this message's own completion
+            // time, and subtracting `tool_duration_ms` from it would shift
+            // the message into the wrong day rather than anchor it correctly.
+            let duration_ms = message.tool_duration_ms.filter(|duration| *duration > 0);
+            let timestamp = match (explicit_timestamp, duration_ms) {
+                (Some(end), Some(duration)) => back_anchor_timestamp(end, duration),
+                _ => recorded_timestamp,
+            };
             let mut unified = UnifiedMessage::new_with_dedup(
                 "jcode",
                 context.model.clone(),
@@ -196,7 +214,7 @@ fn parse_jcode_messages(
                 0.0,
                 Some(dedup_key),
             );
-            unified.duration_ms = message.tool_duration_ms.filter(|duration| *duration > 0);
+            unified.duration_ms = duration_ms;
             if !is_replacement
                 && message.role.as_deref() == Some("assistant")
                 && context.pending_turn_start
@@ -659,5 +677,41 @@ mod tests {
         assert!(messages[1].is_turn_start);
         let turn_count = messages.iter().filter(|m| m.is_turn_start).count();
         assert_eq!(turn_count, 2);
+    }
+
+    #[test]
+    fn test_tool_duration_timestamp_is_start_anchored() {
+        // Regression (follow-up to #890): an assistant message's `timestamp`
+        // is written once the message (including `token_usage`) is
+        // finalized, i.e. the turn's *end*, not its start. `tool_duration_ms`
+        // is that turn's elapsed time, so sessionize()'s
+        // `[timestamp, timestamp + duration_ms]` span would otherwise project
+        // forward past the actual completion into phantom idle time. The
+        // parser must back-calculate the start anchor instead.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[
+    {"id":"assistant_1","role":"assistant","timestamp":"2026-06-16T12:00:05Z","token_usage":{"input_tokens":100,"output_tokens":10},"tool_duration_ms":2000}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jcode_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].timestamp,
+            parse_timestamp_str("2026-06-16T12:00:03Z").unwrap(),
+            "timestamp must be back-calculated to the turn start (end - duration)"
+        );
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(2000),
+            "duration_ms must still span from start to the recorded end timestamp"
+        );
     }
 }
