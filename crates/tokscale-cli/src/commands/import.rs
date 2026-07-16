@@ -20,6 +20,7 @@
 //! See <https://github.com/junhoyeo/tokscale/issues/888>.
 
 use anyhow::{bail, Context, Result};
+use chrono::NaiveDate;
 use std::collections::{BTreeMap, BTreeSet};
 use tokscale_core::{
     calculate_intensities, generate_graph_result, ClientContribution, ClientId,
@@ -43,8 +44,29 @@ pub struct ImportOutcome {
     /// The server rejects submissions shaped like this ("Cost submitted
     /// without tokens"), so these are surfaced as a warning rather than
     /// silently dropped — this importer does not upload, so the row is kept
-    /// as-is for the caller to inspect.
+    /// as-is for the caller to inspect. Cursor's legacy `premium-tool-call`
+    /// rows are exempt (see [`is_cursor_legacy_tokenless`]), matching the
+    /// server's own carve-out.
     pub suspect_cost_rows: usize,
+    /// Number of daily aggregate rows dated after today. The submit
+    /// endpoint rejects dates too far in the future (see
+    /// `submission.ts`'s 2-day buffer), so these are surfaced as a warning.
+    pub future_dated_rows: usize,
+    /// Number of `totalCost` strings that failed to parse as a valid
+    /// float (e.g. `"$1.25"`) and were treated as `0.0`.
+    pub unparseable_cost_rows: usize,
+    /// Number of non-finite (`NaN`/`Infinity`) cost values sanitized to
+    /// `0.0`. Non-finite floats serialize to JSON `null`, which the submit
+    /// endpoint rejects.
+    pub non_finite_cost_rows: usize,
+    /// Number of daily aggregate rows with no `modelBreakdowns` and more
+    /// than one entry in `modelsUsed`: all usage in the row is attributed
+    /// to the first model, since there is no per-model split to use.
+    pub multi_model_fallback_rows: usize,
+    /// Human-readable warnings for rows where `modelBreakdowns` are present
+    /// but their summed tokens/cost diverge from the aggregate-level
+    /// totals beyond a small tolerance — a sign of partial breakdown data.
+    pub breakdown_reconciliation_warnings: Vec<String>,
 }
 
 /// Parse an export of the given `format` into normalized tokscale data.
@@ -146,10 +168,17 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
     let mut unknown: BTreeSet<String> = BTreeSet::new();
     let mut negative_values_clamped = 0usize;
     let mut suspect_cost_rows = 0usize;
+    let mut future_dated_rows = 0usize;
+    let mut unparseable_cost_rows = 0usize;
+    let mut non_finite_cost_rows = 0usize;
+    let mut multi_model_fallback_rows = 0usize;
+    let mut breakdown_reconciliation_warnings: Vec<String> = Vec::new();
+    let today = chrono::Utc::now().date_naive();
 
     for agg in &export.daily_aggregates {
-        if !is_iso_date(&agg.date) {
-            bail!("invalid date {:?} in export (expected YYYY-MM-DD)", agg.date);
+        let parsed_date = parse_calendar_date(&agg.date)?;
+        if parsed_date > today {
+            future_dated_rows += 1;
         }
 
         let client = agg
@@ -171,11 +200,14 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string());
-            let cost = agg
-                .total_cost
-                .as_deref()
-                .and_then(|c| c.parse::<f64>().ok())
-                .unwrap_or(0.0);
+            if agg.models_used.len() > 1 {
+                // All usage in this row is attributed to `model` alone;
+                // there is no per-model split to divide it by.
+                multi_model_fallback_rows += 1;
+            }
+            let raw_cost = parse_cost_string(agg.total_cost.as_deref(), &mut unparseable_cost_rows);
+            let raw_cost = sanitize_cost(raw_cost, &mut non_finite_cost_rows);
+            let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
             let tokens = TokenBreakdown {
                 input: clamp_i64(agg.input_tokens, &mut negative_values_clamped),
                 output: clamp_i64(agg.output_tokens, &mut negative_values_clamped),
@@ -183,12 +215,17 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
                 cache_write: clamp_i64(agg.cache_creation_tokens, &mut negative_values_clamped),
                 reasoning: 0,
             };
-            let cost = clamp_f64(cost, &mut negative_values_clamped);
-            if cost > 0.0 && tokens.total() == 0 {
+            if cost > 0.0 && tokens.total() == 0 && !is_cursor_legacy_tokenless(&client, &model) {
                 suspect_cost_rows += 1;
             }
             add_row(day, &client, &model, tokens, cost);
         } else {
+            let mut mb_input = 0i64;
+            let mut mb_output = 0i64;
+            let mut mb_cache_read = 0i64;
+            let mut mb_cache_write = 0i64;
+            let mut mb_cost = 0.0f64;
+
             for mb in &agg.model_breakdowns {
                 let tokens = TokenBreakdown {
                     input: clamp_i64(mb.input_tokens, &mut negative_values_clamped),
@@ -197,11 +234,54 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
                     cache_write: clamp_i64(mb.cache_creation_tokens, &mut negative_values_clamped),
                     reasoning: 0,
                 };
-                let cost = clamp_f64(mb.cost, &mut negative_values_clamped);
-                if cost > 0.0 && tokens.total() == 0 {
+                let raw_cost = sanitize_cost(mb.cost, &mut non_finite_cost_rows);
+                let cost = clamp_f64(raw_cost, &mut negative_values_clamped);
+                if cost > 0.0
+                    && tokens.total() == 0
+                    && !is_cursor_legacy_tokenless(&client, &mb.model_name)
+                {
                     suspect_cost_rows += 1;
                 }
+
+                mb_input += tokens.input;
+                mb_output += tokens.output;
+                mb_cache_read += tokens.cache_read;
+                mb_cache_write += tokens.cache_write;
+                mb_cost += cost;
+
                 add_row(day, &client, &mb.model_name, tokens, cost);
+            }
+
+            // Reconciliation: only compare against aggregate-level totals
+            // when the export actually populated them — clawdboard rows
+            // sometimes carry only `modelBreakdowns` with no duplicated
+            // aggregate scalars, which is not a mismatch.
+            let agg_tokens_present = agg.input_tokens != 0
+                || agg.output_tokens != 0
+                || agg.cache_read_tokens != 0
+                || agg.cache_creation_tokens != 0;
+            if agg_tokens_present {
+                let agg_total = agg.input_tokens.max(0)
+                    + agg.output_tokens.max(0)
+                    + agg.cache_read_tokens.max(0)
+                    + agg.cache_creation_tokens.max(0);
+                let mb_total = mb_input + mb_output + mb_cache_read + mb_cache_write;
+                if tokens_diverge(mb_total, agg_total) {
+                    breakdown_reconciliation_warnings.push(format!(
+                        "{} {}: modelBreakdowns sum to {} token(s) but aggregate totals report {}",
+                        agg.date, client, mb_total, agg_total
+                    ));
+                }
+            }
+            if let Some(raw) = agg.total_cost.as_deref() {
+                let agg_cost = parse_cost_string(Some(raw), &mut unparseable_cost_rows);
+                let agg_cost = sanitize_cost(agg_cost, &mut non_finite_cost_rows);
+                if costs_diverge(mb_cost, agg_cost) {
+                    breakdown_reconciliation_warnings.push(format!(
+                        "{} {}: modelBreakdowns sum to cost {:.4} but aggregate totalCost reports {:.4}",
+                        agg.date, client, mb_cost, agg_cost
+                    ));
+                }
             }
         }
     }
@@ -223,7 +303,80 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
         unknown_clients: unknown.into_iter().collect(),
         negative_values_clamped,
         suspect_cost_rows,
+        future_dated_rows,
+        unparseable_cost_rows,
+        non_finite_cost_rows,
+        multi_model_fallback_rows,
+        breakdown_reconciliation_warnings,
     })
+}
+
+/// Validate that `s` is both shaped like `YYYY-MM-DD` (matching the
+/// server's `^\d{4}-\d{2}-\d{2}$` regex) and a real calendar date — the
+/// shape check alone lets invalid dates like `2026-02-31` through.
+fn parse_calendar_date(s: &str) -> Result<NaiveDate> {
+    if !is_iso_date(s) {
+        bail!("invalid date {:?} in export (expected YYYY-MM-DD)", s);
+    }
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("invalid calendar date {:?} in export (not a real date)", s))
+}
+
+/// Parse a clawdboard `totalCost` string, tracking how many values failed
+/// to parse so the caller can warn once with a summary count instead of
+/// silently treating malformed strings (e.g. `"$1.25"`) as zero.
+fn parse_cost_string(raw: Option<&str>, unparseable_count: &mut usize) -> f64 {
+    match raw {
+        None => 0.0,
+        Some(s) => match s.parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => {
+                *unparseable_count += 1;
+                0.0
+            }
+        },
+    }
+}
+
+/// Sanitize a non-finite (`NaN`/`Infinity`) cost value to zero, tracking
+/// the count so the caller can warn once. Non-finite floats serialize to
+/// JSON `null` via `serde_json`, which the submit endpoint rejects.
+fn sanitize_cost(v: f64, non_finite_count: &mut usize) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        *non_finite_count += 1;
+        0.0
+    }
+}
+
+/// Mirrors the server's Cursor legacy carve-out
+/// (`CURSOR_LEGACY_TOKENLESS_MODELS` in `submission.ts`): Cursor's
+/// pre-2025-05 usage exports include `premium-tool-call` rows that are
+/// billed per tool invocation and carry no token attribution at all. These
+/// legitimately have `cost > 0` with every token field `0`, so they must
+/// not be flagged as suspect.
+fn is_cursor_legacy_tokenless(client: &str, model: &str) -> bool {
+    client == "cursor" && model == "premium-tool-call"
+}
+
+/// Tolerance for reconciling `modelBreakdowns` sums against aggregate-level
+/// totals: small rounding differences between clawdboard's per-model and
+/// aggregate exports are expected and not worth warning about.
+const RECONCILE_RELATIVE_TOLERANCE: f64 = 0.01; // 1%
+const RECONCILE_TOKEN_ABS_TOLERANCE: i64 = 2;
+const RECONCILE_COST_ABS_TOLERANCE: f64 = 0.01;
+
+fn tokens_diverge(actual: i64, expected: i64) -> bool {
+    let diff = (actual - expected).abs();
+    let rel_bound = ((expected.unsigned_abs() as f64) * RECONCILE_RELATIVE_TOLERANCE) as i64;
+    diff > rel_bound.max(RECONCILE_TOKEN_ABS_TOLERANCE)
+}
+
+fn costs_diverge(actual: f64, expected: f64) -> bool {
+    let diff = (actual - expected).abs();
+    let rel_bound = expected.abs() * RECONCILE_RELATIVE_TOLERANCE;
+    diff > rel_bound.max(RECONCILE_COST_ABS_TOLERANCE)
 }
 
 /// Clamp a token value to zero if negative, tracking the number of times
@@ -533,5 +686,139 @@ mod tests {
         assert_eq!(client.tokens.output, 10);
         assert_eq!(client.tokens.cache_read, 0);
         assert_eq!(client.cost, 0.0);
+    }
+
+    #[test]
+    fn calendar_invalid_date_is_rejected() {
+        // "2026-02-31" is shaped like YYYY-MM-DD but is not a real date
+        // (February never has 31 days); the shape-only check previously let
+        // this through.
+        let json = r#"{"dailyAggregates":[{"date":"2026-02-31","source":"codex",
+            "modelBreakdowns":[{"modelName":"x","cost":0.0,"inputTokens":1,"outputTokens":0,
+            "cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        assert!(parse_clawdboard_export(json).is_err());
+    }
+
+    #[test]
+    fn far_future_date_is_warned() {
+        let json = r#"{"dailyAggregates":[{"date":"2099-01-01","source":"codex",
+            "modelBreakdowns":[{"modelName":"x","cost":0.0,"inputTokens":1,"outputTokens":0,
+            "cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.future_dated_rows, 1);
+        // The row is still kept; the submit endpoint rejects it, this
+        // importer only warns.
+        assert_eq!(out.graph.contributions[0].date, "2099-01-01");
+    }
+
+    #[test]
+    fn reconciliation_warns_when_breakdown_sum_diverges_from_aggregate() {
+        // modelBreakdowns sum to far less than the aggregate-level totals
+        // report: a sign of a partial breakdown (silent usage loss if the
+        // caller only trusts modelBreakdowns).
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":1000,"outputTokens":500,"cacheReadTokens":0,"cacheCreationTokens":0,
+            "totalCost":"10.00","modelsUsed":["gpt-5.5"],
+            "modelBreakdowns":[{"modelName":"gpt-5.5","cost":1.0,"inputTokens":100,
+            "outputTokens":50,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.breakdown_reconciliation_warnings.len(), 2, "both token and cost mismatch");
+        assert!(out.breakdown_reconciliation_warnings[0].contains("token"));
+        assert!(out.breakdown_reconciliation_warnings[1].contains("cost"));
+    }
+
+    #[test]
+    fn reconciliation_is_silent_within_tolerance() {
+        // Small rounding differences between aggregate and per-model totals
+        // (as in real clawdboard exports) must not trigger a warning.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":157910,"outputTokens":5224,"cacheReadTokens":112640,"cacheCreationTokens":0,
+            "totalCost":"0.5859","modelsUsed":["gpt-5.5"],
+            "modelBreakdowns":[{"modelName":"gpt-5.5","cost":0.585882,"inputTokens":157910,
+            "outputTokens":5224,"cacheReadTokens":112640,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert!(out.breakdown_reconciliation_warnings.is_empty());
+    }
+
+    #[test]
+    fn reconciliation_skipped_when_aggregate_totals_absent() {
+        // clawdboard rows that only carry modelBreakdowns (no duplicated
+        // aggregate-level scalars) must not be flagged as mismatched.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "modelsUsed":["gpt-5.5"],
+            "modelBreakdowns":[{"modelName":"gpt-5.5","cost":1.0,"inputTokens":100,
+            "outputTokens":50,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert!(out.breakdown_reconciliation_warnings.is_empty());
+    }
+
+    #[test]
+    fn multi_model_fallback_without_breakdowns_is_warned() {
+        // No modelBreakdowns and multiple modelsUsed: all usage is
+        // attributed to the first model only; the caller must be warned.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":10,"outputTokens":5,"totalCost":"0.01",
+            "modelsUsed":["gpt-5.5","gpt-5.5-mini"]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.multi_model_fallback_rows, 1);
+        assert_eq!(out.graph.contributions[0].clients[0].model_id, "gpt-5.5");
+    }
+
+    #[test]
+    fn single_model_without_breakdowns_is_not_warned() {
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":10,"outputTokens":5,"totalCost":"0.01",
+            "modelsUsed":["gpt-5.5"]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.multi_model_fallback_rows, 0);
+    }
+
+    #[test]
+    fn unparseable_cost_string_is_warned_and_treated_as_zero() {
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":10,"outputTokens":5,"totalCost":"$1.25",
+            "modelsUsed":["gpt-5.5"]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.unparseable_cost_rows, 1);
+        assert_eq!(out.graph.contributions[0].clients[0].cost, 0.0);
+    }
+
+    #[test]
+    fn non_finite_cost_is_sanitized_to_zero() {
+        // "NaN"/"Infinity" parse successfully via f64::from_str but must not
+        // survive to serialize as JSON null (which the endpoint rejects).
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":10,"outputTokens":5,"totalCost":"NaN",
+            "modelsUsed":["gpt-5.5"]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.non_finite_cost_rows, 1);
+        assert_eq!(out.unparseable_cost_rows, 0, "NaN parses fine as a float");
+        let cost = out.graph.contributions[0].clients[0].cost;
+        assert_eq!(cost, 0.0);
+        assert!(cost.is_finite());
+    }
+
+    #[test]
+    fn cursor_legacy_premium_tool_call_is_exempt_from_suspect_warning() {
+        // Mirrors submission.ts's CURSOR_LEGACY_TOKENLESS_MODELS carve-out:
+        // Cursor's premium-tool-call rows legitimately have cost > 0 with
+        // no token attribution and must not be flagged as suspect.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"cursor",
+            "modelBreakdowns":[{"modelName":"premium-tool-call","cost":0.5,"inputTokens":0,
+            "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.suspect_cost_rows, 0);
+        assert!((out.graph.contributions[0].clients[0].cost - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_cursor_tokenless_cost_row_is_still_flagged() {
+        // Sanity check: the exemption is specific to cursor +
+        // premium-tool-call, not tokenless cost rows in general.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "modelBreakdowns":[{"modelName":"premium-tool-call","cost":0.5,"inputTokens":0,
+            "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.suspect_cost_rows, 1);
     }
 }

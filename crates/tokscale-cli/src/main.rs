@@ -4979,15 +4979,19 @@ fn run_import_command(
         ));
     }
 
-    println!("\n  {}\n", "Tokscale - Import Usage Data".cyan());
+    // All human-readable banners/summaries/warnings go to stderr so stdout
+    // stays pure JSON when no --output path is given (matching `tokscale
+    // graph`'s behavior) — e.g. `tokscale import export.json > out.json`
+    // must produce a valid JSON file.
+    eprintln!("\n  {}\n", "Tokscale - Import Usage Data".cyan());
 
     let contents = std::fs::read_to_string(&file)
         .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", file, e))?;
     let outcome = commands::import::parse_export(&fmt, &contents)?;
     let graph = &outcome.graph;
 
-    println!("{}", "  Imported data:".white());
-    println!(
+    eprintln!("{}", "  Imported data:".white());
+    eprintln!(
         "{}",
         format!(
             "    Date range: {} to {}",
@@ -4995,11 +4999,11 @@ fn run_import_command(
         )
         .bright_black()
     );
-    println!(
+    eprintln!(
         "{}",
         format!("    Active days: {}", graph.summary.active_days).bright_black()
     );
-    println!(
+    eprintln!(
         "{}",
         format!(
             "    Total tokens: {}",
@@ -5007,7 +5011,7 @@ fn run_import_command(
         )
         .bright_black()
     );
-    println!(
+    eprintln!(
         "{}",
         format!(
             "    Total cost: {}",
@@ -5016,18 +5020,18 @@ fn run_import_command(
         .bright_black()
     );
     if !graph.summary.clients.is_empty() {
-        println!(
+        eprintln!(
             "{}",
             format!("    Clients: {}", graph.summary.clients.join(", ")).bright_black()
         );
     }
-    println!(
+    eprintln!(
         "{}",
         format!("    Models: {}", graph.summary.models.len()).bright_black()
     );
 
     if !outcome.unknown_clients.is_empty() {
-        println!(
+        eprintln!(
             "\n  {}",
             format!(
                 "Warning: unrecognized client id(s): {}. The leaderboard only \
@@ -5063,22 +5067,82 @@ fn run_import_command(
         );
     }
 
+    if outcome.future_dated_rows > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "\n  Warning: {} row(s) are dated in the future. The submit endpoint rejects \
+                 dates too far ahead, so these rows would be rejected if ever uploaded.",
+                outcome.future_dated_rows
+            )
+            .yellow()
+        );
+    }
+
+    if outcome.unparseable_cost_rows > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "\n  Warning: {} totalCost value(s) in the export could not be parsed and were \
+                 treated as 0.",
+                outcome.unparseable_cost_rows
+            )
+            .yellow()
+        );
+    }
+
+    if outcome.non_finite_cost_rows > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "\n  Warning: {} cost value(s) in the export were non-finite (NaN/Infinity) \
+                 and were sanitized to 0.",
+                outcome.non_finite_cost_rows
+            )
+            .yellow()
+        );
+    }
+
+    if outcome.multi_model_fallback_rows > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "\n  Warning: {} row(s) had no per-model breakdown and multiple models used; \
+                 all usage in those rows was attributed to the first model only.",
+                outcome.multi_model_fallback_rows
+            )
+            .yellow()
+        );
+    }
+
+    for warning in &outcome.breakdown_reconciliation_warnings {
+        eprintln!("{}", format!("\n  Warning: {}", warning).yellow());
+    }
+
     if dry_run {
-        println!("{}", "\n  Dry run - not emitting normalized JSON.\n".yellow());
+        eprintln!(
+            "{}",
+            "\n  Dry run - not emitting normalized JSON.\n".yellow()
+        );
         return Ok(());
     }
 
-    let payload = to_ts_token_contribution_data(graph, None);
+    let mut payload = to_ts_token_contribution_data(graph, None);
+    // The imported data has no MCP provenance of its own — it's derived
+    // purely from a third-party clawdboard export. Reusing the graph/submit
+    // converter would otherwise embed the *local* machine's configured MCP
+    // server names, leaking unrelated metadata into a file that should only
+    // reflect the export's contents.
+    payload.mcp_servers = None;
     let json_output = serde_json::to_string_pretty(&payload)?;
 
     if let Some(output_path) = output {
         std::fs::write(&output_path, json_output)?;
-        println!(
+        eprintln!(
             "{}",
             format!("\n  ✓ Normalized tokscale data written to {}", output_path).green()
         );
     } else {
-        println!();
         println!("{}", json_output);
     }
 

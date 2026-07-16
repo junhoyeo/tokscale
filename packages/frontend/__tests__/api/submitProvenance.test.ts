@@ -265,6 +265,7 @@ describe("POST /api/submit backfill provenance", () => {
     ];
 
     let insertCall = 0;
+    let submissionInsertValues: unknown;
     let submittedDeviceValues: unknown;
     let dailyInsertValues: unknown;
     let submissionUpdateValues: unknown;
@@ -290,7 +291,10 @@ describe("POST /api/submit backfill provenance", () => {
         insertCall += 1;
         if (insertCall === 1) {
           const builder = {
-            values: vi.fn(() => builder),
+            values: vi.fn((values: unknown) => {
+              submissionInsertValues = values;
+              return builder;
+            }),
             returning: vi.fn(() => Promise.resolve([{ id: "submission-1" }])),
           };
           return builder;
@@ -344,10 +348,14 @@ describe("POST /api/submit backfill provenance", () => {
     expect(response.status).toBe(200);
 
     // The submission-level `provenance` tag must not leak into any of the
-    // rows this route writes: not the submitted-device row, not the
-    // daily_breakdown insert, and not the submissions update. Persisting it
-    // (and actually segregating backfilled data) is deliberately deferred —
-    // see https://github.com/junhoyeo/tokscale/issues/888.
+    // rows this route writes: not the initial submissions insert, not the
+    // submitted-device row, not the daily_breakdown insert, and not the
+    // submissions update. Persisting it (and actually segregating
+    // backfilled data) is deliberately deferred — see
+    // https://github.com/junhoyeo/tokscale/issues/888.
+    expect(submissionInsertValues).toEqual(
+      expect.not.objectContaining({ provenance: expect.anything() })
+    );
     expect(submittedDeviceValues).toEqual(
       expect.not.objectContaining({ provenance: expect.anything() })
     );
@@ -359,6 +367,236 @@ describe("POST /api/submit backfill provenance", () => {
     );
 
     // Nor is it echoed back to the caller.
+    const body = await response.json();
+    expect(body).not.toHaveProperty("provenance");
+  });
+
+  it("does not persist provenance via the existing-day UPDATE path", async () => {
+    // The new-day INSERT path (covered above) batches rows through
+    // `tx.insert(dailyBreakdown).values(...)`, which is easy to inspect.
+    // The existing-day path instead issues a raw parameterized `UPDATE ...
+    // FROM (VALUES ...)` via `tx.execute(sql\`...\`)` (see
+    // src/app/api/submit/route.ts around STEP 3c) — a different code path
+    // that must be guarded independently.
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_backfill",
+          name: "Backfill import",
+        },
+        meta: {
+          version: "4.5.3",
+          dateRange: { start: "2026-05-11", end: "2026-05-11" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-05-11",
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 12,
+                cost: 0.5,
+                input: 7,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 0,
+              },
+            ],
+          },
+        ],
+        provenance: { origin: "backfill", importer: "clawdboard" },
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    mockState.clientContributionToBreakdownData.mockReturnValue({
+      tokens: 12,
+      cost: 0.5,
+      input: 7,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 0,
+    });
+    mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
+      merged: {
+        codex: {
+          tokens: 12,
+          cost: 0.5,
+          input: 7,
+          output: 5,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages: 0,
+          models: { "gpt-5.5": { tokens: 12, cost: 0.5 } },
+        },
+      },
+      warnings: [],
+    });
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 12,
+      cost: 0.5,
+      inputTokens: 7,
+      outputTokens: 5,
+    });
+    mockState.mergeTimestampMs.mockImplementation(
+      (_existing: unknown, incoming: unknown) => incoming
+    );
+
+    const selectResults = [
+      [{ id: "submission-existing" }], // existing submission -> no submissions INSERT
+      [
+        {
+          id: "day-1",
+          date: "2026-05-11",
+          timestampMs: null,
+          activeTimeMs: null,
+          sourceBreakdown: {},
+        },
+      ], // existing device day for the same date -> UPDATE path
+      [
+        {
+          totalTokens: 12,
+          totalCost: "0.5000",
+          inputTokens: 7,
+          outputTokens: 5,
+          dateStart: "2026-05-11",
+          dateEnd: "2026-05-11",
+          activeDays: 1,
+          rowCount: 1,
+        },
+      ],
+      [
+        {
+          sourceBreakdown: {
+            codex: {
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+              modelId: "gpt-5.5",
+              models: { "gpt-5.5": { tokens: 12 } },
+            },
+          },
+        },
+      ],
+    ];
+
+    let submittedDeviceValues: unknown;
+    let submissionUpdateValues: unknown;
+    const executedSqlArgs: unknown[] = [];
+    const tx = {
+      update: vi.fn((table: unknown) => {
+        const builder = {
+          set: vi.fn((values: unknown) => {
+            if (
+              table &&
+              typeof table === "object" &&
+              (table as { userId?: unknown }).userId === "submissions.userId"
+            ) {
+              submissionUpdateValues = values;
+            }
+            return builder;
+          }),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        // Only the submitted-device upsert should ever insert in this
+        // scenario: the submission already exists (no submissions insert)
+        // and the day already exists (UPDATE, not dailyBreakdown insert).
+        const builder = {
+          values: vi.fn((values: unknown) => {
+            submittedDeviceValues = values;
+            return builder;
+          }),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn((sqlArg: unknown) => {
+        executedSqlArgs.push(sqlArg);
+        return Promise.resolve();
+      }),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(
+      async (callback: (tx: MockTransaction) => Promise<unknown>) => callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          meta: {},
+          contributions: [],
+          provenance: { origin: "backfill", importer: "clawdboard" },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(submittedDeviceValues).toEqual(
+      expect.not.objectContaining({ provenance: expect.anything() })
+    );
+    expect(submissionUpdateValues).toEqual(
+      expect.not.objectContaining({ provenance: expect.anything() })
+    );
+
+    // Flatten every literal value drizzle bound into the raw
+    // `UPDATE ... FROM (VALUES ...)` SQL issued via tx.execute, and confirm
+    // the submission-level provenance tag never appears among them.
+    const flattenedValues: unknown[] = [];
+    const flattenSqlValues = (node: unknown): void => {
+      if (node == null) return;
+      const maybeSql = node as { queryChunks?: unknown[] };
+      if (Array.isArray(maybeSql.queryChunks)) {
+        for (const chunk of maybeSql.queryChunks) flattenSqlValues(chunk);
+        return;
+      }
+      if (typeof node === "string" || typeof node === "number" || typeof node === "boolean") {
+        flattenedValues.push(node);
+      }
+    };
+    for (const arg of executedSqlArgs) flattenSqlValues(arg);
+
+    expect(
+      flattenedValues.some((v) => typeof v === "string" && v.includes("backfill"))
+    ).toBe(false);
+    expect(
+      flattenedValues.some((v) => typeof v === "string" && v.includes("clawdboard"))
+    ).toBe(false);
+
     const body = await response.json();
     expect(body).not.toHaveProperty("provenance");
   });
