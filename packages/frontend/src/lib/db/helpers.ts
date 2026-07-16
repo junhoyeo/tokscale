@@ -17,6 +17,13 @@ export interface ClientBreakdownProvenanceData {
   schemaVersion: number;
   messageCount: number;
   modelCount: number;
+  /**
+   * "backfill" when this client's contribution was written by a
+   * backfill-origin submission (`tokscale import`); absent (or "cli") for
+   * locally-scanned CLI usage. Preserved by deriveClientBreakdownProvenance
+   * so merges do not silently drop the tag.
+   */
+  origin?: "cli" | "backfill";
 }
 
 export interface ClientBreakdownData {
@@ -94,6 +101,8 @@ export function deriveClientBreakdownProvenance(
     ? 1
     : 0;
 
+  const origin = breakdown.provenance?.origin;
+
   return {
     schemaVersion: Math.max(1, breakdown.provenance?.schemaVersion ?? 1),
     messageCount: Math.max(
@@ -102,6 +111,9 @@ export function deriveClientBreakdownProvenance(
       breakdown.messages ?? 0
     ),
     modelCount: Math.max(0, breakdown.provenance?.modelCount ?? 0, modelCount),
+    // Carry the origin tag through re-derivation (merges, alias folding) so
+    // a backfill-tagged client row keeps its tag.
+    ...(origin ? { origin } : {}),
   };
 }
 

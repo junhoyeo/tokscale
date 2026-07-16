@@ -192,6 +192,13 @@ export const submissions = pgTable(
     submitCount: integer("submit_count").notNull().default(1),
     /** 0=legacy (no timestamps), 1=timestamp-aware CLI */
     schemaVersion: integer("schema_version").notNull().default(0),
+    /**
+     * True once ANY accepted submission for this user carried a
+     * submission-level `provenance.origin === "backfill"` tag (e.g. from
+     * `tokscale import`). Sticky: later live CLI submits never reset it,
+     * because the merged totals still include the imported history.
+     */
+    hasBackfill: boolean("has_backfill").notNull().default(false),
 
     totalActiveTimeMs: bigint("total_active_time_ms", { mode: "number" }),
     longestContinuousMs: bigint("longest_continuous_ms", { mode: "number" }),
@@ -307,6 +314,12 @@ export const dailyBreakdown = pgTable(
             schemaVersion: number;
             messageCount: number;
             modelCount: number;
+            /**
+             * "backfill" when this client's contribution came from a
+             * backfill-origin submission (`tokscale import`); absent/"cli"
+             * for locally-scanned usage.
+             */
+            origin?: "cli" | "backfill";
           };
           modelId?: string;
         }

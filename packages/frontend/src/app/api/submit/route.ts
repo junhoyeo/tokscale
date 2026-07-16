@@ -220,6 +220,13 @@ export async function POST(request: Request) {
     const data = validation.data;
     const warnings = [...validation.warnings];
 
+    // Phase 1 backfill-provenance persistence (issue #888): a submission
+    // tagged `provenance.origin === "backfill"` (from `tokscale import`)
+    // sets the sticky submissions.has_backfill flag and stamps a per-client
+    // origin tag into daily_breakdown.source_breakdown. The tag is excluded
+    // from generateSubmissionHash, so it never affects idempotency.
+    const isBackfill = data.provenance?.origin === "backfill";
+
     if (data.contributions.length === 0) {
       return NextResponse.json(
         { error: "No contribution data to submit" },
@@ -287,6 +294,7 @@ export async function POST(request: Request) {
                 modelsUsed: [],
                 cliVersion: data.meta.version,
                 submissionHash: generateSubmissionHash(hashData),
+                hasBackfill: isBackfill,
               })
               .returning({ id: submissions.id })
           );
@@ -513,6 +521,20 @@ export async function POST(request: Request) {
           }
         }
 
+        if (isBackfill) {
+          // Stamp the per-client origin tag AFTER provenance derivation so it
+          // is persisted alongside the coverage metrics. The merge helper
+          // re-derives provenance via deriveClientBreakdownProvenance, which
+          // carries `origin` through, so the tag survives the merge path too.
+          for (const clientBreakdown of Object.values(incomingClientBreakdown)) {
+            clientBreakdown.provenance = {
+              ...(clientBreakdown.provenance ??
+                deriveClientBreakdownProvenance(clientBreakdown)),
+              origin: "backfill",
+            };
+          }
+        }
+
         const existingDay = existingDaysMap.get(incomingDay.date);
 
         if (existingDay) {
@@ -694,6 +716,10 @@ export async function POST(request: Request) {
            modelsUsed: Array.from(allModels),
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
+          // Sticky: only ever set to true. A later live CLI submit omits the
+          // key entirely, so it can never reset an account's backfill flag —
+          // the merged totals still include the imported history.
+          ...(isBackfill ? { hasBackfill: true } : {}),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
           schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
           totalActiveTimeMs: aggregates.totalActiveTimeMs,

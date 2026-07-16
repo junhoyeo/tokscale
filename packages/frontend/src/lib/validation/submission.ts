@@ -41,6 +41,11 @@ const ClientContributionProvenanceSchema = z.object({
   schemaVersion: NonNegativeIntegerSchema.min(1),
   messageCount: NonNegativeIntegerSchema,
   modelCount: NonNegativeIntegerSchema,
+  // Per-client origin tag; the submit route stamps "backfill" on every client
+  // of a backfill-origin submission before persisting into
+  // daily_breakdown.source_breakdown. Optional so existing CLIs (which never
+  // send it) are unaffected.
+  origin: z.enum(["cli", "backfill"]).optional(),
 });
 
 const CcMirrorSourceSchema = z.string().regex(
@@ -184,12 +189,15 @@ const TimeMetricsSchema = z.object({
  * aggregate export via `tokscale import` ("backfill"). Backfilled aggregates
  * are not independently verifiable the way locally-scanned sessions are.
  *
- * NOTE (https://github.com/junhoyeo/tokscale/issues/888): this is accepted and
- * carried through so backfilled submissions can be *tagged*. Persisting it and
- * segregating backfilled data in ranking (e.g. excluding it from competitive
- * totals, or surfacing it under a separate "imported" view) is still TODO in
- * the submission handler + leaderboard queries. Until that lands, a "backfill"
- * submission must not be treated as ranked-equivalent to live CLI usage.
+ * NOTE (https://github.com/junhoyeo/tokscale/issues/888): Phase 1 persistence
+ * has landed. The submit route now (a) sets the sticky `submissions.has_backfill`
+ * flag when origin === "backfill" (never reset by later live submits), and
+ * (b) stamps `origin: "backfill"` into each client's provenance inside
+ * `daily_breakdown.source_breakdown`. The flag is surfaced as an
+ * "includes imported history" badge on profiles. Segregating backfilled data
+ * in RANKING (e.g. excluding it from competitive totals, or a separate
+ * "imported" view) is still TODO in the leaderboard queries, so a "backfill"
+ * submission must not yet be treated as ranked-equivalent to live CLI usage.
  *
  * Optional, so existing CLIs (which omit it) are unaffected, and excluded from
  * `generateSubmissionHash` below since it is derived metadata.

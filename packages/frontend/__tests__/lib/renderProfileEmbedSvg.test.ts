@@ -18,6 +18,7 @@ const mockStats: UserEmbedStats = {
     submissionCount: 7,
     rank: 3,
     updatedAt: "2026-02-24T00:00:00.000Z",
+    hasBackfill: false,
   },
 };
 
