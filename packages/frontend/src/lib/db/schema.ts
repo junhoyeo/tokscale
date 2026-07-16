@@ -323,11 +323,6 @@ export const dailyBreakdown = pgTable(
       table.submissionId,
       table.date
     ),
-    unique("daily_breakdown_submission_device_date_unique").on(
-      table.submissionId,
-      table.submittedDeviceId,
-      table.date
-    ),
   ]
 );
 

@@ -291,10 +291,10 @@ export async function POST(request: Request) {
           )
           .for('update');
 
-      let existingDays = await fetchExistingDeviceDays();
+      let existingDeviceDays = await fetchExistingDeviceDays();
 
       if (
-        existingDays.length === 0 &&
+        existingDeviceDays.length === 0 &&
         !isNewSubmission &&
         submitDevice.key !== LEGACY_SUBMIT_DEVICE_KEY
       ) {
@@ -356,8 +356,26 @@ export async function POST(request: Request) {
           // re-adopt.
           console.warn("Legacy adoption conflict (concurrent submit), falling through:", adoptionErr);
         }
-        existingDays = await fetchExistingDeviceDays();
+        existingDeviceDays = await fetchExistingDeviceDays();
       }
+
+      // Fetch existing days across the WHOLE submission (every device), not
+      // just the submitting device. A date already recorded by another
+      // device must flow through the toUpdate merge path below (which runs
+      // mergeClientBreakdownsWithRegressionGuard) instead of falling into
+      // toInsert, where ON CONFLICT DO UPDATE would blindly overwrite the
+      // other device's row with this device's raw values.
+      const existingDays = await tx
+        .select({
+          id: dailyBreakdown.id,
+          date: dailyBreakdown.date,
+          timestampMs: dailyBreakdown.timestampMs,
+          activeTimeMs: dailyBreakdown.activeTimeMs,
+          sourceBreakdown: dailyBreakdown.sourceBreakdown,
+        })
+        .from(dailyBreakdown)
+        .where(eq(dailyBreakdown.submissionId, submissionId))
+        .for('update');
 
       const existingDaysMap = new Map(
         existingDays.map((d) => [d.date, d])
@@ -476,30 +494,35 @@ export async function POST(request: Request) {
         }
       }
 
+      // Batch INSERT new days via raw SQL VALUES list. ON CONFLICT (submission_id, date)
+      // DO UPDATE is a defensive fallback for a concurrent submit racing this one
+      // between the SELECT above and this INSERT -- existingDaysMap already covers
+      // every device for this submission, so under normal (non-racing) conditions
+      // every row here is a genuinely new date.
       if (toInsert.length > 0) {
-        for (const row of toInsert) {
-          await tx.execute(sql`
-            INSERT INTO daily_breakdown (
-              submission_id, submitted_device_id, date, tokens, cost,
-              input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown
-            ) VALUES (
-              ${row.submissionId}::uuid, ${row.submittedDeviceId}::uuid, ${row.date},
-              ${row.tokens}::bigint, ${row.cost}::numeric(14,4),
-              ${row.inputTokens}::bigint, ${row.outputTokens}::bigint,
-              ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint,
-              ${JSON.stringify(row.sourceBreakdown)}::jsonb
-            )
-            ON CONFLICT (submission_id, date) DO UPDATE SET
-              submitted_device_id = EXCLUDED.submitted_device_id,
-              tokens = EXCLUDED.tokens,
-              cost = EXCLUDED.cost,
-              input_tokens = EXCLUDED.input_tokens,
-              output_tokens = EXCLUDED.output_tokens,
-              timestamp_ms = EXCLUDED.timestamp_ms,
-              active_time_ms = EXCLUDED.active_time_ms,
-              source_breakdown = EXCLUDED.source_breakdown
-          `);
-        }
+        const insertValuesClauses = toInsert.map(
+          (row) =>
+            sql`(${row.submissionId}::uuid, ${row.submittedDeviceId}::uuid, ${row.date}, ${row.tokens}::bigint, ${row.cost}::numeric(14,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
+        );
+
+        const insertValuesList = sql.join(insertValuesClauses, sql`, `);
+
+        await tx.execute(sql`
+          INSERT INTO daily_breakdown (
+            submission_id, submitted_device_id, date, tokens, cost,
+            input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown
+          )
+          VALUES ${insertValuesList}
+          ON CONFLICT (submission_id, date) DO UPDATE SET
+            submitted_device_id = EXCLUDED.submitted_device_id,
+            tokens = EXCLUDED.tokens,
+            cost = EXCLUDED.cost,
+            input_tokens = EXCLUDED.input_tokens,
+            output_tokens = EXCLUDED.output_tokens,
+            timestamp_ms = EXCLUDED.timestamp_ms,
+            active_time_ms = EXCLUDED.active_time_ms,
+            source_breakdown = EXCLUDED.source_breakdown
+        `);
       }
 
       // Batch UPDATE existing days via raw SQL VALUES list

@@ -154,6 +154,21 @@ function makeAwaitableBuilder(result: unknown) {
   return builder;
 }
 
+// Drizzle's `sql` template composes nested SQL/StringChunk objects (and
+// `sql.join` adds another nesting level for batched VALUES lists). Rather
+// than assert on the exact nesting shape -- which shifts whenever the query
+// is restructured -- flatten every chunk's raw values into one array so
+// assertions only care that the expected params were embedded somewhere.
+function flattenSqlChunks(node: unknown): unknown[] {
+  if (node && typeof node === "object" && Array.isArray((node as { queryChunks?: unknown }).queryChunks)) {
+    return (node as { queryChunks: unknown[] }).queryChunks.flatMap(flattenSqlChunks);
+  }
+  if (node && typeof node === "object" && Array.isArray((node as { value?: unknown }).value)) {
+    return (node as { value: unknown[] }).value;
+  }
+  return [node];
+}
+
 describe("POST /api/submit auth path", () => {
   it("rejects invalid API tokens through the shared auth service", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({ status: "invalid" });
@@ -380,6 +395,7 @@ describe("POST /api/submit auth path", () => {
     const selectResults = [
       [],
       [],
+      [],
       [{
         totalTokens: 12,
         totalCost: "0.5000",
@@ -450,7 +466,7 @@ describe("POST /api/submit auth path", () => {
           values: vi.fn(() => Promise.resolve()),
         };
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -490,20 +506,13 @@ describe("POST /api/submit auth path", () => {
       displayName: "Test device",
     }));
     expect(tx.execute).toHaveBeenCalledTimes(1);
-    expect(tx.execute).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        queryChunks: expect.arrayContaining([
-          expect.objectContaining({
-            value: expect.arrayContaining([
-              expect.stringContaining("INSERT INTO daily_breakdown"),
-            ]),
-          }),
-          "submission-1",
-          "submitted-device-1",
-          "2026-04-30",
-        ]),
-      }),
+    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown"),
+        "submission-1",
+        "submitted-device-1",
+        "2026-04-30",
+      ]),
     );
     expect(submissionUpdateValues).toEqual(
       expect.objectContaining({
@@ -619,6 +628,12 @@ describe("POST /api/submit auth path", () => {
         sourceBreakdown: existingBreakdown,
       }],
       [{
+        id: "daily-1",
+        date: "2026-04-30",
+        timestampMs: 123,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
         totalTokens: 15,
         totalCost: "0.7500",
         inputTokens: 10,
@@ -648,7 +663,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -806,6 +821,13 @@ describe("POST /api/submit auth path", () => {
         sourceBreakdown: existingBreakdown,
       }],
       [{
+        id: "daily-1",
+        date: "2026-04-30",
+        timestampMs: 123,
+        activeTimeMs: null,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
         totalTokens: 15,
         totalCost: "0.7500",
         inputTokens: 10,
@@ -863,7 +885,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
         callback(tx)
       ),
@@ -1003,6 +1025,7 @@ describe("POST /api/submit auth path", () => {
       [{ id: "submission-1" }],
       [],
       [],
+      [],
       [{
         totalTokens: 42,
         totalCost: "1.7500",
@@ -1049,7 +1072,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
         callback(tx)
       ),
@@ -1074,21 +1097,14 @@ describe("POST /api/submit auth path", () => {
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
     expect(tx.execute).toHaveBeenCalledTimes(2);
-    expect(tx.execute).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        queryChunks: expect.arrayContaining([
-          expect.objectContaining({
-            value: expect.arrayContaining([
-              expect.stringContaining("INSERT INTO daily_breakdown"),
-            ]),
-          }),
-          "submission-1",
-          "submitted-device-2",
-          "2026-04-30",
-          4_000,
-        ]),
-      }),
+    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown"),
+        "submission-1",
+        "submitted-device-2",
+        "2026-04-30",
+        4_000,
+      ]),
     );
     expect(submissionUpdateSets.at(-1)).toEqual(expect.objectContaining({
       totalActiveTimeMs: 10_000,
@@ -1207,6 +1223,13 @@ describe("POST /api/submit auth path", () => {
         sourceBreakdown: existingBreakdown,
       }],
       [{
+        id: "daily-1",
+        date: "2026-04-30",
+        timestampMs: 123,
+        activeTimeMs: 2_000,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
         totalTokens: 27,
         totalCost: "1.2500",
         inputTokens: 17,
@@ -1243,7 +1266,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
         callback(tx)
       ),
@@ -1386,6 +1409,13 @@ describe("POST /api/submit auth path", () => {
         sourceBreakdown: legacyBreakdown,
       }],
       [{
+        id: "daily-legacy",
+        date: "2026-04-30",
+        timestampMs: 123,
+        activeTimeMs: null,
+        sourceBreakdown: legacyBreakdown,
+      }],
+      [{
         totalTokens: 15,
         totalCost: "0.7500",
         inputTokens: 10,
@@ -1424,7 +1454,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -1551,6 +1581,7 @@ describe("POST /api/submit auth path", () => {
       [{ id: "submission-1" }],
       [],
       [],
+      [],
       [{
         totalTokens: 42,
         totalCost: "1.7500",
@@ -1590,7 +1621,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -1618,22 +1649,15 @@ describe("POST /api/submit auth path", () => {
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
     expect(tx.execute).toHaveBeenCalledTimes(2);
-    expect(tx.execute).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        queryChunks: expect.arrayContaining([
-          expect.objectContaining({
-            value: expect.arrayContaining([
-              expect.stringContaining("INSERT INTO daily_breakdown"),
-            ]),
-          }),
-          "submission-1",
-          "submitted-device-2",
-          "2026-04-30",
-          15,
-          JSON.stringify(insertedBreakdown),
-        ]),
-      }),
+    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown"),
+        "submission-1",
+        "submitted-device-2",
+        "2026-04-30",
+        15,
+        JSON.stringify(insertedBreakdown),
+      ]),
     );
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).not.toHaveBeenCalled();
     expect(await response.json()).toEqual(expect.objectContaining({
