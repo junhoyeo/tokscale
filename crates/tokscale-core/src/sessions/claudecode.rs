@@ -459,8 +459,10 @@ pub fn parse_claude_file_with_cache_and_home(
     // context) must not use char-based token estimation. These files may be written by
     // third-party tools (e.g. OpenCode) that log tool outputs without Claude API usage
     // metadata. Estimating tokens from their content would double-count usage already
-    // tracked by the originating client's own parser.
-    let is_bare_transcript = is_in_transcripts_dir(path) && cc_mirror_metadata.is_none();
+    // tracked by the originating client's own parser. Explicit tool-result token counts
+    // are still honored — only the char-based fallback estimate is suppressed.
+    let is_bare_transcript =
+        is_in_transcripts_dir(path) && cc_mirror_metadata.is_none() && workspace_key.is_none();
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
@@ -539,25 +541,22 @@ pub fn parse_claude_file_with_cache_and_home(
             }
 
             if entry.entry_type == "user" || entry.entry_type == "tool_result" {
-                let tool_result_message = if is_bare_transcript {
-                    None
-                } else {
-                    extract_claude_tool_result_message(
-                        trimmed,
-                        ClaudeToolResultContext {
-                            entry: &entry,
-                            last_model: last_model.as_deref(),
-                            last_provider_hint: last_provider_hint.as_deref(),
-                            client_id: &client_id,
-                            default_provider_hint: metadata_provider_hint,
-                            session_id: &session_id,
-                            fallback_timestamp,
-                            workspace_key: workspace_key.clone(),
-                            workspace_label: workspace_label.clone(),
-                            sidechain_agent: sidechain_agent.clone(),
-                        },
-                    )
-                };
+                let tool_result_message = extract_claude_tool_result_message(
+                    trimmed,
+                    ClaudeToolResultContext {
+                        entry: &entry,
+                        last_model: last_model.as_deref(),
+                        last_provider_hint: last_provider_hint.as_deref(),
+                        client_id: &client_id,
+                        default_provider_hint: metadata_provider_hint,
+                        session_id: &session_id,
+                        fallback_timestamp,
+                        workspace_key: workspace_key.clone(),
+                        workspace_label: workspace_label.clone(),
+                        sidechain_agent: sidechain_agent.clone(),
+                        allow_char_estimate: !is_bare_transcript,
+                    },
+                );
 
                 if let Some(timestamp_ms) = parse_claude_entry_timestamp(entry.timestamp.as_deref())
                 {
@@ -945,6 +944,12 @@ struct ClaudeToolResultContext<'a> {
     workspace_key: Option<String>,
     workspace_label: Option<String>,
     sidechain_agent: Option<String>,
+    /// Whether char-based token estimation may be used as a fallback when no
+    /// explicit tool-result token count is present. Bare transcripts (see
+    /// `is_bare_transcript`) set this to `false` to avoid double-counting
+    /// usage already tracked by the originating client's own parser, while
+    /// still honoring any explicit tool-result token counts.
+    allow_char_estimate: bool,
 }
 
 fn extract_claude_tool_result_message(
@@ -952,7 +957,7 @@ fn extract_claude_tool_result_message(
     context: ClaudeToolResultContext<'_>,
 ) -> Option<UnifiedMessage> {
     let value: Value = serde_json::from_str(line).ok()?;
-    let usage = extract_claude_tool_result_usage(&value)?;
+    let usage = extract_claude_tool_result_usage(&value, context.allow_char_estimate)?;
 
     let raw_model = extract_claude_model(&value)
         .or_else(|| {
@@ -1009,7 +1014,10 @@ fn extract_claude_tool_result_message(
     Some(message)
 }
 
-fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsage> {
+fn extract_claude_tool_result_usage(
+    value: &Value,
+    allow_char_estimate: bool,
+) -> Option<ClaudeToolResultUsage> {
     let mut total_tokens = 0;
     let mut first_dedup_id: Option<String> = None;
     let mut seen_ids = HashSet::new();
@@ -1024,7 +1032,8 @@ fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsa
         if first_dedup_id.is_none() {
             first_dedup_id = tool_result_id;
         }
-        total_tokens += extract_tool_result_input_tokens(tool_result).unwrap_or(0);
+        total_tokens +=
+            extract_tool_result_input_tokens(tool_result, allow_char_estimate).unwrap_or(0);
     }
 
     if total_tokens <= 0 {
@@ -1090,8 +1099,11 @@ fn extract_tool_result_id(tool_result: &Value) -> Option<String> {
         .or_else(|| extract_string(tool_result.get("tool_result_id")))
 }
 
-fn extract_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
+fn extract_tool_result_input_tokens(tool_result: &Value, allow_char_estimate: bool) -> Option<i64> {
     explicit_tool_result_input_tokens(tool_result).or_else(|| {
+        if !allow_char_estimate {
+            return None;
+        }
         let chars = tool_result_output_char_count(tool_result);
         (chars > 0).then(|| estimate_tokens_from_chars(chars))
     })
@@ -2382,6 +2394,48 @@ mod tests {
             !messages.is_empty(),
             "project transcripts with tool results should still estimate tokens"
         );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_explicit_tool_result_tokens_is_counted() {
+        // Bare transcripts must not char-estimate tokens, but explicit tool-result
+        // token counts (e.g. reported by the originating client) should still be honored.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","input_tokens":42,"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_explicit112233445566778899.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "bare transcripts must still count explicit tool-result token usage"
+        );
+        assert_eq!(messages[0].tokens.input, 42);
+    }
+
+    #[test]
+    fn test_transcripts_dir_under_project_is_not_treated_as_bare() {
+        // A `transcripts/` directory nested under a resolvable `projects/<key>/` path
+        // must not be treated as a bare transcript, since its workspace can still be
+        // attributed. Char-based estimation should proceed normally.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("projects")
+            .join("myproject")
+            .join("transcripts")
+            .join("ses_scoped112233445566778899.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            !messages.is_empty(),
+            "transcripts nested under a resolvable projects/<key>/ path should still be estimated"
+        );
+        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
     }
 
     // --- Sidechain / Agent tracking tests ---
