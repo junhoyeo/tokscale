@@ -880,7 +880,12 @@ fn merge_claude_duplicate(
         if timestamp_ms >= existing.timestamp {
             let new_duration = timestamp_ms.saturating_sub(existing.timestamp);
             if new_duration > 0 {
-                existing.duration_ms = Some(new_duration);
+                // Duplicates can arrive out of order (e.g. late-processed
+                // streaming chunks), so never let a later-processed duplicate
+                // with an earlier completion timestamp shrink a duration
+                // already established by another duplicate.
+                existing.duration_ms =
+                    Some(existing.duration_ms.unwrap_or(0).max(new_duration));
             }
         }
     }
@@ -1873,6 +1878,46 @@ mod tests {
         assert_eq!(messages[0].timestamp, 1_733_047_200_000);
         assert_eq!(messages[0].duration_ms, Some(3500));
         assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
+    }
+
+    #[test]
+    fn test_dedup_merge_duration_is_monotonic_across_out_of_order_duplicates() {
+        // Regression: several streaming duplicates of one message can be
+        // processed out of order (e.g. a late-arriving chunk carrying an
+        // earlier completion timestamp than one already merged). The start
+        // anchor (existing.timestamp) must survive every merge, and
+        // duration_ms must never shrink below a value already established by
+        // an earlier-processed duplicate — it must track the latest
+        // (largest) end timestamp seen so far.
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":30}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:05.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:07.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":200}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "all streaming duplicates should collapse to one message"
+        );
+        assert_eq!(
+            messages[0].timestamp, 1_733_047_200_000,
+            "the start anchor must survive every merge (the user entry's timestamp)"
+        );
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(7_000),
+            "duration_ms must equal the latest end timestamp minus the start \
+             anchor (7s), not shrink when an out-of-order duplicate with an \
+             earlier timestamp is merged"
+        );
+        assert_eq!(
+            messages[0].tokens.output, 200,
+            "token fields keep the per-field max across all duplicates"
+        );
     }
 
     #[test]

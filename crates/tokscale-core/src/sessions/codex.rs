@@ -457,6 +457,15 @@ fn parse_codex_reader<R: BufRead>(
                 {
                     if codex_message_is_human_turn(payload.message.as_deref()) {
                         state.pending_turn_start = true;
+                        // Defensively reset the start-anchor cursor here too.
+                        // Normally `turn_context` resets it every turn (see
+                        // above), but a resumed/compacted session can emit a
+                        // `token_count` after this `user_message` with no
+                        // intervening `turn_context`. Without this reset the
+                        // cursor would still hold the previous turn's last
+                        // token time and bridge backward across the idle gap.
+                        state.last_accepted_token_timestamp_ms =
+                            parse_codex_entry_timestamp(entry.timestamp.as_deref());
                     }
                     handled = true;
                 }
@@ -2662,6 +2671,45 @@ mod tests {
             messages[0].duration_ms,
             Some(5),
             "duration_ms must span from turn start to token_count event (5ms)"
+        );
+    }
+
+    #[test]
+    fn test_user_message_without_turn_context_anchors_at_user_message() {
+        // Regression: a resumed/compacted session can emit a human
+        // `user_message` followed directly by a `token_count` with no
+        // intervening `turn_context` (which normally resets the start-anchor
+        // cursor every turn). Before this fix, the token_count would anchor
+        // at the previous turn's last accepted token timestamp instead of
+        // this user message, bridging backward across the idle gap between
+        // turns.
+        let line1 = r#"{"timestamp":"1970-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+        let line2 = r#"{"timestamp":"1970-01-01T00:00:01.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        // A long idle gap follows: the session resumes with a human
+        // user_message but no fresh turn_context before the next token_count.
+        let line3 = r#"{"timestamp":"1970-01-01T01:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"still there?"}}"#;
+        let line4 = r#"{"timestamp":"1970-01-01T01:00:00.500Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let content = [line1, line2, line3, line4].join("\n");
+        let file = create_test_file(&content);
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1].timestamp,
+            parse_codex_entry_timestamp(Some("1970-01-01T01:00:00Z")).unwrap(),
+            "the second token_count must anchor at the user_message, not the \
+             previous turn's last accepted token timestamp"
+        );
+        assert_eq!(
+            messages[1].duration_ms,
+            Some(500),
+            "duration_ms must span from the user_message to its token_count \
+             (500ms), not bridge backward across the idle gap"
+        );
+        assert!(
+            messages[1].is_turn_start,
+            "the deferred turn-start marker must still apply"
         );
     }
 }
