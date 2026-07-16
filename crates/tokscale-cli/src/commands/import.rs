@@ -22,8 +22,8 @@
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use tokscale_core::{
-    generate_graph_result, ClientContribution, ClientId, DailyContribution, DailyTotals,
-    GraphResult, TokenBreakdown,
+    calculate_intensities, generate_graph_result, ClientContribution, ClientId,
+    DailyContribution, DailyTotals, GraphResult, TokenBreakdown,
 };
 
 /// Import source formats understood by [`parse_export`].
@@ -37,6 +37,14 @@ pub struct ImportOutcome {
     /// The leaderboard rejects unknown clients, so these are surfaced to the
     /// caller as a warning rather than silently dropped or silently kept.
     pub unknown_clients: Vec<String>,
+    /// Number of negative token/cost values that were clamped to zero.
+    pub negative_values_clamped: usize,
+    /// Number of per-model rows with `cost > 0` but every token field `0`.
+    /// The server rejects submissions shaped like this ("Cost submitted
+    /// without tokens"), so these are surfaced as a warning rather than
+    /// silently dropped — this importer does not upload, so the row is kept
+    /// as-is for the caller to inspect.
+    pub suspect_cost_rows: usize,
 }
 
 /// Parse an export of the given `format` into normalized tokscale data.
@@ -136,6 +144,8 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
 
     let mut days: BTreeMap<String, DayBuilder> = BTreeMap::new();
     let mut unknown: BTreeSet<String> = BTreeSet::new();
+    let mut negative_values_clamped = 0usize;
+    let mut suspect_cost_rows = 0usize;
 
     for agg in &export.daily_aggregates {
         if !is_iso_date(&agg.date) {
@@ -166,34 +176,32 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
                 .as_deref()
                 .and_then(|c| c.parse::<f64>().ok())
                 .unwrap_or(0.0);
-            add_row(
-                day,
-                &client,
-                &model,
-                TokenBreakdown {
-                    input: agg.input_tokens.max(0),
-                    output: agg.output_tokens.max(0),
-                    cache_read: agg.cache_read_tokens.max(0),
-                    cache_write: agg.cache_creation_tokens.max(0),
-                    reasoning: 0,
-                },
-                cost.max(0.0),
-            );
+            let tokens = TokenBreakdown {
+                input: clamp_i64(agg.input_tokens, &mut negative_values_clamped),
+                output: clamp_i64(agg.output_tokens, &mut negative_values_clamped),
+                cache_read: clamp_i64(agg.cache_read_tokens, &mut negative_values_clamped),
+                cache_write: clamp_i64(agg.cache_creation_tokens, &mut negative_values_clamped),
+                reasoning: 0,
+            };
+            let cost = clamp_f64(cost, &mut negative_values_clamped);
+            if cost > 0.0 && tokens.total() == 0 {
+                suspect_cost_rows += 1;
+            }
+            add_row(day, &client, &model, tokens, cost);
         } else {
             for mb in &agg.model_breakdowns {
-                add_row(
-                    day,
-                    &client,
-                    &mb.model_name,
-                    TokenBreakdown {
-                        input: mb.input_tokens.max(0),
-                        output: mb.output_tokens.max(0),
-                        cache_read: mb.cache_read_tokens.max(0),
-                        cache_write: mb.cache_creation_tokens.max(0),
-                        reasoning: 0,
-                    },
-                    mb.cost.max(0.0),
-                );
+                let tokens = TokenBreakdown {
+                    input: clamp_i64(mb.input_tokens, &mut negative_values_clamped),
+                    output: clamp_i64(mb.output_tokens, &mut negative_values_clamped),
+                    cache_read: clamp_i64(mb.cache_read_tokens, &mut negative_values_clamped),
+                    cache_write: clamp_i64(mb.cache_creation_tokens, &mut negative_values_clamped),
+                    reasoning: 0,
+                };
+                let cost = clamp_f64(mb.cost, &mut negative_values_clamped);
+                if cost > 0.0 && tokens.total() == 0 {
+                    suspect_cost_rows += 1;
+                }
+                add_row(day, &client, &mb.model_name, tokens, cost);
             }
         }
     }
@@ -205,7 +213,7 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
         .map(|(date, builder)| finalize_day(date, builder))
         .collect();
     contributions.sort_by(|a, b| a.date.cmp(&b.date));
-    apply_intensities(&mut contributions);
+    calculate_intensities(&mut contributions);
 
     // `processing_time_ms = 0`: this data was imported, not scanned.
     let graph = generate_graph_result(contributions, 0);
@@ -213,7 +221,31 @@ pub fn parse_clawdboard_export(json: &str) -> Result<ImportOutcome> {
     Ok(ImportOutcome {
         graph,
         unknown_clients: unknown.into_iter().collect(),
+        negative_values_clamped,
+        suspect_cost_rows,
     })
+}
+
+/// Clamp a token value to zero if negative, tracking the number of times
+/// clamping actually changed a value so the caller can warn once with a
+/// summary count rather than spamming a message per field.
+fn clamp_i64(v: i64, negative_count: &mut usize) -> i64 {
+    if v < 0 {
+        *negative_count += 1;
+        0
+    } else {
+        v
+    }
+}
+
+/// `f64` counterpart of [`clamp_i64`], used for `cost`.
+fn clamp_f64(v: f64, negative_count: &mut usize) -> f64 {
+    if v < 0.0 {
+        *negative_count += 1;
+        0.0
+    } else {
+        v
+    }
 }
 
 fn add_row(day: &mut DayBuilder, client: &str, model: &str, tokens: TokenBreakdown, cost: f64) {
@@ -277,32 +309,6 @@ fn finalize_day(date: String, builder: DayBuilder) -> DailyContribution {
         token_breakdown,
         clients,
         active_time_ms: None,
-    }
-}
-
-/// Cost-relative intensity buckets (0-4), mirroring
-/// `tokscale_core::aggregator::calculate_intensities`.
-fn apply_intensities(contributions: &mut [DailyContribution]) {
-    let max_cost = contributions
-        .iter()
-        .map(|c| c.totals.cost)
-        .fold(0.0, f64::max);
-    if max_cost == 0.0 {
-        return;
-    }
-    for c in contributions.iter_mut() {
-        let ratio = c.totals.cost / max_cost;
-        c.intensity = if ratio >= 0.75 {
-            4
-        } else if ratio >= 0.5 {
-            3
-        } else if ratio >= 0.25 {
-            2
-        } else if ratio > 0.0 {
-            1
-        } else {
-            0
-        };
     }
 }
 
@@ -441,5 +447,91 @@ mod tests {
             "modelBreakdowns":[{"modelName":"x","cost":0.0,"inputTokens":1,"outputTokens":0,
             "cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
         assert!(parse_clawdboard_export(json).is_err());
+    }
+
+    #[test]
+    fn falls_back_to_aggregate_totals_when_no_model_breakdowns() {
+        // No `modelBreakdowns` at all: the aggregate-level token/cost fields
+        // must be used directly instead of being silently dropped.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":100,"outputTokens":50,"cacheReadTokens":10,
+            "cacheCreationTokens":5,"totalCost":"1.25","modelsUsed":["gpt-5.5"]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        let day = &out.graph.contributions[0];
+        assert_eq!(day.clients.len(), 1);
+        let client = &day.clients[0];
+        assert_eq!(client.model_id, "gpt-5.5");
+        assert_eq!(client.tokens.input, 100);
+        assert_eq!(client.tokens.output, 50);
+        assert_eq!(client.tokens.cache_read, 10);
+        assert_eq!(client.tokens.cache_write, 5);
+        assert!((client.cost - 1.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn empty_models_used_falls_back_to_unknown_model() {
+        // No `modelBreakdowns` and no `modelsUsed`: the synthesized row's
+        // model id must fall back to "unknown" rather than panicking or
+        // being left empty.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "inputTokens":10,"outputTokens":5,"totalCost":"0.01"}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        let day = &out.graph.contributions[0];
+        assert_eq!(day.clients.len(), 1);
+        assert_eq!(day.clients[0].model_id, "unknown");
+    }
+
+    #[test]
+    fn sums_multiple_machine_rows_for_same_client_model_date() {
+        // clawdboard splits rows by machineId; two rows sharing (client,
+        // model, date) must be summed into a single client contribution.
+        let json = r#"{"dailyAggregates":[
+            {"date":"2026-05-11","source":"codex","machineId":"m1",
+             "modelBreakdowns":[{"modelName":"gpt-5.5","cost":1.0,"inputTokens":10,
+                "outputTokens":20,"cacheReadTokens":0,"cacheCreationTokens":0}]},
+            {"date":"2026-05-11","source":"codex","machineId":"m2",
+             "modelBreakdowns":[{"modelName":"gpt-5.5","cost":2.0,"inputTokens":30,
+                "outputTokens":40,"cacheReadTokens":5,"cacheCreationTokens":0}]}
+        ]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        let day = &out.graph.contributions[0];
+        assert_eq!(day.clients.len(), 1, "same (client, model) merges into one row");
+        let client = &day.clients[0];
+        assert_eq!(client.tokens.input, 40);
+        assert_eq!(client.tokens.output, 60);
+        assert_eq!(client.tokens.cache_read, 5);
+        assert!((client.cost - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn flags_cost_without_tokens_as_suspect() {
+        // A modelBreakdown row with cost > 0 but all token fields 0 would
+        // fail the server's "Cost submitted without tokens" check; it must
+        // be surfaced as a warning (kept, not silently dropped).
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "modelBreakdowns":[{"modelName":"gpt-5.5","cost":0.5,"inputTokens":0,
+            "outputTokens":0,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        assert_eq!(out.suspect_cost_rows, 1);
+        // The row is kept, not dropped.
+        assert_eq!(out.graph.contributions[0].clients.len(), 1);
+        assert!((out.graph.contributions[0].clients[0].cost - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clamps_negative_values_to_zero() {
+        // Negative token/cost values (malformed or adversarial export data)
+        // must be clamped to zero and counted so the caller can warn once.
+        let json = r#"{"dailyAggregates":[{"date":"2026-05-11","source":"codex",
+            "modelBreakdowns":[{"modelName":"gpt-5.5","cost":-1.0,"inputTokens":-5,
+            "outputTokens":10,"cacheReadTokens":-2,"cacheCreationTokens":0}]}]}"#;
+        let out = parse_clawdboard_export(json).unwrap();
+        // input (-5), cacheRead (-2), cost (-1.0) → 3 clamped values.
+        assert_eq!(out.negative_values_clamped, 3);
+        let client = &out.graph.contributions[0].clients[0];
+        assert_eq!(client.tokens.input, 0);
+        assert_eq!(client.tokens.output, 10);
+        assert_eq!(client.tokens.cache_read, 0);
+        assert_eq!(client.cost, 0.0);
     }
 }

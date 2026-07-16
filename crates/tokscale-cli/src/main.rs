@@ -5038,6 +5038,31 @@ fn run_import_command(
         );
     }
 
+    if outcome.negative_values_clamped > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "\n  Warning: {} negative token/cost value(s) in the export were clamped to \
+                 zero.",
+                outcome.negative_values_clamped
+            )
+            .yellow()
+        );
+    }
+
+    if outcome.suspect_cost_rows > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "\n  Warning: {} modelBreakdown row(s) have cost > 0 but all token fields are \
+                 0. The server rejects submissions shaped like this (\"Cost submitted without \
+                 tokens\"), so these rows would be rejected if ever uploaded.",
+                outcome.suspect_cost_rows
+            )
+            .yellow()
+        );
+    }
+
     if dry_run {
         println!("{}", "\n  Dry run - not emitting normalized JSON.\n".yellow());
         return Ok(());

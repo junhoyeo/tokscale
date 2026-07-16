@@ -706,7 +706,9 @@ struct YearAccumulator {
     end: String,
 }
 
-fn calculate_intensities(contributions: &mut [DailyContribution]) {
+/// Cost-relative intensity buckets (0-4): each day's intensity is a function
+/// of its cost relative to the maximum cost across all `contributions`.
+pub fn calculate_intensities(contributions: &mut [DailyContribution]) {
     let max_cost = contributions
         .iter()
         .map(|c| c.totals.cost)
