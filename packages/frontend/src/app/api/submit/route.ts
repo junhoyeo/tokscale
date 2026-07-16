@@ -28,6 +28,66 @@ const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
 // across multiple INSERT statements to stay well under that limit.
 const INSERT_CHUNK_SIZE = 1000;
 
+// "kilocode" is a legacy alias of "kilo" (mirrors LEGACY_CLIENT_ALIASES in
+// lib/validation/submission.ts and lib/publicProfileData.ts). Incoming
+// contributions are already normalized to "kilo" by validateSubmission's
+// preprocessing, but a daily_breakdown row's stored source_breakdown JSON
+// can still carry a "kilocode" key written before that normalization
+// existed. Fold it into "kilo" before merging so the day-level merge treats
+// the two as the SAME client instead of summing them as disjoint clients
+// (which would double-count the same underlying usage).
+const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
+
+function mergeModelBreakdowns(
+  target: Record<string, ClientBreakdownData["models"][string]>,
+  incoming: Record<string, ClientBreakdownData["models"][string]>
+): void {
+  for (const [modelId, modelData] of Object.entries(incoming)) {
+    const existingModel = target[modelId];
+    if (existingModel) {
+      existingModel.tokens += modelData.tokens || 0;
+      existingModel.cost += modelData.cost || 0;
+      existingModel.input += modelData.input || 0;
+      existingModel.output += modelData.output || 0;
+      existingModel.cacheRead += modelData.cacheRead || 0;
+      existingModel.cacheWrite += modelData.cacheWrite || 0;
+      existingModel.reasoning = (existingModel.reasoning || 0) + (modelData.reasoning || 0);
+      existingModel.messages += modelData.messages || 0;
+    } else {
+      target[modelId] = { ...modelData };
+    }
+  }
+}
+
+function normalizeClientBreakdownAliases(
+  breakdown: Record<string, ClientBreakdownData>
+): Record<string, ClientBreakdownData> {
+  const normalized: Record<string, ClientBreakdownData> = {};
+
+  for (const [rawClientName, data] of Object.entries(breakdown)) {
+    const clientName = LEGACY_CLIENT_ALIASES[rawClientName] ?? rawClientName;
+    const existing = normalized[clientName];
+
+    if (!existing) {
+      normalized[clientName] = { ...data, models: { ...data.models } };
+      continue;
+    }
+
+    existing.tokens += data.tokens || 0;
+    existing.cost += data.cost || 0;
+    existing.input += data.input || 0;
+    existing.output += data.output || 0;
+    existing.cacheRead += data.cacheRead || 0;
+    existing.cacheWrite += data.cacheWrite || 0;
+    existing.reasoning = (existing.reasoning || 0) + (data.reasoning || 0);
+    existing.messages += data.messages || 0;
+    mergeModelBreakdowns(existing.models, data.models || {});
+    existing.provenance = deriveClientBreakdownProvenance(existing);
+  }
+
+  return normalized;
+}
+
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
   const obj = data as Record<string, unknown>;
@@ -456,10 +516,9 @@ export async function POST(request: Request) {
         const existingDay = existingDaysMap.get(incomingDay.date);
 
         if (existingDay) {
-          const existingClientBreakdown = (existingDay.sourceBreakdown || {}) as Record<
-            string,
-            ClientBreakdownData
-          >;
+          const existingClientBreakdown = normalizeClientBreakdownAliases(
+            (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>
+          );
           const mergeResult = mergeClientBreakdownsWithRegressionGuard(
             existingClientBreakdown,
             incomingClientBreakdown,
