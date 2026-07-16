@@ -102,10 +102,16 @@ fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std:
 
     // Most non-TUI commands (including `submit`) do not install a tracing
     // subscriber. Surface persistence failures directly once per process so a
-    // permanently cold cache can never fail silently again.
+    // permanently cold cache can never fail silently again. The TUI owns raw
+    // mode and the alternate screen for its whole run, so a raw stdio write
+    // there corrupts the rendered display instead of being visible as a log
+    // line — suppress it in that case and rely on tracing::warn! (or the
+    // TUI's own status/error UI) instead.
     static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let warned = WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()));
-    if warned.lock().is_ok_and(|mut warned| warned.insert(context)) {
+    if warned.lock().is_ok_and(|mut warned| warned.insert(context))
+        && !crate::tui_signal::is_tui_active()
+    {
         eprintln!("tokscale: warning: {context} ({}): {error}", path.display());
     }
 }

@@ -15,6 +15,7 @@ mod provider_identity;
 pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
+pub mod tui_signal;
 pub mod wiki;
 
 pub use aggregator::*;
