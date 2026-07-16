@@ -7770,6 +7770,92 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_local_clients_devin_nonzero_cli_usage_dedups_desktop_row_but_keeps_raw_count() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join(".local/share/devin/cli/sessions.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 working_directory TEXT NOT NULL,
+                 backend_type TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 title TEXT,
+                 agent_mode TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 last_activity_at INTEGER NOT NULL
+             );
+             CREATE TABLE message_nodes (
+                 row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 node_id INTEGER NOT NULL,
+                 parent_node_id INTEGER,
+                 chat_message TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 metadata TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, working_directory, backend_type, model, title, agent_mode, created_at, last_activity_at) VALUES ('cli-session', '/tmp/project', 'windsurf', 'gpt-5', 'Desktop task', 'accept-edits', 1, 1)",
+            [],
+        )
+        .unwrap();
+        // Unlike the zero-usage regression test above, this CLI row carries
+        // real attributable usage, so it must NOT be filtered by
+        // `parse_devin_cli_sqlite`'s zero-metric guard. That means its
+        // session id lands in `cli_session_ids`, which is exactly the
+        // condition needed to exercise the dedup filter against the
+        // matching Desktop NDJSON session.
+        conn.execute(
+            "INSERT INTO message_nodes (session_id, node_id, chat_message, created_at) VALUES ('cli-session', 1, ?1, 1700000000)",
+            [r#"{"role":"assistant","metadata":{"metrics":{"input_tokens":50,"output_tokens":25}}}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        let desktop_dir = temp_dir
+            .path()
+            .join("Library/Application Support/Devin/User/acp-events");
+        std::fs::create_dir_all(&desktop_dir).unwrap();
+        std::fs::write(
+            desktop_dir.join("desktop-file.ndjson"),
+            concat!(
+                r#"{"notification":{"sessionUpdate":"session_info_update","title":"Desktop task"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":100,"cognition.ai/outputTokens":20,"cognition.ai/cachedReadTokens":10}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["devin-cli".to_string(), "devin-desktop".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        // The Desktop row shares its resolved session id with the CLI row,
+        // so it must be deduped out of `messages` and attributed to
+        // devin-cli instead.
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "devin-cli");
+        assert_eq!(parsed.messages[0].session_id, "cli-session");
+
+        // But the `clients` command count must still reflect the raw,
+        // pre-dedup Desktop discovery so Desktop usage doesn't appear to
+        // vanish when it overlaps with a CLI session.
+        assert_eq!(parsed.counts.get(ClientId::DevinCli), 1);
+        assert!(parsed.counts.get(ClientId::DevinDesktop) > 0);
+    }
+
+    #[test]
     fn test_parse_local_clients_desktop_uses_configured_cli_lookup_without_cli_usage() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let external_dir = temp_dir.path().join("imports/devin/profile");
