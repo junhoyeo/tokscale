@@ -115,6 +115,7 @@ try {
         'groups',
         'sessions',
         'submissions',
+        'submission_reviews',
         'submitted_devices',
         'users'
       )
@@ -129,6 +130,7 @@ try {
     "groups",
     "sessions",
     "submissions",
+    "submission_reviews",
     "submitted_devices",
     "users",
   ].filter((tableName) => !tableNames.has(tableName));
@@ -176,6 +178,40 @@ try {
     ].every((columnName) => columns.has(columnName))
   );
 
+  const [reviewCostColumn] = await sql<
+    { numeric_precision: number; numeric_scale: number }[]
+  >`
+    SELECT numeric_precision::int, numeric_scale::int
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'submission_reviews'
+      AND column_name = 'total_cost'
+  `;
+  expect(
+    "submission review cost uses numeric(18,4)",
+    reviewCostColumn?.numeric_precision === 18 &&
+      reviewCostColumn.numeric_scale === 4
+  );
+
+  const [{ count: reviewConstraintCount }] = await sql<{ count: number }[]>`
+    SELECT count(*)::int AS count
+    FROM pg_constraint
+    WHERE conrelid = 'submission_reviews'::regclass
+      AND conname IN (
+        'submission_reviews_trust_state_check',
+        'submission_reviews_total_tokens_check',
+        'submission_reviews_total_cost_check',
+        'submission_reviews_active_days_check',
+        'submission_reviews_schema_version_check',
+        'submission_reviews_date_range_check'
+      )
+  `;
+  expect(
+    "submission review integrity constraints exist",
+    reviewConstraintCount === 6,
+    `expected 6, got ${reviewConstraintCount}`
+  );
+
   const removedColumns = await sql<{ count: number }[]>`
     SELECT count(*)::int AS count
     FROM information_schema.columns
@@ -198,6 +234,7 @@ try {
         'idx_group_invites_invited_by',
         'idx_group_members_invited_by',
         'idx_submissions_leaderboard',
+        'submission_reviews_pending_user_hash_unique',
         'users_username_lower_unique'
       )
   `;
@@ -210,6 +247,7 @@ try {
       "idx_group_invites_invited_by",
       "idx_group_members_invited_by",
       "idx_submissions_leaderboard",
+      "submission_reviews_pending_user_hash_unique",
       "users_username_lower_unique",
     ].every((indexName) => indexes.has(indexName))
   );
@@ -218,6 +256,15 @@ try {
     indexes.get("users_username_lower_unique")?.includes("UNIQUE INDEX") === true &&
       indexes.get("users_username_lower_unique")?.includes("lower((username)::text)") ===
         true
+  );
+  expect(
+    "pending review hashes are unique per user",
+    indexes
+      .get("submission_reviews_pending_user_hash_unique")
+      ?.includes("UNIQUE INDEX") === true &&
+      indexes
+        .get("submission_reviews_pending_user_hash_unique")
+        ?.includes("review_required") === true
   );
 
   const extensionRows = await sql<{ count: number }[]>`
@@ -234,6 +281,36 @@ try {
       INSERT INTO "users" ("github_id", "username")
       VALUES (1001, 'ci_migration_replay')
       RETURNING "id"
+    `;
+    await sql`
+      INSERT INTO "submission_reviews" (
+        "user_id",
+        "submission_hash",
+        "trust_state",
+        "reason_codes",
+        "payload",
+        "total_tokens",
+        "total_cost",
+        "active_days",
+        "date_start",
+        "date_end",
+        "sources_used",
+        "models_used"
+      )
+      VALUES (
+        ${user.id},
+        'runtime-migration-review-hash',
+        'review_required',
+        ARRAY['historical_day_missing_timestamp'],
+        '{"contributions":[]}'::jsonb,
+        100000000,
+        100000000.2500,
+        1,
+        '2025-12-31',
+        '2025-12-31',
+        ARRAY['codex'],
+        ARRAY['gpt-5']
+      )
     `;
     const [submission] = await sql<{ id: string }[]>`
       INSERT INTO "submissions" (
@@ -283,6 +360,241 @@ try {
     `;
   } finally {
     await sql`ROLLBACK`;
+  }
+
+  const concurrencySql = postgres(databaseUrl, { max: 2 });
+  try {
+    await concurrencySql`
+      DELETE FROM "users"
+      WHERE "username" = 'ci_pending_review_concurrency'
+    `;
+    const [reviewUser] = await concurrencySql<{ id: string }[]>`
+      INSERT INTO "users" ("github_id", "username")
+      VALUES (-2147480001, 'ci_pending_review_concurrency')
+      RETURNING "id"
+    `;
+    const upsertPendingReview = () => concurrencySql<{ id: string }[]>`
+      INSERT INTO "submission_reviews" (
+        "user_id",
+        "submission_hash",
+        "trust_state",
+        "reason_codes",
+        "payload",
+        "total_tokens",
+        "total_cost",
+        "active_days",
+        "date_start",
+        "date_end",
+        "sources_used",
+        "models_used"
+      )
+      VALUES (
+        ${reviewUser.id},
+        'concurrent-pending-review-hash',
+        'review_required',
+        ARRAY['historical_day_missing_timestamp'],
+        '{"contributions":[]}'::jsonb,
+        42,
+        0.4200,
+        1,
+        '2025-12-30',
+        '2025-12-30',
+        ARRAY['codex'],
+        ARRAY['gpt-5']
+      )
+      ON CONFLICT ("user_id", "submission_hash")
+        WHERE "trust_state" = 'review_required'
+      DO UPDATE SET "updated_at" = excluded."updated_at"
+      RETURNING "id"
+    `;
+
+    const [firstReview, secondReview] = await Promise.all([
+      upsertPendingReview(),
+      upsertPendingReview(),
+    ]);
+    const [pendingReviewCount] = await concurrencySql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM "submission_reviews"
+      WHERE "user_id" = ${reviewUser.id}
+        AND "submission_hash" = 'concurrent-pending-review-hash'
+        AND "trust_state" = 'review_required'
+    `;
+    expect(
+      "concurrent pending review upserts converge",
+      firstReview[0].id === secondReview[0].id &&
+        pendingReviewCount.count === 1
+    );
+
+    await concurrencySql`
+      INSERT INTO "submission_reviews" (
+        "user_id",
+        "submission_hash",
+        "trust_state",
+        "reason_codes",
+        "payload",
+        "total_tokens",
+        "total_cost",
+        "active_days",
+        "date_start",
+        "date_end",
+        "sources_used",
+        "models_used"
+      )
+      SELECT
+        ${reviewUser.id},
+        'quota-baseline-' || series.value,
+        'review_required',
+        ARRAY['historical_day_missing_timestamp'],
+        '{"contributions":[]}'::jsonb,
+        series.value,
+        0,
+        1,
+        '2025-12-01'::date,
+        '2025-12-01'::date,
+        ARRAY['codex'],
+        ARRAY['gpt-5']
+      FROM generate_series(1, 18) AS series(value)
+    `;
+    const queueReviewIfCapacityRemains = async (submissionHash: string) =>
+      concurrencySql.begin(async (transaction) => {
+        await transaction`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${reviewUser.id}::text, 0)
+          )
+        `;
+        const [pendingCount] = await transaction<{ count: number }[]>`
+          SELECT count(*)::int AS count
+          FROM "submission_reviews"
+          WHERE "user_id" = ${reviewUser.id}
+            AND "trust_state" = 'review_required'
+        `;
+        if (pendingCount.count >= 20) return false;
+        await transaction`SELECT pg_sleep(0.05)`;
+        await transaction`
+          INSERT INTO "submission_reviews" (
+            "user_id",
+            "submission_hash",
+            "trust_state",
+            "reason_codes",
+            "payload",
+            "total_tokens",
+            "total_cost",
+            "active_days",
+            "date_start",
+            "date_end",
+            "sources_used",
+            "models_used"
+          )
+          VALUES (
+            ${reviewUser.id},
+            ${submissionHash},
+            'review_required',
+            ARRAY['historical_day_missing_timestamp'],
+            '{"contributions":[]}'::jsonb,
+            1,
+            0,
+            1,
+            '2025-12-01',
+            '2025-12-01',
+            ARRAY['codex'],
+            ARRAY['gpt-5']
+          )
+        `;
+        return true;
+      });
+    const quotaRaceResults = await Promise.all([
+      queueReviewIfCapacityRemains("quota-race-a"),
+      queueReviewIfCapacityRemains("quota-race-b"),
+    ]);
+    const [quotaRaceCount] = await concurrencySql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM "submission_reviews"
+      WHERE "user_id" = ${reviewUser.id}
+        AND "trust_state" = 'review_required'
+    `;
+    expect(
+      "advisory lock serializes the pending-review quota race",
+      quotaRaceResults.filter(Boolean).length === 1 &&
+        quotaRaceCount.count === 20
+    );
+
+    let reviewInsertCompleted = false;
+    let rollbackTriggered = false;
+    try {
+      await concurrencySql.begin(async (transaction) => {
+        await transaction`
+          INSERT INTO "submission_reviews" (
+            "user_id",
+            "submission_hash",
+            "trust_state",
+            "reason_codes",
+            "payload",
+            "total_tokens",
+            "total_cost",
+            "active_days",
+            "date_start",
+            "date_end",
+            "sources_used",
+            "models_used"
+          )
+          VALUES (
+            ${reviewUser.id},
+            'rollback-pending-review-hash',
+            'review_required',
+            ARRAY['historical_day_missing_timestamp'],
+            '{"contributions":[]}'::jsonb,
+            42,
+            0.4200,
+            1,
+            '2025-12-29',
+            '2025-12-29',
+            ARRAY['codex'],
+            ARRAY['gpt-5']
+          )
+        `;
+        reviewInsertCompleted = true;
+        await transaction`
+          INSERT INTO "daily_breakdown" (
+            "submission_id",
+            "submitted_device_id",
+            "date",
+            "tokens",
+            "cost",
+            "input_tokens",
+            "output_tokens"
+          )
+          VALUES (
+            gen_random_uuid(),
+            gen_random_uuid(),
+            '2025-12-29',
+            42,
+            0.4200,
+            20,
+            22
+          )
+        `;
+      });
+    } catch {
+      rollbackTriggered = true;
+    }
+    const [rolledBackReviewCount] = await concurrencySql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM "submission_reviews"
+      WHERE "user_id" = ${reviewUser.id}
+        AND "submission_hash" = 'rollback-pending-review-hash'
+    `;
+    expect(
+      "review insert rolls back with later competitive write failure",
+      reviewInsertCompleted &&
+        rollbackTriggered &&
+        rolledBackReviewCount.count === 0
+    );
+  } finally {
+    await concurrencySql`
+      DELETE FROM "users"
+      WHERE "username" = 'ci_pending_review_concurrency'
+    `;
+    await concurrencySql.end();
   }
 
   expect("schema accepts representative inserts", true);

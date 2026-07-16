@@ -411,6 +411,12 @@ pub struct DailyContribution {
     pub intensity: u8,
     pub token_breakdown: TokenBreakdown,
     pub clients: Vec<ClientContribution>,
+    /// Representative event timestamp for this local-date bucket (Unix ms).
+    ///
+    /// Present only when an event's UTC date also matches `date`, so the submit
+    /// trust check cannot reject a legitimate local-time bucket at a UTC boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_time_ms: Option<i64>,
 }

@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
-import { db, apiTokens, submissions, submittedDevices, dailyBreakdown } from "@/lib/db";
+import {
+  db,
+  apiTokens,
+  submissions,
+  submittedDevices,
+  dailyBreakdown,
+  submissionReviews,
+} from "@/lib/db";
 import { and, eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
@@ -8,6 +15,11 @@ import {
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import {
+  assessSubmissionTrust,
+  subsetSubmissionByDates,
+  SUBMISSION_TRUST_STATE,
+} from "@/lib/validation/submissionTrust";
 import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
   mergeClientBreakdownsWithRegressionGuard,
@@ -23,6 +35,43 @@ import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 
 const LEGACY_SUBMIT_DEVICE_KEY = LEGACY_DEVICE_KEY;
 const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
+const MAX_PENDING_SUBMISSION_REVIEWS = 20;
+const MAX_SUBMISSION_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_MCP_SERVERS = 100;
+const MAX_MCP_SERVER_NAME_LENGTH = 128;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
+
+class PendingReviewLimitError extends Error {}
+
+async function readBoundedRequestBody(
+  request: Request,
+  maxBytes: number
+): Promise<string | null> {
+  if (!request.body) return "";
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const bodyBytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bodyBytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bodyBytes);
+}
 
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -127,41 +176,117 @@ export async function POST(request: Request) {
     // ========================================
     // STEP 2: Parse and Validate
     // ========================================
+    const declaredBodyBytes = Number(request.headers.get("Content-Length"));
+    if (
+      Number.isFinite(declaredBodyBytes) &&
+      declaredBodyBytes > MAX_SUBMISSION_BODY_BYTES
+    ) {
+      return NextResponse.json(
+        { error: "Submission body is too large" },
+        { status: 413 }
+      );
+    }
+
     let rawData: unknown;
     try {
-      rawData = await request.json();
+      const rawBody = await readBoundedRequestBody(
+        request,
+        MAX_SUBMISSION_BODY_BYTES
+      );
+      if (rawBody == null) {
+        return NextResponse.json(
+          { error: "Submission body is too large" },
+          { status: 413 }
+        );
+      }
+      rawData = JSON.parse(rawBody);
     } catch {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
     normalizeSubmissionData(rawData);
 
-    const mcpServers: string[] | null =
-      rawData != null && typeof rawData === "object" &&
+    let mcpServers: string[] | null = null;
+    if (
+      rawData != null &&
+      typeof rawData === "object" &&
       Array.isArray((rawData as Record<string, unknown>).mcpServers)
-        ? ((rawData as Record<string, unknown>).mcpServers as unknown[]).filter(
-            (s): s is string => typeof s === "string" && s.length > 0
-          )
-        : null;
+    ) {
+      const rawServerNames = (
+        (rawData as Record<string, unknown>).mcpServers as unknown[]
+      );
+      const serverNames = rawServerNames.filter(
+        (server): server is string =>
+          typeof server === "string" && server.length > 0
+      );
+      if (
+        rawServerNames.length > MAX_MCP_SERVERS ||
+        serverNames.some(
+          (server) =>
+            server.length > MAX_MCP_SERVER_NAME_LENGTH ||
+            CONTROL_CHARACTER_PATTERN.test(server)
+        )
+      ) {
+        return NextResponse.json(
+          { error: "Invalid MCP server metadata" },
+          { status: 400 }
+        );
+      }
+      mcpServers = Array.from(new Set(serverNames));
+    }
 
     const validation = validateSubmission(rawData);
 
     if (!validation.valid || !validation.data) {
       return NextResponse.json(
-        { error: "Validation failed", details: validation.errors },
+        {
+          error: "Validation failed",
+          details: validation.errors,
+          trustState: SUBMISSION_TRUST_STATE.REJECTED,
+        },
         { status: 400 }
       );
     }
 
-    const data = validation.data;
+    const validatedData = validation.data;
     const warnings = [...validation.warnings];
 
-    if (data.contributions.length === 0) {
+    if (validatedData.contributions.length === 0) {
       return NextResponse.json(
-        { error: "No contribution data to submit" },
+        {
+          error: "No contribution data to submit",
+          trustState: SUBMISSION_TRUST_STATE.REJECTED,
+        },
         { status: 400 }
       );
     }
+
+    const trustAssessment = assessSubmissionTrust(validatedData);
+    warnings.push(...trustAssessment.warnings);
+    if (trustAssessment.trustState === SUBMISSION_TRUST_STATE.REJECTED) {
+      return NextResponse.json(
+        {
+          error: "Submission rejected by trust policy",
+          details: trustAssessment.errors,
+          trustState: trustAssessment.trustState,
+          errorCodes: trustAssessment.rejectionReasonCodes,
+        },
+        { status: 400 }
+      );
+    }
+
+    const submitDevice = getSubmitDevice(validatedData);
+    const reviewDates = new Set(trustAssessment.reviewDates);
+    const trustedDates = new Set(
+      validatedData.contributions
+        .filter((day) => !reviewDates.has(day.date))
+        .map((day) => day.date)
+    );
+    const reviewData = subsetSubmissionByDates(validatedData, reviewDates);
+    const trustedData = reviewData
+      ? subsetSubmissionByDates(validatedData, trustedDates)
+      : validatedData;
+    const data = trustedData ?? validatedData;
 
     const submittedClients = new Set<SubmissionData["summary"]["clients"][number]>(data.summary.clients);
     for (const contribution of data.contributions) {
@@ -188,6 +313,103 @@ export async function POST(request: Request) {
         .update(apiTokens)
         .set({ lastUsedAt: new Date() })
         .where(eq(apiTokens.id, tokenRecord.tokenId));
+
+      let reviewId: string | null = null;
+      if (reviewData) {
+        const reviewPayload = {
+          ...(reviewData as unknown as Record<string, unknown>),
+          ...(mcpServers && mcpServers.length > 0 ? { mcpServers } : {}),
+        };
+        const reviewHash = generateSubmissionHash(reviewData);
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${tokenRecord.userId}::text, 0))`
+        );
+        const [pendingReviewStats] = await tx
+          .select({
+            pendingCount: sql<number>`count(*)::int`,
+            matchingHashCount: sql<number>`count(*) FILTER (
+              WHERE ${submissionReviews.submissionHash} = ${reviewHash}
+            )::int`,
+          })
+          .from(submissionReviews)
+          .where(
+            and(
+              eq(submissionReviews.userId, tokenRecord.userId),
+              eq(
+                submissionReviews.trustState,
+                SUBMISSION_TRUST_STATE.REVIEW_REQUIRED
+              )
+            )
+          );
+        if (
+          Number(pendingReviewStats.pendingCount) >=
+            MAX_PENDING_SUBMISSION_REVIEWS &&
+          Number(pendingReviewStats.matchingHashCount) === 0
+        ) {
+          throw new PendingReviewLimitError();
+        }
+        const [review] = await tx
+          .insert(submissionReviews)
+          .values({
+            userId: tokenRecord.userId,
+            submissionHash: reviewHash,
+            trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
+            competitiveWriteApplied: trustedData !== null,
+            reasonCodes: trustAssessment.reasonCodes,
+            payload: reviewPayload,
+            totalTokens: reviewData.summary.totalTokens,
+            totalCost: reviewData.summary.totalCost.toFixed(4),
+            activeDays: reviewData.summary.activeDays,
+            dateStart: reviewData.meta.dateRange.start,
+            dateEnd: reviewData.meta.dateRange.end,
+            sourcesUsed: reviewData.summary.clients,
+            modelsUsed: reviewData.summary.models,
+            cliVersion: reviewData.meta.version,
+            schemaVersion: submitDevice.schemaVersion,
+          })
+          .onConflictDoUpdate({
+            target: [
+              submissionReviews.userId,
+              submissionReviews.submissionHash,
+            ],
+            targetWhere: sql`${submissionReviews.trustState} = 'review_required'`,
+            set: {
+              competitiveWriteApplied: sql`${submissionReviews.competitiveWriteApplied} OR ${trustedData !== null}`,
+              reasonCodes: trustAssessment.reasonCodes,
+              payload: reviewPayload,
+              totalTokens: reviewData.summary.totalTokens,
+              totalCost: reviewData.summary.totalCost.toFixed(4),
+              activeDays: reviewData.summary.activeDays,
+              dateStart: reviewData.meta.dateRange.start,
+              dateEnd: reviewData.meta.dateRange.end,
+              sourcesUsed: reviewData.summary.clients,
+              modelsUsed: reviewData.summary.models,
+              cliVersion: reviewData.meta.version,
+              schemaVersion: submitDevice.schemaVersion,
+              updatedAt: new Date(),
+            },
+          })
+          .returning({ id: submissionReviews.id });
+        reviewId = review.id;
+      }
+
+      if (!trustedData) {
+        return {
+          trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
+          reviewId,
+          submissionId: null,
+          isNewSubmission: false,
+          competitiveWriteApplied: false,
+          metrics: undefined,
+          reviewMetrics: {
+            totalTokens: reviewData!.summary.totalTokens,
+            totalCost: reviewData!.summary.totalCost,
+            dateRange: reviewData!.meta.dateRange,
+            activeDays: reviewData!.summary.activeDays,
+            clients: reviewData!.summary.clients,
+          },
+        };
+      }
 
       // ------------------------------------------
       // STEP 3a: Get or create user's submission
@@ -249,7 +471,6 @@ export async function POST(request: Request) {
         }
       }
 
-      const submitDevice = getSubmitDevice(data);
       const submittedAt = new Date();
       const [submittedDevice] = await tx
         .insert(submittedDevices)
@@ -575,7 +796,9 @@ export async function POST(request: Request) {
            modelsUsed: Array.from(allModels),
           cliVersion: data.meta.version,
           submissionHash: generateSubmissionHash(hashData),
-          submitCount: sql`COALESCE(submit_count, 0) + 1`,
+          submitCount: isNewSubmission
+            ? 1
+            : sql`COALESCE(submit_count, 0) + 1`,
           schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
           totalActiveTimeMs: aggregates.totalActiveTimeMs,
           // Session-shape metrics cannot be safely recomputed from daily active-time buckets.
@@ -590,52 +813,87 @@ export async function POST(request: Request) {
         .where(eq(submissions.id, submissionId));
 
       return {
+        trustState: trustAssessment.trustState,
+        reviewId,
+        competitiveWriteApplied: true,
         submissionId,
         isNewSubmission,
+        reviewMetrics: reviewData
+          ? {
+              totalTokens: reviewData.summary.totalTokens,
+              totalCost: reviewData.summary.totalCost,
+              dateRange: reviewData.meta.dateRange,
+              activeDays: reviewData.summary.activeDays,
+              clients: reviewData.summary.clients,
+            }
+          : undefined,
         metrics: {
-          totalTokens: aggregates.totalTokens,
+          totalTokens: Number(aggregates.totalTokens ?? 0),
           totalCost: parseFloat(aggregates.totalCost),
           dateRange: {
             start: aggregates.dateStart,
             end: aggregates.dateEnd,
           },
-          activeDays: aggregates.activeDays,
+          activeDays: Number(aggregates.activeDays ?? 0),
           clients: Array.from(allClients),
         },
       };
     });
 
-    const usernameCacheKey = normalizeUsernameCacheKey(tokenRecord.username);
-    try {
-      revalidateTag("leaderboard", "max");
-      revalidateTag(`user:${usernameCacheKey}`, "max");
-      revalidateTag("user-rank", "max");
-      revalidateTag(`user-rank:${usernameCacheKey}`, "max");
-    } catch (e) {
-      console.error("Public cache invalidation failed:", e);
-    }
+    if (result.competitiveWriteApplied) {
+      const usernameCacheKey = normalizeUsernameCacheKey(tokenRecord.username);
+      try {
+        revalidateTag("leaderboard", "max");
+        revalidateTag(`user:${usernameCacheKey}`, "max");
+        revalidateTag("user-rank", "max");
+        revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+      } catch (e) {
+        console.error("Public cache invalidation failed:", e);
+      }
 
-    try {
-      await revalidateUserGroupLeaderboards(tokenRecord.userId);
-    } catch (e) {
-      console.error("Group leaderboard cache invalidation failed:", e);
-    }
+      try {
+        await revalidateUserGroupLeaderboards(tokenRecord.userId);
+      } catch (e) {
+        console.error("Group leaderboard cache invalidation failed:", e);
+      }
 
-    try {
-      revalidateUsernamePaths(tokenRecord.username);
-    } catch (e) {
-      console.error("Username path revalidation failed:", e);
+      try {
+        revalidateUsernamePaths(tokenRecord.username);
+      } catch (e) {
+        console.error("Username path revalidation failed:", e);
+      }
     }
 
     return NextResponse.json({
       success: true,
+      trustState: result.trustState,
       submissionId: result.submissionId,
+      reviewId: result.reviewId,
       username: tokenRecord.username,
       metrics: result.metrics,
-      mode: result.isNewSubmission ? "create" : "merge",
+      reviewMetrics: result.reviewMetrics,
+      mode: result.competitiveWriteApplied
+        ? result.isNewSubmission
+          ? "create"
+          : "merge"
+        : "review",
+      reasonCodes:
+        trustAssessment.reasonCodes.length > 0
+          ? trustAssessment.reasonCodes
+          : undefined,
+      competitiveWriteApplied: result.competitiveWriteApplied,
       warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (error) {
+    if (error instanceof PendingReviewLimitError) {
+      return NextResponse.json(
+        {
+          error: "Pending submission review limit reached",
+          trustState: SUBMISSION_TRUST_STATE.REVIEW_REQUIRED,
+        },
+        { status: 429 }
+      );
+    }
     console.error("Submit error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

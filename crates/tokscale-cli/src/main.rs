@@ -4209,6 +4209,8 @@ struct TsDailyContribution {
     token_breakdown: TsTokenBreakdown,
     clients: Vec<TsSourceContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     active_time_ms: Option<i64>,
 }
 
@@ -4360,6 +4362,7 @@ fn to_ts_token_contribution_data(
                         messages: s.messages,
                     })
                     .collect(),
+                timestamp_ms: d.timestamp_ms,
                 active_time_ms: d.active_time_ms,
             })
             .collect(),
@@ -4930,12 +4933,45 @@ fn run_graph_command(
 struct SubmitResponse {
     #[serde(rename = "submissionId")]
     submission_id: Option<String>,
+    #[serde(rename = "trustState")]
+    trust_state: Option<String>,
+    #[serde(rename = "competitiveWriteApplied")]
+    competitive_write_applied: Option<bool>,
     #[allow(dead_code)]
     username: Option<String>,
     metrics: Option<SubmitMetrics>,
+    #[serde(rename = "reviewMetrics")]
+    review_metrics: Option<SubmitMetrics>,
     warnings: Option<Vec<String>>,
     error: Option<String>,
     details: Option<Vec<String>>,
+}
+
+fn terminal_safe(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
+
+fn safe_profile_username(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= 39
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+    .then_some(value)
+}
+
+fn submit_confirmation_message(
+    trust_state: Option<&str>,
+    competitive_write_applied: bool,
+) -> &'static str {
+    match (trust_state, competitive_write_applied) {
+        (Some("review_required"), true) => "Submitted; flagged days queued for review.",
+        (Some("review_required"), false) => "Submitted for review.",
+        _ => "Successfully submitted!",
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -4950,6 +4986,25 @@ struct SubmitMetrics {
     sources: Option<Vec<String>>,
 }
 
+fn print_submit_metrics(label: &str, metrics: &SubmitMetrics) {
+    use colored::Colorize;
+    println!("{}", format!("  {label}:").white());
+    if let Some(tokens) = metrics.total_tokens {
+        println!(
+            "{}",
+            format!("    Total tokens: {}", format_tokens_with_commas(tokens)).bright_black()
+        );
+    }
+    if let Some(cost) = metrics.total_cost {
+        println!(
+            "{}",
+            format!("    Total cost: {}", format_currency(cost)).bright_black()
+        );
+    }
+    if let Some(days) = metrics.active_days {
+        println!("{}", format!("    Active days: {days}").bright_black());
+    }
+}
 /// A client row dropped from a submission because it carried cost without any
 /// token attribution. See [`exclude_tokenless_cost_contributions`].
 #[derive(Debug, Clone, PartialEq)]
@@ -5333,8 +5388,11 @@ fn run_submit_command(
                 rt.block_on(async { resp.json().await })
                     .unwrap_or_else(|_| SubmitResponse {
                         submission_id: None,
+                        trust_state: None,
+                        competitive_write_applied: None,
                         username: None,
                         metrics: None,
+                        review_metrics: None,
                         warnings: None,
                         error: Some(format!(
                             "Server returned {} with unparseable response",
@@ -5344,14 +5402,14 @@ fn run_submit_command(
                     });
 
             if !status.is_success() {
-                let error = body
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Submission failed".to_string());
+                let error = terminal_safe(&body.error.as_deref().unwrap_or("Submission failed"));
                 eprintln!("\n  {}", format!("Error: {}", error).red());
                 if let Some(details) = body.details {
                     for detail in details {
-                        eprintln!("{}", format!("    - {}", detail).bright_black());
+                        eprintln!(
+                            "{}",
+                            format!("    - {}", terminal_safe(&detail)).bright_black()
+                        );
                     }
                 }
                 println!();
@@ -5361,34 +5419,39 @@ fn run_submit_command(
                 std::process::exit(1);
             }
 
-            println!("\n  {}", "Successfully submitted!".green());
+            let competitive_write_applied = body
+                .competitive_write_applied
+                .unwrap_or(body.submission_id.is_some());
+            let confirmation =
+                submit_confirmation_message(body.trust_state.as_deref(), competitive_write_applied);
+            if body.trust_state.as_deref() == Some("review_required") {
+                println!("\n  {}", confirmation.yellow());
+            } else {
+                println!("\n  {}", confirmation.green());
+            }
             println!();
-            println!("{}", "  Summary:".white());
             if let Some(id) = body.submission_id {
-                println!("{}", format!("    Submission ID: {}", id).bright_black());
+                println!(
+                    "{}",
+                    format!("  Submission ID: {}", terminal_safe(&id)).bright_black()
+                );
             }
             if let Some(metrics) = &body.metrics {
-                if let Some(tokens) = metrics.total_tokens {
-                    println!(
-                        "{}",
-                        format!("    Total tokens: {}", format_tokens_with_commas(tokens))
-                            .bright_black()
-                    );
-                }
-                if let Some(cost) = metrics.total_cost {
-                    println!(
-                        "{}",
-                        format!("    Total cost: {}", format_currency(cost)).bright_black()
-                    );
-                }
-                if let Some(days) = metrics.active_days {
-                    println!("{}", format!("    Active days: {}", days).bright_black());
-                }
+                print_submit_metrics("Competitive summary", metrics);
+            }
+            if let Some(metrics) = &body.review_metrics {
+                print_submit_metrics("Queued for review", metrics);
             }
             if let Some(username) = body
                 .username
-                .clone()
-                .or_else(|| auth_token.username.clone())
+                .as_deref()
+                .and_then(safe_profile_username)
+                .or_else(|| {
+                    auth_token
+                        .username
+                        .as_deref()
+                        .and_then(safe_profile_username)
+                })
             {
                 println!();
                 println!(
@@ -5406,7 +5469,10 @@ fn run_submit_command(
                 if !warnings.is_empty() {
                     println!("{}", "  Warnings:".yellow());
                     for warning in warnings {
-                        println!("{}", format!("    - {}", warning).bright_black());
+                        println!(
+                            "{}",
+                            format!("    - {}", terminal_safe(&warning)).bright_black()
+                        );
                     }
                     println!();
                 }
@@ -6004,6 +6070,83 @@ mod tests {
     };
 
     #[test]
+    fn terminal_safe_removes_control_characters_from_server_messages() {
+        assert_eq!(
+            terminal_safe("warning\u{1b}[31m\r\nnext\u{85}line"),
+            "warning[31mnextline"
+        );
+    }
+
+    #[test]
+    fn profile_links_reject_control_and_path_injection() {
+        assert_eq!(
+            safe_profile_username("valid-user-25"),
+            Some("valid-user-25")
+        );
+        assert_eq!(safe_profile_username("bad\u{1b}]8;;https://evil"), None);
+        assert_eq!(safe_profile_username("../another-user"), None);
+        assert_eq!(safe_profile_username("percent%2Fpath"), None);
+    }
+
+    #[test]
+    fn review_required_response_never_uses_success_confirmation() {
+        let response: SubmitResponse = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "trustState": "review_required",
+            "submissionId": null,
+            "reviewMetrics": {
+                "totalTokens": 100,
+                "totalCost": 0.25,
+                "activeDays": 1
+            }
+        }))
+        .unwrap();
+
+        assert!(response.metrics.is_none());
+        assert_eq!(
+            response
+                .review_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_tokens),
+            Some(100)
+        );
+
+        assert_eq!(
+            submit_confirmation_message(
+                response.trust_state.as_deref(),
+                response.competitive_write_applied.unwrap_or(false),
+            ),
+            "Submitted for review."
+        );
+        assert_ne!(
+            submit_confirmation_message(
+                response.trust_state.as_deref(),
+                response.competitive_write_applied.unwrap_or(false),
+            ),
+            "Successfully submitted!"
+        );
+    }
+
+    #[test]
+    fn partial_review_response_reports_accepted_and_queued_days() {
+        let response: SubmitResponse = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "trustState": "review_required",
+            "submissionId": "submission-1",
+            "competitiveWriteApplied": true
+        }))
+        .unwrap();
+
+        assert_eq!(
+            submit_confirmation_message(
+                response.trust_state.as_deref(),
+                response.competitive_write_applied.unwrap_or(false),
+            ),
+            "Submitted; flagged days queued for review."
+        );
+    }
+
+    #[test]
     fn test_parse_variant_arg_accepts_known_values() {
         assert_eq!(
             parse_variant_arg(Some("solo")).unwrap(),
@@ -6168,6 +6311,7 @@ mod tests {
                 cost: total_cost,
                 messages: 1,
             }],
+            timestamp_ms: None,
             active_time_ms: None,
         }
     }
@@ -7351,6 +7495,7 @@ mod tests {
             intensity: 0,
             token_breakdown: token_breakdown(token_breakdown_total),
             clients,
+            timestamp_ms: None,
             active_time_ms: None,
         }
     }
@@ -7460,13 +7605,18 @@ mod tests {
 
     #[test]
     fn test_submit_payload_includes_device_when_provided() {
-        let graph = graph_result_with_contributions(vec![daily_contribution(
+        let timestamp_ms = "2026-12-31T12:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+            .timestamp_millis();
+        let mut graph = graph_result_with_contributions(vec![daily_contribution(
             "2026-12-31",
             20,
             2.50,
             "codex",
             "model-b",
         )]);
+        graph.contributions[0].timestamp_ms = Some(timestamp_ms);
         let device = device::SubmitDevice {
             id: "dev_test".to_string(),
             name: Some("Test device".to_string()),
@@ -7479,6 +7629,9 @@ mod tests {
             payload.device.as_ref().unwrap().name.as_deref(),
             Some("Test device")
         );
+        assert_eq!(payload.contributions[0].timestamp_ms, Some(timestamp_ms));
+        let serialized = serde_json::to_value(&payload).unwrap();
+        assert_eq!(serialized["contributions"][0]["timestampMs"], timestamp_ms);
     }
 
     #[test]
