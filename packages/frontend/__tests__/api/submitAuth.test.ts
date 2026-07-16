@@ -694,6 +694,12 @@ describe("POST /api/submit auth path", () => {
       id: "submittedDevices.id",
     }));
     expect(tx.execute).toHaveBeenCalledTimes(1);
+    // Batch UPDATE must re-attribute the merged row to the submitting
+    // device, not leave it stamped with whichever device's row happened to
+    // survive the SELECT.
+    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).toEqual(
+      expect.arrayContaining(["submitted-device-1"]),
+    );
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       existingBreakdown,
       {
@@ -716,6 +722,186 @@ describe("POST /api/submit auth path", () => {
       }),
       mode: "merge",
     }));
+  });
+
+  it("attributes a merged day to the new device on a replacement-device submit", async () => {
+    // Regression for cubic P2 review: a replacement-device submit (dev_phone
+    // taking over from a previously-submitting device on an overlapping
+    // date) must stamp submitted_device_id on the batch UPDATE, otherwise
+    // the merged row keeps pointing at the old device.
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_phone",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    const incomingBreakdown = {
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    };
+    const existingBreakdown = {
+      codex: {
+        tokens: 12,
+        cost: 0.5,
+        input: 7,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 1,
+        models: { "gpt-5.5": { tokens: 12 } },
+      },
+    };
+    const mergedBreakdown = {
+      codex: {
+        ...incomingBreakdown,
+        models: { "gpt-5.5": incomingBreakdown },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
+    mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
+      merged: mergedBreakdown,
+      warnings: [],
+    });
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(456);
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      // fetchExistingDeviceDays() for dev_phone: a row already visible under
+      // this device key (non-empty, so the legacy-adoption branch is
+      // skipped) -- what matters for this test is that the merged row gets
+      // re-stamped with the *current* submitting device's id below.
+      [{
+        id: "daily-old-device",
+        date: "2026-04-30",
+        timestampMs: 123,
+        activeTimeMs: null,
+        sourceBreakdown: existingBreakdown,
+      }],
+      // existingDays across the WHOLE submission.
+      [{
+        id: "daily-old-device",
+        date: "2026-04-30",
+        timestampMs: 123,
+        activeTimeMs: null,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
+        totalTokens: 15,
+        totalCost: "0.7500",
+        inputTokens: 10,
+        outputTokens: 5,
+        dateStart: "2026-04-30",
+        dateEnd: "2026-04-30",
+        activeDays: 1,
+        rowCount: 1,
+      }],
+      [{ sourceBreakdown: mergedBreakdown }],
+    ];
+
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-phone" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("UPDATE daily_breakdown"),
+        "daily-old-device",
+        "submitted-device-phone",
+      ]),
+    );
   });
 
   it("merges after a concurrent first submit creates the submission first", async () => {

@@ -23,6 +23,10 @@ import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 
 const LEGACY_SUBMIT_DEVICE_KEY = LEGACY_DEVICE_KEY;
 const LEGACY_SUBMIT_DEVICE_NAME = "Legacy submissions";
+// PostgreSQL caps a single statement at 65,535 bound parameters. Each
+// inserted row binds 10 params, so chunk large backfills (e.g. ~6,500+ days)
+// across multiple INSERT statements to stay well under that limit.
+const INSERT_CHUNK_SIZE = 1000;
 
 function normalizeSubmissionData(data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -399,6 +403,7 @@ export async function POST(request: Request) {
 
       const toUpdate: Array<{
         id: string;
+        submittedDeviceId: string;
         tokens: number;
         cost: string;
         inputTokens: number;
@@ -468,6 +473,7 @@ export async function POST(request: Request) {
 
           toUpdate.push({
             id: existingDay.id,
+            submittedDeviceId: submittedDevice.id,
             tokens: dayTotals.tokens,
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
@@ -494,13 +500,17 @@ export async function POST(request: Request) {
         }
       }
 
-      // Batch INSERT new days via raw SQL VALUES list. ON CONFLICT (submission_id, date)
-      // DO UPDATE is a defensive fallback for a concurrent submit racing this one
-      // between the SELECT above and this INSERT -- existingDaysMap already covers
-      // every device for this submission, so under normal (non-racing) conditions
-      // every row here is a genuinely new date.
-      if (toInsert.length > 0) {
-        const insertValuesClauses = toInsert.map(
+      // Batch INSERT new days via raw SQL VALUES list, chunked to stay under
+      // PostgreSQL's 65,535 bound-parameter limit (10 params/row here --
+      // a large historical backfill can otherwise exceed it in one statement).
+      // ON CONFLICT (submission_id, date) DO UPDATE is a defensive fallback
+      // for a concurrent submit racing this one between the SELECT above and
+      // this INSERT -- existingDaysMap already covers every device for this
+      // submission, so under normal (non-racing) conditions every row here is
+      // a genuinely new date.
+      for (let i = 0; i < toInsert.length; i += INSERT_CHUNK_SIZE) {
+        const chunk = toInsert.slice(i, i + INSERT_CHUNK_SIZE);
+        const insertValuesClauses = chunk.map(
           (row) =>
             sql`(${row.submissionId}::uuid, ${row.submittedDeviceId}::uuid, ${row.date}, ${row.tokens}::bigint, ${row.cost}::numeric(14,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
         );
@@ -525,17 +535,23 @@ export async function POST(request: Request) {
         `);
       }
 
-      // Batch UPDATE existing days via raw SQL VALUES list
-      if (toUpdate.length > 0) {
-        const valuesClauses = toUpdate.map(
+      // Batch UPDATE existing days via raw SQL VALUES list, chunked for the
+      // same parameter-limit reason as the INSERT above. Includes
+      // submitted_device_id so a replacement-device submit re-attributes the
+      // merged row to the submitting device instead of leaving it stamped
+      // with the previous device that first created the row.
+      for (let i = 0; i < toUpdate.length; i += INSERT_CHUNK_SIZE) {
+        const chunk = toUpdate.slice(i, i + INSERT_CHUNK_SIZE);
+        const valuesClauses = chunk.map(
           (row) =>
-            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(14,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
+            sql`(${row.id}::uuid, ${row.submittedDeviceId}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(14,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
         );
 
         const valuesList = sql.join(valuesClauses, sql`, `);
 
         await tx.execute(sql`
           UPDATE daily_breakdown AS d SET
+            submitted_device_id = batch.submitted_device_id,
             tokens = batch.tokens,
             cost = batch.cost,
             input_tokens = batch.input_tokens,
@@ -544,7 +560,7 @@ export async function POST(request: Request) {
             active_time_ms = batch.active_time_ms,
             source_breakdown = batch.source_breakdown
           FROM (VALUES ${valuesList})
-            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown)
+            AS batch(id, submitted_device_id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown)
           WHERE d.id = batch.id
         `);
       }

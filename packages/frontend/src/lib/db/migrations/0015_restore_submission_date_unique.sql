@@ -6,10 +6,21 @@
 -- ADD CONSTRAINT UNIQUE (submission_id, date) would abort at deploy time.
 --
 -- Before restoring the (submission_id, date) uniqueness, merge any existing
--- duplicate (submission_id, date) rows into a single row: sum the numeric
--- totals, deep-merge source_breakdown per client/model, keep the row
--- belonging to whichever device most recently submitted, and delete the
--- rest.
+-- duplicate (submission_id, date) rows into a single row and delete the
+-- rest. The merge is per-client-key aware, not a blind sum of row totals:
+-- the PR's core scenario is a DEVICE CHANGE, where the same local history is
+-- resubmitted under a new device id, so two duplicate rows commonly carry
+-- the *same* client keys describing the *same* underlying usage. Summing
+-- those would double the user's daily usage. Instead, within
+-- source_breakdown, a client key that appears in more than one row keeps
+-- only the newest-submitting device's version of that client (the same
+-- "latest snapshot wins" semantics the route's
+-- mergeClientBreakdownsWithRegressionGuard applies to same-device
+-- resubmits). A client key that appears in exactly one row (a genuine
+-- two-machine duplicate with distinct client usage) is kept as-is. Row
+-- totals (tokens, cost, input, output) are then recomputed from the merged
+-- per-client breakdown rather than summed across rows, so they can never
+-- double-count a device-change duplicate.
 DO $$
 DECLARE
   dup RECORD;
@@ -25,10 +36,6 @@ DECLARE
   keep_device_id UUID;
   client_key TEXT;
   client_val JSONB;
-  existing_client_val JSONB;
-  model_key TEXT;
-  model_val JSONB;
-  existing_model_val JSONB;
 BEGIN
   FOR dup IN
     SELECT submission_id, date
@@ -37,10 +44,6 @@ BEGIN
     HAVING COUNT(*) > 1
   LOOP
     merged_source := '{}'::jsonb;
-    merged_tokens := 0;
-    merged_cost := 0;
-    merged_input := 0;
-    merged_output := 0;
     merged_timestamp_ms := NULL;
     merged_active_time_ms := NULL;
     keep_id := NULL;
@@ -48,11 +51,12 @@ BEGIN
 
     -- Rows for this (submission_id, date), most-recently-submitting device
     -- first. The first row visited becomes the row we keep (its id and
-    -- submitted_device_id survive); every row's numeric/JSON data is folded
-    -- into the merged totals regardless of visit order.
+    -- submitted_device_id survive). Client keys are folded in newest-first:
+    -- the first (newest) occurrence of a given client key wins outright, and
+    -- later (older) occurrences of the same key are skipped rather than
+    -- summed in.
     FOR device_row IN
-      SELECT db."id", db."submitted_device_id", db."tokens", db."cost",
-             db."input_tokens", db."output_tokens", db."timestamp_ms",
+      SELECT db."id", db."submitted_device_id", db."timestamp_ms",
              db."active_time_ms", db."source_breakdown"
       FROM daily_breakdown db
       LEFT JOIN submitted_devices sd ON sd."id" = db."submitted_device_id"
@@ -65,10 +69,6 @@ BEGIN
         keep_device_id := device_row."submitted_device_id";
       END IF;
 
-      merged_tokens := merged_tokens + COALESCE(device_row."tokens", 0);
-      merged_cost := merged_cost + COALESCE(device_row."cost", 0);
-      merged_input := merged_input + COALESCE(device_row."input_tokens", 0);
-      merged_output := merged_output + COALESCE(device_row."output_tokens", 0);
       merged_active_time_ms := COALESCE(merged_active_time_ms, 0) + COALESCE(device_row."active_time_ms", 0);
       merged_timestamp_ms := LEAST(
         COALESCE(merged_timestamp_ms, device_row."timestamp_ms"),
@@ -79,64 +79,22 @@ BEGIN
         FOR client_key, client_val IN
           SELECT key, value FROM jsonb_each(device_row."source_breakdown")
         LOOP
-          existing_client_val := merged_source -> client_key;
-
-          IF existing_client_val IS NULL THEN
+          IF NOT (merged_source ? client_key) THEN
             merged_source := jsonb_set(merged_source, ARRAY[client_key], client_val, true);
-          ELSE
-            existing_client_val := jsonb_set(existing_client_val, '{tokens}',
-              to_jsonb(COALESCE((existing_client_val->>'tokens')::numeric, 0) + COALESCE((client_val->>'tokens')::numeric, 0)));
-            existing_client_val := jsonb_set(existing_client_val, '{cost}',
-              to_jsonb(COALESCE((existing_client_val->>'cost')::numeric, 0) + COALESCE((client_val->>'cost')::numeric, 0)));
-            existing_client_val := jsonb_set(existing_client_val, '{input}',
-              to_jsonb(COALESCE((existing_client_val->>'input')::numeric, 0) + COALESCE((client_val->>'input')::numeric, 0)));
-            existing_client_val := jsonb_set(existing_client_val, '{output}',
-              to_jsonb(COALESCE((existing_client_val->>'output')::numeric, 0) + COALESCE((client_val->>'output')::numeric, 0)));
-            existing_client_val := jsonb_set(existing_client_val, '{cacheRead}',
-              to_jsonb(COALESCE((existing_client_val->>'cacheRead')::numeric, 0) + COALESCE((client_val->>'cacheRead')::numeric, 0)));
-            existing_client_val := jsonb_set(existing_client_val, '{cacheWrite}',
-              to_jsonb(COALESCE((existing_client_val->>'cacheWrite')::numeric, 0) + COALESCE((client_val->>'cacheWrite')::numeric, 0)));
-            existing_client_val := jsonb_set(existing_client_val, '{reasoning}',
-              to_jsonb(COALESCE((existing_client_val->>'reasoning')::numeric, 0) + COALESCE((client_val->>'reasoning')::numeric, 0)));
-            existing_client_val := jsonb_set(existing_client_val, '{messages}',
-              to_jsonb(COALESCE((existing_client_val->>'messages')::numeric, 0) + COALESCE((client_val->>'messages')::numeric, 0)));
-
-            IF client_val ? 'models' THEN
-              FOR model_key, model_val IN
-                SELECT key, value FROM jsonb_each(client_val -> 'models')
-              LOOP
-                existing_model_val := existing_client_val #> ARRAY['models', model_key];
-
-                IF existing_model_val IS NULL THEN
-                  existing_client_val := jsonb_set(existing_client_val, ARRAY['models', model_key], model_val, true);
-                ELSE
-                  existing_model_val := jsonb_set(existing_model_val, '{tokens}',
-                    to_jsonb(COALESCE((existing_model_val->>'tokens')::numeric, 0) + COALESCE((model_val->>'tokens')::numeric, 0)));
-                  existing_model_val := jsonb_set(existing_model_val, '{cost}',
-                    to_jsonb(COALESCE((existing_model_val->>'cost')::numeric, 0) + COALESCE((model_val->>'cost')::numeric, 0)));
-                  existing_model_val := jsonb_set(existing_model_val, '{input}',
-                    to_jsonb(COALESCE((existing_model_val->>'input')::numeric, 0) + COALESCE((model_val->>'input')::numeric, 0)));
-                  existing_model_val := jsonb_set(existing_model_val, '{output}',
-                    to_jsonb(COALESCE((existing_model_val->>'output')::numeric, 0) + COALESCE((model_val->>'output')::numeric, 0)));
-                  existing_model_val := jsonb_set(existing_model_val, '{cacheRead}',
-                    to_jsonb(COALESCE((existing_model_val->>'cacheRead')::numeric, 0) + COALESCE((model_val->>'cacheRead')::numeric, 0)));
-                  existing_model_val := jsonb_set(existing_model_val, '{cacheWrite}',
-                    to_jsonb(COALESCE((existing_model_val->>'cacheWrite')::numeric, 0) + COALESCE((model_val->>'cacheWrite')::numeric, 0)));
-                  existing_model_val := jsonb_set(existing_model_val, '{reasoning}',
-                    to_jsonb(COALESCE((existing_model_val->>'reasoning')::numeric, 0) + COALESCE((model_val->>'reasoning')::numeric, 0)));
-                  existing_model_val := jsonb_set(existing_model_val, '{messages}',
-                    to_jsonb(COALESCE((existing_model_val->>'messages')::numeric, 0) + COALESCE((model_val->>'messages')::numeric, 0)));
-
-                  existing_client_val := jsonb_set(existing_client_val, ARRAY['models', model_key], existing_model_val, true);
-                END IF;
-              END LOOP;
-            END IF;
-
-            merged_source := jsonb_set(merged_source, ARRAY[client_key], existing_client_val, true);
           END IF;
         END LOOP;
       END IF;
     END LOOP;
+
+    -- Recompute row totals from the merged per-client breakdown rather than
+    -- summing row totals across duplicate rows.
+    SELECT
+      COALESCE(SUM((value->>'tokens')::numeric), 0),
+      COALESCE(SUM((value->>'cost')::numeric), 0),
+      COALESCE(SUM((value->>'input')::numeric), 0),
+      COALESCE(SUM((value->>'output')::numeric), 0)
+    INTO merged_tokens, merged_cost, merged_input, merged_output
+    FROM jsonb_each(merged_source);
 
     UPDATE daily_breakdown
     SET "submitted_device_id" = keep_device_id,
