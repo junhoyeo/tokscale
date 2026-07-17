@@ -1827,6 +1827,46 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+
+        fn set(&mut self, key: &'static str, value: impl AsRef<std::ffi::OsStr>) {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        fn remove(&mut self, key: &'static str) {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, previous) in self.0.drain(..) {
+                    match previous {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn scan_without_extra_dirs(home_dir: &str, clients: &[String]) -> ScanResult {
+        let mut extra = EnvGuard::capture(&["TOKSCALE_EXTRA_DIRS", "TOKSCALE_HEADLESS_DIR"]);
+        extra.remove("TOKSCALE_EXTRA_DIRS");
+        extra.remove("TOKSCALE_HEADLESS_DIR");
+        scan_all_clients(home_dir, clients)
+    }
+
     fn restore_env(var: &str, previous: Option<String>) {
         match previous {
             Some(value) => unsafe { std::env::set_var(var, value) },
@@ -1844,6 +1884,21 @@ mod tests {
         let file_path = sessions_dir.join("copilot.jsonl");
         let mut file = File::create(file_path).unwrap();
         writeln!(file, "{{\"type\":\"span\",\"name\":\"chat gpt-5.4-mini\"}}").unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_env_guard_restores_after_unwind() {
+        const KEY: &str = "TOKSCALE_SCANNER_ENV_GUARD_SELF_CHECK";
+        let mut outer = EnvGuard::capture(&[KEY]);
+        outer.set(KEY, "before");
+        let result = std::panic::catch_unwind(|| {
+            let mut inner = EnvGuard::capture(&[KEY]);
+            inner.set(KEY, "during");
+            panic!("exercise EnvGuard unwinding");
+        });
+        assert!(result.is_err());
+        assert_eq!(std::env::var_os(KEY), Some("before".into()));
     }
 
     #[test]
@@ -2518,7 +2573,7 @@ mod tests {
         // Set XDG_DATA_HOME for the test
         unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["opencode".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["opencode".to_string()]);
         assert_eq!(result.get(ClientId::OpenCode).len(), 1);
         assert!(result.get(ClientId::Claude).is_empty());
         assert!(result.get(ClientId::Codex).is_empty());
@@ -2734,11 +2789,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_scan_all_clients_with_scanner_settings_merges_user_path() {
-        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
-
         let dir = TempDir::new().unwrap();
         let home = dir.path();
-        // Auto-discoverable channel db inside XDG data dir.
+        // Auto-discoverable channel db inside the default data dir.
         let data_dir = home.join(".local/share/opencode");
         fs::create_dir_all(&data_dir).unwrap();
         File::create(data_dir.join("opencode-stable.db")).unwrap();
@@ -2750,8 +2803,6 @@ mod tests {
         let outside_db = outside_dir.join("opencode.db");
         File::create(&outside_db).unwrap();
 
-        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
-
         let settings = ScannerSettings {
             opencode_db_paths: vec![outside_db.clone()],
             ..Default::default()
@@ -2759,7 +2810,7 @@ mod tests {
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
             &["opencode".to_string()],
-            true,
+            false,
             &settings,
         );
 
@@ -2780,8 +2831,6 @@ mod tests {
             outside_db.display(),
             result.opencode_dbs
         );
-
-        restore_env("XDG_DATA_HOME", previous_xdg);
     }
 
     #[test]
@@ -2808,7 +2857,7 @@ mod tests {
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
             &["codex".to_string()],
-            true,
+            false,
             &settings,
         );
 
@@ -2977,7 +3026,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_scan_all_clients_with_scanner_settings_auto_discovers_hermes_profiles_under_env_home() {
-        let previous = std::env::var("HERMES_HOME").ok();
+        let mut env = EnvGuard::capture(&["HERMES_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        env.remove("TOKSCALE_EXTRA_DIRS");
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         let hermes_home = home.join("custom-hermes-home");
@@ -2991,14 +3041,13 @@ mod tests {
         let profile_db = profile_dir.join("state.db");
         File::create(&profile_db).unwrap();
 
-        unsafe { std::env::set_var("HERMES_HOME", &hermes_home) };
+        env.set("HERMES_HOME", &hermes_home);
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
             &["hermes".to_string()],
             true,
             &ScannerSettings::default(),
         );
-        restore_env("HERMES_HOME", previous);
 
         assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
         assert_eq!(result.hermes_db_paths(), vec![default_db, profile_db]);
@@ -3011,7 +3060,8 @@ mod tests {
         // Data-isolation guarantee: a profile-scoped `HERMES_HOME` must NOT pull
         // in sibling profiles under `<root>/profiles/*` or the default profile at
         // `<root>/state.db`. Only the scoped profile's own `state.db` is scanned.
-        let previous = std::env::var("HERMES_HOME").ok();
+        let mut env = EnvGuard::capture(&["HERMES_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        env.remove("TOKSCALE_EXTRA_DIRS");
         let dir = TempDir::new().unwrap();
         let home = dir.path();
 
@@ -3035,14 +3085,13 @@ mod tests {
         fs::create_dir_all(&nested_dir).unwrap();
         File::create(nested_dir.join("state.db")).unwrap();
 
-        unsafe { std::env::set_var("HERMES_HOME", &coder_dir) };
+        env.set("HERMES_HOME", &coder_dir);
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
             &["hermes".to_string()],
             true,
             &ScannerSettings::default(),
         );
-        restore_env("HERMES_HOME", previous);
 
         assert_eq!(result.hermes_db.as_ref(), Some(&coder_db));
         assert_eq!(result.hermes_db_paths(), vec![coder_db.clone()]);
@@ -3180,9 +3229,12 @@ mod tests {
     #[test]
     #[serial]
     fn test_scan_all_clients_with_scanner_settings_dedups_settings_and_env_extra_paths() {
-        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+        let mut env =
+            EnvGuard::capture(&["TOKSCALE_EXTRA_DIRS", "TOKSCALE_HEADLESS_DIR", "CODEX_HOME"]);
+        env.remove("TOKSCALE_HEADLESS_DIR");
         let dir = TempDir::new().unwrap();
         let home = dir.path();
+        env.set("CODEX_HOME", home.join(".codex"));
 
         let default_root = home.join(".codex/sessions");
         fs::create_dir_all(&default_root).unwrap();
@@ -3192,12 +3244,10 @@ mod tests {
         fs::create_dir_all(&extra_root).unwrap();
         File::create(extra_root.join("extra.jsonl")).unwrap();
 
-        unsafe {
-            std::env::set_var(
-                "TOKSCALE_EXTRA_DIRS",
-                format!("codex:{}", extra_root.join("..").join("sessions").display()),
-            )
-        };
+        env.set(
+            "TOKSCALE_EXTRA_DIRS",
+            format!("codex:{}", extra_root.join("..").join("sessions").display()),
+        );
 
         let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
             "extraScanPaths": {
@@ -3214,7 +3264,6 @@ mod tests {
         );
 
         assert_eq!(result.get(ClientId::Codex).len(), 2);
-        restore_env("TOKSCALE_EXTRA_DIRS", previous);
     }
 
     #[test]
@@ -3233,8 +3282,6 @@ mod tests {
         //   2. ["opencode"]  → both auto + user-configured dbs present
         //   3. ["synthetic"] → both present (synthetic enables all)
         //   4. []            → both present (empty filter = all clients)
-        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
-
         let dir = TempDir::new().unwrap();
         let home = dir.path();
 
@@ -3251,8 +3298,6 @@ mod tests {
         let outside_db = outside_dir.join("opencode.db");
         File::create(&outside_db).unwrap();
 
-        unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
-
         let settings = ScannerSettings {
             opencode_db_paths: vec![outside_db.clone()],
             ..Default::default()
@@ -3260,7 +3305,7 @@ mod tests {
 
         let scan = |clients: &[&str]| {
             let owned: Vec<String> = clients.iter().map(|s| s.to_string()).collect();
-            scan_all_clients_with_scanner_settings(home.to_str().unwrap(), &owned, true, &settings)
+            scan_all_clients_with_scanner_settings(home.to_str().unwrap(), &owned, false, &settings)
         };
 
         // 1. clients=["claude"] — OpenCode disabled, dbs must stay empty.
@@ -3313,8 +3358,6 @@ mod tests {
             "empty client filter must merge user-configured paths, got {:?}",
             all_clients.opencode_dbs
         );
-
-        restore_env("XDG_DATA_HOME", previous_xdg);
     }
 
     #[test]
@@ -3336,7 +3379,7 @@ mod tests {
 
         unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["opencode".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["opencode".to_string()]);
 
         let names: Vec<String> = result
             .opencode_dbs
@@ -3362,7 +3405,8 @@ mod tests {
         let home = dir.path();
         setup_mock_pi_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["pi".to_string()], false);
         assert_eq!(result.get(ClientId::Pi).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
@@ -3374,7 +3418,8 @@ mod tests {
         let home = dir.path();
         setup_mock_omp_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["pi".to_string()], false);
         assert_eq!(result.get(ClientId::Pi).len(), 1);
         assert!(result.get(ClientId::Pi)[0].ends_with("2026-04-06T03-04-28Z_omp_ses_001.jsonl"));
         assert!(result.get(ClientId::OpenCode).is_empty());
@@ -3387,7 +3432,8 @@ mod tests {
         setup_mock_pi_dir(home);
         setup_mock_omp_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["pi".to_string()], false);
         assert_eq!(result.get(ClientId::Pi).len(), 2);
     }
 
@@ -3401,7 +3447,7 @@ mod tests {
         let zed_db = setup_mock_zed_xdg_db(home);
         unsafe { std::env::set_var("XDG_DATA_HOME", home.join(".local/share")) };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["zed".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["zed".to_string()]);
 
         assert_eq!(result.zed_db.as_ref(), Some(&zed_db));
         restore_env("XDG_DATA_HOME", previous_xdg);
@@ -3418,7 +3464,7 @@ mod tests {
         let zed_db = setup_mock_zed_macos_db(home);
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["zed".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["zed".to_string()]);
 
         assert_eq!(result.zed_db.as_ref(), Some(&zed_db));
         restore_env("XDG_DATA_HOME", previous_xdg);
@@ -3430,7 +3476,11 @@ mod tests {
         let home = dir.path();
         setup_mock_claude_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::Claude).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
     }
@@ -3453,7 +3503,11 @@ mod tests {
             .write_all(b"{}\n")
             .unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
         assert!(
             result.get(ClientId::Claude).iter().any(|p| p == &agent),
             "nested workflow agent transcript must be discovered, got {:?}",
@@ -3468,7 +3522,11 @@ mod tests {
         setup_mock_claude_dir(home);
         let transcript = setup_mock_claude_transcripts_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
 
         assert_eq!(result.get(ClientId::Claude).len(), 2);
         assert!(
@@ -3489,7 +3547,11 @@ mod tests {
         let home = dir.path();
         let transcript = setup_mock_claude_transcripts_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
 
         assert_eq!(result.get(ClientId::Claude), &vec![transcript]);
         assert!(result.get(ClientId::OpenCode).is_empty());
@@ -3517,7 +3579,11 @@ mod tests {
         let variant_session = project_dir.join("variant-session.jsonl");
         File::create(&variant_session).unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
 
         assert_eq!(result.get(ClientId::Claude).len(), 2);
         assert!(
@@ -3549,7 +3615,11 @@ mod tests {
         )
         .unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            false,
+        );
 
         assert_eq!(
             result.get(ClientId::Claude).len(),
@@ -3564,7 +3634,11 @@ mod tests {
         let home = dir.path();
         setup_mock_gemini_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["gemini".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::Gemini).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
     }
@@ -3577,7 +3651,11 @@ mod tests {
         fs::create_dir_all(&gemini_path).unwrap();
         File::create(gemini_path.join("session-abc.jsonl")).unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["gemini".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::Gemini).len(), 1);
         assert!(result.get(ClientId::Gemini)[0].ends_with("session-abc.jsonl"));
     }
@@ -3612,7 +3690,7 @@ mod tests {
 
         unsafe { std::env::set_var("COPILOT_OTEL_FILE_EXPORTER_PATH", &explicit_file) };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["copilot".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["copilot".to_string()]);
 
         assert_eq!(result.get(ClientId::Copilot), &vec![explicit_file]);
 
@@ -3625,7 +3703,11 @@ mod tests {
         let home = dir.path();
         setup_mock_openclaw_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["openclaw".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::OpenClaw).len(), 3);
         assert!(result
             .get(ClientId::OpenClaw)
@@ -3651,7 +3733,11 @@ mod tests {
         File::create(openclaw_sessions.join("session-archived.jsonl.deleted.1700000000000"))
             .unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["openclaw".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["openclaw".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::OpenClaw).len(), 1);
         assert!(result.get(ClientId::OpenClaw)[0]
             .ends_with("session-archived.jsonl.deleted.1700000000000"));
@@ -3686,7 +3772,11 @@ mod tests {
         setup_mock_kiro_dir(home);
         setup_mock_kiro_global_storage_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["kiro".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["kiro".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::Kiro).len(), 4);
         assert!(result
             .get(ClientId::Kiro)
@@ -3712,7 +3802,11 @@ mod tests {
         File::create(sess_dir.join("session.json")).unwrap();
         File::create(sess_dir.join("messages.jsonl")).unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["kiro".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["kiro".to_string()],
+            false,
+        );
         assert!(result
             .get(ClientId::Kiro)
             .iter()
@@ -3945,7 +4039,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_scan_all_clients_crush_populates_crush_db_paths() {
-        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
+        let mut env = EnvGuard::capture(&["XDG_DATA_HOME", "CRUSH_GLOBAL_DATA", "LOCALAPPDATA"]);
+        env.remove("CRUSH_GLOBAL_DATA");
+        env.remove("LOCALAPPDATA");
 
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("home");
@@ -3968,9 +4064,9 @@ mod tests {
         );
         setup_mock_crush_registry(&registry_path, &projects_json);
 
-        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
+        env.set("XDG_DATA_HOME", &xdg);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["crush".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["crush".to_string()]);
         assert_eq!(
             result.crush_dbs,
             vec![CrushDbSource {
@@ -3980,15 +4076,21 @@ mod tests {
             }]
         );
         assert!(result.get(ClientId::Crush).is_empty());
-
-        restore_env("XDG_DATA_HOME", previous_xdg);
     }
 
     #[test]
     #[serial]
     fn test_scan_all_clients_headless_paths() {
-        let previous_headless = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") };
+        let mut env = EnvGuard::capture(&[
+            "TOKSCALE_HEADLESS_DIR",
+            "TOKSCALE_EXTRA_DIRS",
+            "CODEX_HOME",
+            "GEMINI_CLI_HOME",
+        ]);
+        env.remove("TOKSCALE_HEADLESS_DIR");
+        env.remove("TOKSCALE_EXTRA_DIRS");
+        env.remove("CODEX_HOME");
+        env.remove("GEMINI_CLI_HOME");
 
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -4014,8 +4116,6 @@ mod tests {
         assert!(result.get(ClientId::Claude).is_empty());
         assert_eq!(result.get(ClientId::Codex).len(), 1);
         assert!(result.get(ClientId::Gemini).is_empty());
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous_headless);
     }
 
     #[test]
@@ -4030,7 +4130,7 @@ mod tests {
         // Set CODEX_HOME environment variable
         unsafe { std::env::set_var("CODEX_HOME", home.join(".codex")) };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["codex".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codex".to_string()]);
         assert_eq!(result.get(ClientId::Codex).len(), 1);
 
         restore_env("CODEX_HOME", previous_codex);
@@ -4072,7 +4172,7 @@ mod tests {
 
         unsafe { std::env::set_var("CODEX_HOME", home.join(".codex")) };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["codex".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codex".to_string()]);
         assert_eq!(result.get(ClientId::Codex).len(), 1);
         assert!(result.get(ClientId::Codex)[0].ends_with("archived.jsonl"));
 
@@ -4091,7 +4191,7 @@ mod tests {
 
         unsafe { std::env::set_var("CODEX_HOME", home.join(".codex")) };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["codex".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codex".to_string()]);
         assert_eq!(result.get(ClientId::Codex).len(), 2);
 
         restore_env("CODEX_HOME", previous_codex);
@@ -4103,7 +4203,11 @@ mod tests {
         let home = dir.path();
         setup_mock_kimi_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["kimi".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["kimi".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::Kimi).len(), 1);
         assert!(result.get(ClientId::Kimi)[0].ends_with("wire.jsonl"));
         assert!(result.get(ClientId::OpenCode).is_empty());
@@ -4150,7 +4254,11 @@ mod tests {
         let home = dir.path();
         setup_mock_roocode_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["roocode".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["roocode".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::RooCode).len(), 2);
         assert!(result
             .get(ClientId::RooCode)
@@ -4164,7 +4272,11 @@ mod tests {
         let home = dir.path();
         setup_mock_kilocode_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["kilocode".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["kilocode".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::KiloCode).len(), 2);
         assert!(result
             .get(ClientId::KiloCode)
@@ -4178,7 +4290,11 @@ mod tests {
         let home = dir.path();
         setup_mock_cline_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["cline".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cline".to_string()],
+            false,
+        );
         assert_eq!(result.get(ClientId::Cline).len(), 4);
         assert!(result
             .get(ClientId::Cline)
@@ -4293,7 +4409,7 @@ mod tests {
         setup_mock_codebuff_chat(home, "manicode-dev", "2025-12-14T11-00-00.000Z");
         setup_mock_codebuff_chat(home, "manicode-staging", "2025-12-14T12-00-00.000Z");
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 3);
 
         restore_env("CODEBUFF_DATA_DIR", previous);
@@ -4312,7 +4428,7 @@ mod tests {
         setup_mock_codebuff_chat(home, "manicode", "2025-12-14T10-00-00.000Z");
         setup_mock_codebuff_chat(home, "manicode-dev", "2025-12-14T11-00-00.000Z");
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 2);
 
         restore_env("CODEBUFF_DATA_DIR", previous);
@@ -4344,7 +4460,7 @@ mod tests {
             )
         };
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["codebuff".to_string()]);
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["codebuff".to_string()]);
         assert_eq!(result.get(ClientId::Codebuff).len(), 1);
         assert!(result.get(ClientId::Codebuff)[0]
             .to_string_lossy()
@@ -4433,9 +4549,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_gjc_discovery_recursive_glob_depth1_and_depth2() {
-        let previous = std::env::var("GJC_CODING_AGENT_DIR").ok();
-        unsafe { std::env::remove_var("GJC_CODING_AGENT_DIR") };
-
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         // depth 1: <slug>/<id>.jsonl
@@ -4445,10 +4558,9 @@ mod tests {
         fs::create_dir_all(&depth2).unwrap();
         File::create(depth2.join("0-Pass.jsonl")).unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["gjc".to_string()], false);
         assert_eq!(result.get(ClientId::Gjc).len(), 2);
-
-        restore_env("GJC_CODING_AGENT_DIR", previous);
     }
 
     #[test]
@@ -4479,7 +4591,17 @@ mod tests {
     #[test]
     #[serial]
     fn test_gjc_discovery_env_override() {
-        let previous = std::env::var("GJC_CODING_AGENT_DIR").ok();
+        let mut env = EnvGuard::capture(&[
+            "GJC_CODING_AGENT_DIR",
+            "GJC_CONFIG_DIR",
+            "PI_CONFIG_DIR",
+            "XDG_DATA_HOME",
+            "TOKSCALE_EXTRA_DIRS",
+        ]);
+        env.remove("GJC_CONFIG_DIR");
+        env.remove("PI_CONFIG_DIR");
+        env.remove("XDG_DATA_HOME");
+        env.remove("TOKSCALE_EXTRA_DIRS");
 
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -4489,15 +4611,13 @@ mod tests {
         fs::create_dir_all(&override_sessions).unwrap();
         File::create(override_sessions.join("o.jsonl")).unwrap();
 
-        unsafe { std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref()) };
+        env.set("GJC_CODING_AGENT_DIR", &agent_dir);
 
         let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
         assert!(result
             .get(ClientId::Gjc)
             .iter()
             .any(|p| p.to_string_lossy().contains("custom-gjc-agent")));
-
-        restore_env("GJC_CODING_AGENT_DIR", previous);
     }
 
     #[test]
@@ -4505,7 +4625,17 @@ mod tests {
     fn test_gjc_discovery_multi_root_files_dedup_to_one() {
         // When GJC_CODING_AGENT_DIR points at the same on-disk location the
         // home fallback also resolves, the file must be counted ONCE.
-        let previous = std::env::var("GJC_CODING_AGENT_DIR").ok();
+        let mut env = EnvGuard::capture(&[
+            "GJC_CODING_AGENT_DIR",
+            "GJC_CONFIG_DIR",
+            "PI_CONFIG_DIR",
+            "XDG_DATA_HOME",
+            "TOKSCALE_EXTRA_DIRS",
+        ]);
+        env.remove("GJC_CONFIG_DIR");
+        env.remove("PI_CONFIG_DIR");
+        env.remove("XDG_DATA_HOME");
+        env.remove("TOKSCALE_EXTRA_DIRS");
 
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -4514,12 +4644,10 @@ mod tests {
         // Point the env var at <home>/.gjc/agent so root (1) and root (4)
         // resolve to the same directory.
         let agent_dir = home.join(".gjc/agent");
-        unsafe { std::env::set_var("GJC_CODING_AGENT_DIR", agent_dir.to_string_lossy().as_ref()) };
+        env.set("GJC_CODING_AGENT_DIR", &agent_dir);
 
         let result = scan_all_clients(home.to_str().unwrap(), &["gjc".to_string()]);
         assert_eq!(result.get(ClientId::Gjc).len(), 1);
-
-        restore_env("GJC_CODING_AGENT_DIR", previous);
     }
 
     // -----------------------------------------------------------------------
@@ -4557,7 +4685,8 @@ mod tests {
             )
         };
 
-        let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
             !result.get(ClientId::Gjc).is_empty(),
             "expected at least 1 file from GJC_CONFIG_DIR root, got {:?}",
@@ -4602,7 +4731,8 @@ mod tests {
 
         unsafe { std::env::set_var("PI_CONFIG_DIR", pi_config.path().to_string_lossy().as_ref()) };
 
-        let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
             !result.get(ClientId::Gjc).is_empty(),
             "expected at least 1 file from PI_CONFIG_DIR root, got {:?}",
@@ -4649,7 +4779,8 @@ mod tests {
 
         unsafe { std::env::set_var("XDG_DATA_HOME", xdg_data.path().to_string_lossy().as_ref()) };
 
-        let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
             !result.get(ClientId::Gjc).is_empty(),
             "expected at least 1 file from XDG_DATA_HOME/gjc/sessions, got {:?}",
@@ -4699,7 +4830,8 @@ mod tests {
 
         unsafe { std::env::set_var("XDG_DATA_HOME", xdg_data.path().to_string_lossy().as_ref()) };
 
-        let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert_eq!(
             result.get(ClientId::Gjc).len(),
             2,
@@ -4802,7 +4934,8 @@ mod tests {
         setup_mock_gjc_session(home_dir.path(), "slug", "a.jsonl");
 
         // Must not panic.
-        let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
 
         assert_eq!(
             result.get(ClientId::Gjc).len(),
