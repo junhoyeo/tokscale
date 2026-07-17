@@ -1356,8 +1356,10 @@ fn write_shard_with_limit(
             .map_err(std::io::Error::other)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
+        drop(writer);
         crate::fs_atomic::replace_file(&tmp_path, final_path)?;
-        File::open(final_path)?.sync_all()?;
+        let final_file = OpenOptions::new().read(true).write(true).open(final_path)?;
+        final_file.sync_all()?;
         Ok(())
     })();
 
@@ -2531,6 +2533,29 @@ mod tests {
         std::fs::write(file.path(), rewritten).unwrap();
 
         assert!(!codex_prefix_matches(file.path(), &incremental_cache));
+    }
+
+    #[test]
+    fn test_write_shard_round_trips_after_atomic_replace() {
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let entry = test_entry(identity, source.path(), "session-1");
+        let shard_dir = TempDir::new().unwrap();
+        let shard_path = shard_dir.path().join("shard.bin");
+
+        write_shard_with_limit(
+            &shard_path,
+            identity,
+            std::slice::from_ref(&entry),
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            read_shard(&shard_path, identity),
+            ShardReadStatus::Loaded(entries)
+                if entries.len() == 1 && entries[0].messages[0].session_id == "session-1"
+        ));
     }
 
     #[test]
