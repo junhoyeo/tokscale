@@ -395,7 +395,6 @@ describe("POST /api/submit auth path", () => {
     const selectResults = [
       [],
       [],
-      [],
       [{
         totalTokens: 12,
         totalCost: "0.5000",
@@ -628,12 +627,6 @@ describe("POST /api/submit auth path", () => {
         sourceBreakdown: existingBreakdown,
       }],
       [{
-        id: "daily-1",
-        date: "2026-04-30",
-        timestampMs: 123,
-        sourceBreakdown: existingBreakdown,
-      }],
-      [{
         totalTokens: 15,
         totalCost: "0.7500",
         inputTokens: 10,
@@ -694,10 +687,9 @@ describe("POST /api/submit auth path", () => {
       id: "submittedDevices.id",
     }));
     expect(tx.execute).toHaveBeenCalledTimes(1);
-    // Batch UPDATE must re-attribute the merged row to the submitting
-    // device, not leave it stamped with whichever device's row happened to
-    // survive the SELECT.
-    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).toEqual(
+    // A same-device update keeps ownership implicit in the selected row and
+    // must not rewrite submitted_device_id.
+    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).not.toEqual(
       expect.arrayContaining(["submitted-device-1"]),
     );
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
@@ -724,11 +716,7 @@ describe("POST /api/submit auth path", () => {
     }));
   });
 
-  it("attributes a merged day to the new device on a replacement-device submit", async () => {
-    // Regression for cubic P2 review: a replacement-device submit (dev_phone
-    // taking over from a previously-submitting device on an overlapping
-    // date) must stamp submitted_device_id on the batch UPDATE, otherwise
-    // the merged row keeps pointing at the old device.
+  it("keeps same-client usage additive across devices on the same date", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",
       tokenId: "token-1",
@@ -808,10 +796,6 @@ describe("POST /api/submit auth path", () => {
     };
 
     mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
-    mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
-      merged: mergedBreakdown,
-      warnings: [],
-    });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
       cost: 0.75,
@@ -822,36 +806,26 @@ describe("POST /api/submit auth path", () => {
 
     const selectResults = [
       [{ id: "submission-1" }],
-      // fetchExistingDeviceDays() for dev_phone: a row already visible under
-      // this device key (non-empty, so the legacy-adoption branch is
-      // skipped) -- what matters for this test is that the merged row gets
-      // re-stamped with the *current* submitting device's id below.
+      // No rows owned by dev_phone. A different device's row for this date
+      // exists in the database but must not enter this device-scoped merge.
+      [],
+      // Legacy-adoption re-fetch remains empty because another modern device
+      // already owns the existing row.
+      [],
       [{
-        id: "daily-old-device",
-        date: "2026-04-30",
-        timestampMs: 123,
-        activeTimeMs: null,
-        sourceBreakdown: existingBreakdown,
-      }],
-      // existingDays across the WHOLE submission.
-      [{
-        id: "daily-old-device",
-        date: "2026-04-30",
-        timestampMs: 123,
-        activeTimeMs: null,
-        sourceBreakdown: existingBreakdown,
-      }],
-      [{
-        totalTokens: 15,
-        totalCost: "0.7500",
-        inputTokens: 10,
-        outputTokens: 5,
+        totalTokens: 27,
+        totalCost: "1.2500",
+        inputTokens: 17,
+        outputTokens: 10,
         dateStart: "2026-04-30",
         dateEnd: "2026-04-30",
         activeDays: 1,
-        rowCount: 1,
+        rowCount: 2,
       }],
-      [{ sourceBreakdown: mergedBreakdown }],
+      [
+        { sourceBreakdown: existingBreakdown },
+        { sourceBreakdown: mergedBreakdown },
+      ],
     ];
 
     const tx = {
@@ -894,14 +868,23 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(tx.execute).toHaveBeenCalledTimes(1);
-    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).toEqual(
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("UPDATE daily_breakdown"),
-        "daily-old-device",
+        expect.stringContaining("INSERT INTO daily_breakdown"),
         "submitted-device-phone",
+        expect.stringContaining("ON CONFLICT (submission_id, submitted_device_id, date)"),
       ]),
     );
+    expect(mockState.mergeClientBreakdownsWithRegressionGuard).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual(expect.objectContaining({
+      success: true,
+      metrics: expect.objectContaining({
+        totalTokens: 27,
+        activeDays: 1,
+      }),
+      mode: "merge",
+    }));
   });
 
   it("merges after a concurrent first submit creates the submission first", async () => {
@@ -999,13 +982,6 @@ describe("POST /api/submit auth path", () => {
     const selectResults = [
       [],
       [{ id: "submission-1" }],
-      [{
-        id: "daily-1",
-        date: "2026-04-30",
-        timestampMs: 123,
-        activeTimeMs: null,
-        sourceBreakdown: existingBreakdown,
-      }],
       [{
         id: "daily-1",
         date: "2026-04-30",
@@ -1211,7 +1187,6 @@ describe("POST /api/submit auth path", () => {
       [{ id: "submission-1" }],
       [],
       [],
-      [],
       [{
         totalTokens: 42,
         totalCost: "1.7500",
@@ -1409,13 +1384,6 @@ describe("POST /api/submit auth path", () => {
         sourceBreakdown: existingBreakdown,
       }],
       [{
-        id: "daily-1",
-        date: "2026-04-30",
-        timestampMs: 123,
-        activeTimeMs: 2_000,
-        sourceBreakdown: existingBreakdown,
-      }],
-      [{
         totalTokens: 27,
         totalCost: "1.2500",
         inputTokens: 17,
@@ -1595,13 +1563,6 @@ describe("POST /api/submit auth path", () => {
         sourceBreakdown: legacyBreakdown,
       }],
       [{
-        id: "daily-legacy",
-        date: "2026-04-30",
-        timestampMs: 123,
-        activeTimeMs: null,
-        sourceBreakdown: legacyBreakdown,
-      }],
-      [{
         totalTokens: 15,
         totalCost: "0.7500",
         inputTokens: 10,
@@ -1765,7 +1726,6 @@ describe("POST /api/submit auth path", () => {
 
     const selectResults = [
       [{ id: "submission-1" }],
-      [],
       [],
       [],
       [{
