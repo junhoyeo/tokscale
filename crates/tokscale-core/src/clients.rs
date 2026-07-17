@@ -42,6 +42,14 @@ impl PathRoot {
                     }
                 }
 
+                #[cfg(target_os = "windows")]
+                if !use_env_roots {
+                    return std::path::Path::new(home_dir)
+                        .join("AppData/Roaming/tokscale")
+                        .to_string_lossy()
+                        .into_owned();
+                }
+
                 format!("{home_dir}/.config/tokscale")
             }
             PathRoot::EnvVar {
@@ -833,7 +841,15 @@ mod tests {
         }
 
         let resolved = PathRoot::Config.resolve_with_env_strategy("/tmp/home", false);
-        assert_eq!(resolved, "/tmp/home/.config/tokscale");
+        let expected = if cfg!(target_os = "windows") {
+            std::path::Path::new("/tmp/home")
+                .join("AppData/Roaming/tokscale")
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            "/tmp/home/.config/tokscale".to_string()
+        };
+        assert_eq!(resolved, expected);
 
         restore_env("TOKSCALE_CONFIG_DIR", previous_override);
         restore_env("XDG_CONFIG_HOME", previous_xdg);
