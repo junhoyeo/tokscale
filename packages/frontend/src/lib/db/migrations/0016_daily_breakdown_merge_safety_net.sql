@@ -66,8 +66,10 @@ WHERE (db.submission_id, db.date) IN (
 --> statement-breakpoint
 -- Tracks which submissions actually had a duplicate merged, so the totals
 -- recompute at the end of this migration only touches submissions whose
--- denormalized totals could actually have gone stale.
-DROP TABLE IF EXISTS affected_submissions_0016;
+-- denormalized totals could actually have gone stale. Qualified to pg_temp
+-- so this cleanup can only ever drop a leftover temp table from a prior
+-- attempt in the same session -- never a permanent table of the same name.
+DROP TABLE IF EXISTS pg_temp.affected_submissions_0016;
 --> statement-breakpoint
 CREATE TEMP TABLE affected_submissions_0016 (submission_id uuid PRIMARY KEY);
 --> statement-breakpoint
@@ -292,4 +294,4 @@ LEFT JOIN client_agg ca ON ca.submission_id = da.submission_id
 LEFT JOIN model_agg ma ON ma.submission_id = da.submission_id
 WHERE s.id = da.submission_id;
 --> statement-breakpoint
-DROP TABLE IF EXISTS affected_submissions_0016;
+DROP TABLE IF EXISTS pg_temp.affected_submissions_0016;
