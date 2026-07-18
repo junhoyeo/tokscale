@@ -141,7 +141,11 @@ struct OpenCodeSqliteFingerprint {
 
 #[derive(Debug, Clone)]
 struct OpenCodeSqliteDedupState {
-    has_embedded_message_id: bool,
+    /// The entry's embedded (`$.id`) message id, if any. Two rows that share
+    /// every fingerprint field but carry *different* embedded ids are distinct
+    /// messages, not fork copies, and must not be merged. A fork copies the id,
+    /// so equal ids (or an id absent on either side) still merge.
+    message_id: Option<String>,
     has_workspace_conflict: bool,
 }
 
@@ -276,11 +280,13 @@ type OpenCodeSqliteRow = (String, String, String, Option<String>);
 /// Accumulates parsed assistant messages across OpenCode's v1 (`message`) and
 /// v2 (`session_message`) tables, applying fingerprint-based deduplication so
 /// forked-history copies — and any overlap between the two tables — collapse
-/// into a single entry.
+/// into a single entry. A fingerprint maps to a *list* of entries, one per
+/// distinct embedded message id, so two genuinely different messages that
+/// happen to collide on every fingerprint field are kept apart.
 #[derive(Default)]
 struct OpenCodeSqliteAccumulator {
     messages: Vec<UnifiedMessage>,
-    fingerprint_indices: HashMap<OpenCodeSqliteFingerprint, usize>,
+    fingerprint_indices: HashMap<OpenCodeSqliteFingerprint, Vec<usize>>,
     dedup_states: Vec<OpenCodeSqliteDedupState>,
 }
 
@@ -369,22 +375,46 @@ impl OpenCodeSqliteAccumulator {
         set_workspace_from_root(&mut unified, workspace_root);
         mark_opencode_cost_source(&mut unified);
 
-        if let Some(index) = self.fingerprint_indices.get(&fingerprint).copied() {
+        // Among entries sharing this fingerprint, merge into the first one that
+        // is NOT a definitively-different message -- i.e. skip any whose stored
+        // embedded id conflicts with this row's. (Cloning the small index list
+        // avoids holding a borrow of `fingerprint_indices` while we read
+        // `dedup_states`.)
+        let candidate = {
+            let slots = self
+                .fingerprint_indices
+                .get(&fingerprint)
+                .cloned()
+                .unwrap_or_default();
+            slots.into_iter().find(|&index| {
+                !matches!(
+                    (&self.dedup_states[index].message_id, &message_id),
+                    (Some(existing), Some(incoming)) if existing != incoming
+                )
+            })
+        };
+
+        if let Some(index) = candidate {
             let dedup_state = &mut self.dedup_states[index];
-            if message_id.is_some() && !dedup_state.has_embedded_message_id {
-                dedup_state.has_embedded_message_id = true;
-                self.messages[index].dedup_key = unified.dedup_key;
+            // First copy carrying an embedded id promotes the entry's stable
+            // dedup key (and records the id so later rows can be told apart).
+            if message_id.is_some() && dedup_state.message_id.is_none() {
+                dedup_state.message_id = message_id.clone();
+                self.messages[index].dedup_key = unified.dedup_key.clone();
             }
             merge_duplicate_workspace(&mut self.messages[index], dedup_state, workspace_root);
             return;
         }
 
+        let new_index = self.messages.len();
         self.dedup_states.push(OpenCodeSqliteDedupState {
-            has_embedded_message_id: message_id.is_some(),
+            message_id: message_id.clone(),
             has_workspace_conflict: false,
         });
         self.fingerprint_indices
-            .insert(fingerprint, self.messages.len());
+            .entry(fingerprint)
+            .or_default()
+            .push(new_index);
         self.messages.push(unified);
     }
 }
@@ -831,6 +861,60 @@ mod tests {
             messages.len(),
             1,
             "forked copies of the same assistant turn collapse inside v2 parsing"
+        );
+    }
+
+    #[test]
+    fn test_distinct_embedded_ids_are_not_merged_despite_fingerprint_collision() {
+        // Two genuinely different assistant messages can share every fingerprint
+        // field (timestamp, model, tokens, cost, agent). When both carry an
+        // embedded `$.id` and the ids DIFFER, they are distinct messages -- not
+        // fork copies -- and must be kept separate rather than collapsed.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode-next.db");
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+
+        let payload = |id: &str| {
+            format!(
+                r#"{{
+                    "id": "{id}",
+                    "time": {{ "created": 1783882279705, "completed": 1783882279943 }},
+                    "agent": "build",
+                    "model": {{ "id": "claude-sonnet-4", "providerID": "anthropic" }},
+                    "cost": 0.0123,
+                    "tokens": {{ "input": 10, "output": 5, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }}
+                }}"#
+            )
+        };
+
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["row_a", "ses_v2", "assistant", payload("msg_a")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["row_b", "ses_v2", "assistant", payload("msg_b")],
+        )
+        .unwrap();
+        // A true fork of msg_a (same embedded id, different session/row) must
+        // still collapse into msg_a rather than becoming a third entry.
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["row_a_fork", "fork_session", "assistant", payload("msg_a")],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut dedup_keys: Vec<String> = parse_opencode_sqlite(&db_path)
+            .into_iter()
+            .filter_map(|m| m.dedup_key)
+            .collect();
+        dedup_keys.sort();
+        assert_eq!(
+            dedup_keys,
+            vec!["msg_a".to_string(), "msg_b".to_string()],
+            "distinct embedded ids stay separate; a same-id fork collapses"
         );
     }
 
