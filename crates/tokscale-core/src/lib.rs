@@ -3701,16 +3701,29 @@ mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
         filter_messages_for_report, generate_graph_with_loaded_pricing, message_cache,
-        normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
-        pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
-        unified_to_parsed, ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown,
-        UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        normalize_model_for_grouping, parse_all_messages_with_pricing_with_env_strategy,
+        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
+        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
+        ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::str::FromStr;
     use std::sync::Arc;
+
+    fn parse_all_messages_with_pricing(
+        home_dir: &str,
+        clients: &[String],
+        pricing: Option<&pricing::PricingService>,
+    ) -> Vec<UnifiedMessage> {
+        parse_all_messages_with_pricing_with_env_strategy(
+            home_dir,
+            clients,
+            pricing,
+            false,
+            &scanner::ScannerSettings::default(),
+        )
+    }
 
     #[test]
     fn token_total_saturates_on_overlarge_buckets() {
@@ -8100,9 +8113,9 @@ mod tests {
     #[test]
     fn test_parse_local_clients_honors_scanner_extra_scan_paths_for_zed_threads_db() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let windows_threads_dir = temp_dir.path().join("AppData/Local/Zed/threads");
-        std::fs::create_dir_all(&windows_threads_dir).unwrap();
-        let threads_db = windows_threads_dir.join("threads.db");
+        let extra_threads_dir = temp_dir.path().join("custom-zed/threads");
+        std::fs::create_dir_all(&extra_threads_dir).unwrap();
+        let threads_db = extra_threads_dir.join("threads.db");
         let conn = create_zed_sqlite_db(&threads_db);
         insert_zed_thread(&conn, "zed-extra-thread", "claude-sonnet-4-5");
         drop(conn);
@@ -8121,7 +8134,7 @@ mod tests {
         assert!(parsed_default.messages.is_empty());
 
         let mut extra_scan_paths = std::collections::BTreeMap::new();
-        extra_scan_paths.insert("zed".to_string(), vec![windows_threads_dir]);
+        extra_scan_paths.insert("zed".to_string(), vec![extra_threads_dir]);
         let parsed_with_settings = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,

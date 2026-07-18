@@ -505,7 +505,8 @@ describe("POST /api/submit auth path", () => {
       displayName: "Test device",
     }));
     expect(tx.execute).toHaveBeenCalledTimes(1);
-    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).toEqual(
+    const insertChunks = flattenSqlChunks(tx.execute.mock.calls[0][0]);
+    expect(insertChunks).toEqual(
       expect.arrayContaining([
         expect.stringContaining("INSERT INTO daily_breakdown"),
         "submission-1",
@@ -513,6 +514,21 @@ describe("POST /api/submit auth path", () => {
         "2026-04-30",
       ]),
     );
+    // Device-scoped upsert: the daily_breakdown INSERT must target the
+    // per-device unique key so independent devices own distinct rows. Naming
+    // the old account-level (submission_id, date) key would collapse them.
+    expect(insertChunks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("ON CONFLICT (submission_id, submitted_device_id, date)"),
+      ]),
+    );
+    expect(
+      insertChunks.some(
+        (chunk) =>
+          typeof chunk === "string" &&
+          /ON CONFLICT \(submission_id, date\)/.test(chunk),
+      ),
+    ).toBe(false);
     expect(submissionUpdateValues).toEqual(
       expect.objectContaining({
         mcpServers: ["github", "slack"],

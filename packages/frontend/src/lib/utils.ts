@@ -254,7 +254,22 @@ export function formatTokenCount(count: number): string {
 export const formatNumber = formatTokenCount;
 
 export function formatCurrency(amount: number): string {
-  if (amount >= 1000) return `$${(amount / 1000).toFixed(2)}K`;
+  if (amount >= 1_000_000_000) {
+    return `$${(amount / 1_000_000_000).toFixed(2)}B`;
+  }
+  if (amount >= 1_000_000) {
+    const val = amount / 1_000_000;
+    // toFixed(2) rounds 999.995+ to "1000.00"; promote to next unit instead
+    return val >= 999.995
+      ? `$${(val / 1000).toFixed(2)}B`
+      : `$${val.toFixed(2)}M`;
+  }
+  if (amount >= 1000) {
+    const val = amount / 1000;
+    return val >= 999.995
+      ? `$${(val / 1000).toFixed(2)}M`
+      : `$${val.toFixed(2)}K`;
+  }
   return `$${amount.toFixed(2)}`;
 }
 
