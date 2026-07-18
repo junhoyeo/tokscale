@@ -1644,6 +1644,126 @@ describe("POST /api/submit auth path", () => {
     }));
   });
 
+  it("fails the request instead of double-counting when legacy adoption errors non-recoverably", async () => {
+    // Regression: the legacy-adoption savepoint must only swallow a unique
+    // violation (23505) from a concurrent submit. Any other failure (deadlock,
+    // timeout, permission) leaves the legacy rows unclaimed; falling through
+    // would insert the incoming device's overlapping history as a second row
+    // and silently inflate totals. Such errors must propagate as a 500.
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_laptop",
+          name: "Laptop",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    mockState.clientContributionToBreakdownData.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(123);
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      // First fetchExistingDeviceDays() for dev_laptop: empty, so the route
+      // enters the legacy-adoption branch.
+      [],
+    ];
+
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
+      // Savepoint fails with a non-unique error (deadlock, SQLSTATE 40P01).
+      transaction: vi.fn(async () => {
+        throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+      }),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(500);
+    // The merge/write path must never run after a non-recoverable adoption error.
+    expect(mockState.mergeClientBreakdownsWithRegressionGuard).not.toHaveBeenCalled();
+    expect(tx.execute).not.toHaveBeenCalled();
+  });
+
   it("keeps legacy daily rows separate when another modern device already submitted", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",

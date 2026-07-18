@@ -413,11 +413,19 @@ export async function POST(request: Request) {
             `);
           });
         } catch (adoptionErr) {
-          // Unique constraint hit from a concurrent submit racing this UPDATE.
-          // Savepoint rolled back; outer tx is still usable.
-          // fetchExistingDeviceDays() below will pick up rows already claimed
-          // by the other request, and subsequent logic will merge rather than
-          // re-adopt.
+          // Only a unique-constraint violation (23505) from a concurrent submit
+          // racing this UPDATE is a recoverable fall-through: the savepoint
+          // rolled back, the outer tx is still usable, and fetchExistingDeviceDays()
+          // below picks up rows the other request already claimed so subsequent
+          // logic merges rather than re-adopts.
+          //
+          // Any other failure (timeout, deadlock, permission error) leaves the
+          // legacy rows unclaimed. Falling through would then insert the incoming
+          // device's overlapping history as a SECOND row, silently inflating
+          // totals. Re-throw so the request fails loudly instead of double-counting.
+          if (!isUniqueConstraintViolation(adoptionErr)) {
+            throw adoptionErr;
+          }
           console.warn("Legacy adoption conflict (concurrent submit), falling through:", adoptionErr);
         }
         existingDeviceDays = await fetchExistingDeviceDays();
