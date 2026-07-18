@@ -198,7 +198,13 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
 
     let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).ok()?;
 
-    if !msg.is_assistant() {
+    // OpenCode JSON files (v1) always carry an explicit role, so require it to
+    // be "assistant" here. Missing-role acceptance (is_assistant) is reserved
+    // for the v2 `session_message` SQLite path, whose SQL already filters
+    // `type = 'assistant'`; applying it to files would count a role-less or
+    // malformed file as assistant usage (previously it was skipped when the
+    // required `role` field failed to deserialize).
+    if msg.role.as_deref() != Some("assistant") {
         return None;
     }
 
@@ -928,6 +934,42 @@ mod tests {
             msg.cost >= 0.0,
             "Negative cost should be clamped to 0.0, got {}",
             msg.cost
+        );
+    }
+
+    #[test]
+    fn test_parse_opencode_file_requires_explicit_assistant_role() {
+        use std::io::Write;
+        // Regression: making `role` optional for the v2 SQLite path must NOT
+        // loosen file parsing. A file without a `role` (or a non-assistant one)
+        // is not assistant usage and must be skipped -- the missing-role =>
+        // assistant shortcut applies only to the type-filtered session_message
+        // SQLite query, never to JSON files.
+        let role_less = r#"{
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 10, "output": 5, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        let mut f1 = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        f1.write_all(role_less.as_bytes()).unwrap();
+        assert!(
+            parse_opencode_file(f1.path()).is_none(),
+            "a role-less OpenCode JSON file must not be counted as assistant usage"
+        );
+
+        let user_role = r#"{
+            "role": "user",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 10, "output": 5, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        let mut f2 = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        f2.write_all(user_role.as_bytes()).unwrap();
+        assert!(
+            parse_opencode_file(f2.path()).is_none(),
+            "a non-assistant OpenCode JSON file must be skipped"
         );
     }
 
