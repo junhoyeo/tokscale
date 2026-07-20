@@ -274,8 +274,8 @@ fn mark_opencode_cost_source(unified: &mut UnifiedMessage) {
 }
 
 /// Column layout shared by every OpenCode SQLite query variant:
-/// `(row_id, session_id, data_json, workspace_root)`.
-type OpenCodeSqliteRow = (String, String, String, Option<String>);
+/// `(row_id, session_id, data_json, workspace_root, session_title)`.
+type OpenCodeSqliteRow = (String, String, String, Option<String>, Option<String>);
 
 /// Accumulates parsed assistant messages across OpenCode's v1 (`message`) and
 /// v2 (`session_message`) tables, applying fingerprint-based deduplication so
@@ -294,7 +294,7 @@ impl OpenCodeSqliteAccumulator {
     /// Parse one SQLite row's JSON payload and merge it into the accumulator,
     /// deduplicating against previously ingested rows.
     fn ingest_row(&mut self, row: OpenCodeSqliteRow) {
-        let (row_id, session_id, data_json, row_workspace_root) = row;
+        let (row_id, session_id, data_json, row_workspace_root, row_session_title) = row;
 
         let mut bytes = data_json.into_bytes();
         let msg: OpenCodeMessage = match simd_json::from_slice(&mut bytes) {
@@ -374,6 +374,12 @@ impl OpenCodeSqliteAccumulator {
             .or(embedded_workspace_root.as_deref());
         set_workspace_from_root(&mut unified, workspace_root);
         mark_opencode_cost_source(&mut unified);
+        if let Some(ref title) = row_session_title {
+            let trimmed = title.trim();
+            if !trimmed.is_empty() {
+                unified.session_title = Some(trimmed.to_string());
+            }
+        }
 
         // Among entries sharing this fingerprint, merge into the first one that
         // is NOT a definitively-different message -- i.e. skip any whose stored
@@ -419,11 +425,11 @@ impl OpenCodeSqliteAccumulator {
     }
 }
 
-/// Run one query (whose columns are `id, session_id, data, workspace_root`)
-/// against `conn` and feed every row into `acc`. A prepare/query failure — for
-/// example a table that does not exist in this schema variant — is treated as
-/// "no rows", so callers can attempt several schema variants against the same
-/// database without an error aborting the scan.
+/// Run one query (whose columns are `id, session_id, data, workspace_root,
+/// session_title`) against `conn` and feed every row into `acc`. A prepare/query
+/// failure — for example a table that does not exist in this schema variant —
+/// is treated as "no rows", so callers can attempt several schema variants
+/// against the same database without an error aborting the scan.
 fn collect_opencode_rows(
     conn: &rusqlite::Connection,
     query: &str,
@@ -439,7 +445,8 @@ fn collect_opencode_rows(
         let session_id: String = row.get(1)?;
         let data_json: String = row.get(2)?;
         let workspace_root: Option<String> = row.get(3)?;
-        Ok((id, session_id, data_json, workspace_root))
+        let session_title: Option<String> = row.get(4)?;
+        Ok((id, session_id, data_json, workspace_root, session_title))
     }) {
         Ok(r) => r,
         Err(_) => return,
@@ -462,7 +469,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // under `$.model`. Absent in v1 databases, where the prepare fails and this
     // is a no-op.
     let v2_query = r#"
-        SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root
+        SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root, s.title AS session_title
         FROM session_message sm
         LEFT JOIN session s ON s.id = sm.session_id
         WHERE sm.type = 'assistant'
@@ -472,10 +479,11 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     collect_opencode_rows(&conn, v2_query, &mut acc);
 
     // OpenCode v1 (`opencode.db`, 1.2+): per-message rows in `message`, role in
-    // the JSON `$.role`. The `session` join supplies the workspace directory;
-    // the legacy variant drops it for databases without a `session` table.
+    // the JSON `$.role`. The `session` join supplies the workspace directory
+    // and title; the legacy variant drops both for databases without a
+    // `session` table.
     let v1_modern_query = r#"
-        SELECT m.id, m.session_id, m.data, NULLIF(s.directory, '') AS workspace_root
+        SELECT m.id, m.session_id, m.data, NULLIF(s.directory, '') AS workspace_root, s.title AS session_title
         FROM message m
         LEFT JOIN session s ON s.id = m.session_id
         WHERE json_extract(m.data, '$.role') = 'assistant'
@@ -483,7 +491,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         ORDER BY m.id, m.session_id
     "#;
     let v1_legacy_query = r#"
-        SELECT m.id, m.session_id, m.data, NULL AS workspace_root
+        SELECT m.id, m.session_id, m.data, NULL AS workspace_root, NULL AS session_title
         FROM message m
         WHERE json_extract(m.data, '$.role') = 'assistant'
           AND json_extract(m.data, '$.tokens') IS NOT NULL
@@ -660,7 +668,8 @@ mod tests {
             );
             CREATE TABLE session (
                 id TEXT PRIMARY KEY,
-                directory TEXT NOT NULL
+                directory TEXT NOT NULL,
+                title TEXT
             );
             CREATE TABLE session_message (
                 id TEXT PRIMARY KEY,
@@ -1405,7 +1414,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
-                directory TEXT NOT NULL
+                directory TEXT NOT NULL,
+                title TEXT
             );",
         )
         .unwrap();
@@ -1499,7 +1509,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
-                directory TEXT NOT NULL
+                directory TEXT NOT NULL,
+                title TEXT
             );",
         )
         .unwrap();

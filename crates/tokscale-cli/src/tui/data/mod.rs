@@ -141,6 +141,29 @@ pub struct MonthlyUsage {
     pub turn_count: u32,
 }
 
+/// Per-session usage rollup. One row per `(client, session_id)` pair so the
+/// Sessions tab can show cost/tokens broken down by individual conversation
+/// alongside how long the session was active and when it last saw activity.
+#[derive(Debug, Clone)]
+pub struct SessionUsage {
+    pub session_id: String,
+    pub client: String,
+    /// Human-readable session title when the source client stores one
+    /// (e.g. OpenCode's `session.title` column). `None` for clients that
+    /// don't record a title.
+    pub title: Option<String>,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub message_count: u32,
+    pub turn_count: u32,
+    /// Unix-ms timestamp of the first message observed in this session.
+    /// `0` when every message lacked a usable timestamp.
+    pub first_active_ms: i64,
+    /// Unix-ms timestamp of the most recent message observed in this session.
+    /// `0` when every message lacked a usable timestamp.
+    pub last_active_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ContributionDay {
     pub date: NaiveDate,
@@ -162,6 +185,7 @@ pub struct UsageData {
     pub hourly: Vec<HourlyUsage>,
     pub minutely: Vec<MinutelyUsage>,
     pub monthly: Vec<MonthlyUsage>,
+    pub sessions: Vec<SessionUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -430,6 +454,7 @@ impl DataLoader {
         let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
         let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
 
         for msg in &messages {
             let normalized_model = normalize_model_for_grouping(&msg.model_id);
@@ -872,6 +897,79 @@ impl DataLoader {
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
                 m_model.cost += m_cost;
             }
+
+            // Session aggregation: one bucket per (client, session_id) so the
+            // Sessions tab can show cost/tokens per individual conversation.
+            // Skips messages with an empty session_id (some legacy/scanner
+            // records lack one) rather than lumping them into a single bogus
+            // "no-session" row.
+            if !msg.session_id.is_empty() {
+                let session_key = format!("{}:{}", msg.client, msg.session_id);
+                let session_entry =
+                    session_map
+                        .entry(session_key)
+                        .or_insert_with(|| SessionUsage {
+                            session_id: msg.session_id.clone(),
+                            client: msg.client.clone(),
+                            title: None,
+                            tokens: TokenBreakdown::default(),
+                            cost: 0.0,
+                            message_count: 0,
+                            turn_count: 0,
+                            first_active_ms: 0,
+                            last_active_ms: 0,
+                        });
+
+                session_entry.tokens.input = session_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                session_entry.tokens.output = session_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                session_entry.tokens.cache_read = session_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                session_entry.tokens.cache_write = session_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                session_entry.tokens.reasoning = session_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                session_entry.cost += msg_cost;
+                session_entry.message_count = session_entry
+                    .message_count
+                    .saturating_add(msg.message_count.max(0) as u32);
+                if msg.is_turn_start {
+                    session_entry.turn_count += 1;
+                }
+
+                let ts = message_timestamp_ms(msg);
+                if ts > 0 {
+                    if session_entry.first_active_ms == 0 || ts < session_entry.first_active_ms {
+                        session_entry.first_active_ms = ts;
+                    }
+                    if ts > session_entry.last_active_ms {
+                        session_entry.last_active_ms = ts;
+                    }
+                }
+
+                // Adopt the first non-empty session_title seen across the
+                // session's messages. Parsers that don't populate the field
+                // leave it `None` and the Sessions tab falls back to the ID.
+                if session_entry.title.is_none() {
+                    if let Some(ref title) = msg.session_title {
+                        let trimmed = title.trim();
+                        if !trimmed.is_empty() {
+                            session_entry.title = Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
         }
 
         let mut models: Vec<ModelUsage> = model_map
@@ -913,6 +1011,15 @@ impl DataLoader {
 
         let monthly = aggregate_monthly_from_daily(&daily);
 
+        let mut sessions: Vec<SessionUsage> = session_map.into_values().collect();
+        sessions.sort_by(|a, b| {
+            b.cost
+                .total_cmp(&a.cost)
+                .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                .then_with(|| a.client.cmp(&b.client))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+
         let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
         let total_cost: f64 = models
             .iter()
@@ -929,6 +1036,7 @@ impl DataLoader {
             hourly,
             minutely,
             monthly,
+            sessions,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -942,6 +1050,26 @@ impl DataLoader {
 
 fn parse_date(date_str: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+}
+
+/// Resolve a message to a Unix-ms timestamp, falling back to the `date`
+/// string's midnight (local) when `timestamp` is missing/zero. Mirrors the
+/// fallback semantics used by the hourly/minutely bucketing so sessions
+/// with only a date still contribute to first/last-active bounds.
+fn message_timestamp_ms(msg: &UnifiedMessage) -> i64 {
+    if msg.timestamp > 0 {
+        return msg.timestamp;
+    }
+    use chrono::TimeZone;
+    parse_date(&msg.date)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|dt| {
+            Local
+                .from_local_datetime(&dt)
+                .single()
+                .map(|dt| dt.timestamp_millis())
+        })
+        .unwrap_or(0)
 }
 
 /// Convert Unix ms timestamp to a NaiveDateTime truncated to the hour (local tz).

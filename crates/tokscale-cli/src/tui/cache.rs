@@ -638,6 +638,10 @@ impl TryFrom<CachedUsageData> for UsageData {
             // first foreground refresh after cache hit will populate it.
             minutely: Vec::new(),
             monthly,
+            // Sessions are recomputed on each load (high cardinality, not
+            // worth round-tripping through the on-disk cache); the first
+            // foreground refresh after cache hit will populate it.
+            sessions: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,

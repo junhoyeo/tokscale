@@ -20,7 +20,7 @@ use super::codex_login::{
 };
 use super::data::{
     AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, MonthlyUsage,
-    TokenBreakdown, UsageData,
+    SessionUsage, TokenBreakdown, UsageData,
 };
 use super::privacy::looks_like_email;
 use super::settings::Settings;
@@ -61,6 +61,7 @@ pub enum Tab {
     Hourly,
     Minutely,
     Monthly,
+    Sessions,
     Stats,
     Agents,
 }
@@ -75,6 +76,7 @@ impl Tab {
             Tab::Hourly,
             Tab::Minutely,
             Tab::Monthly,
+            Tab::Sessions,
             Tab::Stats,
             Tab::Agents,
         ]
@@ -89,6 +91,7 @@ impl Tab {
             Tab::Hourly => "Hourly",
             Tab::Minutely => "Minutely",
             Tab::Monthly => "Monthly",
+            Tab::Sessions => "Sessions",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
         }
@@ -103,6 +106,7 @@ impl Tab {
             Tab::Hourly => "Hr",
             Tab::Minutely => "Min",
             Tab::Monthly => "Mon",
+            Tab::Sessions => "Ses",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
         }
@@ -116,7 +120,8 @@ impl Tab {
             Tab::Daily => Tab::Hourly,
             Tab::Hourly => Tab::Minutely,
             Tab::Minutely => Tab::Monthly,
-            Tab::Monthly => Tab::Stats,
+            Tab::Monthly => Tab::Sessions,
+            Tab::Sessions => Tab::Stats,
             Tab::Stats => Tab::Agents,
             Tab::Agents => Tab::Overview,
         }
@@ -131,7 +136,8 @@ impl Tab {
             Tab::Hourly => Tab::Daily,
             Tab::Minutely => Tab::Hourly,
             Tab::Monthly => Tab::Minutely,
-            Tab::Stats => Tab::Monthly,
+            Tab::Sessions => Tab::Monthly,
+            Tab::Stats => Tab::Sessions,
             Tab::Agents => Tab::Stats,
         }
     }
@@ -1604,7 +1610,10 @@ impl App {
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
-        if matches!(tab, Tab::Hourly | Tab::Minutely | Tab::Monthly) {
+        if matches!(
+            tab,
+            Tab::Hourly | Tab::Minutely | Tab::Monthly | Tab::Sessions
+        ) {
             (SortField::Date, SortDirection::Descending)
         } else {
             (SortField::Cost, SortDirection::Descending)
@@ -1764,6 +1773,7 @@ impl App {
                 self.get_sorted_monthly_detail_days().len()
             }
             Tab::Monthly => self.data.monthly.len(),
+            Tab::Sessions => self.data.sessions.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
                     self.stats_breakdown_total_lines
@@ -2100,6 +2110,23 @@ impl App {
                 .get_sorted_monthly()
                 .get(self.selected_index)
                 .map(|m| format!("{}: {} tokens, ${:.4}", m.month, m.tokens.total(), m.cost)),
+            Tab::Sessions => self
+                .get_sorted_sessions()
+                .get(self.selected_index)
+                .map(|s| {
+                    let label = s
+                        .title
+                        .as_deref()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or(&s.session_id);
+                    format!(
+                        "{} / {}: {} tokens, ${:.4}",
+                        s.client,
+                        label,
+                        s.tokens.total(),
+                        s.cost
+                    )
+                }),
             Tab::Stats | Tab::Usage => None,
         };
 
@@ -2492,6 +2519,59 @@ impl App {
     pub fn is_very_narrow(&self) -> bool {
         self.terminal_width < 60
     }
+
+    pub fn get_sorted_sessions(&self) -> Vec<&SessionUsage> {
+        let mut sessions: Vec<&SessionUsage> = self.data.sessions.iter().collect();
+
+        let tie_breaker = |a: &&SessionUsage, b: &&SessionUsage| {
+            a.client
+                .cmp(&b.client)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        };
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => sessions.sort_by(|a, b| {
+                b.cost
+                    .total_cmp(&a.cost)
+                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => sessions.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => sessions.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => sessions.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            // "Date" maps to last_active for sessions: most recently active
+            // session first when descending, oldest active first when ascending.
+            (SortField::Date, SortDirection::Descending) => sessions.sort_by(|a, b| {
+                b.last_active_ms
+                    .cmp(&a.last_active_ms)
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Date, SortDirection::Ascending) => sessions.sort_by(|a, b| {
+                a.last_active_ms
+                    .cmp(&b.last_active_ms)
+                    .then_with(|| tie_breaker(a, b))
+            }),
+        }
+
+        sessions
+    }
 }
 
 #[cfg(test)]
@@ -2509,7 +2589,7 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 9);
+        assert_eq!(tabs.len(), 10);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Usage);
         assert_eq!(tabs[2], Tab::Models);
@@ -2517,8 +2597,9 @@ mod tests {
         assert_eq!(tabs[4], Tab::Hourly);
         assert_eq!(tabs[5], Tab::Minutely);
         assert_eq!(tabs[6], Tab::Monthly);
-        assert_eq!(tabs[7], Tab::Stats);
-        assert_eq!(tabs[8], Tab::Agents);
+        assert_eq!(tabs[7], Tab::Sessions);
+        assert_eq!(tabs[8], Tab::Stats);
+        assert_eq!(tabs[9], Tab::Agents);
     }
 
     #[test]
@@ -2529,7 +2610,8 @@ mod tests {
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
         assert_eq!(Tab::Hourly.next(), Tab::Minutely);
         assert_eq!(Tab::Minutely.next(), Tab::Monthly);
-        assert_eq!(Tab::Monthly.next(), Tab::Stats);
+        assert_eq!(Tab::Monthly.next(), Tab::Sessions);
+        assert_eq!(Tab::Sessions.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
         assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
@@ -2543,7 +2625,8 @@ mod tests {
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
         assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
         assert_eq!(Tab::Monthly.prev(), Tab::Minutely);
-        assert_eq!(Tab::Stats.prev(), Tab::Monthly);
+        assert_eq!(Tab::Sessions.prev(), Tab::Monthly);
+        assert_eq!(Tab::Stats.prev(), Tab::Sessions);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
@@ -2556,6 +2639,7 @@ mod tests {
         assert_eq!(Tab::Hourly.as_str(), "Hourly");
         assert_eq!(Tab::Minutely.as_str(), "Minutely");
         assert_eq!(Tab::Monthly.as_str(), "Monthly");
+        assert_eq!(Tab::Sessions.as_str(), "Sessions");
         assert_eq!(Tab::Stats.as_str(), "Stats");
     }
 
@@ -2568,6 +2652,7 @@ mod tests {
         assert_eq!(Tab::Hourly.short_name(), "Hr");
         assert_eq!(Tab::Minutely.short_name(), "Min");
         assert_eq!(Tab::Monthly.short_name(), "Mon");
+        assert_eq!(Tab::Sessions.short_name(), "Ses");
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
 
@@ -3446,6 +3531,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Monthly);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Sessions);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Stats);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -3465,6 +3553,9 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Stats);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Sessions);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Monthly);
@@ -3498,6 +3589,7 @@ mod tests {
             Tab::Hourly,
             Tab::Minutely,
             Tab::Monthly,
+            Tab::Sessions,
             Tab::Stats,
             Tab::Agents,
             Tab::Overview,
