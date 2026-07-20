@@ -153,7 +153,10 @@ fn tokens_from_usage(usage: &Value) -> TokenBreakdown {
 fn number_field(value: &Value, field: &str) -> i64 {
     value
         .get(field)
-        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_u64().map(|u| i64::try_from(u).unwrap_or(i64::MAX)))
+        })
         .unwrap_or(0)
         .max(0)
 }
@@ -220,6 +223,26 @@ mod tests {
         assert_eq!(msgs[0].duration_ms, Some(1500));
         assert_eq!(msgs[0].session_id, "test-session-123");
         assert!(msgs[0].workspace_key.is_some());
+    }
+
+    #[test]
+    fn clamps_extreme_unsigned_usage_and_keeps_the_message() {
+        let content = format!(
+            "{}\n{}\n",
+            session_start("/home/user/project"),
+            r#"{"type":"llm_response","sessionId":"test-session-123","timestamp":"2026-01-15T10:00:05Z","model":"gpt-4o","duration_ms":1500,"usage":{"prompt_tokens":18446744073709551615,"completion_tokens":9223372036854775807,"cache_read_tokens":-1,"cache_write_tokens":0}}"#,
+        );
+        let msgs = parse_events(&content);
+
+        assert_eq!(
+            msgs.len(),
+            1,
+            "one extreme bucket must not drop the message"
+        );
+        assert_eq!(msgs[0].tokens.input, i64::MAX);
+        assert_eq!(msgs[0].tokens.output, i64::MAX);
+        assert_eq!(msgs[0].tokens.cache_read, 0);
+        assert_eq!(msgs[0].tokens.cache_write, 0);
     }
 
     #[test]
