@@ -838,6 +838,9 @@ fn parser_version(client: ClientId) -> u32 {
         // to the (end-anchored) turn_end timestamp. Second-round follow-up
         // to #890.
         ClientId::Kiro => 2,
+        // Kimi now checks each token bucket independently when deciding
+        // whether a usage record is empty, avoiding an overflowing sum.
+        ClientId::Kimi => 2,
         _ => 1,
     }
 }
@@ -2066,6 +2069,11 @@ mod tests {
     }
 
     #[test]
+    fn test_kimi_parser_version_invalidates_v1_entries() {
+        assert_eq!(parser_version(ClientId::Kimi), 2);
+    }
+
+    #[test]
     fn test_jcode_fingerprint_tracks_journal_sidecar_changes() {
         let dir = TempDir::new().unwrap();
         let session_path = dir.path().join("session_fixture.json");
@@ -2248,6 +2256,122 @@ mod tests {
         std::fs::write(&would_be_config, br#"{"model":"unrelated"}"#).unwrap();
         let code_with_config = SourceFingerprint::from_kimi_path(&code_path).unwrap();
         assert_eq!(code_base, code_with_config);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_kimi_stale_parser_cache_is_rejected_and_rebuilt_with_same_fingerprint() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_home = TempDir::new().unwrap();
+        let wire_path = source_home
+            .path()
+            .join(".kimi/sessions/group/session/wire.jsonl");
+        std::fs::create_dir_all(wire_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &wire_path,
+            concat!(
+                r#"{"type":"metadata","protocol_version":"1.3"}"#,
+                "\n",
+                r#"{"timestamp":1770983410.0,"message":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":9223372036854775807,"output":9223372036854775807,"input_cache_read":2,"input_cache_creation":0},"message_id":"msg-extreme"}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let fingerprint = match SourceFingerprint::check_kimi_path_samples_only(&wire_path, None)
+            .unwrap()
+        {
+            FingerprintStatus::Changed(fingerprint) => fingerprint,
+            FingerprintStatus::Unchanged => panic!("an uncached source must build a fingerprint"),
+        };
+        let identity = CacheIdentity::for_client(ClientId::Kimi);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: identity.parser_version.saturating_sub(1),
+        };
+        let stale_message = UnifiedMessage::new(
+            "kimi",
+            "stale-model",
+            "moonshot",
+            "stale-session",
+            1,
+            TokenBreakdown {
+                input: 999,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &wire_path,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_shard = cache_shard_path(identity, &wire_path);
+        ensure_cache_dir(stale_shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(identity, &wire_path).is_none());
+        assert!(matches!(
+            SourceFingerprint::check_kimi_path_samples_only(&wire_path, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        let first = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kimi".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].tokens.input, i64::MAX);
+        assert_eq!(first[0].tokens.output, i64::MAX);
+        assert_eq!(first[0].tokens.cache_read, 2);
+        assert_eq!(first[0].tokens.cache_write, 0);
+        assert!(
+            matches!(
+                SourceFingerprint::check_kimi_path_samples_only(&wire_path, Some(&fingerprint)),
+                Some(FingerprintStatus::Unchanged)
+            ),
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let rebuilt = SourceMessageCache::load();
+        let cached = rebuilt
+            .get(identity, &wire_path)
+            .expect("production loader should persist the reparsed Kimi entry");
+        assert_eq!(cached.parser_version, identity.parser_version);
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages.len(), 1);
+        assert_eq!(cached.messages[0].tokens.input, i64::MAX);
+        assert_eq!(cached.messages[0].tokens.output, i64::MAX);
+        assert_eq!(cached.messages[0].tokens.cache_read, 2);
+        assert_eq!(cached.messages[0].tokens.cache_write, 0);
+
+        let second = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kimi".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(second, first);
+
+        restore_cache_env(prev_env);
     }
 
     #[test]
