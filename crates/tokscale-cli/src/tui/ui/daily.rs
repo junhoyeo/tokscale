@@ -6,7 +6,7 @@ use ratatui::widgets::{
 
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name, total_tokens_cell,
+    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_text,
     viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
@@ -429,7 +429,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
-                    Cell::from(truncate(row.model, 18)).style(
+                    Cell::from(truncate_text(row.model, 18)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -438,7 +438,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]
             } else if is_narrow {
                 vec![
-                    Cell::from(truncate(row.model, 24)).style(
+                    Cell::from(truncate_text(row.model, 24)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -452,7 +452,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(row.model, 30)).style(
+                    Cell::from(truncate_text(row.model, 30)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -538,21 +538,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             &mut scrollbar_state,
         );
-    }
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 3 {
-        s.chars().take(max_chars).collect()
-    } else {
-        let head: String = s.chars().take(max_chars - 3).collect();
-        format!("{}...", head)
     }
 }
 

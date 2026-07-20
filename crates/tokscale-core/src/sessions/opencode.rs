@@ -468,6 +468,10 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // `session_message`, keyed by a `type` column, with model + provider nested
     // under `$.model`. Absent in v1 databases, where the prepare fails and this
     // is a no-op.
+    //
+    // Try the title-bearing query first; older v2 databases whose `session`
+    // table predates the `title` column fall back to a title-less variant so
+    // they still produce rows (the title is optional, not a gating column).
     let v2_query = r#"
         SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root, s.title AS session_title
         FROM session_message sm
@@ -476,14 +480,36 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
           AND json_extract(sm.data, '$.tokens') IS NOT NULL
         ORDER BY sm.id, sm.session_id
     "#;
-    collect_opencode_rows(&conn, v2_query, &mut acc);
+    let v2_query_no_title = r#"
+        SELECT sm.id, sm.session_id, sm.data, NULLIF(s.directory, '') AS workspace_root, NULL AS session_title
+        FROM session_message sm
+        LEFT JOIN session s ON s.id = sm.session_id
+        WHERE sm.type = 'assistant'
+          AND json_extract(sm.data, '$.tokens') IS NOT NULL
+        ORDER BY sm.id, sm.session_id
+    "#;
+    if conn.prepare(v2_query).is_ok() {
+        collect_opencode_rows(&conn, v2_query, &mut acc);
+    } else {
+        collect_opencode_rows(&conn, v2_query_no_title, &mut acc);
+    }
 
     // OpenCode v1 (`opencode.db`, 1.2+): per-message rows in `message`, role in
     // the JSON `$.role`. The `session` join supplies the workspace directory
-    // and title; the legacy variant drops both for databases without a
-    // `session` table.
+    // and title. Three fallback tiers:
+    //   1. modern: session table has both `directory` and `title`
+    //   2. directory-only: session table has `directory` but not `title`
+    //   3. legacy: no `session` table at all (drops workspace + title)
     let v1_modern_query = r#"
         SELECT m.id, m.session_id, m.data, NULLIF(s.directory, '') AS workspace_root, s.title AS session_title
+        FROM message m
+        LEFT JOIN session s ON s.id = m.session_id
+        WHERE json_extract(m.data, '$.role') = 'assistant'
+          AND json_extract(m.data, '$.tokens') IS NOT NULL
+        ORDER BY m.id, m.session_id
+    "#;
+    let v1_directory_query = r#"
+        SELECT m.id, m.session_id, m.data, NULLIF(s.directory, '') AS workspace_root, NULL AS session_title
         FROM message m
         LEFT JOIN session s ON s.id = m.session_id
         WHERE json_extract(m.data, '$.role') = 'assistant'
@@ -499,6 +525,8 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     "#;
     if conn.prepare(v1_modern_query).is_ok() {
         collect_opencode_rows(&conn, v1_modern_query, &mut acc);
+    } else if conn.prepare(v1_directory_query).is_ok() {
+        collect_opencode_rows(&conn, v1_directory_query, &mut acc);
     } else {
         collect_opencode_rows(&conn, v1_legacy_query, &mut acc);
     }

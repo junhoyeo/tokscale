@@ -99,6 +99,25 @@ pub fn viewport_scrollbar_state(
         .viewport_content_length(viewport_len)
 }
 
+/// Truncate a string to `max_chars` Unicode code points, appending "..." when
+/// truncation occurs. Returns the original string when it fits, and an empty
+/// string when `max_chars` is 0. Shared across all table-style tabs (Daily,
+/// Monthly, Sessions, Models, Agents) so ellipsis behavior stays consistent.
+pub fn truncate_text(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else if max_chars <= 3 {
+        s.chars().take(max_chars).collect()
+    } else {
+        let head: String = s.chars().take(max_chars - 3).collect();
+        format!("{}...", head)
+    }
+}
+
 fn scrollbar_position(scroll_offset: usize, content_len: usize, viewport_len: usize) -> usize {
     let max_scroll = content_len.saturating_sub(viewport_len);
     if max_scroll == 0 {
