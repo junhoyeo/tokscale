@@ -1147,7 +1147,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 &mut tasks,
                 &mut seen_scan_roots,
                 ClientId::Grok,
-                grok_home.join("logs"),
+                grok_home.join("logs/unified.jsonl"),
                 "unified.jsonl",
             );
         }
@@ -4242,6 +4242,10 @@ mod tests {
         fs::create_dir_all(&unified_dir).unwrap();
         let unified_log = unified_dir.join("unified.jsonl");
         File::create(&unified_log).unwrap();
+        let nested_dir = unified_dir.join("archive");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let nested_log = nested_dir.join("unified.jsonl");
+        File::create(&nested_log).unwrap();
 
         let result = scan_all_clients_with_env_strategy(
             home.to_str().unwrap(),
@@ -4254,6 +4258,7 @@ mod tests {
             .iter()
             .any(|path| path.ends_with("updates.jsonl")));
         assert!(grok_files.iter().any(|path| path == &unified_log));
+        assert!(!grok_files.iter().any(|path| path == &nested_log));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }
