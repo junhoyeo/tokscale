@@ -1053,19 +1053,25 @@ fn parse_date(date_str: &str) -> Option<NaiveDate> {
 }
 
 /// Resolve a message to a Unix-ms timestamp, falling back to the `date`
-/// string's midnight (UTC) when `timestamp` is missing/zero. UTC midnight is
-/// used instead of local midnight to avoid DST-transition ambiguity: a date
-/// that falls in a spring-forward gap or fall-back overlap would yield `None`
-/// from `Local.from_local_datetime(..).single()` and silently return 0,
-/// losing the session boundary. UTC is unambiguous and the fallback is only
-/// an approximation for boundary tracking.
+/// string's midnight when `timestamp` is missing/zero. Local midnight is
+/// preferred so the date renders on the same calendar day in the user's
+/// timezone. DST edge cases are handled explicitly:
+/// - Fall-back overlap (two valid midnights): take the earliest so the date
+///   stays on the correct day.
+/// - Spring-forward gap (midnight doesn't exist): fall back to UTC midnight
+///   rather than silently returning 0 and losing the session boundary.
 fn message_timestamp_ms(msg: &UnifiedMessage) -> i64 {
     if msg.timestamp > 0 {
         return msg.timestamp;
     }
+    use chrono::TimeZone;
     parse_date(&msg.date)
         .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|dt| dt.and_utc().timestamp_millis())
+        .map(|dt| match Local.from_local_datetime(&dt) {
+            chrono::LocalResult::Single(local) => local.timestamp_millis(),
+            chrono::LocalResult::Ambiguous(earliest, _) => earliest.timestamp_millis(),
+            chrono::LocalResult::None => dt.and_utc().timestamp_millis(),
+        })
         .unwrap_or(0)
 }
 
