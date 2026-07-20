@@ -320,9 +320,17 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
     messages
 }
 
+fn exact_token_total(tokens: &TokenBreakdown) -> i128 {
+    i128::from(tokens.input)
+        + i128::from(tokens.output)
+        + i128::from(tokens.cache_read)
+        + i128::from(tokens.cache_write)
+        + i128::from(tokens.reasoning)
+}
+
 fn should_replace_status_update(existing: &UnifiedMessage, candidate: &UnifiedMessage) -> bool {
-    let existing_total = existing.tokens.total();
-    let candidate_total = candidate.tokens.total();
+    let existing_total = exact_token_total(&existing.tokens);
+    let candidate_total = exact_token_total(&candidate.tokens);
 
     candidate_total > existing_total
         || (candidate_total == existing_total && candidate.timestamp >= existing.timestamp)
@@ -487,6 +495,25 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 30);
         assert_eq!(messages[0].tokens.cache_read, 5);
         assert_eq!(messages[0].timestamp, 1770983420000);
+    }
+
+    #[test]
+    fn test_parse_kimi_keeps_larger_extreme_status_update() {
+        // Both saturating totals equal i64::MAX, but the first exact total is larger.
+        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 9223372036854775807, "output": 9223372036854775807, "input_cache_read": 2, "input_cache_creation": 0}, "message_id": "msg-extreme"}}}
+{"timestamp": 1770983420.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 9223372036854775807, "output": 0, "input_cache_read": 1, "input_cache_creation": 0}, "message_id": "msg-extreme"}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_kimi_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("msg-extreme"));
+        assert_eq!(messages[0].tokens.input, i64::MAX);
+        assert_eq!(messages[0].tokens.output, i64::MAX);
+        assert_eq!(messages[0].tokens.cache_read, 2);
+        assert_eq!(messages[0].tokens.cache_write, 0);
+        assert_eq!(messages[0].timestamp, 1770983410000);
     }
 
     #[test]
