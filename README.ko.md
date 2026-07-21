@@ -851,7 +851,7 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 
 | 설정 | 타입 | 기본값 | 설명 |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUI 색상 테마 (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk) |
+| `colorPalette` | string | `"blue"` | TUI 색상 테마 (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk, tokyo-night, catppuccin, solarized, gruvbox, gruvbox-material, one-dark) |
 | `includeUnusedModels` | boolean | `false` | 리포트에서 제로 토큰 모델 표시 |
 | `autoRefreshEnabled` | boolean | `false` | TUI 자동 새로고침 활성화 |
 | `autoRefreshMs` | number | `60000` | 자동 새로고침 간격 (30000-3600000ms) |

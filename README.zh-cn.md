@@ -847,7 +847,7 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 
 | 设置 | 类型 | 默认值 | 描述 |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUI 颜色主题（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk） |
+| `colorPalette` | string | `"blue"` | TUI 颜色主题（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk、tokyo-night、catppuccin、solarized、gruvbox、gruvbox-material、one-dark） |
 | `includeUnusedModels` | boolean | `false` | 在报告中显示零 Token 的模型 |
 | `autoRefreshEnabled` | boolean | `false` | 在 TUI 中启用自动刷新 |
 | `autoRefreshMs` | number | `60000` | 自动刷新间隔（30000-3600000ms） |

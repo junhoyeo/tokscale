@@ -862,7 +862,7 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUI color theme (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk) |
+| `colorPalette` | string | `"blue"` | TUI color theme (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk, tokyo-night, catppuccin, solarized, gruvbox, gruvbox-material, one-dark) |
 | `includeUnusedModels` | boolean | `false` | Show models with zero tokens in reports |
 | `autoRefreshEnabled` | boolean | `false` | Enable auto-refresh in TUI |
 | `autoRefreshMs` | number | `60000` | Auto-refresh interval (30000-3600000ms) |
