@@ -117,8 +117,22 @@
     {
       "idx": 16,
       "version": "7",
-      "when": 1784160000000,
-      "tag": "0016_add_has_backfill",
+      "when": 1784259719000,
+      "tag": "0016_daily_breakdown_merge_safety_net",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784356471929,
+      "tag": "0017_restore_device_daily_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784611194680,
+      "tag": "0018_add_has_backfill",
       "breakpoints": true
     }
   ]

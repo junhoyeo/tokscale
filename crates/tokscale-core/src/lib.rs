@@ -15,6 +15,7 @@ mod provider_identity;
 pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
+pub mod tui_signal;
 pub mod wiki;
 
 pub use aggregator::*;
@@ -163,6 +164,11 @@ fn retain_for_requested_clients(
 ) -> bool {
     requested.contains(client)
         || (requested.contains("claude") && client.starts_with("cc-mirror/"))
+        // "gjc" is a superset request: 9Router bridge data IS gjc-format, so
+        // requesting gjc retains 9router-stamped messages too. The reverse is
+        // intentionally NOT true — `--client 9router` must retain only
+        // 9router-stamped messages, not native gjc ones.
+        || (requested.contains("gjc") && client.eq_ignore_ascii_case("9router"))
         || (requested.contains("synthetic")
             && sessions::synthetic::matches_synthetic_filter(client, model_id, provider_id))
 }
@@ -2694,7 +2700,6 @@ fn filter_messages_for_report(
     if let Some(until) = &options.until {
         filtered.retain(|m| m.date.as_str() <= until.as_str());
     }
-
     filtered
 }
 
@@ -3661,7 +3666,6 @@ fn filter_parsed_messages(
     if let Some(until) = &options.until {
         filtered.retain(|m| m.date.as_str() <= until.as_str());
     }
-
     filtered
 }
 
@@ -3696,8 +3700,8 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        generate_graph_with_loaded_pricing, message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
+        filter_messages_for_report, generate_graph_with_loaded_pricing, message_cache,
+        normalize_model_for_grouping, parse_all_messages_with_pricing_with_env_strategy,
         parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
         select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
         ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
@@ -3706,6 +3710,20 @@ mod tests {
     use std::io::Write;
     use std::str::FromStr;
     use std::sync::Arc;
+
+    fn parse_all_messages_with_pricing(
+        home_dir: &str,
+        clients: &[String],
+        pricing: Option<&pricing::PricingService>,
+    ) -> Vec<UnifiedMessage> {
+        parse_all_messages_with_pricing_with_env_strategy(
+            home_dir,
+            clients,
+            pricing,
+            false,
+            &scanner::ScannerSettings::default(),
+        )
+    }
 
     #[test]
     fn token_total_saturates_on_overlarge_buckets() {
@@ -8095,9 +8113,9 @@ mod tests {
     #[test]
     fn test_parse_local_clients_honors_scanner_extra_scan_paths_for_zed_threads_db() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let windows_threads_dir = temp_dir.path().join("AppData/Local/Zed/threads");
-        std::fs::create_dir_all(&windows_threads_dir).unwrap();
-        let threads_db = windows_threads_dir.join("threads.db");
+        let extra_threads_dir = temp_dir.path().join("custom-zed/threads");
+        std::fs::create_dir_all(&extra_threads_dir).unwrap();
+        let threads_db = extra_threads_dir.join("threads.db");
         let conn = create_zed_sqlite_db(&threads_db);
         insert_zed_thread(&conn, "zed-extra-thread", "claude-sonnet-4-5");
         drop(conn);
@@ -8116,7 +8134,7 @@ mod tests {
         assert!(parsed_default.messages.is_empty());
 
         let mut extra_scan_paths = std::collections::BTreeMap::new();
-        extra_scan_paths.insert("zed".to_string(), vec![windows_threads_dir]);
+        extra_scan_paths.insert("zed".to_string(), vec![extra_threads_dir]);
         let parsed_with_settings = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
@@ -8642,5 +8660,73 @@ mod tests {
         };
         assert!(dates.contains(&local_date(thread_created + 2000)));
         assert!(dates.contains(&local_date(ledger_timestamp)));
+    }
+    #[test]
+    fn test_retain_for_requested_clients_gjc_superset_of_9router() {
+        let gjc_requested: HashSet<&str> = HashSet::from(["gjc"]);
+        // Bridge messages carry client="9router"; requesting "gjc" retains
+        // them (9router data IS gjc-format, so gjc is a superset request).
+        assert!(retain_for_requested_clients(
+            "9router",
+            "deepseek-ai/deepseek-v4-flash",
+            "nvidia",
+            &gjc_requested
+        ));
+        // --client 9router retains bridge-stamped messages…
+        let ninerouter_requested: HashSet<&str> = HashSet::from(["9router"]);
+        assert!(retain_for_requested_clients(
+            "9router",
+            "deepseek-ai/deepseek-v4-flash",
+            "nvidia",
+            &ninerouter_requested
+        ));
+        // …but must NOT retain native gjc messages: the alias is one-way
+        // (gjc is the superset request, 9router is the narrow one).
+        assert!(!retain_for_requested_clients(
+            "gjc",
+            "claude-sonnet-4",
+            "anthropic",
+            &ninerouter_requested
+        ));
+        // Unrelated clients still filtered out.
+        assert!(!retain_for_requested_clients(
+            "claude",
+            "gpt-4o",
+            "openai",
+            &gjc_requested
+        ));
+    }
+
+    #[test]
+    fn test_filter_messages_preserves_pi_9router_when_no_duplicate() {
+        let messages = vec![
+            UnifiedMessage::new(
+                "pi",
+                "deepseek_v4_flash_free",
+                "9router",
+                "session-1",
+                1783412353188,
+                TokenBreakdown::default(),
+                0.0,
+            ),
+            UnifiedMessage::new(
+                "9router",
+                "deepseek-ai/deepseek-v4-flash",
+                "nvidia",
+                "session-2",
+                1783412353188,
+                TokenBreakdown {
+                    input: 100,
+                    output: 50,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.05,
+            ),
+        ];
+        // Without verified cross-source dedup, both messages are preserved.
+        let filtered = filter_messages_for_report(messages, &ReportOptions::default());
+        assert_eq!(filtered.len(), 2);
     }
 }

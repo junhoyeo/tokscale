@@ -323,8 +323,10 @@ interface MockTxCapture {
  * Builds a mock drizzle transaction.
  *
  * @param selectResults consumed in call order: (1) existing-submission
- *   lookup, (2) existing device days, [(3) existing submission days when the
- *   submission is not new], then aggregates + all-days rows.
+ *   lookup, (2) existing device days (FOR UPDATE; per-device since #910),
+ *   then (3) aggregates + (4) all-days rows. The legacy-adoption re-fetch
+ *   only fires when the device-days select is empty on a pre-existing
+ *   submission, which none of these scenarios trigger.
  * @param existingSubmission when true, the submissions INSERT branch is
  *   never taken and the first insert call is the submitted-device upsert.
  */
@@ -421,8 +423,7 @@ describe("POST /api/submit backfill provenance persistence (phase 1)", () => {
     const capture = buildMockTx(
       [
         [], // no existing submission -> insert path
-        [], // no existing device days
-        [], // no existing submission days -> new-day INSERT path
+        [], // no existing device days -> new-day INSERT path
         [AGGREGATES_ROW],
         [ALL_DAYS_ROW],
       ],
@@ -472,16 +473,7 @@ describe("POST /api/submit backfill provenance persistence (phase 1)", () => {
             activeTimeMs: null,
             sourceBreakdown: {},
           },
-        ], // existing device day
-        [
-          {
-            id: "day-1",
-            date: "2026-05-11",
-            timestampMs: null,
-            activeTimeMs: null,
-            sourceBreakdown: {},
-          },
-        ], // existing submission day for the same date -> UPDATE path
+        ], // existing device day for the same date -> UPDATE path
         [AGGREGATES_ROW],
         [ALL_DAYS_ROW],
       ],
@@ -508,7 +500,7 @@ describe("POST /api/submit backfill provenance persistence (phase 1)", () => {
     primeDataMocks();
 
     const capture = buildMockTx(
-      [[], [], [], [AGGREGATES_ROW], [ALL_DAYS_ROW]],
+      [[], [], [AGGREGATES_ROW], [ALL_DAYS_ROW]],
       false
     );
 
@@ -530,7 +522,7 @@ describe("POST /api/submit backfill provenance persistence (phase 1)", () => {
     primeDataMocks({ origin: "cli" });
 
     const capture = buildMockTx(
-      [[], [], [], [AGGREGATES_ROW], [ALL_DAYS_ROW]],
+      [[], [], [AGGREGATES_ROW], [ALL_DAYS_ROW]],
       false
     );
 
@@ -555,15 +547,6 @@ describe("POST /api/submit backfill provenance persistence (phase 1)", () => {
     const capture = buildMockTx(
       [
         [{ id: "submission-existing" }],
-        [
-          {
-            id: "day-1",
-            date: "2026-05-11",
-            timestampMs: null,
-            activeTimeMs: null,
-            sourceBreakdown: {},
-          },
-        ],
         [
           {
             id: "day-1",

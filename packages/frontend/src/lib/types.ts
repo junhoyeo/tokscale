@@ -27,6 +27,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "cline",
   "synthetic",
   "gjc",
+  "9router",
   "grok",
   "jcode",
   "commandcode",

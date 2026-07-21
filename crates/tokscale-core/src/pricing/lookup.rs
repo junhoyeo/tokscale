@@ -2806,11 +2806,7 @@ mod tests {
                 "google/gemini-3.5-flash",
                 "Models.dev",
             ),
-            (
-                "gemini-3-flash-b",
-                "google/gemini-3.5-flash",
-                "Models.dev",
-            ),
+            ("gemini-3-flash-b", "google/gemini-3.5-flash", "Models.dev"),
             (
                 // Legacy CLI responseModel for M132, the retired predecessor
                 // of M133 — prices as the High tier, same catalog entry as

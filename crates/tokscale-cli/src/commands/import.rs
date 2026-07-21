@@ -23,8 +23,8 @@ use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use std::collections::{BTreeMap, BTreeSet};
 use tokscale_core::{
-    calculate_intensities, generate_graph_result, ClientContribution, ClientId,
-    DailyContribution, DailyTotals, GraphResult, TokenBreakdown,
+    calculate_intensities, generate_graph_result, ClientContribution, ClientId, DailyContribution,
+    DailyTotals, GraphResult, TokenBreakdown,
 };
 
 /// Import source formats understood by [`parse_export`].
@@ -447,7 +447,11 @@ fn finalize_day(date: String, builder: DayBuilder) -> DailyContribution {
     }
 
     // Deterministic output order.
-    clients.sort_by(|a, b| a.client.cmp(&b.client).then_with(|| a.model_id.cmp(&b.model_id)));
+    clients.sort_by(|a, b| {
+        a.client
+            .cmp(&b.client)
+            .then_with(|| a.model_id.cmp(&b.model_id))
+    });
 
     DailyContribution {
         date,
@@ -585,7 +589,10 @@ mod tests {
             "modelBreakdowns":[{"modelName":"x","cost":0.0,"inputTokens":1,"outputTokens":0,
             "cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
         let out = parse_clawdboard_export(json).unwrap();
-        assert_eq!(out.unknown_clients, vec!["totally-not-a-client".to_string()]);
+        assert_eq!(
+            out.unknown_clients,
+            vec!["totally-not-a-client".to_string()]
+        );
     }
 
     #[test]
@@ -648,7 +655,11 @@ mod tests {
         ]}"#;
         let out = parse_clawdboard_export(json).unwrap();
         let day = &out.graph.contributions[0];
-        assert_eq!(day.clients.len(), 1, "same (client, model) merges into one row");
+        assert_eq!(
+            day.clients.len(),
+            1,
+            "same (client, model) merges into one row"
+        );
         let client = &day.clients[0];
         assert_eq!(client.tokens.input, 40);
         assert_eq!(client.tokens.output, 60);
@@ -722,7 +733,11 @@ mod tests {
             "modelBreakdowns":[{"modelName":"gpt-5.5","cost":1.0,"inputTokens":100,
             "outputTokens":50,"cacheReadTokens":0,"cacheCreationTokens":0}]}]}"#;
         let out = parse_clawdboard_export(json).unwrap();
-        assert_eq!(out.breakdown_reconciliation_warnings.len(), 2, "both token and cost mismatch");
+        assert_eq!(
+            out.breakdown_reconciliation_warnings.len(),
+            2,
+            "both token and cost mismatch"
+        );
         assert!(out.breakdown_reconciliation_warnings[0].contains("token"));
         assert!(out.breakdown_reconciliation_warnings[1].contains("cost"));
     }

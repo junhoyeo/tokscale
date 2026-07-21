@@ -706,7 +706,12 @@ mod tests {
         assert_eq!(msg.client, "devin-cli");
         assert_eq!(msg.session_id, "sess-1");
         assert_eq!(msg.model_id, "glm-5-2-max-1m");
-        assert_eq!(msg.provider_id, "devin");
+        // `inferred_provider_from_model` recognizes "glm" and infers "zai"
+        // (Zhipu AI), taking precedence over the "devin" fallback below —
+        // the same convention this file already applies to Claude/GPT
+        // models (see the "anthropic" assertion further down). "devin" is
+        // only used when inference can't identify the model at all.
+        assert_eq!(msg.provider_id, "zai");
         assert_eq!(msg.tokens.input, 31134);
         assert_eq!(msg.tokens.output, 147);
         assert_eq!(msg.tokens.cache_read, 8);

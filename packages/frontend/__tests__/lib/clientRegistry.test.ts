@@ -90,6 +90,16 @@ describe("frontend client registry", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("accepts 9router submissions (gjc-format bridge client stamp)", () => {
+    // The 9Router bridge stamps messages with client="9router" (not "gjc"),
+    // and that string flows verbatim into submit payloads, so the server
+    // must accept it even though it is not a core scannable client id.
+    const result = validateSubmission(payloadForClient("9router"));
+
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
   it("accepts every core client id in submission validation", () => {
     const rejected = coreClientIds().filter((client) => {
       const result = validateSubmission(payloadForClient(client));

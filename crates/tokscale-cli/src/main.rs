@@ -974,6 +974,8 @@ pub enum ClientFilter {
     Trae,
     Warp,
     Cline,
+    #[value(name = "9router")]
+    NineRouter,
     Gjc,
     Grok,
     Jcode,
@@ -1026,6 +1028,7 @@ impl ClientFilter {
             Self::Warp => "warp",
             Self::Cline => "cline",
             Self::Gjc => "gjc",
+            Self::NineRouter => "9router",
             Self::Grok => "grok",
             Self::Jcode => "jcode",
             Self::Commandcode => "commandcode",
@@ -1077,6 +1080,7 @@ impl ClientFilter {
             Self::Warp => Some(ClientId::Warp),
             Self::Cline => Some(ClientId::Cline),
             Self::Gjc => Some(ClientId::Gjc),
+            Self::NineRouter => Some(ClientId::Gjc),
             Self::Grok => Some(ClientId::Grok),
             Self::Jcode => Some(ClientId::Jcode),
             Self::Commandcode => Some(ClientId::CommandCode),
@@ -1166,7 +1170,7 @@ impl ClientFilter {
         Self::value_variants()
             .iter()
             .copied()
-            .filter(|f| !matches!(f, Self::Synthetic))
+            .filter(|f| !matches!(f, Self::Synthetic | Self::NineRouter))
             .collect()
     }
 }
@@ -3767,6 +3771,7 @@ fn capitalize_client(client: &str) -> String {
         "goose" => "Goose".to_string(),
         "warp" => "Warp".to_string(),
         "grok" => "Grok Build".to_string(),
+        "9router" => "9Router".to_string(),
         "pi" => "Pi".to_string(),
         "gjc" => "Gajae-Code".to_string(),
         "jcode" => "Jcode".to_string(),
@@ -6580,10 +6585,12 @@ mod tests {
 
     #[test]
     fn test_client_filter_as_filter_str_matches_client_id_for_overlap() {
-        // Every ClientFilter variant except Synthetic must agree with
-        // ClientId::as_str() so the core filter list stays consistent.
+        // Every ClientFilter variant except Synthetic and NineRouter must
+        // agree with ClientId::as_str() so the core filter list stays
+        // consistent.  NineRouter is a filter-only alias that maps to
+        // ClientId::Gjc and intentionally has no matching ClientId of its own.
         for filter in ClientFilter::value_variants() {
-            if matches!(filter, ClientFilter::Synthetic) {
+            if matches!(filter, ClientFilter::Synthetic | ClientFilter::NineRouter) {
                 continue;
             }
             let id = filter.as_filter_str();
@@ -6604,18 +6611,22 @@ mod tests {
         for filter in ClientFilter::value_variants() {
             match filter.to_client_id() {
                 Some(id) => {
-                    assert_eq!(
-                        ClientFilter::from_client_id(id),
-                        *filter,
-                        "round-trip mismatch for {:?}",
-                        filter
-                    );
-                    assert_eq!(
-                        id.as_str(),
-                        filter.as_filter_str(),
-                        "id string drift between ClientId and ClientFilter for {:?}",
-                        filter
-                    );
+                    // NineRouter is a filter-only alias that maps to Gjc's
+                    // scan root; it intentionally does not round-trip.
+                    if !matches!(filter, ClientFilter::NineRouter) {
+                        assert_eq!(
+                            ClientFilter::from_client_id(id),
+                            *filter,
+                            "round-trip mismatch for {:?}",
+                            filter
+                        );
+                        assert_eq!(
+                            id.as_str(),
+                            filter.as_filter_str(),
+                            "id string drift between ClientId and ClientFilter for {:?}",
+                            filter
+                        );
+                    }
                 }
                 None => {
                     // Synthetic is the only meta-client without a ClientId.
@@ -6626,17 +6637,24 @@ mod tests {
     }
 
     #[test]
-    fn test_client_filter_gjc_round_trip() {
+    fn test_client_filter_nine_router_round_trip() {
         use tokscale_core::ClientId;
-        // gjc parses as the canonical lowercase id and round-trips through
+        // 9Router maps to Gjc scan roots and round-trips through
         // both the ClientId<->ClientFilter conversions and the id string.
-        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
-        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
+        assert_eq!(ClientFilter::NineRouter.as_filter_str(), "9router");
+        assert_eq!(ClientFilter::NineRouter.to_client_id(), Some(ClientId::Gjc));
         assert_eq!(
             ClientFilter::from_client_id(ClientId::Gjc),
             ClientFilter::Gjc
         );
-        assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
+        // --client gjc also round-trips correctly.
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
+        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
+        assert_eq!(
+            ClientFilter::Gjc.to_client_id(),
+            Some(ClientId::Gjc),
+            "--client gjc should map to ClientId::Gjc"
+        );
     }
 
     #[test]
@@ -6648,7 +6666,7 @@ mod tests {
         let filters: Vec<ClientFilter> = ClientFilter::value_variants()
             .iter()
             .copied()
-            .filter(|f| !matches!(f, ClientFilter::Synthetic))
+            .filter(|f| !matches!(f, ClientFilter::Synthetic | ClientFilter::NineRouter))
             .collect();
         let ids: Vec<tokscale_core::ClientId> = tokscale_core::ClientId::ALL.to_vec();
         assert_eq!(filters.len(), ids.len());
@@ -6677,29 +6695,40 @@ mod tests {
     }
 
     #[test]
-    fn test_client_filter_default_set_excludes_synthetic() {
+    fn test_client_filter_default_set_excludes_non_distinct_clients() {
         // Synthetic detection is opt-in: it post-processes other clients'
         // sessions to re-attribute messages to a different bucket. The
         // pre-refactor default was "every ClientId, include_synthetic =
         // false"; default_set() must preserve that contract.
+        //
+        // NineRouter is likewise excluded: it's a CLI-level alias filter
+        // for Gjc (`--client 9router` round-trips to `ClientId::Gjc`, see
+        // test_client_filter_nine_router_round_trip), not a distinct
+        // scannable client. Including it in the default set alongside Gjc
+        // would not add coverage — it would just be a second name for the
+        // same scan root.
         let default = ClientFilter::default_set();
         assert!(
             !default.contains(&ClientFilter::Synthetic),
             "default_set() must NOT include Synthetic — it is opt-in only"
         );
-        // Every real client must be present so first-launch reports cover
-        // every integration the binary knows about.
+        assert!(
+            !default.contains(&ClientFilter::NineRouter),
+            "default_set() must NOT include NineRouter — it is a Gjc alias, not a distinct client"
+        );
+        // Every real, non-alias client must be present so first-launch
+        // reports cover every integration the binary knows about.
         for filter in ClientFilter::value_variants() {
-            if matches!(filter, ClientFilter::Synthetic) {
+            if matches!(filter, ClientFilter::Synthetic | ClientFilter::NineRouter) {
                 continue;
             }
             assert!(default.contains(filter), "default_set() missing {filter:?}");
         }
-        // Size sanity: every variant minus Synthetic.
+        // Size sanity: every variant minus Synthetic and the NineRouter alias.
         assert_eq!(
             default.len(),
-            ClientFilter::value_variants().len() - 1,
-            "default_set() size drifted from value_variants() - 1"
+            ClientFilter::value_variants().len() - 2,
+            "default_set() size drifted from value_variants() - 2"
         );
     }
 

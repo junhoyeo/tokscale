@@ -379,10 +379,10 @@ export async function POST(request: Request) {
         // this branch before either has committed. The second UPDATE will try
         // to re-stamp submitted_device_id on rows the first already claimed,
         // which can violate the (submission_id, submitted_device_id, date)
-        // unique constraint. The ON CONFLICT DO NOTHING below makes the UPDATE
-        // skip conflicting rows rather than throw, and the outer try/catch falls
-        // through to the normal insert path if a unique violation still escapes
-        // (e.g. via a concurrent INSERT racing the UPDATE window).
+        // unique constraint. The NOT EXISTS dup guard below makes the UPDATE
+        // skip rows that would collide, and the savepoint + outer try/catch
+        // fall through to the normal insert path if a unique violation still
+        // escapes (e.g. via a concurrent INSERT racing the UPDATE window).
         try {
           // Wrap the UPDATE in a savepoint so a unique-constraint violation
           // from a concurrent submit does not poison the enclosing
@@ -421,36 +421,26 @@ export async function POST(request: Request) {
             `);
           });
         } catch (adoptionErr) {
-          // Unique constraint hit from a concurrent submit racing this UPDATE.
-          // Savepoint rolled back; outer tx is still usable.
-          // fetchExistingDeviceDays() below will pick up rows already claimed
-          // by the other request, and subsequent logic will merge rather than
-          // re-adopt.
+          // Only a unique-constraint violation (23505) from a concurrent submit
+          // racing this UPDATE is a recoverable fall-through: the savepoint
+          // rolled back, the outer tx is still usable, and fetchExistingDeviceDays()
+          // below picks up rows the other request already claimed so subsequent
+          // logic merges rather than re-adopts.
+          //
+          // Any other failure (timeout, deadlock, permission error) leaves the
+          // legacy rows unclaimed. Falling through would then insert the incoming
+          // device's overlapping history as a SECOND row, silently inflating
+          // totals. Re-throw so the request fails loudly instead of double-counting.
+          if (!isUniqueConstraintViolation(adoptionErr)) {
+            throw adoptionErr;
+          }
           console.warn("Legacy adoption conflict (concurrent submit), falling through:", adoptionErr);
         }
         existingDeviceDays = await fetchExistingDeviceDays();
       }
 
-      // Fetch existing days across the WHOLE submission (every device), not
-      // just the submitting device. A date already recorded by another
-      // device must flow through the toUpdate merge path below (which runs
-      // mergeClientBreakdownsWithRegressionGuard) instead of falling into
-      // toInsert, where ON CONFLICT DO UPDATE would blindly overwrite the
-      // other device's row with this device's raw values.
-      const existingDays = await tx
-        .select({
-          id: dailyBreakdown.id,
-          date: dailyBreakdown.date,
-          timestampMs: dailyBreakdown.timestampMs,
-          activeTimeMs: dailyBreakdown.activeTimeMs,
-          sourceBreakdown: dailyBreakdown.sourceBreakdown,
-        })
-        .from(dailyBreakdown)
-        .where(eq(dailyBreakdown.submissionId, submissionId))
-        .for('update');
-
       const existingDaysMap = new Map(
-        existingDays.map((d) => [d.date, d])
+        existingDeviceDays.map((d) => [d.date, d])
       );
 
       // ------------------------------------------
@@ -471,7 +461,6 @@ export async function POST(request: Request) {
 
       const toUpdate: Array<{
         id: string;
-        submittedDeviceId: string;
         tokens: number;
         cost: string;
         inputTokens: number;
@@ -554,7 +543,6 @@ export async function POST(request: Request) {
 
           toUpdate.push({
             id: existingDay.id,
-            submittedDeviceId: submittedDevice.id,
             tokens: dayTotals.tokens,
             cost: dayTotals.cost.toFixed(4),
             inputTokens: dayTotals.inputTokens,
@@ -584,11 +572,10 @@ export async function POST(request: Request) {
       // Batch INSERT new days via raw SQL VALUES list, chunked to stay under
       // PostgreSQL's 65,535 bound-parameter limit (10 params/row here --
       // a large historical backfill can otherwise exceed it in one statement).
-      // ON CONFLICT (submission_id, date) DO UPDATE is a defensive fallback
-      // for a concurrent submit racing this one between the SELECT above and
-      // this INSERT -- existingDaysMap already covers every device for this
-      // submission, so under normal (non-racing) conditions every row here is
-      // a genuinely new date.
+      // ON CONFLICT (submission_id, submitted_device_id, date) is a defensive
+      // fallback for concurrent submits from the same device racing between
+      // the SELECT above and this INSERT. Distinct devices own distinct rows,
+      // so their independent usage remains additive.
       for (let i = 0; i < toInsert.length; i += INSERT_CHUNK_SIZE) {
         const chunk = toInsert.slice(i, i + INSERT_CHUNK_SIZE);
         const insertValuesClauses = chunk.map(
@@ -604,8 +591,7 @@ export async function POST(request: Request) {
             input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown
           )
           VALUES ${insertValuesList}
-          ON CONFLICT (submission_id, date) DO UPDATE SET
-            submitted_device_id = EXCLUDED.submitted_device_id,
+          ON CONFLICT (submission_id, submitted_device_id, date) DO UPDATE SET
             tokens = EXCLUDED.tokens,
             cost = EXCLUDED.cost,
             input_tokens = EXCLUDED.input_tokens,
@@ -616,23 +602,20 @@ export async function POST(request: Request) {
         `);
       }
 
-      // Batch UPDATE existing days via raw SQL VALUES list, chunked for the
-      // same parameter-limit reason as the INSERT above. Includes
-      // submitted_device_id so a replacement-device submit re-attributes the
-      // merged row to the submitting device instead of leaving it stamped
-      // with the previous device that first created the row.
+      // Batch UPDATE existing rows for this device via a raw SQL VALUES list,
+      // chunked for the same parameter-limit reason as the INSERT above.
+      // Device ownership is immutable here: another device writes its own row.
       for (let i = 0; i < toUpdate.length; i += INSERT_CHUNK_SIZE) {
         const chunk = toUpdate.slice(i, i + INSERT_CHUNK_SIZE);
         const valuesClauses = chunk.map(
           (row) =>
-            sql`(${row.id}::uuid, ${row.submittedDeviceId}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(14,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
+            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(14,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
         );
 
         const valuesList = sql.join(valuesClauses, sql`, `);
 
         await tx.execute(sql`
           UPDATE daily_breakdown AS d SET
-            submitted_device_id = batch.submitted_device_id,
             tokens = batch.tokens,
             cost = batch.cost,
             input_tokens = batch.input_tokens,
@@ -641,7 +624,7 @@ export async function POST(request: Request) {
             active_time_ms = batch.active_time_ms,
             source_breakdown = batch.source_breakdown
           FROM (VALUES ${valuesList})
-            AS batch(id, submitted_device_id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown)
+            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown)
           WHERE d.id = batch.id
         `);
       }

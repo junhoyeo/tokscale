@@ -13,6 +13,8 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("kimi-k2p6", "kimi-k2.6");
     m.insert("kimi-k2.5-thinking", "kimi-k2-thinking");
     m.insert("kimi-for-coding", "kimi-k2.5");
+    m.insert("kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed");
+    m.insert("k3", "kimi-k3");
 
     m.insert("model_placeholder_m26", "claude-opus-4-6");
     m.insert("model_placeholder_m35", "claude-sonnet-4-6");
@@ -157,6 +159,18 @@ mod tests {
 
         assert_eq!(resolve_alias("k2p5"), Some("kimi-k2-thinking"));
         assert_eq!(resolve_alias("k2-p5"), Some("kimi-k2-thinking"));
+    }
+
+    #[test]
+    fn resolves_kimi_coding_plan_ids_to_underlying_models() {
+        // kimi-code writes `kimi-code/<id>`; the parser strips the prefix, so
+        // pricing sees the bare id. Without these, models.dev matches them under
+        // its `kimi-for-coding/*` subscription namespace at $0.00.
+        assert_eq!(
+            resolve_alias("kimi-for-coding-highspeed"),
+            Some("kimi-k2.7-code-highspeed")
+        );
+        assert_eq!(resolve_alias("k3"), Some("kimi-k3"));
     }
 
     #[test]

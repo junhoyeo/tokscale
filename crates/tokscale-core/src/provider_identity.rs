@@ -179,6 +179,19 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("sakana");
     }
 
+    // Kimi (Moonshot AI) — `kimi`, `kimi-k2.5`, `kimi-code` variants
+    if contains_delimited(&lower, "kimi") {
+        return Some("moonshotai");
+    }
+    // MiMo (Xiaomi) — `mimo-v2.5` etc.
+    if contains_delimited(&lower, "mimo") {
+        return Some("xiaomi");
+    }
+    // GLM (Zhipu AI / Zai) — `glm-4.6`, `glm-5.2` etc.
+    if contains_delimited(&lower, "glm") {
+        return Some("zai");
+    }
+
     None
 }
 

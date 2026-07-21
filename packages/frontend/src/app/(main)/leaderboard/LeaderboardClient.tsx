@@ -478,6 +478,13 @@ const CurrentUserCard = styled.div`
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--service-accent-soft);
+    border-color: var(--service-accent);
+    opacity: 0.9;
+  }
 
   @media (max-width: 640px) {
     flex-direction: column;
@@ -1206,7 +1213,17 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       )}
 
       {currentUser && currentUserRank && (
-        <CurrentUserCard>
+        <CurrentUserCard
+          role="link"
+          tabIndex={0}
+          onClick={() => handleRowClick(currentUser.username)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              handleRowClick(currentUser.username);
+            }
+          }}
+        >
           <CurrentUserInfo>
             <CurrentUserAvatar
               src={currentUser.avatarUrl || `https://github.com/${currentUser.username}.png`}
