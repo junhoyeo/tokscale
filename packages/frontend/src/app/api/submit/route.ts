@@ -555,10 +555,12 @@ export async function POST(request: Request) {
         const existingDay = existingDaysMap.get(incomingDay.date);
 
         if (existingDay) {
+          const rawExistingBreakdown = (existingDay.sourceBreakdown || {}) as Record<
+            string,
+            ClientBreakdownData
+          >;
           const { breakdown: existingClientBreakdown, foldedClientFloors } =
-            normalizeClientBreakdownAliases(
-              (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>
-            );
+            normalizeClientBreakdownAliases(rawExistingBreakdown);
           const mergeResult = mergeClientBreakdownsWithRegressionGuard(
             existingClientBreakdown,
             incomingClientBreakdown,
@@ -569,6 +571,20 @@ export async function POST(request: Request) {
             ...mergeResult.warnings.map((warning) => `Day ${incomingDay.date}: ${warning}`)
           );
           const mergedClientBreakdown = mergeResult.merged;
+          // A preserved fold must keep its ORIGINAL raw alias keys in storage
+          // (e.g. both "kilocode" and "kilo"), not the collapsed sum: the
+          // collapsed form is indistinguishable from real usage, so writing it
+          // back would burn the heal floor on the first partial resubmit and
+          // permanently re-cement the double count. Day totals are identical
+          // either way (recalculateDayTotals sums all keys).
+          for (const clientName of mergeResult.foldPreservedClients) {
+            delete mergedClientBreakdown[clientName];
+            for (const [rawKey, rawData] of Object.entries(rawExistingBreakdown)) {
+              if ((LEGACY_CLIENT_ALIASES[rawKey] ?? rawKey) === clientName) {
+                mergedClientBreakdown[rawKey] = rawData;
+              }
+            }
+          }
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
 
           toUpdate.push({

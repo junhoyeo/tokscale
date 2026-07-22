@@ -625,6 +625,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
@@ -987,6 +988,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
@@ -1383,6 +1385,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
@@ -1561,6 +1564,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,

@@ -44,6 +44,15 @@ export interface ClientBreakdownData {
 export interface MergeClientBreakdownsResult {
   merged: Record<string, ClientBreakdownData>;
   warnings: string[];
+  // Folded clients (had an entry in foldedClientFloors) whose existing value
+  // was PRESERVED — the incoming submission was below the heal floor or
+  // omitted the client entirely. `merged` holds their collapsed folded entry;
+  // the caller must write the ORIGINAL raw alias keys back to storage for
+  // these clients instead, otherwise the fold evidence (and with it the heal
+  // floor) is destroyed by the writeback and the one heal opportunity is
+  // burned by a partial resubmit — permanently re-cementing the double count
+  // this mechanism exists to repair.
+  foldPreservedClients: Set<string>;
 }
 
 export interface DayTotals {
@@ -164,6 +173,12 @@ export function mergeClientBreakdownsWithRegressionGuard(
 ): MergeClientBreakdownsResult {
   const merged: Record<string, ClientBreakdownData> = { ...(existing || {}) };
   const warnings: string[] = [];
+  // Every folded client starts as "preserved" and is unmarked only when the
+  // incoming submission actually heals or replaces it. This also covers
+  // folded clients the incoming submission never mentions (carried over by
+  // the spread above), whose collapsed entry would otherwise overwrite the
+  // raw alias keys on writeback just the same.
+  const foldPreservedClients = new Set<string>(foldedClientFloors?.keys() ?? []);
 
   for (const clientName of incomingClients) {
     const existingClient = existing?.[clientName];
@@ -177,6 +192,7 @@ export function mergeClientBreakdownsWithRegressionGuard(
         );
       } else {
         delete merged[clientName];
+        foldPreservedClients.delete(clientName);
       }
       continue;
     }
@@ -191,6 +207,7 @@ export function mergeClientBreakdownsWithRegressionGuard(
         // fold — consistent with a complete-day recomputation rather than a
         // partial re-parse. Let it replace the fold instead of defending it.
         merged[clientName] = nextClient;
+        foldPreservedClients.delete(clientName);
         const existingTokens = formatTokens(existingClient.tokens);
         const nextTokens = formatTokens(nextClient.tokens);
         warnings.push(
@@ -214,9 +231,10 @@ export function mergeClientBreakdownsWithRegressionGuard(
     }
 
     merged[clientName] = nextClient;
+    foldPreservedClients.delete(clientName);
   }
 
-  return { merged, warnings };
+  return { merged, warnings, foldPreservedClients };
 }
 
 export function clientContributionToBreakdownData(

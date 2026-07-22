@@ -121,6 +121,8 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain("Healed");
       expect(result.warnings[0]).not.toMatch(/parser regression|Preserved/i);
+      // Healed -> the fold is resolved; nothing to preserve raw keys for.
+      expect(result.foldPreservedClients.size).toBe(0);
     });
 
     it("keeps the regression guard when the incoming value is below the floor", () => {
@@ -141,6 +143,9 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
       expect(result.merged.kilo.tokens).toBe(200);
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain("Preserved");
+      // Preserved fold -> the caller must write the raw alias keys back so
+      // the heal floor survives this partial resubmit.
+      expect(result.foldPreservedClients).toEqual(new Set(["kilo"]));
     });
 
     it("keeps the normal regression guard for a non-folded client with the same shape", () => {
@@ -159,6 +164,27 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
       expect(result.merged.kilo.tokens).toBe(200);
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain("Preserved");
+      // Not folded -> nothing to preserve raw keys for.
+      expect(result.foldPreservedClients.size).toBe(0);
+    });
+
+    it("marks an untouched folded client as preserved (carry-over must not collapse it)", () => {
+      // The incoming submission doesn't claim kilo at all (different client
+      // set); the folded entry is carried over by the spread and must still
+      // be flagged so the raw keys survive the writeback.
+      const existing = { kilo: makeClient(200, 5, 1) };
+      const incoming = { cursor: makeClient(50, 2, 1) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(["cursor"]),
+        new Map([["kilo", 100]])
+      );
+
+      expect(result.merged.kilo.tokens).toBe(200);
+      expect(result.merged.cursor.tokens).toBe(50);
+      expect(result.foldPreservedClients).toEqual(new Set(["kilo"]));
     });
 
     it("keeps the folded value when the incoming submission does not include the client", () => {
@@ -174,6 +200,7 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
       expect(result.merged.kilo.tokens).toBe(200);
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain("disappeared");
+      expect(result.foldPreservedClients).toEqual(new Set(["kilo"]));
     });
   });
 });

@@ -272,6 +272,7 @@ function primeDataMocks(provenance?: { origin: string; importer?: string }) {
     (_existing: unknown, incoming: Record<string, unknown>) => ({
       merged: incoming,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     })
   );
 }

@@ -410,13 +410,69 @@ describe("POST /api/submit kilocode alias fold vs regression guard", () => {
       { tokens: number }
     >;
 
-    // The fold is preserved (still inflated) rather than undercounted; a
-    // later complete-day resubmit at/above the 100-token floor will heal it.
-    expect(merged.kilo.tokens).toBe(200);
+    // The fold is preserved (still inflated in total) rather than
+    // undercounted — and critically, the RAW alias keys survive the
+    // writeback. Persisting the collapsed {kilo: 200} here would make the
+    // heal window one-shot: the floor is derived from the raw keys, so the
+    // next truthful complete-day resubmit could never heal the day again.
+    expect(merged.kilocode.tokens).toBe(100);
+    expect(merged.kilo.tokens).toBe(100);
 
     const body = await response.json();
     const warnings: string[] = body.warnings ?? [];
     expect(warnings.join(" ")).toMatch(/would reduce/i);
+  });
+
+  it("still heals after an intervening partial resubmit (heal window is not one-shot)", async () => {
+    // Step 1 (simulated by the previous test's semantics): a below-floor
+    // partial resubmit preserved the fold, writing the RAW keys back. Step 2
+    // (this test): the stored day still carries both raw keys, so a later
+    // truthful complete-day 100-token resubmit must still heal to 100.
+    mockKiloResubmit();
+
+    const existingDay = {
+      id: "day-1",
+      date: "2026-05-11",
+      timestampMs: null,
+      activeTimeMs: null,
+      // Exactly what the partial-resubmit writeback now persists.
+      sourceBreakdown: {
+        kilocode: structuredClone(CLIENT_ENTRY_100),
+        kilo: structuredClone(CLIENT_ENTRY_100),
+      },
+    };
+
+    const { tx, executedSqlArgs } = buildTx([
+      [{ id: "submission-existing" }],
+      [existingDay],
+      [AGGREGATES_ROW],
+      [{ sourceBreakdown: existingDay.sourceBreakdown }],
+    ]);
+    void tx;
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+    expect(response.status).toBe(200);
+
+    const strings: string[] = [];
+    for (const arg of executedSqlArgs) collectStrings(arg, strings);
+    const breakdownJson = strings.find((s) => s.includes('"kilo"'));
+    expect(breakdownJson).toBeDefined();
+    const merged = JSON.parse(breakdownJson!) as Record<
+      string,
+      { tokens: number }
+    >;
+
+    expect(merged).not.toHaveProperty("kilocode");
+    expect(merged.kilo.tokens).toBe(100);
   });
 
   it("still guards a rename-only kilocode fold (no kilo key present) against a token decrease", async () => {
