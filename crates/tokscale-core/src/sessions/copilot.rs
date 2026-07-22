@@ -657,24 +657,42 @@ fn is_span_record(value: &Value) -> bool {
     has_name && (has_span_identity || has_span_timing || value.get("kind").is_some())
 }
 
+// A W3C Trace Context id (trace or span) is INVALID when it is all-zero hex
+// (32 zero chars for a trace id, 16 for a span id) — the sentinel a
+// non-recording span context carries. Empty behaves the same way. Records
+// without a recording span context carry these sentinel ids, so treat both
+// as absent rather than as a real (and, worse, shared-with-other-records)
+// identity.
+fn is_valid_span_identity_id(id: &str) -> bool {
+    !id.is_empty() && !id.chars().all(|c| c == '0')
+}
+
 fn trace_id_from_record(value: &Value) -> Option<&str> {
-    value.get("traceId").and_then(Value::as_str).or_else(|| {
-        value
-            .get("spanContext")
-            .and_then(Value::as_object)
-            .and_then(|context| context.get("traceId"))
-            .and_then(Value::as_str)
-    })
+    value
+        .get("traceId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("spanContext")
+                .and_then(Value::as_object)
+                .and_then(|context| context.get("traceId"))
+                .and_then(Value::as_str)
+        })
+        .filter(|trace_id| is_valid_span_identity_id(trace_id))
 }
 
 fn span_id_from_record(value: &Value) -> Option<&str> {
-    value.get("spanId").and_then(Value::as_str).or_else(|| {
-        value
-            .get("spanContext")
-            .and_then(Value::as_object)
-            .and_then(|context| context.get("spanId"))
-            .and_then(Value::as_str)
-    })
+    value
+        .get("spanId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("spanContext")
+                .and_then(Value::as_object)
+                .and_then(|context| context.get("spanId"))
+                .and_then(Value::as_str)
+        })
+        .filter(|span_id| is_valid_span_identity_id(span_id))
 }
 
 fn parent_span_id_from_record(value: &Value) -> Option<&str> {
@@ -690,7 +708,7 @@ fn parent_span_id_from_record(value: &Value) -> Option<&str> {
         })
         // OTel exporters may emit an empty (or absent) parent for a root span;
         // treat empty as "no parent" so it never matches a real span id.
-        .filter(|parent_span_id| !parent_span_id.is_empty())
+        .filter(|parent_span_id| is_valid_span_identity_id(parent_span_id))
 }
 
 fn dedup_key_for_record(
@@ -708,6 +726,10 @@ fn dedup_key_for_record(
         CopilotUsageSource::ChatSpan | CopilotUsageSource::AgentSummarySpan => {
             match (trace_id, span_id) {
                 (Some(trace_id), Some(span_id)) => format!("{trace_id}:{span_id}"),
+                // No trace id, but a valid span id is still a stable identity
+                // (unlike the line-index fallback below): key on it directly
+                // so duplicate span-id-only snapshots collapse to one entry.
+                (None, Some(span_id)) => format!("span:{session_id}:{span_id}"),
                 _ => format!("span:{session_id}:{timestamp_ms}:{index}"),
             }
         }
@@ -1713,5 +1735,59 @@ mod tests {
         assert_eq!(candidate.tokens.cache_write, 8);
         assert_eq!(candidate.tokens.reasoning, 6);
         assert_eq!(candidate.agent.as_deref(), Some("recovered-agent"));
+    }
+
+    #[test]
+    fn adversarial_zero_span_identity_spans_are_not_collapsed() {
+        // W3C/OTel "invalid" ids are all-zeros. Two UNRELATED chat spans that
+        // both carry the invalid all-zero traceId/spanId must not be merged
+        // into one message: they are distinct requests whose exporter simply
+        // had no recording span context. Expected: 2 messages, totals summed.
+        let content = concat!(
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-zero","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","name":"chat claude-sonnet-4.5","startTime":[1775934300,0],"endTime":[1775934301,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"claude-sonnet-4.5","gen_ai.conversation.id":"conv-zero","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
+        let total_output: i64 = messages.iter().map(|m| m.tokens.output).sum();
+        assert_eq!(
+            (messages.len(), total_input, total_output),
+            (2, 300, 30),
+            "unrelated zero-id spans were collapsed: {:?}",
+            messages
+                .iter()
+                .map(|m| (m.model_id.clone(), m.tokens.input))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn adversarial_spanid_only_duplicates_do_merge() {
+        // Duplicate exporter snapshots of the SAME span (same spanId) that lack
+        // a traceId. Per the #939 intent these should merge into one message,
+        // but the fallback dedup key previously ignored span_id and appended
+        // the line index, so they stayed distinct -> double count.
+        let content = concat!(
+            r#"{"type":"span","spanId":"span-dup","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-dup","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","spanId":"span-dup","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-dup","gen_ai.usage.input_tokens":150,"gen_ai.usage.output_tokens":12}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "spanId-only duplicate snapshots were not merged: keys {:?}",
+            messages
+                .iter()
+                .map(|m| m.dedup_key.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }

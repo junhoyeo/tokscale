@@ -813,7 +813,11 @@ fn parser_version(client: ClientId) -> u32 {
         // no longer re-arms pending_turn_start and mints a spurious turn.
         ClientId::Jcode => 7,
         // v5->v6: merge same-dedup-key Copilot spans before emitting messages.
-        ClientId::Copilot => 6,
+        // v6->v7: all-zero trace/span ids (the W3C sentinel for "no recording
+        // span context") are now treated as absent instead of as a real,
+        // shared identity, and a valid span_id alone (no trace_id) is now a
+        // stable dedup key instead of falling through to the line-index key.
+        ClientId::Copilot => 7,
         // Pi subagent sessions now derive agent attribution from session_info
         // names; version-1 caches carry those messages without agent metadata.
         ClientId::Pi => 2,
@@ -2052,7 +2056,7 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         assert_eq!(parser_version(ClientId::Codex), 6);
-        assert_eq!(parser_version(ClientId::Copilot), 6);
+        assert_eq!(parser_version(ClientId::Copilot), 7);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
