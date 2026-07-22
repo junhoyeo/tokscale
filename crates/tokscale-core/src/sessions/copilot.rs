@@ -160,12 +160,22 @@ impl CopilotUsageCandidate {
         });
 
         let duplicate_agent = duplicate.agent.filter(|agent| !agent.is_empty());
-        if duplicate.agent_is_direct && !self.agent_is_direct && duplicate_agent.is_some() {
+        // Direct attribution outranks fallback; equal-authority conflicts use a
+        // stable lexical tie-break so duplicate merging is order-independent.
+        let replace_agent = match (
+            self.agent.as_deref().filter(|agent| !agent.is_empty()),
+            duplicate_agent.as_deref(),
+        ) {
+            (None, Some(_)) => true,
+            (Some(_), Some(_)) if self.agent_is_direct != duplicate.agent_is_direct => {
+                duplicate.agent_is_direct
+            }
+            (Some(current), Some(candidate)) => candidate < current,
+            _ => false,
+        };
+        if replace_agent {
             self.agent = duplicate_agent;
-            self.agent_is_direct = true;
-        } else if self.agent.as_deref().is_none_or(|agent| agent.is_empty()) {
-            self.agent_is_direct = duplicate.agent_is_direct && duplicate_agent.is_some();
-            self.agent = duplicate_agent;
+            self.agent_is_direct = duplicate.agent_is_direct;
         }
     }
 }
@@ -1576,6 +1586,21 @@ mod tests {
         assert_eq!(message.duration_ms, Some(8_000));
         assert_eq!(message.agent.as_deref(), Some("agent-merge"));
         assert_eq!(message.dedup_key.as_deref(), Some("trace-merge:span-merge"));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_direct_agents_are_order_independent() {
+        let first = r#"{"type":"span","traceId":"trace-agent-merge","spanId":"span-agent-merge","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"agent-z","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#;
+        let second = r#"{"type":"span","traceId":"trace-agent-merge","spanId":"span-agent-merge","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"agent-a","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let forward_file = create_test_file(&format!("{first}\n{second}\n"));
+        let reverse_file = create_test_file(&format!("{second}\n{first}\n"));
+
+        let forward = parse_copilot_file(forward_file.path());
+        let reverse = parse_copilot_file(reverse_file.path());
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].agent.as_deref(), Some("agent-a"));
     }
 
     #[test]
