@@ -35,8 +35,21 @@ struct JcodeSessionEnvelope {
 #[derive(Debug, Deserialize)]
 struct JcodeJournalEntry {
     meta: Option<JcodeJournalMeta>,
+    // Raw values for the same reason as `JcodeSessionEnvelope::messages`: one
+    // malformed sibling in a journal batch must not drop the line's valid
+    // messages (or its meta).
     #[serde(default)]
-    append_messages: Vec<JcodeMessage>,
+    append_messages: Vec<serde_json::Value>,
+}
+
+/// Parse each raw message independently: a single wrong-typed field (e.g. a
+/// string `token_usage`) must only drop that message, not its whole snapshot
+/// or journal batch, mirroring how kimi/opencodereview skip bad lines.
+fn lenient_jcode_messages(values: Vec<serde_json::Value>) -> Vec<JcodeMessage> {
+    values
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,14 +297,7 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
         Ok(envelope) => envelope,
         Err(_) => return Vec::new(),
     };
-    // Parse each message independently: a single wrong-typed field (e.g. a
-    // string `token_usage`) must only drop that message, not the whole
-    // session's usage, mirroring how kimi/opencodereview skip bad lines.
-    let messages: Vec<JcodeMessage> = envelope
-        .messages
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect();
+    let messages = lenient_jcode_messages(envelope.messages);
     let session = JcodeSession {
         id: envelope.id,
         provider_key: envelope.provider_key,
@@ -357,7 +363,7 @@ pub fn parse_jcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 context.apply_meta(meta);
             }
             let journal_messages = parse_jcode_messages(
-                entry.append_messages,
+                lenient_jcode_messages(entry.append_messages),
                 &mut context,
                 journal_fallback_timestamp,
                 &format!("journal:{line_index}"),
@@ -841,6 +847,41 @@ mod tests {
         let total_output: i64 = messages.iter().map(|m| m.tokens.output).sum();
         assert_eq!(total_input, 300);
         assert_eq!(total_output, 30);
+    }
+
+    #[test]
+    fn one_malformed_journal_sibling_does_not_drop_the_lines_valid_messages() {
+        // Same leniency as the snapshot: a malformed sibling inside a journal
+        // line's append_messages batch must only drop that element, not the
+        // valid messages (or meta) sharing the line.
+        let dir = tempfile::TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        std::fs::write(
+            &snapshot,
+            r#"{
+  "id":"session_test",
+  "model":"snapshot-model",
+  "messages":[
+    {"id":"assistant_good","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":100,"output_tokens":10}}
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("session_test.journal.jsonl"),
+            r#"{"append_messages":[{"id":"assistant_journal","role":"assistant","timestamp":"2026-06-16T12:00:03Z","token_usage":{"input_tokens":200,"output_tokens":20}},{"id":"assistant_bad","role":"assistant","timestamp":"2026-06-16T12:00:04Z","token_usage":"corrupt"}]}
+"#,
+        )
+        .unwrap();
+
+        let messages = parse_jcode_file(&snapshot);
+        assert_eq!(
+            messages.len(),
+            2,
+            "a valid journal message must survive a malformed sibling on its line"
+        );
+        let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
+        assert_eq!(total_input, 300);
     }
 
     #[test]

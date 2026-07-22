@@ -807,10 +807,11 @@ fn parser_version(client: ClientId) -> u32 {
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
         // v5->v6: OpenAI-style Jcode usage now removes cache-read overlap from
         // input_tokens before pricing and aggregation.
-        // v6->v7: the snapshot's messages array is now parsed leniently
-        // (a single wrong-typed token_usage no longer drops the whole
-        // session), and a journal replay of an already-seen user message id
-        // no longer re-arms pending_turn_start and mints a spurious turn.
+        // v6->v7: snapshot and journal message arrays are now parsed
+        // leniently (a single wrong-typed token_usage no longer drops the
+        // whole session or its journal line), and a journal replay of an
+        // already-seen user message id no longer re-arms pending_turn_start
+        // and mints a spurious turn.
         ClientId::Jcode => 7,
         // v5->v6: merge same-dedup-key Copilot spans before emitting messages.
         // v6->v7: all-zero trace/span ids (the W3C sentinel for "no recording
