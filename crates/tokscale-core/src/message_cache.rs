@@ -806,7 +806,8 @@ fn parser_version(client: ClientId) -> u32 {
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
         ClientId::Jcode => 5,
-        ClientId::Copilot => 5,
+        // v5->v6: merge same-dedup-key Copilot spans before emitting messages.
+        ClientId::Copilot => 6,
         // Pi subagent sessions now derive agent attribution from session_info
         // names; version-1 caches carry those messages without agent metadata.
         ClientId::Pi => 2,
@@ -2045,7 +2046,7 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         assert_eq!(parser_version(ClientId::Codex), 6);
-        assert_eq!(parser_version(ClientId::Copilot), 5);
+        assert_eq!(parser_version(ClientId::Copilot), 6);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -2841,7 +2842,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_copilot_v3_cache_is_rejected_and_rebuilt_with_root_agent() {
+    fn test_copilot_stale_cache_is_rejected_and_rebuilt_with_root_agent() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
         let source_dir = TempDir::new().unwrap();
@@ -2857,6 +2858,8 @@ mod tests {
                 "\n",
                 r#"{"type":"span","traceId":"trace-cache","spanId":"chat","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":1,"gen_ai.usage.output_tokens":1}}"#,
                 "\n",
+                r#"{"type":"span","traceId":"trace-cache","spanId":"chat","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":9,"gen_ai.usage.output_tokens":8}}"#,
+                "\n",
             ),
         )
         .unwrap();
@@ -2864,9 +2867,9 @@ mod tests {
         let current_identity = CacheIdentity::for_client(ClientId::Copilot);
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
-            parser_version: 3,
+            parser_version: current_identity.parser_version.saturating_sub(1),
         };
-        let mut stale_message = UnifiedMessage::new(
+        let mut stale_message = UnifiedMessage::new_with_dedup(
             "copilot",
             "gpt-5.4-mini",
             "github-copilot",
@@ -2880,14 +2883,31 @@ mod tests {
                 reasoning: 0,
             },
             0.0,
+            Some("trace-cache:chat".to_string()),
         );
         stale_message.agent = Some("github.copilot.subagent".to_string());
+        let stale_duplicate = UnifiedMessage::new_with_dedup(
+            "copilot",
+            "gpt-5.4-mini",
+            "github-copilot",
+            "trace-cache",
+            2,
+            TokenBreakdown {
+                input: 9,
+                output: 8,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+            Some("trace-cache:chat".to_string()),
+        );
         let fingerprint = SourceFingerprint::from_path(&source_path).unwrap();
         let stale_entry = CachedSourceEntry::new(
             stale_identity,
             &source_path,
             fingerprint.clone(),
-            vec![stale_message],
+            vec![stale_message, stale_duplicate],
             Vec::new(),
             None,
         );
@@ -2905,7 +2925,7 @@ mod tests {
         let mut loaded = SourceMessageCache::load();
         assert!(
             loaded.get(current_identity, &source_path).is_none(),
-            "a v3 Copilot cache entry must not be served after the parser output change"
+            "a stale Copilot cache entry must not be served after the parser output change"
         );
         assert!(loaded.rewrite_shards.contains(&shard_key));
         assert_eq!(
@@ -2916,6 +2936,9 @@ mod tests {
 
         let rebuilt = crate::sessions::copilot::parse_copilot_file(&source_path);
         assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].dedup_key.as_deref(), Some("trace-cache:chat"));
+        assert_eq!(rebuilt[0].tokens.input, 9);
+        assert_eq!(rebuilt[0].tokens.output, 8);
         assert_eq!(
             rebuilt[0].agent.as_deref(),
             Some("github.copilot.default"),
@@ -2944,6 +2967,7 @@ mod tests {
             read_shard(&stale_path, current_identity),
             ShardReadStatus::Loaded(entries)
                 if entries.len() == 1
+                    && entries[0].messages[0].tokens.input == 9
                     && entries[0].messages[0].agent.as_deref()
                         == Some("github.copilot.default")
         ));
