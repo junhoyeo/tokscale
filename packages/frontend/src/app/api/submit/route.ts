@@ -59,10 +59,22 @@ function mergeModelBreakdowns(
   }
 }
 
+interface NormalizedClientBreakdownAliases {
+  breakdown: Record<string, ClientBreakdownData>;
+  // Canonical client names where MULTIPLE raw source keys folded together
+  // (e.g. a stale legacy "kilocode" key alongside "kilo" for the same
+  // underlying usage, summed by this function). A pure rename -- only the
+  // legacy key present, nothing to sum it with -- is NOT included: that's a
+  // single contributor, not a suspect double count, so the regression guard
+  // should still defend it normally.
+  foldedClients: Set<string>;
+}
+
 function normalizeClientBreakdownAliases(
   breakdown: Record<string, ClientBreakdownData>
-): Record<string, ClientBreakdownData> {
+): NormalizedClientBreakdownAliases {
   const normalized: Record<string, ClientBreakdownData> = {};
+  const foldedClients = new Set<string>();
 
   for (const [rawClientName, data] of Object.entries(breakdown)) {
     const clientName = LEGACY_CLIENT_ALIASES[rawClientName] ?? rawClientName;
@@ -73,6 +85,7 @@ function normalizeClientBreakdownAliases(
       continue;
     }
 
+    foldedClients.add(clientName);
     existing.tokens += data.tokens || 0;
     existing.cost += data.cost || 0;
     existing.input += data.input || 0;
@@ -85,7 +98,7 @@ function normalizeClientBreakdownAliases(
     existing.provenance = deriveClientBreakdownProvenance(existing);
   }
 
-  return normalized;
+  return { breakdown: normalized, foldedClients };
 }
 
 function normalizeSubmissionData(data: unknown): void {
@@ -527,13 +540,15 @@ export async function POST(request: Request) {
         const existingDay = existingDaysMap.get(incomingDay.date);
 
         if (existingDay) {
-          const existingClientBreakdown = normalizeClientBreakdownAliases(
-            (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>
-          );
+          const { breakdown: existingClientBreakdown, foldedClients } =
+            normalizeClientBreakdownAliases(
+              (existingDay.sourceBreakdown || {}) as Record<string, ClientBreakdownData>
+            );
           const mergeResult = mergeClientBreakdownsWithRegressionGuard(
             existingClientBreakdown,
             incomingClientBreakdown,
-            submittedClients
+            submittedClients,
+            foldedClients
           );
           warnings.push(
             ...mergeResult.warnings.map((warning) => `Day ${incomingDay.date}: ${warning}`)

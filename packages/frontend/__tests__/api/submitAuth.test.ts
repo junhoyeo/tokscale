@@ -720,6 +720,7 @@ describe("POST /api/submit auth path", () => {
           },
         },
       },
+      expect.any(Set),
       expect.any(Set)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
@@ -1100,6 +1101,7 @@ describe("POST /api/submit auth path", () => {
           },
         },
       },
+      expect.any(Set),
       expect.any(Set)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
@@ -1648,6 +1650,7 @@ describe("POST /api/submit auth path", () => {
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       legacyBreakdown,
       incomingBreakdownWithProvenance,
+      expect.any(Set),
       expect.any(Set)
     );
     expect(await response.json()).toEqual(expect.objectContaining({

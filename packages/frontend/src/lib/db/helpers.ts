@@ -145,7 +145,16 @@ export function mergeClientBreakdowns(
 export function mergeClientBreakdownsWithRegressionGuard(
   existing: Record<string, ClientBreakdownData> | null | undefined,
   incoming: Record<string, ClientBreakdownData>,
-  incomingClients: Set<string>
+  incomingClients: Set<string>,
+  // Clients whose `existing` value came from normalizeClientBreakdownAliases
+  // folding TWO source keys together (e.g. a stale legacy "kilocode" key
+  // alongside "kilo" for the same underlying usage) rather than a simple
+  // one-key rename. For these, a lower incoming token count is not a parser
+  // regression to guard against — it is the healthy, complete-day total that
+  // should replace the inflated fold. A pure rename-only fold (only the
+  // legacy key was ever present) is NOT included here and keeps the normal
+  // guard behavior.
+  foldedClients?: Set<string>
 ): MergeClientBreakdownsResult {
   const merged: Record<string, ClientBreakdownData> = { ...(existing || {}) };
   const warnings: string[] = [];
@@ -168,6 +177,20 @@ export function mergeClientBreakdownsWithRegressionGuard(
 
     const nextClient = withDerivedProvenance(incomingClient);
     if (existingClient && nextClient.tokens < existingClient.tokens) {
+      if (foldedClients?.has(clientName)) {
+        // The existing value is an alias-folded double count (e.g. stale
+        // "kilocode" + "kilo" summed together), not real usage history.
+        // This complete-day incoming submission is authoritative for this
+        // client, so let it replace the fold instead of defending it.
+        merged[clientName] = nextClient;
+        const existingTokens = formatTokens(existingClient.tokens);
+        const nextTokens = formatTokens(nextClient.tokens);
+        warnings.push(
+          `Healed ${clientName} alias-folded double count for this same-device resubmit: replaced ${existingTokens} tokens with ${nextTokens} tokens from the complete incoming day.`
+        );
+        continue;
+      }
+
       // A token decrease alone signals a parser regression (e.g. the CLI
       // re-parsed only a subset of history). Preserve the existing row even
       // when coverage metrics are equal, because equal coverage + fewer tokens

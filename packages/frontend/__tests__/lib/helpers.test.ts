@@ -99,4 +99,60 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
     expect(result.warnings).toHaveLength(1);
     expect(result.warnings[0]).toContain("cursor");
   });
+
+  describe("foldedClients parameter (alias-fold double-count healing)", () => {
+    it("lets a lower incoming value replace a folded client instead of preserving it", () => {
+      // Simulates the healed state normalizeClientBreakdownAliases would produce:
+      // a stored kilocode+kilo double count folded into a single 200-token
+      // "kilo" entry, with the incoming complete-day resubmit reporting the
+      // true 100-token total.
+      const existing = { kilo: makeClient(200, 5, 1) };
+      const incoming = { kilo: makeClient(100, 5, 1) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(["kilo"]),
+        new Set(["kilo"])
+      );
+
+      expect(result.merged.kilo.tokens).toBe(100);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain("Healed");
+      expect(result.warnings[0]).not.toMatch(/parser regression|Preserved/i);
+    });
+
+    it("keeps the normal regression guard for a non-folded client with the same shape", () => {
+      // Same numbers as above, but the client was NOT flagged as folded
+      // (e.g. a plain rename-only case) -- normal preserve-and-warn behavior
+      // must still apply.
+      const existing = { kilo: makeClient(200, 5, 1) };
+      const incoming = { kilo: makeClient(100, 5, 1) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(["kilo"])
+      );
+
+      expect(result.merged.kilo.tokens).toBe(200);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain("Preserved");
+    });
+
+    it("keeps the folded value when the incoming submission does not include the client", () => {
+      const existing = { kilo: makeClient(200, 5, 1) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        {},
+        new Set(["kilo"]),
+        new Set(["kilo"])
+      );
+
+      expect(result.merged.kilo.tokens).toBe(200);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain("disappeared");
+    });
+  });
 });
