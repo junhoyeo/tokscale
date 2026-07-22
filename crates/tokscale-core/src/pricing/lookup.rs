@@ -480,6 +480,11 @@ impl PricingLookup {
             }
         }
 
+        let exact_litellm = self.exact_match_litellm(model_id);
+        if should_prefer_openai_tiered_litellm(model_id, provider_id, exact_litellm.as_ref()) {
+            return exact_litellm;
+        }
+
         if let Some(result) = choose_best_source_result(
             self.exact_match_litellm_for_provider(model_id, provider_id),
             self.exact_match_openrouter_for_provider(model_id, provider_id),
@@ -488,7 +493,7 @@ impl PricingLookup {
             return Some(result);
         }
 
-        if let Some(result) = self.exact_match_litellm(model_id) {
+        if let Some(result) = exact_litellm {
             return Some(result);
         }
         // An unscoped OpenRouter FULL-KEY match is the id's own canonical key,
@@ -1152,20 +1157,177 @@ impl PricingLookup {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> f64 {
+        let provider_id = normalize_provider_hint(provider_id);
         let result = match self.lookup_with_provider(model_id, provider_id) {
             Some(r) => r,
             None => return 0.0,
         };
 
+        compute_cost_for_lookup(&result, provider_id, usage)
+    }
+}
+
+fn matches_model_or_snapshot(model_id: &str, base: &str) -> bool {
+    model_id == base
+        || model_id
+            .strip_prefix(base)
+            .is_some_and(|suffix| suffix.starts_with("-20"))
+}
+
+fn is_openai_full_request_272k_model(model_id: &str) -> bool {
+    let key = model_id.to_ascii_lowercase();
+    let model_id = key.split('/').next_back().unwrap_or(&key);
+
+    [
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-5.5",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
+    .into_iter()
+    .any(|base| matches_model_or_snapshot(model_id, base))
+}
+
+fn should_prefer_openai_tiered_litellm(
+    model_id: &str,
+    provider_id: Option<&str>,
+    litellm: Option<&LookupResult>,
+) -> bool {
+    provider_id.is_some_and(|provider| {
+        provider_identity::canonical_provider(provider).as_deref() == Some("openai")
+    }) && is_openai_full_request_272k_model(model_id)
+        && litellm.is_some_and(|result| has_complete_openai_272k_pricing(&result.pricing))
+}
+
+fn has_complete_openai_272k_pricing(pricing: &ModelPricing) -> bool {
+    let valid_pair = |base: Option<f64>, above: Option<f64>| {
+        base.is_some_and(is_valid_price_value) && above.is_some_and(is_valid_price_value)
+    };
+
+    valid_pair(
+        pricing.input_cost_per_token,
+        pricing.input_cost_per_token_above_272k_tokens,
+    ) && valid_pair(
+        pricing.output_cost_per_token,
+        pricing.output_cost_per_token_above_272k_tokens,
+    ) && pricing.cache_read_input_token_cost.is_none_or(|base| {
+        is_valid_price_value(base)
+            && pricing
+                .cache_read_input_token_cost_above_272k_tokens
+                .is_some_and(is_valid_price_value)
+    })
+}
+
+fn uses_openai_full_request_272k_pricing(result: &LookupResult, provider_id: Option<&str>) -> bool {
+    if result.source != "LiteLLM"
+        || is_reseller_provider(&result.matched_key)
+        || provider_id.is_some_and(|provider| {
+            provider_identity::canonical_provider(provider).as_deref() != Some("openai")
+        })
+    {
+        return false;
+    }
+
+    let key = result.matched_key.to_ascii_lowercase();
+    if key.contains('/') && !key.starts_with("openai/") {
+        return false;
+    }
+
+    is_openai_full_request_272k_model(&key)
+}
+
+fn compute_cost_for_lookup(
+    result: &LookupResult,
+    provider_id: Option<&str>,
+    usage: &TokenBreakdown,
+) -> f64 {
+    let calculate = |pricing| {
         compute_cost(
-            &result.pricing,
+            pricing,
             usage.input,
             usage.output,
             usage.cache_read,
             usage.cache_write,
             usage.reasoning,
         )
+    };
+    let total_input = usage
+        .input
+        .max(0)
+        .saturating_add(usage.cache_read.max(0))
+        .saturating_add(usage.cache_write.max(0));
+    if !uses_openai_full_request_272k_pricing(result, provider_id) {
+        return calculate(&result.pricing);
     }
+
+    let mut pricing = result.pricing.clone();
+    if total_input <= TIERED_PRICING_THRESHOLD_272K_TOKENS as i64 {
+        pricing.input_cost_per_token_above_272k_tokens = None;
+        pricing.output_cost_per_token_above_272k_tokens = None;
+        pricing.cache_read_input_token_cost_above_272k_tokens = None;
+        return calculate(&pricing);
+    }
+
+    if let Some(high) = pricing
+        .input_cost_per_token_above_272k_tokens
+        .filter(|price| is_valid_price_value(*price))
+    {
+        let input_multiplier = pricing
+            .input_cost_per_token
+            .filter(|base| is_valid_price_value(*base) && *base > 0.0)
+            .map(|base| high / base);
+        for rate in [
+            &mut pricing.input_cost_per_token,
+            &mut pricing.input_cost_per_token_above_128k_tokens,
+            &mut pricing.input_cost_per_token_above_200k_tokens,
+            &mut pricing.input_cost_per_token_above_256k_tokens,
+            &mut pricing.input_cost_per_token_above_272k_tokens,
+        ] {
+            *rate = Some(high);
+        }
+
+        if let (Some(multiplier), Some(cache_write_price)) = (
+            input_multiplier,
+            pricing
+                .cache_creation_input_token_cost
+                .filter(|price| is_valid_price_value(*price)),
+        ) {
+            let high = Some(cache_write_price * multiplier);
+            pricing.cache_creation_input_token_cost = high;
+            pricing.cache_creation_input_token_cost_above_200k_tokens = high;
+        }
+    }
+    if let Some(high) = pricing
+        .output_cost_per_token_above_272k_tokens
+        .filter(|price| is_valid_price_value(*price))
+    {
+        for rate in [
+            &mut pricing.output_cost_per_token,
+            &mut pricing.output_cost_per_token_above_128k_tokens,
+            &mut pricing.output_cost_per_token_above_200k_tokens,
+            &mut pricing.output_cost_per_token_above_256k_tokens,
+            &mut pricing.output_cost_per_token_above_272k_tokens,
+        ] {
+            *rate = Some(high);
+        }
+    }
+    if let Some(high) = pricing
+        .cache_read_input_token_cost_above_272k_tokens
+        .filter(|price| is_valid_price_value(*price))
+    {
+        for rate in [
+            &mut pricing.cache_read_input_token_cost,
+            &mut pricing.cache_read_input_token_cost_above_200k_tokens,
+            &mut pricing.cache_read_input_token_cost_above_272k_tokens,
+        ] {
+            *rate = Some(high);
+        }
+    }
+
+    calculate(&pricing)
 }
 
 pub fn compute_cost(
@@ -4640,6 +4802,168 @@ mod tests {
             + (28_000.0 * 0.000004);
 
         assert!((cost - expected).abs() < 1e-12);
+    }
+
+    fn openai_272k_result(key: &str, source: &str) -> LookupResult {
+        LookupResult {
+            matched_key: key.into(),
+            source: source.into(),
+            pricing: ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                input_cost_per_token_above_272k_tokens: Some(0.000010),
+                output_cost_per_token: Some(0.000030),
+                output_cost_per_token_above_272k_tokens: Some(0.000045),
+                cache_read_input_token_cost: Some(0.0000005),
+                cache_read_input_token_cost_above_272k_tokens: Some(0.000001),
+                cache_creation_input_token_cost: Some(0.00000625),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn test_openai_272k_full_request_pricing_uses_combined_input() {
+        let result = openai_272k_result("openai/gpt-5.5", "LiteLLM");
+        let usage = |input, output, cache_read, cache_write| TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning: 0,
+        };
+        let cost =
+            compute_cost_for_lookup(&result, Some("openai"), &usage(200_000, 10_000, 72_000, 1));
+        let expected = 200_000.0 * 0.000010 + 10_000.0 * 0.000045 + 72_000.0 * 0.000001 + 0.0000125;
+        assert!((cost - expected).abs() < 1e-12);
+
+        let boundary = compute_cost_for_lookup(&result, None, &usage(200_000, 10_000, 72_000, 0));
+        let boundary_expected = 200_000.0 * 0.000005 + 10_000.0 * 0.000030 + 72_000.0 * 0.0000005;
+        assert!((boundary - boundary_expected).abs() < 1e-12);
+
+        let output_only = compute_cost_for_lookup(&result, None, &usage(1, 300_000, 0, 0));
+        assert!((output_only - (0.000005 + 300_000.0 * 0.000030)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_provider_aware_openai_prefers_complete_litellm_tiers() {
+        let litellm_pricing = openai_272k_result("gpt-5.6-sol", "LiteLLM").pricing;
+        let openrouter_pricing = ModelPricing {
+            input_cost_per_token: litellm_pricing.input_cost_per_token,
+            output_cost_per_token: litellm_pricing.output_cost_per_token,
+            cache_read_input_token_cost: litellm_pricing.cache_read_input_token_cost,
+            ..Default::default()
+        };
+        let lookup = PricingLookup::new(
+            HashMap::from([("gpt-5.6-sol".into(), litellm_pricing.clone())]),
+            HashMap::from([("openai/gpt-5.6-sol".into(), openrouter_pricing)]),
+            HashMap::new(),
+        );
+
+        let result = lookup
+            .lookup_with_provider("gpt-5.6-sol", Some("openai"))
+            .unwrap();
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.matched_key, "gpt-5.6-sol");
+
+        let usage = TokenBreakdown {
+            input: 200_000,
+            output: 10_000,
+            cache_read: 72_001,
+            ..Default::default()
+        };
+        let expected = 200_000.0 * 0.000010 + 10_000.0 * 0.000045 + 72_001.0 * 0.000001;
+        for provider in [Some("openai"), Some("unknown"), Some(""), None] {
+            let cost = lookup.calculate_cost_with_provider("gpt-5.6-sol", provider, &usage);
+            assert!((cost - expected).abs() < 1e-12);
+        }
+
+        let lookup = PricingLookup::new(
+            HashMap::from([("gpt-5.6-sol".into(), litellm_pricing.clone())]),
+            HashMap::from([("openai/gpt-5.6-sol".into(), litellm_pricing)]),
+            HashMap::new(),
+        );
+        let result = lookup
+            .lookup_with_provider("gpt-5.6-sol", Some("openai"))
+            .unwrap();
+        assert_eq!(result.source, "LiteLLM");
+        assert!(!should_prefer_openai_tiered_litellm(
+            "gpt-5.6-sol",
+            Some("openrouter"),
+            Some(&result)
+        ));
+    }
+
+    #[test]
+    fn test_openai_tiered_litellm_preference_requires_complete_272k_pricing() {
+        let pricing = openai_272k_result("gpt-5.6-sol", "LiteLLM").pricing;
+        assert!(has_complete_openai_272k_pricing(&pricing));
+
+        let clear_required: [fn(&mut ModelPricing); 5] = [
+            |pricing| pricing.input_cost_per_token = None,
+            |pricing| pricing.input_cost_per_token_above_272k_tokens = None,
+            |pricing| pricing.output_cost_per_token = None,
+            |pricing| pricing.output_cost_per_token_above_272k_tokens = None,
+            |pricing| pricing.cache_read_input_token_cost_above_272k_tokens = None,
+        ];
+        for clear in clear_required {
+            let mut incomplete = pricing.clone();
+            clear(&mut incomplete);
+            assert!(!has_complete_openai_272k_pricing(&incomplete));
+        }
+
+        let mut without_cache_read = pricing;
+        without_cache_read.cache_read_input_token_cost = None;
+        without_cache_read.cache_read_input_token_cost_above_272k_tokens = None;
+        assert!(has_complete_openai_272k_pricing(&without_cache_read));
+    }
+
+    #[test]
+    fn test_openai_272k_full_request_pricing_scope() {
+        for key in [
+            "gpt-5.4",
+            "openai/gpt-5.4-pro-2026-03-05",
+            "gpt-5.5-2026-04-23",
+            "gpt-5.6",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra-2026-07-01",
+            "gpt-5.6-luna",
+        ] {
+            assert!(
+                uses_openai_full_request_272k_pricing(
+                    &openai_272k_result(key, "LiteLLM"),
+                    Some("openai")
+                ),
+                "expected full-request pricing for {key}"
+            );
+        }
+
+        for key in [
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.5-pro",
+            "gpt-5.2",
+            "fugu-ultra",
+            "custom/gpt-5.5-pro",
+        ] {
+            assert!(
+                !uses_openai_full_request_272k_pricing(
+                    &openai_272k_result(key, "LiteLLM"),
+                    Some("openai")
+                ),
+                "expected progressive pricing for {key}"
+            );
+        }
+
+        for (result, provider) in [
+            (openai_272k_result("fugu-ultra", "LiteLLM"), None),
+            (openai_272k_result("openai/gpt-5.5", "OpenRouter"), None),
+            (
+                openai_272k_result("azure/openai/gpt-5.5", "LiteLLM"),
+                Some("azure"),
+            ),
+        ] {
+            assert!(!uses_openai_full_request_272k_pricing(&result, provider));
+        }
     }
 
     #[test]
