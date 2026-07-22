@@ -366,7 +366,7 @@ fn is_delimited_model_family(model_lower: &str, family: &str) -> bool {
                 || token
                     .strip_prefix(family)
                     .and_then(|suffix| suffix.chars().next())
-                    .map_or(false, |c| c.is_ascii_digit())
+                    .is_some_and(|c| c.is_ascii_digit())
         })
 }
 
