@@ -50,7 +50,6 @@ impl OpenCodeModelNameResolver {
                 };
 
                 let name = name.to_string();
-                names.insert((provider.clone(), model_id.to_string()), name.clone());
                 names
                     .entry((provider.clone(), canonical_model_id(model_id)))
                     .or_insert(name);
@@ -68,8 +67,7 @@ impl OpenCodeModelNameResolver {
         let provider = provider_identity::canonical_provider(provider_id)
             .unwrap_or_else(|| provider_id.to_string());
         self.names
-            .get(&(provider.clone(), model_id.to_string()))
-            .or_else(|| self.names.get(&(provider, canonical_model_id(model_id))))
+            .get(&(provider, canonical_model_id(model_id)))
             .map(String::as_str)
     }
 }
@@ -459,27 +457,25 @@ mod tests {
     }
 
     #[test]
-    fn exact_model_id_match_takes_precedence_over_canonical_collision() {
+    fn colliding_canonical_ids_resolve_to_single_name() {
         let resolver = OpenCodeModelNameResolver::from_json(
             r#"{
                 "provider": {
                     "fireworks": {
                         "models": {
-                            "accounts/fireworks/models/glm-5p2": { "name": "Exact" },
-                            "fireworks/glm-5p2": { "name": "Alias" }
+                            "glm-5p2-20250701": { "name": "Dated" },
+                            "glm-5p2": { "name": "Short" }
                         }
                     }
                 }
             }"#,
         );
 
-        assert_eq!(
-            resolver.display_name("fireworks", "accounts/fireworks/models/glm-5p2"),
-            Some("Exact")
-        );
-        assert_eq!(
-            resolver.display_name("fireworks", "fireworks/glm-5p2"),
-            Some("Alias")
-        );
+        // Both keys canonicalize to "glm-5p2" (date suffix stripped),
+        // so both lookups return the same name.
+        let dated = resolver.display_name("fireworks", "glm-5p2-20250701");
+        let short = resolver.display_name("fireworks", "glm-5p2");
+        assert!(dated.is_some());
+        assert_eq!(dated, short);
     }
 }
