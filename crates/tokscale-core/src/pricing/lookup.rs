@@ -1182,6 +1182,9 @@ fn is_openai_full_request_272k_model(model_id: &str) -> bool {
         "gpt-5.4",
         "gpt-5.4-pro",
         "gpt-5.5",
+        // Priced identically to gpt-5.4-pro in LiteLLM ($30/$180 base,
+        // $60/$270 above 272k) with the same full-request semantics.
+        "gpt-5.5-pro",
         "gpt-5.6",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
@@ -4923,6 +4926,8 @@ mod tests {
             "gpt-5.4",
             "openai/gpt-5.4-pro-2026-03-05",
             "gpt-5.5-2026-04-23",
+            "gpt-5.5-pro",
+            "gpt-5.5-pro-2026-04-23",
             "gpt-5.6",
             "gpt-5.6-sol",
             "gpt-5.6-terra-2026-07-01",
@@ -4940,7 +4945,7 @@ mod tests {
         for key in [
             "gpt-5.4-mini",
             "gpt-5.4-nano",
-            "gpt-5.5-pro",
+            "gpt-5.5-promax",
             "gpt-5.2",
             "fugu-ultra",
             "custom/gpt-5.5-pro",
