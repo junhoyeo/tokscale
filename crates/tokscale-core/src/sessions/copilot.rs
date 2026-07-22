@@ -161,7 +161,7 @@ impl CopilotUsageCandidate {
                 let duration_ms = end_timestamp_ms.saturating_sub(start_timestamp_ms);
                 (duration_ms > 0).then_some(duration_ms)
             })
-            .or(fallback_duration_ms);
+            .max(fallback_duration_ms);
 
         let duplicate_agent = duplicate.agent.filter(|agent| !agent.is_empty());
         // Direct attribution outranks fallback; equal-authority conflicts use a
@@ -1667,6 +1667,22 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].duration_ms, Some(1_000));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_keeps_larger_duration_only_update() {
+        let interval = r#"{"type":"span","traceId":"trace-duration-update","spanId":"span-duration-update","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#;
+        let duration_only = r#"{"type":"span","traceId":"trace-duration-update","spanId":"span-duration-update","name":"chat gpt-5.4-mini","duration":[5,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let forward_file = create_test_file(&format!("{interval}\n{duration_only}\n"));
+        let reverse_file = create_test_file(&format!("{duration_only}\n{interval}\n"));
+
+        let forward = parse_copilot_file(forward_file.path());
+        let reverse = parse_copilot_file(reverse_file.path());
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].timestamp, 1_775_934_260_000);
+        assert_eq!(forward[0].duration_ms, Some(5_000));
     }
 
     #[test]
