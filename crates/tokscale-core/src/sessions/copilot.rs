@@ -668,47 +668,54 @@ fn is_valid_span_identity_id(id: &str) -> bool {
 }
 
 fn trace_id_from_record(value: &Value) -> Option<&str> {
+    // Filter each candidate individually: a zero/empty top-level sentinel must
+    // fall through to a valid nested `spanContext` id instead of masking it.
     value
         .get("traceId")
         .and_then(Value::as_str)
+        .filter(|trace_id| is_valid_span_identity_id(trace_id))
         .or_else(|| {
             value
                 .get("spanContext")
                 .and_then(Value::as_object)
                 .and_then(|context| context.get("traceId"))
                 .and_then(Value::as_str)
+                .filter(|trace_id| is_valid_span_identity_id(trace_id))
         })
-        .filter(|trace_id| is_valid_span_identity_id(trace_id))
 }
 
 fn span_id_from_record(value: &Value) -> Option<&str> {
     value
         .get("spanId")
         .and_then(Value::as_str)
+        .filter(|span_id| is_valid_span_identity_id(span_id))
         .or_else(|| {
             value
                 .get("spanContext")
                 .and_then(Value::as_object)
                 .and_then(|context| context.get("spanId"))
                 .and_then(Value::as_str)
+                .filter(|span_id| is_valid_span_identity_id(span_id))
         })
-        .filter(|span_id| is_valid_span_identity_id(span_id))
 }
 
 fn parent_span_id_from_record(value: &Value) -> Option<&str> {
+    // OTel exporters may emit an empty, absent, or all-zero parent for a root
+    // span; treat those as "no parent" so they never match a real span id —
+    // filtering each candidate so a top-level sentinel can't mask a valid
+    // nested `spanContext` value.
     value
         .get("parentSpanId")
         .and_then(Value::as_str)
+        .filter(|parent_span_id| is_valid_span_identity_id(parent_span_id))
         .or_else(|| {
             value
                 .get("spanContext")
                 .and_then(Value::as_object)
                 .and_then(|context| context.get("parentSpanId"))
                 .and_then(Value::as_str)
+                .filter(|parent_span_id| is_valid_span_identity_id(parent_span_id))
         })
-        // OTel exporters may emit an empty (or absent) parent for a root span;
-        // treat empty as "no parent" so it never matches a real span id.
-        .filter(|parent_span_id| is_valid_span_identity_id(parent_span_id))
 }
 
 fn dedup_key_for_record(
@@ -1763,6 +1770,33 @@ mod tests {
                 .map(|m| (m.model_id.clone(), m.tokens.input))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn zero_top_level_ids_fall_through_to_valid_span_context_ids() {
+        // A zero top-level sentinel must not mask a valid nested spanContext
+        // identity: duplicate snapshots of the SAME span, identified only via
+        // spanContext, must still merge instead of falling back to the
+        // line-index key and double counting.
+        let content = concat!(
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","spanContext":{"traceId":"aaaabbbbccccddddaaaabbbbccccdddd","spanId":"1122334455667788"},"name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-ctx","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"00000000000000000000000000000000","spanId":"0000000000000000","spanContext":{"traceId":"aaaabbbbccccddddaaaabbbbccccdddd","spanId":"1122334455667788"},"name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-ctx","gen_ai.usage.input_tokens":150,"gen_ai.usage.output_tokens":12}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "duplicate snapshots with valid spanContext ids behind zero top-level ids must merge: keys {:?}",
+            messages
+                .iter()
+                .map(|m| m.dedup_key.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(messages[0].tokens.input, 150);
     }
 
     #[test]
