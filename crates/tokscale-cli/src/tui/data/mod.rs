@@ -1020,7 +1020,13 @@ impl DataLoader {
                 .then_with(|| a.session_id.cmp(&b.session_id))
         });
 
-        let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
+        // Plain `.sum()` panics (debug) / wraps (release) on overflow across
+        // many models; a single corrupt/huge bucket must not poison the
+        // whole total, so fold with saturating_add like `TokenBreakdown::total`.
+        let total_tokens: u64 = models
+            .iter()
+            .map(|m| m.tokens.total())
+            .fold(0u64, u64::saturating_add);
         let total_cost: f64 = models
             .iter()
             .map(|m| if m.cost.is_finite() { m.cost } else { 0.0 })
@@ -1994,6 +2000,40 @@ mod tests {
         assert_eq!(usage.agents[0].message_count, 2);
         assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
         assert_eq!(usage.agents[0].tokens.total(), 45);
+    }
+
+    #[test]
+    fn total_tokens_saturates_across_corrupt_model_buckets() {
+        let loader = DataLoader::new(None);
+        // Three distinct models each carrying i64::MAX input tokens: no
+        // single model bucket overflows (TokenBreakdown::total saturates
+        // internally), but summing three of them plainly overflows u64.
+        let messages: Vec<UnifiedMessage> = (0..3)
+            .map(|i| {
+                UnifiedMessage::new(
+                    "claude",
+                    format!("model-{i}"),
+                    "anthropic",
+                    format!("session-{i}"),
+                    1_735_689_600_000,
+                    tokscale_core::TokenBreakdown {
+                        input: i64::MAX,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                )
+            })
+            .collect();
+
+        let usage = loader
+            .aggregate_messages(messages, &GroupBy::Model)
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 3);
+        assert_eq!(usage.total_tokens, u64::MAX);
     }
 
     #[test]

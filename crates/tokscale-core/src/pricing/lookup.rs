@@ -1182,6 +1182,9 @@ fn is_openai_full_request_272k_model(model_id: &str) -> bool {
         "gpt-5.4",
         "gpt-5.4-pro",
         "gpt-5.5",
+        // Priced identically to gpt-5.4-pro in LiteLLM ($30/$180 base,
+        // $60/$270 above 272k) with the same full-request semantics.
+        "gpt-5.5-pro",
         "gpt-5.6",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
@@ -1202,6 +1205,11 @@ fn should_prefer_openai_tiered_litellm(
         && litellm.is_some_and(|result| has_complete_openai_272k_pricing(&result.pricing))
 }
 
+// A fully-absent cache_read pair used to count as "complete" here (only a
+// present-but-partial pair failed), which let the 272k LiteLLM preference
+// fire over an OpenRouter entry that actually had cache-read pricing,
+// silently dropping it. cache_read is now required present+valid like
+// input/output, symmetric with them, for this preference decision only.
 fn has_complete_openai_272k_pricing(pricing: &ModelPricing) -> bool {
     let valid_pair = |base: Option<f64>, above: Option<f64>| {
         base.is_some_and(is_valid_price_value) && above.is_some_and(is_valid_price_value)
@@ -1213,12 +1221,10 @@ fn has_complete_openai_272k_pricing(pricing: &ModelPricing) -> bool {
     ) && valid_pair(
         pricing.output_cost_per_token,
         pricing.output_cost_per_token_above_272k_tokens,
-    ) && pricing.cache_read_input_token_cost.is_none_or(|base| {
-        is_valid_price_value(base)
-            && pricing
-                .cache_read_input_token_cost_above_272k_tokens
-                .is_some_and(is_valid_price_value)
-    })
+    ) && valid_pair(
+        pricing.cache_read_input_token_cost,
+        pricing.cache_read_input_token_cost_above_272k_tokens,
+    )
 }
 
 fn uses_openai_full_request_272k_pricing(result: &LookupResult, provider_id: Option<&str>) -> bool {
@@ -4911,10 +4917,54 @@ mod tests {
             assert!(!has_complete_openai_272k_pricing(&incomplete));
         }
 
+        // A fully-absent cache_read pair is now incomplete too: this used to
+        // pass leniently, letting the 272k preference silently drop an
+        // OpenRouter entry's cache-read pricing (see
+        // openai_272k_preference_prefers_openrouter_cache_read_pricing_over_incomplete_litellm).
         let mut without_cache_read = pricing;
         without_cache_read.cache_read_input_token_cost = None;
         without_cache_read.cache_read_input_token_cost_above_272k_tokens = None;
-        assert!(has_complete_openai_272k_pricing(&without_cache_read));
+        assert!(!has_complete_openai_272k_pricing(&without_cache_read));
+    }
+
+    #[test]
+    fn openai_272k_preference_prefers_openrouter_cache_read_pricing_over_incomplete_litellm() {
+        let mut litellm_pricing = openai_272k_result("gpt-5.6-sol", "LiteLLM").pricing;
+        litellm_pricing.cache_read_input_token_cost = None;
+        litellm_pricing.cache_read_input_token_cost_above_272k_tokens = None;
+
+        let openrouter_pricing = openai_272k_result("openai/gpt-5.6-sol", "OpenRouter").pricing;
+
+        let lookup = PricingLookup::new(
+            HashMap::from([("gpt-5.6-sol".into(), litellm_pricing)]),
+            HashMap::from([("openai/gpt-5.6-sol".into(), openrouter_pricing)]),
+            HashMap::new(),
+        );
+
+        let result = lookup
+            .lookup_with_provider("gpt-5.6-sol", Some("openai"))
+            .unwrap();
+        assert_eq!(result.source, "OpenRouter");
+        assert_eq!(result.matched_key, "openai/gpt-5.6-sol");
+        assert!(result.pricing.cache_read_input_token_cost.is_some());
+    }
+
+    #[test]
+    fn openai_272k_preference_still_prefers_complete_litellm_pricing() {
+        let litellm_pricing = openai_272k_result("gpt-5.6-sol", "LiteLLM").pricing;
+        let openrouter_pricing = openai_272k_result("openai/gpt-5.6-sol", "OpenRouter").pricing;
+
+        let lookup = PricingLookup::new(
+            HashMap::from([("gpt-5.6-sol".into(), litellm_pricing)]),
+            HashMap::from([("openai/gpt-5.6-sol".into(), openrouter_pricing)]),
+            HashMap::new(),
+        );
+
+        let result = lookup
+            .lookup_with_provider("gpt-5.6-sol", Some("openai"))
+            .unwrap();
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.matched_key, "gpt-5.6-sol");
     }
 
     #[test]
@@ -4923,6 +4973,8 @@ mod tests {
             "gpt-5.4",
             "openai/gpt-5.4-pro-2026-03-05",
             "gpt-5.5-2026-04-23",
+            "gpt-5.5-pro",
+            "gpt-5.5-pro-2026-04-23",
             "gpt-5.6",
             "gpt-5.6-sol",
             "gpt-5.6-terra-2026-07-01",
@@ -4940,7 +4992,7 @@ mod tests {
         for key in [
             "gpt-5.4-mini",
             "gpt-5.4-nano",
-            "gpt-5.5-pro",
+            "gpt-5.5-promax",
             "gpt-5.2",
             "fugu-ultra",
             "custom/gpt-5.5-pro",
