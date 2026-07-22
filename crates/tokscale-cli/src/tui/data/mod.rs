@@ -7,7 +7,7 @@ use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
-    normalize_model_for_grouping, parse_local_unified_messages, sessions, ClientId, GroupBy,
+    model_name_for_grouping, parse_local_unified_messages, sessions, ClientId, GroupBy,
     LocalParseOptions, ModelPerformance,
 };
 
@@ -457,7 +457,8 @@ impl DataLoader {
         let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
 
         for msg in &messages {
-            let normalized_model = normalize_model_for_grouping(&msg.model_id);
+            let normalized_model =
+                model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
             let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
             let key = match group_by {
                 GroupBy::Model => normalized_model.clone(),

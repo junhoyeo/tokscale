@@ -190,6 +190,8 @@ fn known_provider_palette(provider_lower: &str) -> Option<&'static [(u8, u8, u8)
         s if s.contains("google") || s.contains("gemini") => &GOOGLE_SHADES,
         s if s.contains("deepseek") => &DEEPSEEK_SHADES,
         s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
+        s if s.contains("zai") || s.contains("z_ai") || s.contains("zhipu") => &ZAI_SHADES,
+        s if s.contains("moonshot") || s.contains("kimi") => &MOONSHOT_SHADES,
         s if s.contains("meta") || s.contains("llama") => &META_SHADES,
         s if s.contains("cursor") => &CURSOR_SHADES,
         s if s.contains("sakana") || s.contains("fugu") => &SAKANA_SHADES,
@@ -293,6 +295,26 @@ const XAI_SHADES: [(u8, u8, u8); 7] = [
     (251, 221, 129), // #FBDD81
 ];
 
+const ZAI_SHADES: [(u8, u8, u8); 7] = [
+    (168, 85, 247),  // #A855F7
+    (181, 110, 249), // #B56EF9
+    (193, 132, 250), // #C184FA
+    (204, 153, 251), // #CC99FB
+    (214, 172, 252), // #D6ACFC
+    (224, 192, 253), // #E0C0FD
+    (235, 213, 254), // #EBD5FE
+];
+
+const MOONSHOT_SHADES: [(u8, u8, u8); 7] = [
+    (20, 184, 166),  // #14B8A6
+    (35, 197, 178),  // #23C5B2
+    (58, 207, 190),  // #3ACFBE
+    (85, 216, 202),  // #55D8CA
+    (112, 224, 212), // #70E0D4
+    (143, 232, 222), // #8FE8DE
+    (174, 240, 232), // #AEF0E8
+];
+
 const META_SHADES: [(u8, u8, u8); 7] = [
     (99, 102, 241),  // #6366F1
     (122, 125, 243), // #7A7DF3
@@ -367,6 +389,10 @@ pub fn get_provider_from_model(model: &str) -> &'static str {
         "deepseek"
     } else if model_lower.contains("grok") {
         "xai"
+    } else if model_lower.contains("glm") {
+        "zai"
+    } else if model_lower.contains("kimi") {
+        "moonshotai"
     } else if model_lower.contains("llama") {
         "meta"
     } else if model_lower.contains("mixtral") {
@@ -651,6 +677,20 @@ mod tests {
     }
 
     #[test]
+    fn glm_and_kimi_use_their_vendor_color_ramps() {
+        assert_eq!(get_provider_from_model("glm-5.2"), "zai");
+        assert_eq!(get_provider_from_model("kimi-k2.7-code"), "moonshotai");
+        assert_ne!(
+            get_provider_shade("zai", 0),
+            get_provider_shade("unknown", 0)
+        );
+        assert_ne!(
+            get_provider_shade("moonshotai", 0),
+            get_provider_shade("unknown", 0)
+        );
+    }
+
+    #[test]
     fn fable_gets_same_base_color_as_opus() {
         // Fable is a flagship Claude model and must render in the Anthropic
         // palette at the same base level as Opus — not the gray UNKNOWN shade.
@@ -810,6 +850,8 @@ mod tests {
         assert!(provider_has_palette("anthropic"));
         assert!(provider_has_palette("openai"));
         assert!(provider_has_palette("openrouter-gemini-prod"));
+        assert!(provider_has_palette("zai"));
+        assert!(provider_has_palette("moonshotai"));
         // Gateway/reseller providers do not — callers must color by the
         // model's own vendor instead of the neutral "unknown" gray.
         assert!(!provider_has_palette("github-copilot"));

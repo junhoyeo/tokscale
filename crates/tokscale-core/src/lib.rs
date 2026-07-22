@@ -8,6 +8,7 @@ pub mod fs_atomic;
 pub mod mcp;
 mod message_cache;
 pub mod model_alias;
+pub mod opencode_model_name;
 mod parser;
 pub mod paths;
 pub mod pricing;
@@ -88,6 +89,22 @@ pub fn canonical_model_id(model_id: &str) -> String {
 /// empty/unset alias config makes this identical to [`canonical_model_id`].
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     model_alias::global().apply(normalize_syntactic(model_id))
+}
+
+/// Local display/grouping name with OpenCode's configured model label applied
+/// when one exists. The configured label is scoped to OpenCode and matched by
+/// provider plus raw model key; all other messages use the normal grouping
+/// name.
+pub fn model_name_for_grouping(client: &str, provider_id: &str, model_id: &str) -> String {
+    let fallback = normalize_model_for_grouping(model_id);
+    if client == "opencode" {
+        opencode_model_name::global()
+            .display_name(provider_id, model_id)
+            .map(str::to_string)
+            .unwrap_or(fallback)
+    } else {
+        fallback
+    }
 }
 
 /// Structural-only model-name normalization: lowercase, strip a
@@ -2193,7 +2210,7 @@ fn aggregate_model_usage_entries(
     let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
 
     for msg in messages {
-        let normalized = normalize_model_for_grouping(&msg.model_id);
+        let normalized = model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
         let key = match group_by {
             GroupBy::Model => normalized.clone(),
@@ -2428,9 +2445,11 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 
         let entry = month_map.entry(month).or_default();
 
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
+        entry.models.insert(model_name_for_grouping(
+            &msg.client,
+            &msg.provider_id,
+            &msg.model_id,
+        ));
         // saturating_add so clamped (i64::MAX) buckets from a corrupt source
         // can't overflow the fold.
         entry.input = entry.input.saturating_add(msg.tokens.input);
@@ -2530,9 +2549,11 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         let entry = hour_map.entry(hour_key).or_default();
 
         entry.clients.insert(msg.client.clone());
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
+        entry.models.insert(model_name_for_grouping(
+            &msg.client,
+            &msg.provider_id,
+            &msg.model_id,
+        ));
         // saturating_add so clamped (i64::MAX) buckets from a corrupt source
         // can't overflow the fold.
         entry.input = entry.input.saturating_add(msg.tokens.input);

@@ -177,6 +177,11 @@ mod tests {
             provider_color_key("github-copilot", "gpt-5.3-codex"),
             "openai"
         );
+        assert_eq!(provider_color_key("fireworks_ai", "GLM 5.2"), "zai");
+        assert_eq!(
+            provider_color_key("fireworks_ai", "Kimi K2.7 Code"),
+            "moonshotai"
+        );
         // Empty / mixed providers also defer to the model.
         assert_eq!(provider_color_key("", "claude-fable-5"), "anthropic");
         assert_eq!(

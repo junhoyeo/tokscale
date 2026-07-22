@@ -537,6 +537,10 @@ fn main() -> Result<()> {
     // Honors the global `--home` override exactly like scanner settings; an
     // empty or absent config is a strict no-op.
     tokscale_core::model_alias::set_global(&tui::settings::load_model_aliases_for_home(&cli.home));
+    let opencode_model_names = tokscale_core::opencode_model_name::load_for_home(
+        cli.home.as_deref().map(std::path::Path::new),
+    );
+    tokscale_core::opencode_model_name::set_global(opencode_model_names);
     let can_use_tui = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     if cli.test_data {
