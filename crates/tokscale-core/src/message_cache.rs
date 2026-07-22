@@ -809,7 +809,8 @@ fn parser_version(client: ClientId) -> u32 {
         // input_tokens before pricing and aggregation.
         ClientId::Jcode => 6,
         // v5->v6: merge same-dedup-key Copilot spans before emitting messages.
-        ClientId::Copilot => 6,
+        // v6->v7: stabilize duplicate agent attribution and partial timing boundaries.
+        ClientId::Copilot => 7,
         // Pi subagent sessions now derive agent attribution from session_info
         // names; version-1 caches carry those messages without agent metadata.
         ClientId::Pi => 2,
@@ -2048,8 +2049,12 @@ mod tests {
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         assert_eq!(parser_version(ClientId::Codex), 6);
-        assert_eq!(parser_version(ClientId::Copilot), 6);
         assert_eq!(parser_version(ClientId::Claude), 2);
+    }
+
+    #[test]
+    fn test_copilot_duplicate_metadata_parser_version_invalidates_v6_entries() {
+        assert_eq!(parser_version(ClientId::Copilot), 7);
     }
 
     #[test]
