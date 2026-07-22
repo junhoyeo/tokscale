@@ -49,10 +49,7 @@ impl OpenCodeModelNameResolver {
                     continue;
                 };
 
-                names.insert(
-                    (provider.clone(), canonical_model_id(model_id)),
-                    name.to_string(),
-                );
+                names.insert((provider.clone(), model_id.to_string()), name.to_string());
             }
         }
 
@@ -67,7 +64,8 @@ impl OpenCodeModelNameResolver {
         let provider = provider_identity::canonical_provider(provider_id)
             .unwrap_or_else(|| provider_id.to_string());
         self.names
-            .get(&(provider, canonical_model_id(model_id)))
+            .get(&(provider.clone(), model_id.to_string()))
+            .or_else(|| self.names.get(&(provider, canonical_model_id(model_id))))
             .map(String::as_str)
     }
 }
@@ -117,8 +115,30 @@ fn strip_jsonc_syntax(contents: &str) -> String {
             }
             index = (index + 2).min(chars.len());
         } else if ch == ',' {
-            let next = chars[index + 1..].iter().find(|c| !c.is_ascii_whitespace());
-            if matches!(next, Some(&'}') | Some(&']')) {
+            let mut peek = index + 1;
+            loop {
+                while peek < chars.len() && chars[peek].is_ascii_whitespace() {
+                    peek += 1;
+                }
+                if peek + 1 < chars.len() && chars[peek] == '/' && chars[peek + 1] == '/' {
+                    peek += 2;
+                    while peek < chars.len() && chars[peek] != '\n' {
+                        peek += 1;
+                    }
+                    continue;
+                }
+                if peek + 1 < chars.len() && chars[peek] == '/' && chars[peek + 1] == '*' {
+                    peek += 2;
+                    while peek + 1 < chars.len() && !(chars[peek] == '*' && chars[peek + 1] == '/')
+                    {
+                        peek += 1;
+                    }
+                    peek = (peek + 2).min(chars.len());
+                    continue;
+                }
+                break;
+            }
+            if peek < chars.len() && matches!(chars[peek], '}' | ']') {
                 index += 1;
             } else {
                 out.push(ch);
@@ -405,6 +425,53 @@ mod tests {
         assert_eq!(
             resolver.display_name("fireworks", "accounts/fireworks/models/glm-5p2"),
             Some("Inline")
+        );
+    }
+
+    #[test]
+    fn trailing_comma_with_comment_then_close_brace_is_valid_jsonc() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "provider": {
+                    "fireworks-ai": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p2": {
+                                "name": "GLM 5.2", // model label comment
+                            },
+                        },
+                    },
+                },
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks", "accounts/fireworks/models/glm-5p2"),
+            Some("GLM 5.2")
+        );
+    }
+
+    #[test]
+    fn exact_model_id_match_takes_precedence_over_canonical_collision() {
+        let resolver = OpenCodeModelNameResolver::from_json(
+            r#"{
+                "provider": {
+                    "fireworks": {
+                        "models": {
+                            "accounts/fireworks/models/glm-5p2": { "name": "Exact" },
+                            "fireworks/glm-5p2": { "name": "Alias" }
+                        }
+                    }
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            resolver.display_name("fireworks", "accounts/fireworks/models/glm-5p2"),
+            Some("Exact")
+        );
+        assert_eq!(
+            resolver.display_name("fireworks", "fireworks/glm-5p2"),
+            Some("Alias")
         );
     }
 }

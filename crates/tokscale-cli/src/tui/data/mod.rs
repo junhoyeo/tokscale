@@ -7,8 +7,8 @@ use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
-    model_name_for_grouping, parse_local_unified_messages, sessions, ClientId, GroupBy,
-    LocalParseOptions, ModelPerformance,
+    model_name_for_grouping, normalize_model_for_grouping, parse_local_unified_messages, sessions,
+    ClientId, GroupBy, LocalParseOptions, ModelPerformance,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -459,6 +459,7 @@ impl DataLoader {
         for msg in &messages {
             let normalized_model =
                 model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
+            let model_key = normalize_model_for_grouping(&msg.model_id);
             let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
             let key = match group_by {
                 GroupBy::Model => normalized_model.clone(),
@@ -684,7 +685,7 @@ impl DataLoader {
                             &msg.provider_id,
                             &normalized_model,
                         ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
+                        color_key: model_color_key(group_by, &msg.provider_id, &model_key),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                         messages: 0,
@@ -774,7 +775,7 @@ impl DataLoader {
                             &msg.provider_id,
                             &normalized_model,
                         ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
+                        color_key: model_color_key(group_by, &msg.provider_id, &model_key),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                     });
@@ -868,11 +869,7 @@ impl DataLoader {
                                 &msg.provider_id,
                                 &normalized_model,
                             ),
-                            color_key: model_color_key(
-                                group_by,
-                                &msg.provider_id,
-                                &normalized_model,
-                            ),
+                            color_key: model_color_key(group_by, &msg.provider_id, &model_key),
                             tokens: TokenBreakdown::default(),
                             cost: 0.0,
                         });

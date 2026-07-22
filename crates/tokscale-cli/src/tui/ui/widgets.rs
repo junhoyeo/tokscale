@@ -358,6 +358,18 @@ const UNKNOWN_SHADES: [(u8, u8, u8); 7] = [
     (244, 244, 244), // #F4F4F4
 ];
 
+fn is_delimited_model_family(model_lower: &str, family: &str) -> bool {
+    model_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| {
+            token == family
+                || token
+                    .strip_prefix(family)
+                    .and_then(|suffix| suffix.chars().next())
+                    .map_or(false, |c| c.is_ascii_digit())
+        })
+}
+
 pub fn get_provider_from_model(model: &str) -> &'static str {
     let model_lower = model.to_lowercase();
 
@@ -389,9 +401,9 @@ pub fn get_provider_from_model(model: &str) -> &'static str {
         "deepseek"
     } else if model_lower.contains("grok") {
         "xai"
-    } else if model_lower.contains("glm") {
+    } else if is_delimited_model_family(&model_lower, "glm") {
         "zai"
-    } else if model_lower.contains("kimi") {
+    } else if is_delimited_model_family(&model_lower, "kimi") {
         "moonshotai"
     } else if model_lower.contains("llama") {
         "meta"
@@ -680,14 +692,10 @@ mod tests {
     fn glm_and_kimi_use_their_vendor_color_ramps() {
         assert_eq!(get_provider_from_model("glm-5.2"), "zai");
         assert_eq!(get_provider_from_model("kimi-k2.7-code"), "moonshotai");
-        assert_ne!(
-            get_provider_shade("zai", 0),
-            get_provider_shade("unknown", 0)
-        );
-        assert_ne!(
-            get_provider_shade("moonshotai", 0),
-            get_provider_shade("unknown", 0)
-        );
+        assert!(provider_has_palette("zai"));
+        assert!(provider_has_palette("moonshotai"));
+        assert_eq!(get_provider_from_model("glmish-1"), "unknown");
+        assert_eq!(get_provider_from_model("kimiko-1"), "unknown");
     }
 
     #[test]
