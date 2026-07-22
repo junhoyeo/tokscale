@@ -149,12 +149,18 @@ export function mergeClientBreakdownsWithRegressionGuard(
   // Clients whose `existing` value came from normalizeClientBreakdownAliases
   // folding TWO source keys together (e.g. a stale legacy "kilocode" key
   // alongside "kilo" for the same underlying usage) rather than a simple
-  // one-key rename. For these, a lower incoming token count is not a parser
-  // regression to guard against — it is the healthy, complete-day total that
-  // should replace the inflated fold. A pure rename-only fold (only the
-  // legacy key was ever present) is NOT included here and keeps the normal
-  // guard behavior.
-  foldedClients?: Set<string>
+  // one-key rename, mapped to the largest token count any single raw key
+  // contributed to the fold. For these, a lower incoming token count is not
+  // automatically a parser regression — it may be the healthy value the
+  // inflated fold should be replaced with. But nothing proves an incoming
+  // submission covers the full day (partial re-parses are the exact case the
+  // guard exists for), so healing only happens when the incoming value is at
+  // least the largest single contribution: any truthful complete-day total
+  // must be >= each of the components that were summed. Below that floor the
+  // normal guard still applies. A pure rename-only fold (only the legacy key
+  // was ever present) is NOT included here and keeps the normal guard
+  // behavior.
+  foldedClientFloors?: Map<string, number>
 ): MergeClientBreakdownsResult {
   const merged: Record<string, ClientBreakdownData> = { ...(existing || {}) };
   const warnings: string[] = [];
@@ -177,11 +183,13 @@ export function mergeClientBreakdownsWithRegressionGuard(
 
     const nextClient = withDerivedProvenance(incomingClient);
     if (existingClient && nextClient.tokens < existingClient.tokens) {
-      if (foldedClients?.has(clientName)) {
+      const healFloor = foldedClientFloors?.get(clientName);
+      if (healFloor !== undefined && nextClient.tokens >= healFloor) {
         // The existing value is an alias-folded double count (e.g. stale
-        // "kilocode" + "kilo" summed together), not real usage history.
-        // This complete-day incoming submission is authoritative for this
-        // client, so let it replace the fold instead of defending it.
+        // "kilocode" + "kilo" summed together), not real usage history, and
+        // the incoming value clears the largest single contribution to that
+        // fold — consistent with a complete-day recomputation rather than a
+        // partial re-parse. Let it replace the fold instead of defending it.
         merged[clientName] = nextClient;
         const existingTokens = formatTokens(existingClient.tokens);
         const nextTokens = formatTokens(nextClient.tokens);

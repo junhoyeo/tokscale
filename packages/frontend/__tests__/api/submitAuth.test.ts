@@ -721,7 +721,7 @@ describe("POST /api/submit auth path", () => {
         },
       },
       expect.any(Set),
-      expect.any(Set)
+      expect.any(Map)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
@@ -1102,7 +1102,7 @@ describe("POST /api/submit auth path", () => {
         },
       },
       expect.any(Set),
-      expect.any(Set)
+      expect.any(Map)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
@@ -1651,7 +1651,7 @@ describe("POST /api/submit auth path", () => {
       legacyBreakdown,
       incomingBreakdownWithProvenance,
       expect.any(Set),
-      expect.any(Set)
+      expect.any(Map)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,

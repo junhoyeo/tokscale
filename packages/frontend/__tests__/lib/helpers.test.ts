@@ -100,12 +100,13 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
     expect(result.warnings[0]).toContain("cursor");
   });
 
-  describe("foldedClients parameter (alias-fold double-count healing)", () => {
-    it("lets a lower incoming value replace a folded client instead of preserving it", () => {
+  describe("foldedClientFloors parameter (alias-fold double-count healing)", () => {
+    it("lets a lower incoming value at or above the floor replace a folded client", () => {
       // Simulates the healed state normalizeClientBreakdownAliases would produce:
-      // a stored kilocode+kilo double count folded into a single 200-token
-      // "kilo" entry, with the incoming complete-day resubmit reporting the
-      // true 100-token total.
+      // a stored kilocode(100)+kilo(100) double count folded into a single
+      // 200-token "kilo" entry with a floor of 100 (largest single component),
+      // and the incoming complete-day resubmit reporting the true 100-token
+      // total — exactly at the floor, so it heals.
       const existing = { kilo: makeClient(200, 5, 1) };
       const incoming = { kilo: makeClient(100, 5, 1) };
 
@@ -113,13 +114,33 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
         existing,
         incoming,
         new Set(["kilo"]),
-        new Set(["kilo"])
+        new Map([["kilo", 100]])
       );
 
       expect(result.merged.kilo.tokens).toBe(100);
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain("Healed");
       expect(result.warnings[0]).not.toMatch(/parser regression|Preserved/i);
+    });
+
+    it("keeps the regression guard when the incoming value is below the floor", () => {
+      // An incoming value below the largest single contribution to the fold
+      // is indistinguishable from a partial re-parse — the exact data-loss
+      // case the guard exists for — so the fold must be preserved, not
+      // "healed" down to the partial value.
+      const existing = { kilo: makeClient(200, 5, 1) };
+      const incoming = { kilo: makeClient(40, 5, 1) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(["kilo"]),
+        new Map([["kilo", 100]])
+      );
+
+      expect(result.merged.kilo.tokens).toBe(200);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain("Preserved");
     });
 
     it("keeps the normal regression guard for a non-folded client with the same shape", () => {
@@ -147,7 +168,7 @@ describe("mergeClientBreakdownsWithRegressionGuard", () => {
         existing,
         {},
         new Set(["kilo"]),
-        new Set(["kilo"])
+        new Map([["kilo", 100]])
       );
 
       expect(result.merged.kilo.tokens).toBe(200);

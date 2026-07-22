@@ -333,6 +333,92 @@ describe("POST /api/submit kilocode alias fold vs regression guard", () => {
     expect(warnings.join(" ")).not.toMatch(/would reduce/i);
   });
 
+  it("does NOT heal from a partial resubmit below the fold's largest component", async () => {
+    mockKiloResubmit();
+    // Override the incoming day with a PARTIAL parse: 40 tokens, below the
+    // 100-token largest single contribution to the stored fold. Healing from
+    // it would trade the inflated 200 for a value lower than any truthful
+    // complete day can be -- new data loss, the exact case the regression
+    // guard exists for -- so the fold must be preserved instead.
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      errors: [],
+      warnings: [],
+      data: {
+        device: { id: "dev_1", name: "Device one" },
+        meta: {
+          generatedAt: "2026-05-11T00:00:00Z",
+          version: "4.6.0",
+          dateRange: { start: "2026-05-11", end: "2026-05-11" },
+        },
+        summary: { clients: ["kilo"] },
+        years: [],
+        contributions: [
+          {
+            date: "2026-05-11",
+            clients: [
+              {
+                client: "kilo",
+                modelId: "test-model",
+                tokens: { input: 40, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+                cost: 0.4,
+                messages: 2,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const existingDay = {
+      id: "day-1",
+      date: "2026-05-11",
+      timestampMs: null,
+      activeTimeMs: null,
+      sourceBreakdown: {
+        kilocode: structuredClone(CLIENT_ENTRY_100),
+        kilo: structuredClone(CLIENT_ENTRY_100),
+      },
+    };
+
+    const { tx, executedSqlArgs } = buildTx([
+      [{ id: "submission-existing" }],
+      [existingDay],
+      [AGGREGATES_ROW],
+      [{ sourceBreakdown: existingDay.sourceBreakdown }],
+    ]);
+    void tx;
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+    expect(response.status).toBe(200);
+
+    const strings: string[] = [];
+    for (const arg of executedSqlArgs) collectStrings(arg, strings);
+    const breakdownJson = strings.find((s) => s.includes('"kilo"'));
+    expect(breakdownJson).toBeDefined();
+    const merged = JSON.parse(breakdownJson!) as Record<
+      string,
+      { tokens: number }
+    >;
+
+    // The fold is preserved (still inflated) rather than undercounted; a
+    // later complete-day resubmit at/above the 100-token floor will heal it.
+    expect(merged.kilo.tokens).toBe(200);
+
+    const body = await response.json();
+    const warnings: string[] = body.warnings ?? [];
+    expect(warnings.join(" ")).toMatch(/would reduce/i);
+  });
+
   it("still guards a rename-only kilocode fold (no kilo key present) against a token decrease", async () => {
     mockKiloResubmit();
 
