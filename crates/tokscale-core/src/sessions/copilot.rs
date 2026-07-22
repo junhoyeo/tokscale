@@ -100,6 +100,8 @@ struct CopilotUsageCandidate {
     session_id: String,
     timestamp_ms: i64,
     duration_ms: Option<i64>,
+    start_timestamp_ms: Option<i64>,
+    end_timestamp_ms: Option<i64>,
     inclusive_input_tokens: i64,
     tokens: TokenBreakdown,
     dedup_key: String,
@@ -144,20 +146,22 @@ impl CopilotUsageCandidate {
             self.tokens.reasoning.max(duplicate.tokens.reasoning),
         );
 
-        let timestamp_ms = self.timestamp_ms.min(duplicate.timestamp_ms);
-        let end_timestamp_ms = self
-            .duration_ms
-            .map(|duration| self.timestamp_ms.saturating_add(duration))
-            .max(
-                duplicate
-                    .duration_ms
-                    .map(|duration| duplicate.timestamp_ms.saturating_add(duration)),
-            );
-        self.timestamp_ms = timestamp_ms;
-        self.duration_ms = end_timestamp_ms.and_then(|end_timestamp_ms| {
-            let duration_ms = end_timestamp_ms.saturating_sub(timestamp_ms);
-            (duration_ms > 0).then_some(duration_ms)
-        });
+        let fallback_timestamp_ms = self.timestamp_ms.min(duplicate.timestamp_ms);
+        let fallback_duration_ms = self.duration_ms.max(duplicate.duration_ms);
+        self.start_timestamp_ms = match (self.start_timestamp_ms, duplicate.start_timestamp_ms) {
+            (Some(current), Some(candidate)) => Some(current.min(candidate)),
+            (current, candidate) => current.or(candidate),
+        };
+        self.end_timestamp_ms = self.end_timestamp_ms.max(duplicate.end_timestamp_ms);
+        self.timestamp_ms = self.start_timestamp_ms.unwrap_or(fallback_timestamp_ms);
+        self.duration_ms = self
+            .start_timestamp_ms
+            .zip(self.end_timestamp_ms)
+            .and_then(|(start_timestamp_ms, end_timestamp_ms)| {
+                let duration_ms = end_timestamp_ms.saturating_sub(start_timestamp_ms);
+                (duration_ms > 0).then_some(duration_ms)
+            })
+            .or(fallback_duration_ms);
 
         let duplicate_agent = duplicate.agent.filter(|agent| !agent.is_empty());
         // Direct attribution outranks fallback; equal-authority conflicts use a
@@ -463,8 +467,21 @@ fn candidate_from_attributes(
         .or(trace_id.as_deref())
         .unwrap_or("unknown-session")
         .to_string();
-    let timestamp_ms = timestamp_ms_from_record(record).unwrap_or(fallback_timestamp);
+    let record_timestamp_ms = timestamp_ms_from_record(record);
+    let timestamp_ms = record_timestamp_ms.unwrap_or(fallback_timestamp);
     let duration_ms = duration_ms_from_record(record);
+    // Preserve explicit interval boundaries separately: an end-only exporter
+    // update uses endTime as its timestamp but must not treat that end as a start.
+    let explicit_start_ms = record.get("startTime").and_then(timestamp_ms_from_value);
+    let explicit_end_ms = record.get("endTime").and_then(timestamp_ms_from_value);
+    let start_timestamp_ms = explicit_start_ms.or_else(|| {
+        record_timestamp_ms.filter(|_| duration_ms.is_some() || explicit_end_ms.is_none())
+    });
+    let end_timestamp_ms = explicit_end_ms.or_else(|| {
+        record_timestamp_ms
+            .zip(duration_ms)
+            .map(|(start, duration)| start.saturating_add(duration))
+    });
     let dedup_key = dedup_key_for_record(
         source,
         record,
@@ -486,6 +503,8 @@ fn candidate_from_attributes(
         session_id,
         timestamp_ms,
         duration_ms,
+        start_timestamp_ms,
+        end_timestamp_ms,
         inclusive_input_tokens: input.max(0),
         tokens,
         dedup_key,
@@ -1589,6 +1608,68 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_copilot_duplicate_uses_end_only_update_for_interval() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-end-update","spanId":"span-end-update","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-end-update","spanId":"span-end-update","name":"chat gpt-5.4-mini","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_775_934_260_000);
+        assert_eq!(messages[0].duration_ms, Some(5_000));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_end_only_updates_do_not_invent_duration() {
+        let first = r#"{"type":"span","traceId":"trace-end-only","spanId":"span-end-only","name":"chat gpt-5.4-mini","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#;
+        let second = r#"{"type":"span","traceId":"trace-end-only","spanId":"span-end-only","name":"chat gpt-5.4-mini","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let forward_file = create_test_file(&format!("{first}\n{second}\n"));
+        let reverse_file = create_test_file(&format!("{second}\n{first}\n"));
+
+        let forward = parse_copilot_file(forward_file.path());
+        let reverse = parse_copilot_file(reverse_file.path());
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].timestamp, 1_775_934_261_000);
+        assert_eq!(forward[0].duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_fallback_timestamp_is_not_interval_start() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-fallback-time","spanId":"span-fallback-time","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-fallback-time","spanId":"span-fallback-time","name":"chat gpt-5.4-mini","endTime":[4102444800,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_duration_only_fallback_is_not_interval_start() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-fallback-duration","spanId":"span-fallback-duration","name":"chat gpt-5.4-mini","duration":[1,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-fallback-duration","spanId":"span-fallback-duration","name":"chat gpt-5.4-mini","endTime":[4102444800,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, Some(1_000));
+    }
+
+    #[test]
     fn test_parse_copilot_duplicate_direct_agents_are_order_independent() {
         let first = r#"{"type":"span","traceId":"trace-agent-merge","spanId":"span-agent-merge","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"agent-z","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}"#;
         let second = r#"{"type":"span","traceId":"trace-agent-merge","spanId":"span-agent-merge","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"agent-a","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
@@ -1687,6 +1768,8 @@ mod tests {
             session_id: "primary-session".to_string(),
             timestamp_ms: 100,
             duration_ms: Some(20),
+            start_timestamp_ms: Some(100),
+            end_timestamp_ms: Some(120),
             inclusive_input_tokens: 40,
             tokens: TokenBreakdown {
                 input: 10,
@@ -1708,6 +1791,8 @@ mod tests {
             session_id: "duplicate-session".to_string(),
             timestamp_ms: 90,
             duration_ms: Some(30),
+            start_timestamp_ms: Some(90),
+            end_timestamp_ms: Some(120),
             inclusive_input_tokens: 60,
             tokens: TokenBreakdown {
                 input: 20,
