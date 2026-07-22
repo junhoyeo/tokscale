@@ -100,9 +100,11 @@ struct CopilotUsageCandidate {
     session_id: String,
     timestamp_ms: i64,
     duration_ms: Option<i64>,
+    inclusive_input_tokens: i64,
     tokens: TokenBreakdown,
     dedup_key: String,
     agent: Option<String>,
+    agent_is_direct: bool,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -131,16 +133,39 @@ impl CopilotUsageCandidate {
     }
 
     fn merge_duplicate(&mut self, duplicate: Self) {
-        self.tokens.input = self.tokens.input.max(duplicate.tokens.input);
-        self.tokens.output = self.tokens.output.max(duplicate.tokens.output);
-        self.tokens.cache_read = self.tokens.cache_read.max(duplicate.tokens.cache_read);
-        self.tokens.cache_write = self.tokens.cache_write.max(duplicate.tokens.cache_write);
-        self.tokens.reasoning = self.tokens.reasoning.max(duplicate.tokens.reasoning);
-        self.timestamp_ms = self.timestamp_ms.min(duplicate.timestamp_ms);
-        self.duration_ms = self.duration_ms.max(duplicate.duration_ms);
+        self.inclusive_input_tokens = self
+            .inclusive_input_tokens
+            .max(duplicate.inclusive_input_tokens);
+        self.tokens = normalize_input_tokens(
+            self.inclusive_input_tokens,
+            self.tokens.output.max(duplicate.tokens.output),
+            self.tokens.cache_read.max(duplicate.tokens.cache_read),
+            self.tokens.cache_write.max(duplicate.tokens.cache_write),
+            self.tokens.reasoning.max(duplicate.tokens.reasoning),
+        );
 
-        if self.agent.as_deref().is_none_or(|agent| agent.is_empty()) {
-            self.agent = duplicate.agent.filter(|agent| !agent.is_empty());
+        let timestamp_ms = self.timestamp_ms.min(duplicate.timestamp_ms);
+        let end_timestamp_ms = self
+            .duration_ms
+            .map(|duration| self.timestamp_ms.saturating_add(duration))
+            .max(
+                duplicate
+                    .duration_ms
+                    .map(|duration| duplicate.timestamp_ms.saturating_add(duration)),
+            );
+        self.timestamp_ms = timestamp_ms;
+        self.duration_ms = end_timestamp_ms.and_then(|end_timestamp_ms| {
+            let duration_ms = end_timestamp_ms.saturating_sub(timestamp_ms);
+            (duration_ms > 0).then_some(duration_ms)
+        });
+
+        let duplicate_agent = duplicate.agent.filter(|agent| !agent.is_empty());
+        if duplicate.agent_is_direct && !self.agent_is_direct && duplicate_agent.is_some() {
+            self.agent = duplicate_agent;
+            self.agent_is_direct = true;
+        } else if self.agent.as_deref().is_none_or(|agent| agent.is_empty()) {
+            self.agent_is_direct = duplicate.agent_is_direct && duplicate_agent.is_some();
+            self.agent = duplicate_agent;
         }
     }
 }
@@ -439,6 +464,8 @@ fn candidate_from_attributes(
         timestamp_ms,
         index,
     );
+    let direct_agent = first_non_empty_attr(attributes, &["gen_ai.agent.id"]).map(str::to_string);
+    let agent_is_direct = direct_agent.is_some();
 
     Some(CopilotUsageCandidate {
         source,
@@ -449,6 +476,7 @@ fn candidate_from_attributes(
         session_id,
         timestamp_ms,
         duration_ms,
+        inclusive_input_tokens: input.max(0),
         tokens,
         dedup_key,
         // Per-record attribution first: when a chat/inference record carries its
@@ -456,9 +484,8 @@ fn candidate_from_attributes(
         // it so sub-agents are not mis-attributed to the trace's first agent.
         // Fall back to the trace-level agent (typically from the invoke_agent
         // span) only when the record itself has none.
-        agent: first_non_empty_attr(attributes, &["gen_ai.agent.id"])
-            .map(str::to_string)
-            .or_else(|| trace_context.and_then(|tc| tc.agent_id.clone())),
+        agent: direct_agent.or_else(|| trace_context.and_then(|tc| tc.agent_id.clone())),
+        agent_is_direct,
     })
 }
 
@@ -1528,10 +1555,11 @@ mod tests {
 
     #[test]
     fn test_parse_copilot_merges_duplicate_spans_monotonically() {
-        let first = r#"{"type":"span","traceId":"trace-merge","spanId":"span-merge","name":"chat gpt-5.4-mini","startTime":[1775934262,0],"endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-merge","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":20,"gen_ai.usage.cache_read.input_tokens":30,"gen_ai.usage.cache_write.input_tokens":40,"gen_ai.usage.reasoning_tokens":50}}"#;
-        let second = r#"{"type":"span","traceId":"trace-merge","spanId":"span-merge","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934268,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-merge","gen_ai.agent.id":"agent-merge","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":10,"gen_ai.usage.cache_read.input_tokens":40,"gen_ai.usage.cache_write.input_tokens":20,"gen_ai.usage.reasoning_tokens":60}}"#;
-        let forward_file = create_test_file(&format!("{first}\n{second}\n"));
-        let reverse_file = create_test_file(&format!("{second}\n{first}\n"));
+        let root = r#"{"type":"span","traceId":"trace-merge","spanId":"invoke-root","name":"invoke_agent","startTime":[1775934259,0],"endTime":[1775934269,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.response.model":"gpt-5.4-mini","gen_ai.agent.id":"root-agent","gen_ai.usage.input_tokens":999,"gen_ai.usage.output_tokens":999}}"#;
+        let first = r#"{"type":"span","traceId":"trace-merge","spanId":"span-merge","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-merge","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":20,"gen_ai.usage.cache_read.input_tokens":30,"gen_ai.usage.cache_write.input_tokens":40,"gen_ai.usage.reasoning_tokens":50}}"#;
+        let second = r#"{"type":"span","traceId":"trace-merge","spanId":"span-merge","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","startTime":[1775934262,0],"endTime":[1775934268,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-merge","gen_ai.agent.id":"agent-merge","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":10,"gen_ai.usage.cache_read.input_tokens":40,"gen_ai.usage.cache_write.input_tokens":20,"gen_ai.usage.reasoning_tokens":60}}"#;
+        let forward_file = create_test_file(&format!("{root}\n{first}\n{second}\n"));
+        let reverse_file = create_test_file(&format!("{root}\n{second}\n{first}\n"));
 
         let forward = parse_copilot_file(forward_file.path());
         let reverse = parse_copilot_file(reverse_file.path());
@@ -1548,6 +1576,22 @@ mod tests {
         assert_eq!(message.duration_ms, Some(8_000));
         assert_eq!(message.agent.as_deref(), Some("agent-merge"));
         assert_eq!(message.dedup_key.as_deref(), Some("trace-merge:span-merge"));
+    }
+
+    #[test]
+    fn test_parse_copilot_duplicate_normalizes_merged_cache_read() {
+        let content = concat!(
+            r#"{"type":"span","traceId":"trace-cache-merge","spanId":"span-cache-merge","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":10}}"#,
+            "\n",
+            r#"{"type":"span","traceId":"trace-cache-merge","spanId":"span-cache-merge","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":10,"gen_ai.usage.cache_read.input_tokens":500}}"#,
+        );
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 500);
+        assert_eq!(messages[0].tokens.cache_read, 500);
     }
 
     #[test]
@@ -1618,6 +1662,7 @@ mod tests {
             session_id: "primary-session".to_string(),
             timestamp_ms: 100,
             duration_ms: Some(20),
+            inclusive_input_tokens: 40,
             tokens: TokenBreakdown {
                 input: 10,
                 output: 2,
@@ -1626,7 +1671,8 @@ mod tests {
                 reasoning: 5,
             },
             dedup_key: "same-key".to_string(),
-            agent: None,
+            agent: Some("fallback-agent".to_string()),
+            agent_is_direct: false,
         };
         let duplicate = CopilotUsageCandidate {
             source: CopilotUsageSource::AgentSummarySpan,
@@ -1637,6 +1683,7 @@ mod tests {
             session_id: "duplicate-session".to_string(),
             timestamp_ms: 90,
             duration_ms: Some(30),
+            inclusive_input_tokens: 60,
             tokens: TokenBreakdown {
                 input: 20,
                 output: 1,
@@ -1646,6 +1693,7 @@ mod tests {
             },
             dedup_key: "same-key".to_string(),
             agent: Some("recovered-agent".to_string()),
+            agent_is_direct: true,
         };
 
         let merged = merge_duplicate_candidates(vec![primary, duplicate]);
