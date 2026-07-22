@@ -805,7 +805,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
-        ClientId::Jcode => 5,
+        // v5->v6: OpenAI-style Jcode usage now removes cache-read overlap from
+        // input_tokens before pricing and aggregation.
+        ClientId::Jcode => 6,
         // v5->v6: merge same-dedup-key Copilot spans before emitting messages.
         ClientId::Copilot => 6,
         // Pi subagent sessions now derive agent attribution from session_info
@@ -2065,7 +2067,7 @@ mod tests {
         // again here so those stale (start-anchored-but-still-wrong) v2/v1
         // cache entries are also invalidated.
         assert_eq!(parser_version(ClientId::Junie), 2);
-        assert_eq!(parser_version(ClientId::Jcode), 5);
+        assert_eq!(parser_version(ClientId::Jcode), 6);
         assert_eq!(parser_version(ClientId::DevinCli), 3);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 2);
