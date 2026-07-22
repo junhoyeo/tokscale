@@ -8,6 +8,7 @@ use tokscale_core::GroupBy;
 
 struct ModelRowData {
     model: String,
+    color_key: String,
     provider: String,
     workspace_label: Option<String>,
     tokens_input: u64,
@@ -154,7 +155,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         .map(|m| {
             (
                 overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
-                app.model_color_for(&m.provider, &m.model),
+                app.model_color_for(&m.provider, &m.color_key),
             )
         })
         .collect();
@@ -205,6 +206,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         .iter()
         .map(|m| ModelRowData {
             model: m.model.clone(),
+            color_key: m.color_key.clone(),
             provider: m.provider.clone(),
             workspace_label: m.workspace_label.clone(),
             tokens_input: m.tokens.input,
@@ -287,7 +289,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             Style::default()
         };
 
-        let model_color = app.model_color_for(&model.provider, &model.model);
+        let model_color = app.model_color_for(&model.provider, &model.color_key);
         let display_name =
             overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
         let name = truncate_string(&display_name, max_name_width);

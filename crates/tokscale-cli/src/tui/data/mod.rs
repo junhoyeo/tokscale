@@ -48,6 +48,7 @@ impl TokenBreakdown {
 #[derive(Debug, Clone)]
 pub struct ModelUsage {
     pub model: String,
+    pub color_key: String,
     pub provider: String,
     pub client: String,
     pub workspace_key: Option<String>,
@@ -479,6 +480,7 @@ impl DataLoader {
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
+                color_key: model_key.clone(),
                 provider: msg.provider_id.clone(),
                 client: msg.client.clone(),
                 workspace_key: if *group_by == GroupBy::WorkspaceModel {

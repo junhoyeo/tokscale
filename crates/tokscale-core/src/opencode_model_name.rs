@@ -49,7 +49,11 @@ impl OpenCodeModelNameResolver {
                     continue;
                 };
 
-                names.insert((provider.clone(), model_id.to_string()), name.to_string());
+                let name = name.to_string();
+                names.insert((provider.clone(), model_id.to_string()), name.clone());
+                names
+                    .entry((provider.clone(), canonical_model_id(model_id)))
+                    .or_insert(name);
             }
         }
 
@@ -75,13 +79,55 @@ fn parse_jsonc(contents: &str) -> Option<serde_json::Value> {
         .ok()
         .or_else(|| serde_json::from_str(&strip_jsonc_syntax(contents)).ok())
 }
-
 fn strip_jsonc_syntax(contents: &str) -> String {
     let chars: Vec<char> = contents.chars().collect();
-    let mut out = String::with_capacity(contents.len());
+    let mut without_comments = String::with_capacity(contents.len());
+    let mut index = 0;
     let mut in_string = false;
     let mut escaped = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_string {
+            without_comments.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            without_comments.push(ch);
+            index += 1;
+        } else if ch == '/' && chars.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+        } else if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            without_comments.push(' ');
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+        } else {
+            without_comments.push(ch);
+            index += 1;
+        }
+    }
+
+    let chars: Vec<char> = without_comments.chars().collect();
+    let mut out = String::with_capacity(without_comments.len());
     let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
 
     while index < chars.len() {
         let ch = chars[index];
@@ -101,53 +147,15 @@ fn strip_jsonc_syntax(contents: &str) -> String {
         if ch == '"' {
             in_string = true;
             out.push(ch);
-            index += 1;
-        } else if ch == '/' && chars.get(index + 1) == Some(&'/') {
-            index += 2;
-            while index < chars.len() && chars[index] != '\n' {
-                index += 1;
-            }
-        } else if ch == '/' && chars.get(index + 1) == Some(&'*') {
-            out.push(' ');
-            index += 2;
-            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
-                index += 1;
-            }
-            index = (index + 2).min(chars.len());
         } else if ch == ',' {
-            let mut peek = index + 1;
-            loop {
-                while peek < chars.len() && chars[peek].is_ascii_whitespace() {
-                    peek += 1;
-                }
-                if peek + 1 < chars.len() && chars[peek] == '/' && chars[peek + 1] == '/' {
-                    peek += 2;
-                    while peek < chars.len() && chars[peek] != '\n' {
-                        peek += 1;
-                    }
-                    continue;
-                }
-                if peek + 1 < chars.len() && chars[peek] == '/' && chars[peek + 1] == '*' {
-                    peek += 2;
-                    while peek + 1 < chars.len() && !(chars[peek] == '*' && chars[peek + 1] == '/')
-                    {
-                        peek += 1;
-                    }
-                    peek = (peek + 2).min(chars.len());
-                    continue;
-                }
-                break;
-            }
-            if peek < chars.len() && matches!(chars[peek], '}' | ']') {
-                index += 1;
-            } else {
+            let next = chars[index + 1..].iter().find(|c| !c.is_ascii_whitespace());
+            if !matches!(next, Some(&'}') | Some(&']')) {
                 out.push(ch);
-                index += 1;
             }
         } else {
             out.push(ch);
-            index += 1;
         }
+        index += 1;
     }
 
     out

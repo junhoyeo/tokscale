@@ -268,7 +268,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     });
     let favorite_model_name = favorite_model.map(|m| m.model.as_str()).unwrap_or("N/A");
     let model_color = favorite_model
-        .map(|m| app.model_color_for(&m.provider, &m.model))
+        .map(|m| app.model_color_for(&m.provider, &m.color_key))
         .unwrap_or_else(|| app.model_color("N/A"));
     let sessions: u32 = app.data.models.iter().map(|m| m.session_count).sum();
 

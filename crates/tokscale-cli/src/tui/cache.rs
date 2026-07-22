@@ -128,6 +128,7 @@ struct CachedTokenBreakdown {
 #[serde(rename_all = "camelCase")]
 struct CachedModelUsage {
     model: String,
+    color_key: String,
     provider: String,
     client: String,
     #[serde(default)]
@@ -264,6 +265,7 @@ impl From<&ModelUsage> for CachedModelUsage {
     fn from(m: &ModelUsage) -> Self {
         Self {
             model: m.model.clone(),
+            color_key: m.color_key.clone(),
             provider: m.provider.clone(),
             client: m.client.clone(),
             workspace_key: m.workspace_key.clone(),
@@ -280,6 +282,7 @@ impl From<CachedModelUsage> for ModelUsage {
     fn from(m: CachedModelUsage) -> Self {
         Self {
             model: m.model,
+            color_key: m.color_key,
             provider: m.provider,
             client: m.client,
             workspace_key: m.workspace_key,

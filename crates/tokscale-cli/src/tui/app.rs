@@ -2699,6 +2699,7 @@ mod tests {
         app.data.models = vec![
             ModelUsage {
                 model: "model1".to_string(),
+                color_key: "model1".to_string(),
                 provider: "provider1".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2710,6 +2711,7 @@ mod tests {
             },
             ModelUsage {
                 model: "model2".to_string(),
+                color_key: "model2".to_string(),
                 provider: "provider2".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2748,6 +2750,7 @@ mod tests {
         app.data.models = vec![
             ModelUsage {
                 model: "model1".to_string(),
+                color_key: "model1".to_string(),
                 provider: "provider1".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2759,6 +2762,7 @@ mod tests {
             },
             ModelUsage {
                 model: "model2".to_string(),
+                color_key: "model2".to_string(),
                 provider: "provider2".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2796,6 +2800,7 @@ mod tests {
         // Add some mock data
         app.data.models = vec![ModelUsage {
             model: "model1".to_string(),
+            color_key: "model1".to_string(),
             provider: "provider1".to_string(),
             client: "opencode".to_string(),
             tokens: TokenBreakdown::default(),
@@ -3097,6 +3102,7 @@ mod tests {
         app.data.models = (0..n)
             .map(|i| ModelUsage {
                 model: format!("model{}", i),
+                color_key: format!("model{}", i),
                 provider: "provider".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -4856,6 +4862,7 @@ mod tests {
     fn model_usage(name: &str, cost: f64, workspace: Option<&str>) -> ModelUsage {
         ModelUsage {
             model: name.to_string(),
+            color_key: name.to_string(),
             provider: "anthropic".to_string(),
             client: "claude".to_string(),
             workspace_key: workspace.map(String::from),
@@ -5006,6 +5013,7 @@ mod tests {
         app.data.models = vec![
             ModelUsage {
                 model: "claude-opus-4-5".to_string(),
+                color_key: "claude-opus-4-5".to_string(),
                 provider: "anthropic".to_string(),
                 client: "claude".to_string(),
                 workspace_key: None,
@@ -5017,6 +5025,7 @@ mod tests {
             },
             ModelUsage {
                 model: "gpt-5".to_string(),
+                color_key: "gpt-5".to_string(),
                 provider: "openai".to_string(),
                 client: "codex".to_string(),
                 workspace_key: None,
@@ -5073,6 +5082,7 @@ mod tests {
         app.data.models = vec![
             ModelUsage {
                 model: "sonnet-shared".to_string(),
+                color_key: "sonnet-shared".to_string(),
                 provider: "anthropic".to_string(),
                 client: "claude".to_string(),
                 workspace_key: None,
@@ -5084,6 +5094,7 @@ mod tests {
             },
             ModelUsage {
                 model: "sonnet-shared".to_string(),
+                color_key: "sonnet-shared".to_string(),
                 provider: "openai".to_string(),
                 client: "codex".to_string(),
                 workspace_key: None,
@@ -5119,6 +5130,7 @@ mod tests {
         let mut app = make_app();
         let copilot_fable = ModelUsage {
             model: "claude-fable-5".to_string(),
+            color_key: "claude-fable-5".to_string(),
             provider: "github-copilot".to_string(),
             client: "opencode".to_string(),
             workspace_key: None,
@@ -5130,6 +5142,8 @@ mod tests {
         };
         app.data.models = vec![
             ModelUsage {
+                model: "claude-fable-5".to_string(),
+                color_key: "claude-fable-5".to_string(),
                 provider: "anthropic".to_string(),
                 cost: 5.0,
                 ..copilot_fable.clone()
