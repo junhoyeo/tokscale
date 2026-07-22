@@ -807,7 +807,11 @@ fn parser_version(client: ClientId) -> u32 {
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
         // v5->v6: OpenAI-style Jcode usage now removes cache-read overlap from
         // input_tokens before pricing and aggregation.
-        ClientId::Jcode => 6,
+        // v6->v7: the snapshot's messages array is now parsed leniently
+        // (a single wrong-typed token_usage no longer drops the whole
+        // session), and a journal replay of an already-seen user message id
+        // no longer re-arms pending_turn_start and mints a spurious turn.
+        ClientId::Jcode => 7,
         // v5->v6: merge same-dedup-key Copilot spans before emitting messages.
         ClientId::Copilot => 6,
         // Pi subagent sessions now derive agent attribution from session_info
@@ -2067,7 +2071,7 @@ mod tests {
         // again here so those stale (start-anchored-but-still-wrong) v2/v1
         // cache entries are also invalidated.
         assert_eq!(parser_version(ClientId::Junie), 2);
-        assert_eq!(parser_version(ClientId::Jcode), 6);
+        assert_eq!(parser_version(ClientId::Jcode), 7);
         assert_eq!(parser_version(ClientId::DevinCli), 3);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 2);
