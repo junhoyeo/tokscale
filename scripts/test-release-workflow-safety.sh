@@ -215,6 +215,39 @@ PY
   grep -q "Release workflow safety OK" "${TMP_DIR}/without-android-output.txt"
 }
 
+test_accepts_yaml_comments_and_manifest_path_quote_styles() {
+  local work="${TMP_DIR}/yaml-comments"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/build-native.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("on:\n", "on: # workflow events\n", 1)
+text = text.replace("  workflow_call:\n", "  workflow_call: # reusable release build\n", 1)
+text = text.replace(
+    "  pull_request:\n",
+    "# Comments do not close the surrounding YAML mapping.\n  pull_request: # PR validation\n",
+    1,
+)
+text = text.replace("    paths:\n", "    paths: # relevant files\n", 1)
+text = text.replace(
+    '      - "packages/cli/package.json"\n',
+    "      - 'packages/cli/package.json' # release source of truth\n",
+    1,
+)
+path.write_text(text)
+PY
+
+  (
+    cd "${work}"
+    python3 "${SCRIPT_UNDER_TEST}" >"${TMP_DIR}/yaml-comments-output.txt" 2>&1
+  )
+
+  grep -q "Release workflow safety OK" "${TMP_DIR}/yaml-comments-output.txt"
+}
+
 test_reads_workflows_as_utf8_when_locale_is_non_utf8() {
   local work="${TMP_DIR}/utf8-locale"
   write_good_workflows "${work}"
@@ -614,6 +647,7 @@ PY
 
 test_accepts_matching_publish_and_native_workflows
 test_accepts_workflows_without_android_platform
+test_accepts_yaml_comments_and_manifest_path_quote_styles
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
 test_rejects_unmapped_cli_platform_dependency

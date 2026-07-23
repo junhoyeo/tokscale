@@ -43,8 +43,32 @@ def read_lines(path: pathlib.Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
+def strip_yaml_comment(value: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if quote == "'":
+            if char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value.rstrip()
+
+
 def strip_yaml_scalar(value: str) -> str:
-    value = value.strip()
+    value = strip_yaml_comment(value).strip()
     if value in {'""', "''"}:
         return ""
     if (value.startswith('"') and value.endswith('"')) or (
@@ -72,7 +96,7 @@ def mapping_block(lines: list[str], key: str, indent: int) -> list[str]:
     header = f"{' ' * indent}{key}:"
     start = None
     for index, line in enumerate(lines):
-        if line == header:
+        if strip_yaml_comment(line) == header:
             start = index + 1
             break
     if start is None:
@@ -81,9 +105,10 @@ def mapping_block(lines: list[str], key: str, indent: int) -> list[str]:
     end = len(lines)
     for index in range(start, len(lines)):
         line = lines[index]
-        if not line.strip():
+        content = strip_yaml_comment(line)
+        if not content.strip():
             continue
-        line_indent = len(line) - len(line.lstrip(" "))
+        line_indent = len(content) - len(content.lstrip(" "))
         if line_indent <= indent:
             end = index
             break
@@ -192,6 +217,15 @@ def uncommented_lines(lines: list[str]) -> list[str]:
     return [line for line in lines if not line.lstrip().startswith("#")]
 
 
+def yaml_list_scalars(lines: list[str]) -> set[str]:
+    values: set[str] = set()
+    for line in lines:
+        item = strip_yaml_comment(line).strip()
+        if item.startswith("- "):
+            values.add(strip_yaml_scalar(item[2:]))
+    return values
+
+
 def parse_needs(block: list[str]) -> set[str]:
     lines = uncommented_lines(block)
     for index, line in enumerate(lines):
@@ -286,9 +320,8 @@ def main() -> None:
     native_build_uncommented = uncommented_lines(job_block(native_lines, "build"))
     if not native_workflow_call_block:
         errors.append("build-native workflow must expose workflow_call")
-    if not any(
-        line.strip() == '- "packages/cli/package.json"'
-        for line in uncommented_lines(native_pull_request_paths)
+    if "packages/cli/package.json" not in yaml_list_scalars(
+        native_pull_request_paths
     ):
         errors.append("build-native workflow must run for CLI package manifest changes")
     if not any(
