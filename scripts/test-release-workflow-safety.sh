@@ -52,6 +52,9 @@ on:
       bumped-manifests:
         type: string
         default: ""
+  pull_request:
+    paths:
+      - "packages/cli/package.json"
 
 env:
   MACOSX_DEPLOYMENT_TARGET: "10.13"
@@ -269,6 +272,28 @@ PY
   fi
 
   grep -q "CLI optionalDependencies have unmapped platform packages: \['cli-plan9-x64'\]" "${output}"
+}
+
+test_rejects_missing_cli_manifest_path_trigger() {
+  local work="${TMP_DIR}/missing-cli-manifest-trigger"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/build-native.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace('      - "packages/cli/package.json"\n', "", 1)
+text += '\nx-decoy:\n  - "packages/cli/package.json"\n'
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-cli-manifest-trigger-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to require the CLI manifest path trigger" >&2
+    return 1
+  fi
+
+  grep -q "build-native workflow must run for CLI package manifest changes" "${output}"
 }
 
 test_rejects_missing_canonical_target() {
@@ -588,6 +613,7 @@ test_accepts_workflows_without_android_platform
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
 test_rejects_unmapped_cli_platform_dependency
+test_rejects_missing_cli_manifest_path_trigger
 test_rejects_missing_canonical_target
 test_rejects_publish_build_call_drift
 test_rejects_missing_bumped_manifest_handoff

@@ -68,6 +68,28 @@ def top_level_env(lines: list[str]) -> dict[str, str]:
     return env
 
 
+def mapping_block(lines: list[str], key: str, indent: int) -> list[str]:
+    header = f"{' ' * indent}{key}:"
+    start = None
+    for index, line in enumerate(lines):
+        if line == header:
+            start = index + 1
+            break
+    if start is None:
+        return []
+
+    end = len(lines)
+    for index in range(start, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        line_indent = len(line) - len(line.lstrip(" "))
+        if line_indent <= indent:
+            end = index
+            break
+    return lines[start:end]
+
+
 def job_block(lines: list[str], job_name: str) -> list[str]:
     start = None
     for index, line in enumerate(lines):
@@ -257,13 +279,26 @@ def main() -> None:
                 f"build matrix {target} artifact drift: expected {expected_artifact}, found {native_entry.get('artifact_name')}"
             )
 
-    native_uncommented = uncommented_lines(native_lines)
+    native_on_block = mapping_block(native_lines, "on", 0)
+    native_workflow_call_block = mapping_block(native_on_block, "workflow_call", 2)
+    native_pull_request_block = mapping_block(native_on_block, "pull_request", 2)
     native_build_uncommented = uncommented_lines(job_block(native_lines, "build"))
-    if not any(line.strip() == "workflow_call:" for line in native_uncommented):
+    if not native_workflow_call_block:
         errors.append("build-native workflow must expose workflow_call")
-    if not any("bumped-manifests:" in line for line in native_uncommented):
+    if not any(
+        line.strip() == '- "packages/cli/package.json"'
+        for line in uncommented_lines(native_pull_request_block)
+    ):
+        errors.append("build-native workflow must run for CLI package manifest changes")
+    if not any(
+        "bumped-manifests:" in line
+        for line in uncommented_lines(native_workflow_call_block)
+    ):
         errors.append("build-native workflow must accept bumped-manifests input")
-    if not any("name: ${{ inputs.bumped-manifests }}" in line for line in native_uncommented):
+    if not any(
+        "name: ${{ inputs.bumped-manifests }}" in line
+        for line in native_build_uncommented
+    ):
         errors.append("build-native workflow must download the bumped-manifests input")
     if "aarch64-linux-android" in native_build:
         android_runner = "\n".join(

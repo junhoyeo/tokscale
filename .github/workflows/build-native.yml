@@ -14,6 +14,7 @@ on:
       - ".github/workflows/build-native.yml"
       - ".github/workflows/publish-cli.yml"
       - "crates/**"
+      - "packages/cli/package.json"
       - "packages/cli-*/package.json"
       - "scripts/check-release-workflow-safety.py"
       - "Cargo.toml"
