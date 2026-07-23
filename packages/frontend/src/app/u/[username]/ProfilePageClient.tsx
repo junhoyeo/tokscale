@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import Link from "next/link";
 import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
@@ -100,6 +100,12 @@ export default function ProfilePageClient({
   const [activeTab, setActiveTab] = useState<ProfileTab>("activity");
   const [contributionView, setContributionView] =
     useState<ProfileContributionView>("2d");
+  const [timeZoneData, setTimeZoneData] = useState<{
+    data: ProfileData;
+    period: ProfilePeriod;
+    timeZone: string;
+    username: string;
+  } | null>(null);
   const {
     paletteName: contributionPalette,
     setPalette: setContributionPalette,
@@ -107,25 +113,68 @@ export default function ProfilePageClient({
     mounted,
   } = useSettings();
   const contributionBreakdownId = useId();
-  const data = initialData;
-  const period = data.period ?? "all";
-  // Server chart ranges end at UTC "today", which clips contributions the CLI
-  // bucketed into the viewer's local-tomorrow date. Extend the display end to
-  // today in the effective timezone — only after mount, so the first client
-  // render matches the server-rendered range, and only for the lifetime view:
-  // week/month contributions are filtered by the UTC range server-side, so a
-  // local-today cell there could never carry data.
+  const period = initialData.period ?? "all";
+  // Server rendering uses UTC because the localStorage preference is only
+  // available in the browser. Once mounted, reload the complete profile
+  // payload for the selected zone so every period-scoped panel agrees on the
+  // same calendar-day boundaries.
   const effectiveTimeZone = mounted
     ? resolveEffectiveTimeZone(timezonePreference)
     : "UTC";
+  const hasMatchingTimeZoneData =
+    mounted &&
+    effectiveTimeZone !== "UTC" &&
+    timeZoneData?.timeZone === effectiveTimeZone &&
+    timeZoneData.username === username &&
+    timeZoneData.period === period;
+  const data = hasMatchingTimeZoneData ? timeZoneData.data : initialData;
+  useEffect(() => {
+    if (!mounted || effectiveTimeZone === "UTC") return;
+
+    const controller = new AbortController();
+    const query = new URLSearchParams({ tz: effectiveTimeZone });
+    if (period !== "all") query.set("period", period);
+
+    void fetch(`/api/users/${encodeURIComponent(username)}?${query}`, {
+      signal: controller.signal,
+    })
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((profile: ProfileData | null) => {
+        if (!controller.signal.aborted && profile) {
+          setTimeZoneData({
+            data: profile,
+            period,
+            timeZone: effectiveTimeZone,
+            username,
+          });
+        }
+      })
+      .catch(() => {
+        // Keep the server-rendered UTC payload if the timezone refresh fails.
+      });
+
+    return () => controller.abort();
+  }, [effectiveTimeZone, initialData, mounted, period, username]);
   const rollingChartRange = useMemo(() => {
     const range = getProfileChartRange(period, data.dateRange, data.chartRange);
-    if (!mounted || period !== "all") return range;
+    // Period payloads are filtered at the data boundary. Keep their UTC range
+    // until the matching timezone payload has arrived, rather than drawing an
+    // empty local-today cell while the refresh is in flight or unavailable.
+    if (!mounted || (period !== "all" && !hasMatchingTimeZoneData)) {
+      return range;
+    }
     return {
       start: range.start,
       end: extendDateRangeEndToToday(range.end, effectiveTimeZone),
     };
-  }, [period, data.chartRange, data.dateRange, mounted, effectiveTimeZone]);
+  }, [
+    period,
+    data.chartRange,
+    data.dateRange,
+    mounted,
+    hasMatchingTimeZoneData,
+    effectiveTimeZone,
+  ]);
   const contributionRangeOptions = useMemo(
     () =>
       period === "all"

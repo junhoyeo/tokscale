@@ -10,6 +10,7 @@ import {
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+import { getTodayInTimeZone, isValidTimeZone } from "@/lib/timezone";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
@@ -38,43 +39,56 @@ function parseProfilePeriod(value: string | null): ProfilePeriod {
 
 function getProfilePeriodDateRange(
   period: ProfilePeriod,
+  timeZone = "UTC",
   now: Date = new Date(),
 ): ProfilePeriodDateRange | null {
   if (period === "all") {
     return null;
   }
 
-  const end = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
-  const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
+  const end = getProfileRangeEnd(timeZone, now);
 
   return {
-    start: toUtcDateString(start),
-    end: toUtcDateString(end),
+    start: shiftDateKey(end, period === "week" ? -6 : -29),
+    end,
   };
 }
 
 function getRollingProfileDateRange(
+  timeZone = "UTC",
   now: Date = new Date(),
 ): ProfilePeriodDateRange {
-  const end = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
-  const targetYear = end.getUTCFullYear() - 1;
-  const month = end.getUTCMonth();
+  const end = getProfileRangeEnd(timeZone, now);
+  const endDate = new Date(`${end}T00:00:00.000Z`);
+  const targetYear = endDate.getUTCFullYear() - 1;
+  const month = endDate.getUTCMonth();
   const lastValidDay = new Date(
     Date.UTC(targetYear, month + 1, 0),
   ).getUTCDate();
   const start = new Date(
-    Date.UTC(targetYear, month, Math.min(end.getUTCDate(), lastValidDay)),
+    Date.UTC(
+      targetYear,
+      month,
+      Math.min(endDate.getUTCDate(), lastValidDay),
+    ),
   );
 
   return {
     start: toUtcDateString(start),
-    end: toUtcDateString(end),
+    end,
   };
+}
+
+function shiftDateKey(date: string, days: number): string {
+  const shifted = new Date(`${date}T00:00:00.000Z`);
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return toUtcDateString(shifted);
+}
+
+function getProfileRangeEnd(timeZone: string, now: Date): string {
+  const utcToday = toUtcDateString(now);
+  const localToday = getTodayInTimeZone(timeZone, now);
+  return localToday > utcToday ? localToday : utcToday;
 }
 
 function serializeUpdatedAt(
@@ -101,8 +115,13 @@ export async function getPublicProfileResponse(
     const { username } = await params;
     const { searchParams } = new URL(request.url);
     const period = parseProfilePeriod(searchParams.get("period"));
-    const periodRange = getProfilePeriodDateRange(period);
-    const chartRange = periodRange ?? getRollingProfileDateRange();
+    const requestedTimeZone = searchParams.get("tz");
+    const timeZone =
+      requestedTimeZone && isValidTimeZone(requestedTimeZone)
+        ? requestedTimeZone
+        : "UTC";
+    const periodRange = getProfilePeriodDateRange(period, timeZone);
+    const chartRange = periodRange ?? getRollingProfileDateRange(timeZone);
 
     // Find user
     const matchingUsers = await db
@@ -126,6 +145,9 @@ export async function getPublicProfileResponse(
       const canonicalUrl = new URL(`/api/users/${user.username}`, request.url);
       if (period !== "all") {
         canonicalUrl.searchParams.set("period", period);
+      }
+      if (requestedTimeZone && timeZone !== "UTC") {
+        canonicalUrl.searchParams.set("tz", timeZone);
       }
       return NextResponse.redirect(canonicalUrl, 308);
     }

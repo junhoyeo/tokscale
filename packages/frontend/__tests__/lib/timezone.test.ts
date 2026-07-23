@@ -94,4 +94,16 @@ describe("calendarInstantInTimeZone", () => {
       expect(formatInTimeZone(instant, timeZone)).toBe("Friday, 07/24/2026");
     }
   });
+
+  it("keeps skipped-midnight DST dates on their requested calendar day", () => {
+    const UTC_MIDNIGHT_ON_SANTIAGO_TRANSITION = Date.UTC(2026, 8, 6);
+    const instant = calendarInstantInTimeZone(
+      UTC_MIDNIGHT_ON_SANTIAGO_TRANSITION,
+      "America/Santiago",
+    );
+
+    expect(formatInTimeZone(instant, "America/Santiago")).toBe(
+      "Sunday, 09/06/2026",
+    );
+  });
 });

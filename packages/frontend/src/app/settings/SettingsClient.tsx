@@ -707,7 +707,11 @@ async function fetchDevices(username: string): Promise<SettingsDevice[]> {
 
 export default function SettingsClient() {
   const router = useRouter();
-  const { timezone, setTimezone } = useSettings();
+  const { timezone, setTimezone, mounted } = useSettings();
+  // Use the server-safe UTC label for the first render. The browser's zone can
+  // differ from the server's, so reading it before hydration would make the
+  // Auto option's text disagree with the SSR markup.
+  const browserTimeZone = mounted ? getBrowserTimeZone() : "UTC";
   const [user, setUser] = useState<User | null>(null);
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -973,7 +977,7 @@ export default function SettingsClient() {
             onChange={(event) => setTimezone(event.target.value)}
           >
             <option value="auto">
-              Auto (browser) — {getBrowserTimeZone()}
+              Auto (browser) — {browserTimeZone}
             </option>
             {COMMON_TIMEZONE_GROUPS.map((group) => (
               <optgroup key={group.region} label={group.region}>

@@ -193,6 +193,15 @@ function getTimeZoneOffsetMs(timeZone: string, utcMs: number): number {
   return asUtcMs - utcMs;
 }
 
+function dateKeyInTimeZone(timeZone: string, timestamp: number): string {
+  const parts = getDayPartsFormatter(timeZone).formatToParts(
+    new Date(timestamp),
+  );
+  const part = (type: string) =>
+    parts.find((candidate) => candidate.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 /**
  * Shift a UTC-midnight calendar timestamp to the instant of that same
  * calendar midnight in `timeZone`, so timezone-aware formatters label the
@@ -204,10 +213,17 @@ export function calendarInstantInTimeZone(
 ): number {
   if (timeZone === "UTC") return utcMidnightMs;
   const offset = getTimeZoneOffsetMs(timeZone, utcMidnightMs);
-  let timestamp = utcMidnightMs - offset;
+  const timestamp = utcMidnightMs - offset;
   // Refine once: the offset at UTC midnight can differ from the offset at
-  // local midnight around DST transitions.
+  // local midnight around DST transitions. Some zones skip local midnight at
+  // spring-forward, though; retain the first valid instant on the requested
+  // calendar day rather than moving the label into the prior day.
   const refined = getTimeZoneOffsetMs(timeZone, timestamp);
-  if (refined !== offset) timestamp = utcMidnightMs - refined;
-  return timestamp;
+  if (refined === offset) return timestamp;
+
+  const refinedTimestamp = utcMidnightMs - refined;
+  const targetDate = new Date(utcMidnightMs).toISOString().slice(0, 10);
+  return dateKeyInTimeZone(timeZone, refinedTimestamp) === targetDate
+    ? refinedTimestamp
+    : timestamp;
 }

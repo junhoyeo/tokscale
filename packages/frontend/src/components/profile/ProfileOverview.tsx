@@ -316,17 +316,18 @@ export function formatLastUpdated(
 
 function formatJoined(
   createdAt: string | null | undefined,
-  timeZone = "UTC",
+  timeZone?: string,
 ): string | null {
   if (!createdAt) return null;
   const date = new Date(createdAt);
   if (Number.isNaN(date.getTime())) return null;
 
-  return date.toLocaleDateString("en-US", {
+  const options: Intl.DateTimeFormatOptions = {
     month: "short",
     year: "numeric",
-    timeZone,
-  });
+  };
+  if (timeZone) options.timeZone = timeZone;
+  return date.toLocaleDateString("en-US", options);
 }
 
 export function ProfileOverview({
@@ -348,7 +349,7 @@ export function ProfileOverview({
     [isMounted, lastUpdated, timeZone],
   );
   const joined = useMemo(
-    () => formatJoined(user.createdAt, isMounted ? timeZone : undefined),
+    () => formatJoined(user.createdAt, isMounted ? timeZone : "UTC"),
     [user.createdAt, isMounted, timeZone],
   );
   const displayName = user.displayName || user.username;
