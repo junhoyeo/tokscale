@@ -153,6 +153,10 @@ pub struct SessionUsage {
     /// (e.g. OpenCode's `session.title` column). `None` for clients that
     /// don't record a title.
     pub title: Option<String>,
+    /// Distinct model display names used across messages in this session,
+    /// in first-seen order. Most sessions use a single model; a few switch
+    /// mid-conversation and show multiple entries.
+    pub models: Vec<String>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub message_count: u32,
@@ -912,6 +916,7 @@ impl DataLoader {
                             session_id: msg.session_id.clone(),
                             client: msg.client.clone(),
                             title: None,
+                            models: Vec::new(),
                             tokens: TokenBreakdown::default(),
                             cost: 0.0,
                             message_count: 0,
@@ -968,6 +973,11 @@ impl DataLoader {
                             session_entry.title = Some(trimmed.to_string());
                         }
                     }
+                }
+
+                // Track distinct model display names in first-seen order.
+                if !session_entry.models.contains(&normalized_model) {
+                    session_entry.models.push(normalized_model.clone());
                 }
             }
         }

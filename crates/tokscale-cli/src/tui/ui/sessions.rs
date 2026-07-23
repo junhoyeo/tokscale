@@ -61,6 +61,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         "%Y-%m-%d %H:%M"
     };
 
+    // Model column grows on wide terminals: base 18, +1 per 8 chars past 80, capped at 36.
+    let model_col_width = (18 + (app.terminal_width as usize).saturating_sub(80) / 8).min(36);
+
     let header_cells = if is_very_narrow {
         vec!["Session", "Cost"]
     } else if is_narrow {
@@ -73,6 +76,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         vec![
             "Session",
             "Client",
+            "Model",
             "Turn",
             "Msgs",
             "Input",
@@ -90,6 +94,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         vec![
             "Session",
             "Client",
+            "Model",
             "Msgs",
             "Input",
             "Output",
@@ -127,9 +132,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     // narrow drops last-active entirely; Date sort has no header indicator
                     usize::MAX
                 } else if has_turn_data {
-                    13
+                    14
                 } else {
-                    12
+                    13
                 };
                 let total_idx = if is_very_narrow {
                     usize::MAX
@@ -140,9 +145,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         3
                     }
                 } else if has_turn_data {
-                    9
+                    10
                 } else {
-                    8
+                    9
                 };
                 let cost_idx = if is_very_narrow {
                     1
@@ -153,9 +158,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         4
                     }
                 } else if has_turn_data {
-                    10
+                    11
                 } else {
-                    9
+                    10
                 };
                 let indicator = if i == last_active_idx {
                     sort_indicator(SortField::Date)
@@ -249,6 +254,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(get_client_display_name(&session.client))
                         .style(Style::default().fg(theme_muted)),
                 );
+                let model_cell = build_model_cell(&session.models, model_col_width, app);
+                cells.push(model_cell);
                 if has_turn_data {
                     let turn_str = if session.turn_count > 0 {
                         session.turn_count.to_string()
@@ -319,6 +326,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         vec![
             Constraint::Min(20),
             Constraint::Length(12),
+            Constraint::Length(model_col_width as u16),
             Constraint::Length(5),
             Constraint::Length(5),
             Constraint::Length(10),
@@ -336,6 +344,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         vec![
             Constraint::Min(20),
             Constraint::Length(12),
+            Constraint::Length(model_col_width as u16),
             Constraint::Length(6),
             Constraint::Length(10),
             Constraint::Length(10),
@@ -373,6 +382,53 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             &mut scrollbar_state,
         );
     }
+}
+
+/// Build a table cell for the Model column with each model name colored by the
+/// same family-shade system used in the Overview and Models tabs. Multiple
+/// models are joined with `", "`. The total display width is truncated to
+/// `max_chars` with an ellipsis when it overflows.
+fn build_model_cell(models: &[String], max_chars: usize, app: &App) -> Cell<'static> {
+    if models.is_empty() {
+        return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut budget = max_chars;
+
+    for (i, model) in models.iter().enumerate() {
+        if i > 0 {
+            if budget < 3 {
+                break;
+            }
+            spans.push(Span::raw(", "));
+            budget -= 2;
+        }
+
+        if budget == 0 {
+            break;
+        }
+
+        let color = app.model_color(model);
+        let model_len = model.chars().count();
+
+        if model_len <= budget {
+            spans.push(Span::styled(model.clone(), Style::default().fg(color)));
+            budget -= model_len;
+        } else if budget <= 1 {
+            spans.push(Span::styled("…".to_string(), Style::default().fg(color)));
+            budget = 0;
+        } else {
+            let head: String = model.chars().take(budget - 1).collect();
+            spans.push(Span::styled(
+                format!("{}…", head),
+                Style::default().fg(color),
+            ));
+            budget = 0;
+        }
+    }
+
+    Cell::from(Line::from(spans))
 }
 
 /// Convert Unix-ms to a local NaiveDateTime for display.
@@ -424,6 +480,7 @@ mod tests {
             session_id: id.to_string(),
             client: client.to_string(),
             title: None,
+            models: vec!["test-model".to_string()],
             tokens: TokenBreakdown {
                 input: 1000,
                 output: 500,
@@ -498,6 +555,33 @@ mod tests {
     }
 
     #[test]
+    fn model_column_shows_model_names() {
+        let mut app = make_app(200);
+        let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+        s.models = vec!["claude-sonnet-4".to_string()];
+        app.data.sessions = vec![s];
+        let body = render_body(&mut app, 200, 12);
+        assert!(body.contains("Model"), "expected Model header\n{body}");
+        assert!(
+            body.contains("claude-sonnet-4"),
+            "expected model name in body\n{body}"
+        );
+    }
+
+    #[test]
+    fn model_column_shows_multiple_models() {
+        let mut app = make_app(220);
+        let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+        s.models = vec!["gpt-4o".to_string(), "o3-mini".to_string()];
+        app.data.sessions = vec![s];
+        let body = render_body(&mut app, 220, 12);
+        assert!(
+            body.contains("gpt-4o") && body.contains("o3-mini"),
+            "expected both model names in body\n{body}"
+        );
+    }
+
+    #[test]
     fn session_title_displayed_when_available() {
         let mut app = make_app(200);
         let mut s = session("ses_09d2eac0", "opencode", 1.5, 1_736_000_000_000);
@@ -512,11 +596,11 @@ mod tests {
 
     #[test]
     fn session_column_expands_on_wide_terminal() {
-        let mut app = make_app(220);
+        let mut app = make_app(260);
         let mut s = session("ses_09d2eac0", "opencode", 1.5, 1_736_000_000_000);
         s.title = Some("This is a long title for a session that could be used".to_string());
         app.data.sessions = vec![s];
-        let body = render_body(&mut app, 220, 12);
+        let body = render_body(&mut app, 260, 12);
         assert!(
             body.contains("This is a long title for a session that could be used"),
             "expected full title on wide terminal\n{body}"
