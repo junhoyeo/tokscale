@@ -25,12 +25,12 @@ pub fn model_shade_key(provider: &str, model: &str) -> String {
 pub fn build_model_shade_map(models: &[ModelUsage]) -> HashMap<String, Color> {
     let mut by_provider: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
     for m in models {
-        let provider = provider_color_key(&m.provider, &m.model);
+        let provider = provider_color_key(&m.provider, &m.color_key);
         let cost = if m.cost.is_finite() { m.cost } else { 0.0 };
         *by_provider
             .entry(provider)
             .or_default()
-            .entry(m.model.as_str())
+            .entry(m.color_key.as_str())
             .or_insert(0.0) += cost;
     }
 
@@ -145,6 +145,7 @@ mod tests {
     fn usage(model: &str, provider: &str, cost: f64) -> ModelUsage {
         ModelUsage {
             model: model.to_string(),
+            color_key: model.to_string(),
             provider: provider.to_string(),
             client: "claude".to_string(),
             workspace_key: None,
@@ -176,6 +177,11 @@ mod tests {
         assert_eq!(
             provider_color_key("github-copilot", "gpt-5.3-codex"),
             "openai"
+        );
+        assert_eq!(provider_color_key("fireworks_ai", "GLM 5.2"), "zai");
+        assert_eq!(
+            provider_color_key("fireworks_ai", "Kimi K2.7 Code"),
+            "moonshotai"
         );
         // Empty / mixed providers also defer to the model.
         assert_eq!(provider_color_key("", "claude-fable-5"), "anthropic");

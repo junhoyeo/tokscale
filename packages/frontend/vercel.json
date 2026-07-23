@@ -1,4 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- . ../../bun.lock ../../package.json"
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- . ../../bun.lock ../../package.json",
+  "buildCommand": "bun run scripts/migrate-prod.ts && next build"
 }

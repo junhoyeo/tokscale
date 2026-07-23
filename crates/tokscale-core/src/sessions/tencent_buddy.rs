@@ -469,7 +469,13 @@ mod tests {
         let message = &messages[0];
         assert_eq!(message.client, "codebuddy");
         assert_eq!(message.model_id, "glm-5.2");
-        assert_eq!(message.provider_id, "tencent");
+        // `inferred_provider_from_model` recognizes "glm" and infers "zai"
+        // (Zhipu AI), taking precedence over the DEFAULT_PROVIDER ("tencent")
+        // fallback — consistent with how every other model family (claude,
+        // gpt, etc.) is attributed to its real provider rather than the
+        // client name. DEFAULT_PROVIDER only applies when inference can't
+        // identify the model at all.
+        assert_eq!(message.provider_id, "zai");
         assert_eq!(message.session_id, "session-1");
         assert_eq!(message.tokens.input, 24486);
         assert_eq!(message.tokens.output, 3);

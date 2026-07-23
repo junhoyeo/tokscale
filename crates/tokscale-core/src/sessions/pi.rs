@@ -202,12 +202,14 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
             None => continue,
         };
 
-        // A missing provider field is recoverable: infer it from the model name
-        // (and fall back to "pi") rather than dropping a message that carries
+        // A missing/blank provider field is recoverable: infer it from the
+        // model name (e.g. a Pi "gpt-5" message with no provider maps to
+        // "openai"), falling back to "pi" only when inference can't
+        // identify the model, rather than dropping a message that carries
         // valid tokens.
         let provider = match message.provider {
-            Some(p) => p,
-            None => inferred_provider_from_model(&model)
+            Some(p) if !p.is_empty() => p,
+            _ => inferred_provider_from_model(&model)
                 .unwrap_or("pi")
                 .to_string(),
         };
@@ -276,6 +278,56 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].workspace_key, Some("/tmp".to_string()));
         assert_eq!(messages[0].workspace_label, Some("tmp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pi_infers_provider_from_model_when_absent() {
+        // given: no "provider" key at all — a missing provider must be
+        // inferred from the model name (gpt-5 -> openai), not hardcoded
+        // to "pi".
+        let content = r#"{"type":"session","id":"pi_ses_005","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5");
+        assert_eq!(messages[0].provider_id, "openai");
+    }
+
+    #[test]
+    fn test_parse_pi_infers_provider_from_model_when_blank() {
+        // given: "provider" present but blank — same inference path as
+        // fully absent.
+        let content = r#"{"type":"session","id":"pi_ses_006","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5","provider":"","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openai");
+    }
+
+    #[test]
+    fn test_parse_pi_falls_back_to_pi_when_provider_unrecoverable() {
+        // given: no provider and a model name inference can't identify —
+        // falls back to "pi" rather than dropping the message.
+        let content = r#"{"type":"session","id":"pi_ses_007","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"totally-unrecognized-model-xyz","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "pi");
     }
 
     #[test]

@@ -65,6 +65,8 @@ export interface ProfileData {
   clients: string[];
   models: string[];
   mcpServers?: string[];
+  /** True once any accepted submission carried a backfill provenance tag. */
+  hasBackfill?: boolean;
   modelUsage?: ModelUsage[];
   contributions: DailyContribution[];
   period?: ProfilePeriod;
@@ -235,6 +237,15 @@ export default function ProfilePageClient({
             lastUpdated={data.updatedAt ?? undefined}
             period={period}
           />
+
+          {data.hasBackfill && (
+            <BackfillBadge
+              role="note"
+              title="Totals include usage imported from a third-party export via `tokscale import`, not only locally-scanned CLI sessions."
+            >
+              includes imported history
+            </BackfillBadge>
+          )}
 
           <ViewControls aria-label="Profile data views">
             <TabsScroller>
@@ -545,6 +556,17 @@ const UpdateNotice = styled.p`
     font-size: 14px;
     line-height: 20px;
   }
+`;
+
+const BackfillBadge = styled.span`
+  align-self: flex-start;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--service-text) 18%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--service-text) 6%, transparent);
+  color: color-mix(in srgb, var(--service-text) 72%, transparent);
+  font-size: 12px;
+  line-height: 18px;
 `;
 
 const ViewControls = styled.div`

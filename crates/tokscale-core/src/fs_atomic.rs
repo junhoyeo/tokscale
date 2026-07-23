@@ -36,18 +36,41 @@ fn windows_replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
             .collect()
     }
 
+    // MoveFileExW replacing an existing file is a well-known source of
+    // transient ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32) on
+    // Windows: antivirus, indexing, and cloud-sync agents routinely hold a
+    // brief scan handle open on a just-written file. Retry a handful of
+    // times with a short backoff before giving up, rather than surfacing a
+    // one-shot failure for what is usually a few-millisecond lock.
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const MAX_ATTEMPTS: u32 = 5;
+
     let existing = encode(tmp_path);
     let new = encode(final_path);
-    let result = unsafe {
-        MoveFileExW(
-            existing.as_ptr(),
-            new.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let result = unsafe {
+            MoveFileExW(
+                existing.as_ptr(),
+                new.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result != 0 {
+            return Ok(());
+        }
+
+        let error = io::Error::last_os_error();
+        let is_retryable = matches!(
+            error.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION)
+        );
+        if !is_retryable || attempt == MAX_ATTEMPTS {
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10 * attempt as u64));
     }
+
+    unreachable!("loop always returns on its final attempt")
 }

@@ -42,6 +42,7 @@
     "@types/react-dom": "^19",
     "@types/styled-components": "^5.1.36",
     "@vitest/coverage-v8": "4.0.16",
+    "bun-types": "^1.3.14",
     "drizzle-kit": "^0.30.1",
     "eslint": "^9",
     "eslint-config-next": "16.0.6",

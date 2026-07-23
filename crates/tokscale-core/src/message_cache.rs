@@ -20,7 +20,10 @@ use std::time::UNIX_EPOCH;
 // absent when cached. Claude sidechain parent candidates can therefore be
 // revalidated without reparsing the sidechain on every warm scan, while a
 // later-created parent transcript still invalidates the entry.
-const CACHE_FORMAT_VERSION: u32 = 2;
+// 3: UnifiedMessage gained session_title, changing the bincode payload layout.
+// Old shards must read as Stale (silent rebuild), not Invalid (corruption
+// warning), so the format version moves with the struct.
+const CACHE_FORMAT_VERSION: u32 = 3;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:
 // the monolith did not record a trustworthy parser owner for migration.
 const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
@@ -102,10 +105,16 @@ fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std:
 
     // Most non-TUI commands (including `submit`) do not install a tracing
     // subscriber. Surface persistence failures directly once per process so a
-    // permanently cold cache can never fail silently again.
+    // permanently cold cache can never fail silently again. The TUI owns raw
+    // mode and the alternate screen for its whole run, so a raw stdio write
+    // there corrupts the rendered display instead of being visible as a log
+    // line — suppress it in that case and rely on tracing::warn! (or the
+    // TUI's own status/error UI) instead.
     static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let warned = WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()));
-    if warned.lock().is_ok_and(|mut warned| warned.insert(context)) {
+    if warned.lock().is_ok_and(|mut warned| warned.insert(context))
+        && !crate::tui_signal::is_tui_active()
+    {
         eprintln!("tokscale: warning: {context} ({}): {error}", path.display());
     }
 }
@@ -793,15 +802,61 @@ fn parser_version(client: ClientId) -> u32 {
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
         ClientId::Codex => 6,
-        ClientId::Jcode => 4,
-        ClientId::Copilot => 5,
+        // v4->v5: jcode's assistant-message timestamp is now back-calculated
+        // to the turn start (timestamp - tool_duration_ms) instead of using
+        // the recorded (end-anchored) timestamp directly. Follow-up to #890.
+        // v5->v6: OpenAI-style Jcode usage now removes cache-read overlap from
+        // input_tokens before pricing and aggregation.
+        // v6->v7: snapshot and journal message arrays are now parsed
+        // leniently (a single wrong-typed token_usage no longer drops the
+        // whole session or its journal line), and a journal replay of an
+        // already-seen user message id no longer re-arms pending_turn_start
+        // and mints a spurious turn.
+        ClientId::Jcode => 7,
+        // v5->v6: merge same-dedup-key Copilot spans before emitting messages.
+        // v6->v7: all-zero trace/span ids (the W3C sentinel for "no recording
+        // span context") are now treated as absent instead of as a real,
+        // shared identity, and a valid span_id alone (no trace_id) is now a
+        // stable dedup key instead of falling through to the line-index key.
+        // v7->v8: stabilize duplicate agent attribution and partial timing boundaries.
+        ClientId::Copilot => 8,
         // Pi subagent sessions now derive agent attribution from session_info
         // names; version-1 caches carry those messages without agent metadata.
         ClientId::Pi => 2,
-        // Devin CLI v1 could stop at a malformed chat_message. Desktop v1
-        // parsed a non-ACP shape and did not track its CLI title lookup.
-        ClientId::DevinCli | ClientId::DevinDesktop => 2,
+        // Devin CLI v1 could stop at a malformed chat_message. v2->v3:
+        // message timestamp is now back-calculated to the turn start
+        // (created_at - total_time_ms) instead of the recorded (end-anchored)
+        // created_at. Follow-up to #890.
+        ClientId::DevinCli => 3,
+        // Desktop v1 parsed a non-ACP shape and did not track its CLI title
+        // lookup; its timestamp handling is unaffected by the #890 follow-up.
+        ClientId::DevinDesktop => 2,
         ClientId::Claude => 2,
+        // Junie's usage-event timestamp is now back-calculated to the call
+        // start (timestampMs - usage.time) instead of the recorded
+        // (end-anchored) timestampMs. Follow-up to #890.
+        ClientId::Junie => 2,
+        // zcode's model_usage timestamp now prefers `started_at` over
+        // `completed_at`. Follow-up to #890. v2->v3: rows with a NULL
+        // `started_at` now back-calculate `completed_at - duration_ms`
+        // instead of staying end-anchored at `completed_at`, and
+        // `is_turn_start` is now assigned to the earliest-STARTED request
+        // per turn instead of the first one seen in completed_at order.
+        // Second-round follow-up to #890.
+        ClientId::Zcode => 3,
+        // opencodereview's llm_response timestamp is now back-calculated to
+        // the call start (timestamp - duration_ms) instead of the recorded
+        // (end-anchored) timestamp. Follow-up to #890.
+        ClientId::OpenCodeReview => 2,
+        // Kiro's structured messages.jsonl turns now back-calculate the
+        // start anchor from `turn_end - elapsedTime` when the user prompt's
+        // own timestamp is missing/unparseable, instead of falling through
+        // to the (end-anchored) turn_end timestamp. Second-round follow-up
+        // to #890.
+        ClientId::Kiro => 2,
+        // Kimi now checks each token bucket independently when deciding
+        // whether a usage record is empty, avoiding an overflowing sum.
+        ClientId::Kimi => 2,
         _ => 1,
     }
 }
@@ -1320,8 +1375,10 @@ fn write_shard_with_limit(
             .map_err(std::io::Error::other)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
+        drop(writer);
         crate::fs_atomic::replace_file(&tmp_path, final_path)?;
-        File::open(final_path)?.sync_all()?;
+        let final_file = OpenOptions::new().read(true).write(true).open(final_path)?;
+        final_file.sync_all()?;
         Ok(())
     })();
 
@@ -1994,15 +2051,46 @@ mod tests {
 
     #[test]
     fn test_devin_parser_versions_invalidate_v1_entries() {
-        assert_eq!(parser_version(ClientId::DevinCli), 2);
+        assert_eq!(parser_version(ClientId::DevinCli), 3);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
     }
 
     #[test]
     fn test_codex_duration_parser_version_invalidates_v4_entries() {
         assert_eq!(parser_version(ClientId::Codex), 6);
-        assert_eq!(parser_version(ClientId::Copilot), 5);
         assert_eq!(parser_version(ClientId::Claude), 2);
+    }
+
+    #[test]
+    fn test_copilot_duplicate_metadata_parser_version_invalidates_v7_entries() {
+        assert_eq!(parser_version(ClientId::Copilot), 8);
+    }
+
+    #[test]
+    fn test_duration_anchor_audit_remaining_parsers_bumps_versions() {
+        // Follow-up to #890: junie, jcode, devin-cli, zcode, and
+        // opencodereview were re-anchored to start-anchored duration
+        // timestamps; their cache-invalidating parser versions must bump so
+        // stale end-anchored-timestamp cache entries are not reused.
+        //
+        // Second-round review found gaps in that first pass: zcode's
+        // NULL-`started_at` fallback stayed end-anchored and its
+        // `is_turn_start` marking didn't follow the new start-anchored
+        // timestamps, and kiro's structured messages.jsonl turns stayed
+        // end-anchored when the prompt timestamp was missing. Both bump
+        // again here so those stale (start-anchored-but-still-wrong) v2/v1
+        // cache entries are also invalidated.
+        assert_eq!(parser_version(ClientId::Junie), 2);
+        assert_eq!(parser_version(ClientId::Jcode), 7);
+        assert_eq!(parser_version(ClientId::DevinCli), 3);
+        assert_eq!(parser_version(ClientId::Zcode), 3);
+        assert_eq!(parser_version(ClientId::OpenCodeReview), 2);
+        assert_eq!(parser_version(ClientId::Kiro), 2);
+    }
+
+    #[test]
+    fn test_kimi_parser_version_invalidates_v1_entries() {
+        assert_eq!(parser_version(ClientId::Kimi), 2);
     }
 
     #[test]
@@ -2188,6 +2276,122 @@ mod tests {
         std::fs::write(&would_be_config, br#"{"model":"unrelated"}"#).unwrap();
         let code_with_config = SourceFingerprint::from_kimi_path(&code_path).unwrap();
         assert_eq!(code_base, code_with_config);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_kimi_stale_parser_cache_is_rejected_and_rebuilt_with_same_fingerprint() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_home = TempDir::new().unwrap();
+        let wire_path = source_home
+            .path()
+            .join(".kimi/sessions/group/session/wire.jsonl");
+        std::fs::create_dir_all(wire_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &wire_path,
+            concat!(
+                r#"{"type":"metadata","protocol_version":"1.3"}"#,
+                "\n",
+                r#"{"timestamp":1770983410.0,"message":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":9223372036854775807,"output":9223372036854775807,"input_cache_read":2,"input_cache_creation":0},"message_id":"msg-extreme"}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let fingerprint = match SourceFingerprint::check_kimi_path_samples_only(&wire_path, None)
+            .unwrap()
+        {
+            FingerprintStatus::Changed(fingerprint) => fingerprint,
+            FingerprintStatus::Unchanged => panic!("an uncached source must build a fingerprint"),
+        };
+        let identity = CacheIdentity::for_client(ClientId::Kimi);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: identity.parser_version.saturating_sub(1),
+        };
+        let stale_message = UnifiedMessage::new(
+            "kimi",
+            "stale-model",
+            "moonshot",
+            "stale-session",
+            1,
+            TokenBreakdown {
+                input: 999,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &wire_path,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_shard = cache_shard_path(identity, &wire_path);
+        ensure_cache_dir(stale_shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(identity, &wire_path).is_none());
+        assert!(matches!(
+            SourceFingerprint::check_kimi_path_samples_only(&wire_path, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        let first = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kimi".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].tokens.input, i64::MAX);
+        assert_eq!(first[0].tokens.output, i64::MAX);
+        assert_eq!(first[0].tokens.cache_read, 2);
+        assert_eq!(first[0].tokens.cache_write, 0);
+        assert!(
+            matches!(
+                SourceFingerprint::check_kimi_path_samples_only(&wire_path, Some(&fingerprint)),
+                Some(FingerprintStatus::Unchanged)
+            ),
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let rebuilt = SourceMessageCache::load();
+        let cached = rebuilt
+            .get(identity, &wire_path)
+            .expect("production loader should persist the reparsed Kimi entry");
+        assert_eq!(cached.parser_version, identity.parser_version);
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages.len(), 1);
+        assert_eq!(cached.messages[0].tokens.input, i64::MAX);
+        assert_eq!(cached.messages[0].tokens.output, i64::MAX);
+        assert_eq!(cached.messages[0].tokens.cache_read, 2);
+        assert_eq!(cached.messages[0].tokens.cache_write, 0);
+
+        let second = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kimi".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(second, first);
+
+        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -2476,6 +2680,29 @@ mod tests {
     }
 
     #[test]
+    fn test_write_shard_round_trips_after_atomic_replace() {
+        let source = write_temp_file(b"{}\n");
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let entry = test_entry(identity, source.path(), "session-1");
+        let shard_dir = TempDir::new().unwrap();
+        let shard_path = shard_dir.path().join("shard.bin");
+
+        write_shard_with_limit(
+            &shard_path,
+            identity,
+            std::slice::from_ref(&entry),
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            read_shard(&shard_path, identity),
+            ShardReadStatus::Loaded(entries)
+                if entries.len() == 1 && entries[0].messages[0].session_id == "session-1"
+        ));
+    }
+
+    #[test]
     #[serial_test::serial]
     fn test_source_message_cache_round_trips_across_distinct_shards() {
         let temp_home = TempDir::new().unwrap();
@@ -2631,7 +2858,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_copilot_v3_cache_is_rejected_and_rebuilt_with_root_agent() {
+    fn test_copilot_stale_cache_is_rejected_and_rebuilt_with_root_agent() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
         let source_dir = TempDir::new().unwrap();
@@ -2647,6 +2874,8 @@ mod tests {
                 "\n",
                 r#"{"type":"span","traceId":"trace-cache","spanId":"chat","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":1,"gen_ai.usage.output_tokens":1}}"#,
                 "\n",
+                r#"{"type":"span","traceId":"trace-cache","spanId":"chat","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":9,"gen_ai.usage.output_tokens":8}}"#,
+                "\n",
             ),
         )
         .unwrap();
@@ -2654,9 +2883,9 @@ mod tests {
         let current_identity = CacheIdentity::for_client(ClientId::Copilot);
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
-            parser_version: 3,
+            parser_version: current_identity.parser_version.saturating_sub(1),
         };
-        let mut stale_message = UnifiedMessage::new(
+        let mut stale_message = UnifiedMessage::new_with_dedup(
             "copilot",
             "gpt-5.4-mini",
             "github-copilot",
@@ -2670,14 +2899,31 @@ mod tests {
                 reasoning: 0,
             },
             0.0,
+            Some("trace-cache:chat".to_string()),
         );
         stale_message.agent = Some("github.copilot.subagent".to_string());
+        let stale_duplicate = UnifiedMessage::new_with_dedup(
+            "copilot",
+            "gpt-5.4-mini",
+            "github-copilot",
+            "trace-cache",
+            2,
+            TokenBreakdown {
+                input: 9,
+                output: 8,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+            Some("trace-cache:chat".to_string()),
+        );
         let fingerprint = SourceFingerprint::from_path(&source_path).unwrap();
         let stale_entry = CachedSourceEntry::new(
             stale_identity,
             &source_path,
             fingerprint.clone(),
-            vec![stale_message],
+            vec![stale_message, stale_duplicate],
             Vec::new(),
             None,
         );
@@ -2695,7 +2941,7 @@ mod tests {
         let mut loaded = SourceMessageCache::load();
         assert!(
             loaded.get(current_identity, &source_path).is_none(),
-            "a v3 Copilot cache entry must not be served after the parser output change"
+            "a stale Copilot cache entry must not be served after the parser output change"
         );
         assert!(loaded.rewrite_shards.contains(&shard_key));
         assert_eq!(
@@ -2706,6 +2952,9 @@ mod tests {
 
         let rebuilt = crate::sessions::copilot::parse_copilot_file(&source_path);
         assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].dedup_key.as_deref(), Some("trace-cache:chat"));
+        assert_eq!(rebuilt[0].tokens.input, 9);
+        assert_eq!(rebuilt[0].tokens.output, 8);
         assert_eq!(
             rebuilt[0].agent.as_deref(),
             Some("github.copilot.default"),
@@ -2734,6 +2983,7 @@ mod tests {
             read_shard(&stale_path, current_identity),
             ShardReadStatus::Loaded(entries)
                 if entries.len() == 1
+                    && entries[0].messages[0].tokens.input == 9
                     && entries[0].messages[0].agent.as_deref()
                         == Some("github.copilot.default")
         ));

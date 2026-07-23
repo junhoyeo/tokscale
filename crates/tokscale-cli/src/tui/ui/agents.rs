@@ -4,7 +4,8 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cost, get_client_display_name, total_tokens_cell, viewport_scrollbar_state,
+    format_cost, get_client_display_name, total_tokens_cell, truncate_text,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
@@ -108,13 +109,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
-                    Cell::from(truncate(&agent.agent, 18))
+                    Cell::from(truncate_text(&agent.agent, 18))
                         .style(Style::default().fg(app.theme.foreground)),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if is_narrow {
                 vec![
-                    Cell::from(truncate(&agent.agent, 18))
+                    Cell::from(truncate_text(&agent.agent, 18))
                         .style(Style::default().fg(app.theme.foreground)),
                     total_tokens_cell(agent.tokens.total(), &app.theme),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
@@ -122,12 +123,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(&agent.agent, 32)).style(
+                    Cell::from(truncate_text(&agent.agent, 32)).style(
                         Style::default()
                             .fg(app.theme.foreground)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(truncate(&client_labels(&agent.clients), 24))
+                    Cell::from(truncate_text(&client_labels(&agent.clients), 24))
                         .style(Style::default().fg(theme_muted)),
                     total_tokens_cell(agent.tokens.total(), &app.theme),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
@@ -214,21 +215,6 @@ fn client_labels(clients: &str) -> String {
         .map(get_client_display_name)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 3 {
-        s.chars().take(max_chars).collect()
-    } else {
-        let head: String = s.chars().take(max_chars - 3).collect();
-        format!("{}...", head)
-    }
 }
 
 #[cfg(test)]

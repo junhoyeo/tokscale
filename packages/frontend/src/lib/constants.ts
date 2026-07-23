@@ -56,6 +56,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   cline: "Cline",
   synthetic: "Synthetic",
   gjc: "Gajae Code",
+  "9router": "9Router",
   grok: "Grok Build",
   jcode: "Jcode",
   commandcode: "Command Code",
@@ -101,6 +102,9 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   cline: "https://github.com/cline.png",
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
   gjc: "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
+  // 9Router data flows through the gjc-format bridge; reuse the gjc mark
+  // until 9Router ships a dedicated asset.
+  "9router": "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
   grok: "https://github.com/xai-org.png",
   jcode: `${GITHUB_CDN_BASE}/client-jcode.png`,
   commandcode:
@@ -147,6 +151,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   cline: "#5B8DEF",
   synthetic: "#4ADE80",
   gjc: "#FF6B6B",
+  "9router": "#0EA5E9",
   grok: "#171717",
   jcode: "#F59E0B",
   commandcode: "#A855F7",

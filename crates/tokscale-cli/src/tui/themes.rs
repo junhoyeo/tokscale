@@ -59,6 +59,12 @@ pub enum ThemeName {
     Graphite,
     Lagoon,
     Dusk,
+    TokyoNight,
+    Catppuccin,
+    Solarized,
+    Gruvbox,
+    GruvboxMaterial,
+    OneDark,
 }
 
 impl ThemeName {
@@ -76,6 +82,12 @@ impl ThemeName {
             ThemeName::Graphite,
             ThemeName::Lagoon,
             ThemeName::Dusk,
+            ThemeName::TokyoNight,
+            ThemeName::Catppuccin,
+            ThemeName::Solarized,
+            ThemeName::Gruvbox,
+            ThemeName::GruvboxMaterial,
+            ThemeName::OneDark,
         ]
     }
 
@@ -99,6 +111,12 @@ impl ThemeName {
             ThemeName::Graphite => "graphite",
             ThemeName::Lagoon => "lagoon",
             ThemeName::Dusk => "dusk",
+            ThemeName::TokyoNight => "tokyo-night",
+            ThemeName::Catppuccin => "catppuccin",
+            ThemeName::Solarized => "solarized",
+            ThemeName::Gruvbox => "gruvbox",
+            ThemeName::GruvboxMaterial => "gruvbox-material",
+            ThemeName::OneDark => "one-dark",
         }
     }
 }
@@ -120,6 +138,12 @@ impl std::str::FromStr for ThemeName {
             "graphite" => Ok(ThemeName::Graphite),
             "lagoon" => Ok(ThemeName::Lagoon),
             "dusk" => Ok(ThemeName::Dusk),
+            "tokyo-night" => Ok(ThemeName::TokyoNight),
+            "catppuccin" => Ok(ThemeName::Catppuccin),
+            "solarized" => Ok(ThemeName::Solarized),
+            "gruvbox" => Ok(ThemeName::Gruvbox),
+            "gruvbox-material" => Ok(ThemeName::GruvboxMaterial),
+            "one-dark" => Ok(ThemeName::OneDark),
             _ => Err(()),
         }
     }
@@ -236,6 +260,48 @@ impl Theme {
                 Color::Rgb(139, 92, 246),  // grade3: #8b5cf6
                 Color::Rgb(109, 40, 217),  // grade4: #6d28d9
             ],
+            ThemeName::TokyoNight => [
+                Color::Rgb(36, 40, 59),    // grade0: empty
+                Color::Rgb(125, 207, 255), // grade1: #7dcfff
+                Color::Rgb(122, 162, 247), // grade2: #7aa2f7
+                Color::Rgb(187, 154, 247), // grade3: #bb9af7
+                Color::Rgb(247, 118, 142), // grade4: #f7768e
+            ],
+            ThemeName::Catppuccin => [
+                Color::Rgb(49, 50, 68),    // grade0: empty
+                Color::Rgb(166, 227, 161), // grade1: #a6e3a1
+                Color::Rgb(137, 180, 250), // grade2: #89b4fa
+                Color::Rgb(203, 166, 247), // grade3: #cba6f7
+                Color::Rgb(243, 139, 168), // grade4: #f38ba8
+            ],
+            ThemeName::Solarized => [
+                Color::Rgb(7, 54, 66),    // grade0: empty
+                Color::Rgb(42, 161, 152), // grade1: #2aa198
+                Color::Rgb(38, 139, 210), // grade2: #268bd2
+                Color::Rgb(181, 137, 0),  // grade3: #b58900
+                Color::Rgb(220, 50, 47),  // grade4: #dc322f
+            ],
+            ThemeName::Gruvbox => [
+                Color::Rgb(50, 48, 47),    // grade0: empty
+                Color::Rgb(142, 192, 124), // grade1: #8ec07c
+                Color::Rgb(131, 165, 152), // grade2: #83a598
+                Color::Rgb(250, 189, 47),  // grade3: #fabd2f
+                Color::Rgb(251, 73, 52),   // grade4: #fb4934
+            ],
+            ThemeName::GruvboxMaterial => [
+                Color::Rgb(40, 40, 40),   // grade0: empty
+                Color::Rgb(184, 187, 38), // grade1: #b8bb26
+                Color::Rgb(250, 189, 47), // grade2: #fabd2f
+                Color::Rgb(215, 153, 33), // grade3: #d79921
+                Color::Rgb(251, 73, 52),  // grade4: #fb4934
+            ],
+            ThemeName::OneDark => [
+                Color::Rgb(40, 44, 52),    // grade0: empty
+                Color::Rgb(152, 195, 121), // grade1: #98c379
+                Color::Rgb(97, 175, 239),  // grade2: #61afef
+                Color::Rgb(198, 120, 221), // grade3: #c678dd
+                Color::Rgb(224, 108, 117), // grade4: #e06c75
+            ],
         };
 
         let mut theme = Self {
@@ -283,6 +349,66 @@ impl Theme {
                 theme.selection = Color::Rgb(43, 37, 58);
                 theme.striped_row = Color::Rgb(22, 20, 32);
                 theme.current_row = Color::Rgb(40, 45, 36);
+            }
+            ThemeName::TokyoNight => {
+                theme.background = Color::Rgb(26, 27, 38); // #1a1b26
+                theme.foreground = Color::Rgb(192, 202, 245); // #c0caf5
+                theme.border = Color::Rgb(65, 72, 104); // #414868
+                theme.muted = Color::Rgb(86, 95, 137); // #565f89
+                theme.accent = Color::Rgb(187, 154, 247); // #bb9af7
+                theme.selection = Color::Rgb(41, 46, 66); // #292e42
+                theme.striped_row = Color::Rgb(31, 35, 53);
+                theme.current_row = Color::Rgb(45, 74, 102);
+            }
+            ThemeName::Catppuccin => {
+                theme.background = Color::Rgb(30, 30, 46); // #1e1e2e
+                theme.foreground = Color::Rgb(205, 214, 244); // #cdd6f4
+                theme.border = Color::Rgb(88, 91, 112); // #585b70
+                theme.muted = Color::Rgb(166, 173, 200); // #a6adc8
+                theme.accent = Color::Rgb(203, 166, 247); // #cba6f7
+                theme.selection = Color::Rgb(69, 71, 90); // #45475a
+                theme.striped_row = Color::Rgb(49, 50, 68);
+                theme.current_row = Color::Rgb(69, 71, 90);
+            }
+            ThemeName::Solarized => {
+                theme.background = Color::Rgb(0, 43, 54); // #002b36
+                theme.foreground = Color::Rgb(147, 161, 161); // #93a1a1
+                theme.border = Color::Rgb(88, 110, 117); // #586e75
+                theme.muted = Color::Rgb(101, 123, 131); // #657b83
+                theme.accent = Color::Rgb(181, 137, 0); // #b58900
+                theme.selection = Color::Rgb(7, 54, 66); // #073642
+                theme.striped_row = Color::Rgb(0, 52, 65);
+                theme.current_row = Color::Rgb(7, 54, 66);
+            }
+            ThemeName::Gruvbox => {
+                theme.background = Color::Rgb(40, 40, 40); // #282828
+                theme.foreground = Color::Rgb(235, 219, 178); // #ebdbb2
+                theme.border = Color::Rgb(102, 92, 84); // #665c54
+                theme.muted = Color::Rgb(168, 153, 132); // #a89984
+                theme.accent = Color::Rgb(250, 189, 47); // #fabd2f
+                theme.selection = Color::Rgb(60, 56, 54); // #3c3836
+                theme.striped_row = Color::Rgb(50, 48, 47);
+                theme.current_row = Color::Rgb(69, 133, 136);
+            }
+            ThemeName::GruvboxMaterial => {
+                theme.background = Color::Rgb(50, 48, 47); // #32302f
+                theme.foreground = Color::Rgb(235, 219, 178); // #ebdbb2
+                theme.border = Color::Rgb(102, 92, 84); // #665c54
+                theme.muted = Color::Rgb(168, 153, 132); // #a89984
+                theme.accent = Color::Rgb(215, 153, 33); // #d79921
+                theme.selection = Color::Rgb(80, 73, 69); // #504945
+                theme.striped_row = Color::Rgb(60, 56, 54);
+                theme.current_row = Color::Rgb(69, 133, 136);
+            }
+            ThemeName::OneDark => {
+                theme.background = Color::Rgb(40, 44, 52); // #282c34
+                theme.foreground = Color::Rgb(171, 178, 191); // #abb2bf
+                theme.border = Color::Rgb(92, 99, 112); // #5c6370
+                theme.muted = Color::Rgb(130, 137, 151); // #828997
+                theme.accent = Color::Rgb(97, 175, 239); // #61afef
+                theme.selection = Color::Rgb(62, 68, 81); // #3e4451
+                theme.striped_row = Color::Rgb(44, 49, 58);
+                theme.current_row = Color::Rgb(58, 73, 94);
             }
             _ => {}
         }
@@ -450,6 +576,43 @@ mod tests {
     }
 
     #[test]
+    fn theme_pack_names_parse_from_settings_strings() {
+        assert_eq!("tokyo-night".parse(), Ok(ThemeName::TokyoNight));
+        assert_eq!("catppuccin".parse(), Ok(ThemeName::Catppuccin));
+        assert_eq!("solarized".parse(), Ok(ThemeName::Solarized));
+        assert_eq!("gruvbox".parse(), Ok(ThemeName::Gruvbox));
+        assert_eq!("gruvbox-material".parse(), Ok(ThemeName::GruvboxMaterial));
+        assert_eq!("one-dark".parse(), Ok(ThemeName::OneDark));
+    }
+
+    #[test]
+    fn theme_pack_themes_are_listed_for_cycling() {
+        let themes = ThemeName::all();
+
+        assert!(themes.contains(&ThemeName::TokyoNight));
+        assert!(themes.contains(&ThemeName::Catppuccin));
+        assert!(themes.contains(&ThemeName::Solarized));
+        assert!(themes.contains(&ThemeName::Gruvbox));
+        assert!(themes.contains(&ThemeName::GruvboxMaterial));
+        assert!(themes.contains(&ThemeName::OneDark));
+    }
+
+    #[test]
+    fn gruvbox_material_differs_from_gruvbox() {
+        let gruvbox =
+            Theme::from_name_with_color_mode(ThemeName::Gruvbox, TerminalColorMode::FullColor);
+        let material = Theme::from_name_with_color_mode(
+            ThemeName::GruvboxMaterial,
+            TerminalColorMode::FullColor,
+        );
+
+        assert_ne!(gruvbox.background, material.background);
+        assert_ne!(gruvbox.accent, material.accent);
+        assert_ne!(gruvbox.selection, material.selection);
+        assert_ne!(gruvbox.colors, material.colors);
+    }
+
+    #[test]
     fn surface_themes_customize_background_and_row_colors() {
         let cases = [
             (
@@ -475,6 +638,54 @@ mod tests {
                 Color::Rgb(43, 37, 58),
                 Color::Rgb(22, 20, 32),
                 Color::Rgb(40, 45, 36),
+            ),
+            (
+                ThemeName::TokyoNight,
+                Color::Rgb(26, 27, 38),
+                Color::Rgb(192, 202, 245),
+                Color::Rgb(41, 46, 66),
+                Color::Rgb(31, 35, 53),
+                Color::Rgb(45, 74, 102),
+            ),
+            (
+                ThemeName::Catppuccin,
+                Color::Rgb(30, 30, 46),
+                Color::Rgb(205, 214, 244),
+                Color::Rgb(69, 71, 90),
+                Color::Rgb(49, 50, 68),
+                Color::Rgb(69, 71, 90),
+            ),
+            (
+                ThemeName::Solarized,
+                Color::Rgb(0, 43, 54),
+                Color::Rgb(147, 161, 161),
+                Color::Rgb(7, 54, 66),
+                Color::Rgb(0, 52, 65),
+                Color::Rgb(7, 54, 66),
+            ),
+            (
+                ThemeName::Gruvbox,
+                Color::Rgb(40, 40, 40),
+                Color::Rgb(235, 219, 178),
+                Color::Rgb(60, 56, 54),
+                Color::Rgb(50, 48, 47),
+                Color::Rgb(69, 133, 136),
+            ),
+            (
+                ThemeName::GruvboxMaterial,
+                Color::Rgb(50, 48, 47),
+                Color::Rgb(235, 219, 178),
+                Color::Rgb(80, 73, 69),
+                Color::Rgb(60, 56, 54),
+                Color::Rgb(69, 133, 136),
+            ),
+            (
+                ThemeName::OneDark,
+                Color::Rgb(40, 44, 52),
+                Color::Rgb(171, 178, 191),
+                Color::Rgb(62, 68, 81),
+                Color::Rgb(44, 49, 58),
+                Color::Rgb(58, 73, 94),
             ),
         ];
 

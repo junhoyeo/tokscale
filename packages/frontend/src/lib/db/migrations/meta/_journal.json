@@ -106,6 +106,34 @@
       "when": 1780915651573,
       "tag": "0014_widen_cost_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1784069000000,
+      "tag": "0015_restore_submission_date_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1784259719000,
+      "tag": "0016_daily_breakdown_merge_safety_net",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784356471929,
+      "tag": "0017_restore_device_daily_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784611194680,
+      "tag": "0018_add_has_backfill",
+      "breakpoints": true
     }
   ]
 }

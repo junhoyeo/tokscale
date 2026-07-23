@@ -13,7 +13,7 @@
 //! estimated from context_usage_percentage * context_window (input) and
 //! response_size / 4 (output).
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use rusqlite::Connection;
@@ -615,13 +615,28 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
                     return None;
                 }
 
-                let timestamp = turn
-                    .prompt_timestamp_ms
-                    .or(turn.end_timestamp_ms)
-                    .unwrap_or(fallback_timestamp);
                 let duration_ms = turn.elapsed_ms.or_else(|| {
                     duration_between_ms(turn.prompt_timestamp_ms, turn.end_timestamp_ms)
                 });
+                // Prefer the user prompt's own timestamp. When it's absent or
+                // unparseable (e.g. `usage_summary.elapsedTime` supplied
+                // `duration_ms` but the prompt timestamp couldn't be
+                // resolved), back-calculate the start anchor from
+                // `turn_end - elapsed` instead of falling through to
+                // `end_timestamp_ms` directly — otherwise sessionize()'s
+                // `[timestamp, timestamp + duration_ms]` span would project
+                // forward past the turn's actual end into phantom idle time.
+                // The back-calculation is guarded against a non-positive
+                // result (which sessionize() silently drops) by falling back
+                // to the unadjusted `end_timestamp_ms`.
+                let timestamp = turn
+                    .prompt_timestamp_ms
+                    .or_else(|| match (turn.end_timestamp_ms, duration_ms) {
+                        (Some(end), Some(elapsed)) => Some(back_anchor_timestamp(end, elapsed)),
+                        _ => None,
+                    })
+                    .or(turn.end_timestamp_ms)
+                    .unwrap_or(fallback_timestamp);
 
                 let mut message = UnifiedMessage::new_with_dedup(
                     CLIENT_ID,
@@ -2191,6 +2206,46 @@ not valid json at all
         assert_eq!(messages[0].message_count, 2);
         assert!(messages[0].tokens.input > 0);
         assert!(messages[0].tokens.output > 0);
+    }
+
+    #[test]
+    fn test_structured_turn_missing_prompt_timestamp_back_calculates_from_elapsed_time() {
+        // Second-round review fix: in the structured `messages.jsonl` layout,
+        // `usage_summary.elapsedTime` can supply `duration_ms` while the user
+        // prompt's own timestamp is absent (or unparseable). Previously the
+        // message timestamp fell back to the `turn_end` event's own
+        // timestamp, leaving the message end-anchored — sessionize()'s
+        // `[timestamp, timestamp + duration_ms]` span would then project
+        // forward past the turn's actual end into phantom idle time. The
+        // parser must back-calculate `turn_end - elapsedTime` as the anchor
+        // instead.
+        let session_json = r#"{
+            "schemaVersion": "1.0.0",
+            "id": "sess_structured"
+        }"#;
+        let messages_jsonl = concat!(
+            "{\"payload\":{\"type\":\"user\",\"content\":\"hello world\"}}\n",
+            "{\"payload\":{\"type\":\"assistant\",\"content\":\"response text\"}}\n",
+            "{\"payload\":{\"type\":\"usage_summary\",\"elapsedTime\":5000}}\n",
+            "{\"payload\":{\"type\":\"turn_end\"},\"timestamp\":\"2026-06-20T10:00:05Z\"}\n",
+        );
+
+        let dir = TempDir::new().unwrap();
+        let path =
+            create_ide_session_files(&dir, "ws", "sess_structured", session_json, messages_jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let expected_end = chrono::DateTime::parse_from_rfc3339("2026-06-20T10:00:05Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            messages[0].timestamp,
+            expected_end - 5000,
+            "timestamp must be back-calculated from turn_end - elapsedTime when the prompt timestamp is missing"
+        );
+        assert_eq!(messages[0].duration_ms, Some(5000));
     }
 
     #[test]

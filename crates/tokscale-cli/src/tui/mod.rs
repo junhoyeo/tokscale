@@ -146,6 +146,13 @@ pub fn run(
         return Err(e.into());
     }
 
+    // From here on the TUI owns raw mode and the alternate screen for its
+    // whole run. Background diagnostics (e.g. cache save warnings) must not
+    // write raw stdio while this is set, or they corrupt the rendered
+    // display instead of being visible as a log line. Cleared in both
+    // `restore_terminal` and `restore_terminal_best_effort` below.
+    tokscale_core::tui_signal::set_tui_active(true);
+
     let backend = CrosstermBackend::new(stdout);
     let terminal_result = Terminal::new(backend);
     let mut terminal = match terminal_result {
@@ -233,6 +240,7 @@ pub fn run(
 }
 
 fn restore_terminal_best_effort() {
+    tokscale_core::tui_signal::set_tui_active(false);
     let _ = execute!(
         io::stdout(),
         LeaveAlternateScreen,
@@ -243,6 +251,7 @@ fn restore_terminal_best_effort() {
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    tokscale_core::tui_signal::set_tui_active(false);
     let _ = disable_raw_mode();
     let _ = execute!(
         terminal.backend_mut(),

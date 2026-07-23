@@ -851,7 +851,7 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 
 | 設定 | タイプ | デフォルト | 説明 |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUIカラーテーマ（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk） |
+| `colorPalette` | string | `"blue"` | TUIカラーテーマ（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk、tokyo-night、catppuccin、solarized、gruvbox、gruvbox-material、one-dark） |
 | `includeUnusedModels` | boolean | `false` | レポートでゼロトークンのモデルを表示 |
 | `autoRefreshEnabled` | boolean | `false` | TUIの自動更新を有効化 |
 | `autoRefreshMs` | number | `60000` | 自動更新間隔（30000-3600000ms） |

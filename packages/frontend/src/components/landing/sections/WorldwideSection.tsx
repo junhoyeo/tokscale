@@ -23,6 +23,10 @@ function formatCompactNumber(n: number): string {
 }
 
 function formatCompactCurrency(n: number): string {
+  if (n >= 1_000_000_000)
+    return "$" + (n / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "B";
+  if (n >= 1_000_000)
+    return "$" + (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
   if (n >= 1_000)
     return "$" + (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
   if (n >= 1) return "$" + n.toFixed(2);

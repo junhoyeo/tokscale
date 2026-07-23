@@ -13,11 +13,11 @@
 //! counts are used. When absent, tokens are estimated at ~4 chars/token,
 //! consistent with tokscale's other estimated sources (see CommandCode, Kiro).
 
-use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite};
+use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -395,7 +395,10 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     };
 
     let mut messages = Vec::new();
-    let mut seen_turns: HashSet<String> = HashSet::new();
+    // Parallel to `messages`: each row's turn_id (if any), so is_turn_start
+    // can be assigned in a second pass once every row's start-anchored
+    // timestamp is known (see below).
+    let mut turn_ids: Vec<Option<String>> = Vec::new();
 
     for row_result in rows {
         let row = match row_result {
@@ -409,10 +412,12 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .as_deref()
             .map(canonicalize_model)
             .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
-        let timestamp = row
-            .completed_at
-            .or(row.started_at)
-            .unwrap_or(fallback_timestamp);
+        let timestamp = resolve_zcode_timestamp(
+            row.started_at,
+            row.completed_at,
+            row.duration_ms,
+            fallback_timestamp,
+        );
 
         let raw_input = row.input_tokens.unwrap_or(0);
         let raw_output = row.output_tokens.unwrap_or(0);
@@ -483,19 +488,76 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         );
         message.dedup_key = Some(format!("zcode-sqlite:{}", row.id));
         message.duration_ms = row.duration_ms.filter(|duration| *duration > 0);
-        if let Some(turn_id) = row.turn_id.as_deref().filter(|id| !id.is_empty()) {
-            message.is_turn_start = seen_turns.insert(turn_id.to_string());
-        }
 
         let workspace_root = row.session_directory.or(row.session_path);
         let workspace_key = workspace_root.as_deref().and_then(normalize_workspace_key);
         let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
         message.set_workspace(workspace_key, workspace_label);
 
+        turn_ids.push(
+            row.turn_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+        );
         messages.push(message);
     }
 
+    // Assign is_turn_start to the earliest-STARTED request per turn, not the
+    // first one encountered in query order (which is ordered by
+    // completed_at). Timestamps are now start-anchored (see above), so a
+    // later-started-but-earlier-completed request could otherwise win the
+    // flag and land the turn in the wrong hour/day bucket downstream (see
+    // lib.rs's hourly turn_count aggregation).
+    let mut earliest_index_per_turn: HashMap<&str, usize> = HashMap::new();
+    for (index, turn_id) in turn_ids.iter().enumerate() {
+        let Some(turn_id) = turn_id.as_deref() else {
+            continue;
+        };
+        earliest_index_per_turn
+            .entry(turn_id)
+            .and_modify(|current| {
+                if messages[index].timestamp < messages[*current].timestamp {
+                    *current = index;
+                }
+            })
+            .or_insert(index);
+    }
+    for index in earliest_index_per_turn.into_values() {
+        messages[index].is_turn_start = true;
+    }
+
     messages
+}
+
+/// Resolve the anchor timestamp for a `model_usage` row.
+///
+/// Prefers `started_at` when it's a positive epoch, since it anchors the
+/// message at the call's actual start, matching `duration_ms`'s own
+/// start-to-end span. When `started_at` is missing or non-positive, falls
+/// back to `completed_at`, back-calculating the start anchor from
+/// `completed_at - duration_ms` when a positive `duration_ms` is available
+/// — anchoring at `completed_at` directly would make sessionize()'s
+/// `[timestamp, timestamp + duration_ms]` span project forward past the
+/// actual completion into phantom idle time (see #890). The back-calculation
+/// is guarded against a non-positive result (which sessionize() silently
+/// drops) by falling back to the unadjusted `completed_at`.
+fn resolve_zcode_timestamp(
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
+    duration_ms: Option<i64>,
+    fallback_timestamp: i64,
+) -> i64 {
+    if let Some(started) = started_at.filter(|value| *value > 0) {
+        return started;
+    }
+    match completed_at {
+        Some(completed) => match duration_ms.filter(|duration| *duration > 0) {
+            Some(duration) => back_anchor_timestamp(completed, duration),
+            None => completed,
+        },
+        None => fallback_timestamp,
+    }
 }
 
 struct ZcodeUsageRow {
@@ -866,7 +928,9 @@ mod tests {
         assert_eq!(msg.provider_id, "zhipu");
         assert_eq!(msg.model_id, "glm-5.2");
         assert_eq!(msg.session_id, "sess_1");
-        assert_eq!(msg.timestamp, 1_782_718_001_000_i64);
+        // Timestamp anchors to `started_at` (the call's start), not
+        // `completed_at` (the call's end). See #890 (follow-up).
+        assert_eq!(msg.timestamp, 1_782_718_000_000_i64);
         assert_eq!(msg.duration_ms, Some(1000));
         assert_eq!(msg.tokens.input, 90);
         assert_eq!(msg.tokens.output, 15);
@@ -911,6 +975,92 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0].is_turn_start);
         assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn test_model_usage_timestamp_is_start_anchored() {
+        // Regression (follow-up to #890): `model_usage` records both
+        // `started_at` and `completed_at` for a call, plus an explicit
+        // `duration_ms`. Anchoring the message timestamp at `completed_at`
+        // would make sessionize()'s `[timestamp, timestamp + duration_ms]`
+        // span project forward past the actual completion into phantom idle
+        // time. The parser must prefer `started_at`.
+        let dir = TempDir::new().unwrap();
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, turn_id, model_id, started_at, completed_at,
+                duration_ms, input_tokens, output_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                "usage_1",
+                "sess_1",
+                "turn_1",
+                "glm-5.2",
+                1_782_718_000_000_i64,
+                1_782_718_005_000_i64,
+                5000_i64,
+                10_i64,
+                1_i64,
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].timestamp, 1_782_718_000_000_i64,
+            "timestamp must anchor at started_at, not completed_at"
+        );
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(5000),
+            "duration_ms must still span from start to completion"
+        );
+    }
+
+    #[test]
+    fn test_model_usage_missing_started_at_back_calculates_from_completed_at() {
+        // Second-round review fix: when `started_at` is NULL but
+        // `completed_at` and a positive `duration_ms` are present, the row
+        // must not stay end-anchored at `completed_at` (a phantom forward
+        // projection past the call's actual completion). Back-calculate the
+        // start anchor from `completed_at - duration_ms` instead.
+        let dir = TempDir::new().unwrap();
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, turn_id, model_id, completed_at,
+                duration_ms, input_tokens, output_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                "usage_1",
+                "sess_1",
+                "turn_1",
+                "glm-5.2",
+                1_782_718_005_000_i64,
+                5000_i64,
+                10_i64,
+                1_i64,
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].timestamp, 1_782_718_000_000_i64,
+            "timestamp must be back-calculated from completed_at - duration_ms when started_at is missing"
+        );
+        assert_eq!(messages[0].duration_ms, Some(5000));
     }
 
     #[test]

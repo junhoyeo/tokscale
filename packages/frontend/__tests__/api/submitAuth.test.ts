@@ -154,6 +154,21 @@ function makeAwaitableBuilder(result: unknown) {
   return builder;
 }
 
+// Drizzle's `sql` template composes nested SQL/StringChunk objects (and
+// `sql.join` adds another nesting level for batched VALUES lists). Rather
+// than assert on the exact nesting shape -- which shifts whenever the query
+// is restructured -- flatten every chunk's raw values into one array so
+// assertions only care that the expected params were embedded somewhere.
+function flattenSqlChunks(node: unknown): unknown[] {
+  if (node && typeof node === "object" && Array.isArray((node as { queryChunks?: unknown }).queryChunks)) {
+    return (node as { queryChunks: unknown[] }).queryChunks.flatMap(flattenSqlChunks);
+  }
+  if (node && typeof node === "object" && Array.isArray((node as { value?: unknown }).value)) {
+    return (node as { value: unknown[] }).value;
+  }
+  return [node];
+}
+
 describe("POST /api/submit auth path", () => {
   it("rejects invalid API tokens through the shared auth service", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({ status: "invalid" });
@@ -405,7 +420,6 @@ describe("POST /api/submit auth path", () => {
 
     let insertCall = 0;
     let submittedDeviceValues: unknown;
-    let dailyInsertValues: unknown;
     let submissionUpdateValues: unknown;
     const tx = {
       update: vi.fn((table: unknown) => {
@@ -448,13 +462,10 @@ describe("POST /api/submit auth path", () => {
         }
 
         return {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -484,6 +495,7 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(tx.insert).toHaveBeenCalledTimes(2);
     expect(tx.insert).toHaveBeenNthCalledWith(2, expect.objectContaining({
       id: "submittedDevices.id",
     }));
@@ -492,13 +504,31 @@ describe("POST /api/submit auth path", () => {
       deviceKey: "dev_test",
       displayName: "Test device",
     }));
-    expect(dailyInsertValues).toEqual([
-      expect.objectContaining({
-        submissionId: "submission-1",
-        submittedDeviceId: "submitted-device-1",
-        date: "2026-04-30",
-      }),
-    ]);
+    expect(tx.execute).toHaveBeenCalledTimes(1);
+    const insertChunks = flattenSqlChunks(tx.execute.mock.calls[0][0]);
+    expect(insertChunks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown"),
+        "submission-1",
+        "submitted-device-1",
+        "2026-04-30",
+      ]),
+    );
+    // Device-scoped upsert: the daily_breakdown INSERT must target the
+    // per-device unique key so independent devices own distinct rows. Naming
+    // the old account-level (submission_id, date) key would collapse them.
+    expect(insertChunks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("ON CONFLICT (submission_id, submitted_device_id, date)"),
+      ]),
+    );
+    expect(
+      insertChunks.some(
+        (chunk) =>
+          typeof chunk === "string" &&
+          /ON CONFLICT \(submission_id, date\)/.test(chunk),
+      ),
+    ).toBe(false);
     expect(submissionUpdateValues).toEqual(
       expect.objectContaining({
         mcpServers: ["github", "slack"],
@@ -595,6 +625,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
@@ -642,7 +673,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -673,6 +704,11 @@ describe("POST /api/submit auth path", () => {
       id: "submittedDevices.id",
     }));
     expect(tx.execute).toHaveBeenCalledTimes(1);
+    // A same-device update keeps ownership implicit in the selected row and
+    // must not rewrite submitted_device_id.
+    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).not.toEqual(
+      expect.arrayContaining(["submitted-device-1"]),
+    );
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       existingBreakdown,
       {
@@ -685,12 +721,184 @@ describe("POST /api/submit auth path", () => {
           },
         },
       },
-      expect.any(Set)
+      expect.any(Set),
+      expect.any(Map)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
       metrics: expect.objectContaining({
         totalTokens: 15,
+        activeDays: 1,
+      }),
+      mode: "merge",
+    }));
+  });
+
+  it("keeps same-client usage additive across devices on the same date", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_phone",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    const incomingBreakdown = {
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    };
+    const existingBreakdown = {
+      codex: {
+        tokens: 12,
+        cost: 0.5,
+        input: 7,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 1,
+        models: { "gpt-5.5": { tokens: 12 } },
+      },
+    };
+    const mergedBreakdown = {
+      codex: {
+        ...incomingBreakdown,
+        models: { "gpt-5.5": incomingBreakdown },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(456);
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      // No rows owned by dev_phone. A different device's row for this date
+      // exists in the database but must not enter this device-scoped merge.
+      [],
+      // Legacy-adoption re-fetch remains empty because another modern device
+      // already owns the existing row.
+      [],
+      [{
+        totalTokens: 27,
+        totalCost: "1.2500",
+        inputTokens: 17,
+        outputTokens: 10,
+        dateStart: "2026-04-30",
+        dateEnd: "2026-04-30",
+        activeDays: 1,
+        rowCount: 2,
+      }],
+      [
+        { sourceBreakdown: existingBreakdown },
+        { sourceBreakdown: mergedBreakdown },
+      ],
+    ];
+
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-phone" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown"),
+        "submitted-device-phone",
+        expect.stringContaining("ON CONFLICT (submission_id, submitted_device_id, date)"),
+      ]),
+    );
+    expect(mockState.mergeClientBreakdownsWithRegressionGuard).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual(expect.objectContaining({
+      success: true,
+      metrics: expect.objectContaining({
+        totalTokens: 27,
         activeDays: 1,
       }),
       mode: "merge",
@@ -780,6 +988,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
@@ -857,7 +1066,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
         callback(tx)
       ),
@@ -894,7 +1103,8 @@ describe("POST /api/submit auth path", () => {
           },
         },
       },
-      expect.any(Set)
+      expect.any(Set),
+      expect.any(Map)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
@@ -1013,7 +1223,6 @@ describe("POST /api/submit auth path", () => {
 
     const submissionUpdateSets: Array<Record<string, unknown>> = [];
     let insertCall = 0;
-    let dailyInsertValues: unknown;
     const tx = {
       update: vi.fn((table: unknown) => {
         const builder = {
@@ -1040,14 +1249,11 @@ describe("POST /api/submit auth path", () => {
         }
 
         const builder = {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
         callback(tx)
       ),
@@ -1070,9 +1276,17 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(dailyInsertValues).toEqual([expect.objectContaining({
-      activeTimeMs: 4_000,
-    })]);
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown"),
+        "submission-1",
+        "submitted-device-2",
+        "2026-04-30",
+        4_000,
+      ]),
+    );
     expect(submissionUpdateSets.at(-1)).toEqual(expect.objectContaining({
       totalActiveTimeMs: 10_000,
       longestContinuousMs: 4_000,
@@ -1171,6 +1385,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
@@ -1226,7 +1441,7 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
         callback(tx)
       ),
@@ -1349,6 +1564,7 @@ describe("POST /api/submit auth path", () => {
     mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
       merged: mergedBreakdown,
       warnings: [],
+      foldPreservedClients: new Set<string>(),
     });
     mockState.recalculateDayTotals.mockReturnValue({
       tokens: 15,
@@ -1382,7 +1598,6 @@ describe("POST /api/submit auth path", () => {
     ];
 
     let insertCall = 0;
-    let dailyInsertValues: unknown;
     const tx = {
       update: vi.fn(() => {
         const builder = {
@@ -1404,14 +1619,11 @@ describe("POST /api/submit auth path", () => {
         }
 
         const builder = {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -1438,12 +1650,12 @@ describe("POST /api/submit auth path", () => {
 
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
-    expect(dailyInsertValues).toBeUndefined();
     expect(tx.execute).toHaveBeenCalledTimes(2);
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       legacyBreakdown,
       incomingBreakdownWithProvenance,
-      expect.any(Set)
+      expect.any(Set),
+      expect.any(Map)
     );
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,
@@ -1453,6 +1665,126 @@ describe("POST /api/submit auth path", () => {
       }),
       mode: "merge",
     }));
+  });
+
+  it("fails the request instead of double-counting when legacy adoption errors non-recoverably", async () => {
+    // Regression: the legacy-adoption savepoint must only swallow a unique
+    // violation (23505) from a concurrent submit. Any other failure (deadlock,
+    // timeout, permission) leaves the legacy rows unclaimed; falling through
+    // would insert the incoming device's overlapping history as a second row
+    // and silently inflate totals. Such errors must propagate as a 500.
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_laptop",
+          name: "Laptop",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 456,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    mockState.clientContributionToBreakdownData.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(123);
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      // First fetchExistingDeviceDays() for dev_laptop: empty, so the route
+      // enters the legacy-adoption branch.
+      [],
+    ];
+
+    const tx = {
+      update: vi.fn(() => {
+        const builder = {
+          set: vi.fn(() => builder),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn(() => builder),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
+      // Savepoint fails with a non-unique error (deadlock, SQLSTATE 40P01).
+      transaction: vi.fn(async () => {
+        throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+      }),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(500);
+    // The merge/write path must never run after a non-recoverable adoption error.
+    expect(mockState.mergeClientBreakdownsWithRegressionGuard).not.toHaveBeenCalled();
+    expect(tx.execute).not.toHaveBeenCalled();
   });
 
   it("keeps legacy daily rows separate when another modern device already submitted", async () => {
@@ -1553,7 +1885,6 @@ describe("POST /api/submit auth path", () => {
     ];
 
     let insertCall = 0;
-    let dailyInsertValues: unknown;
     const tx = {
       update: vi.fn(() => {
         const builder = {
@@ -1575,14 +1906,11 @@ describe("POST /api/submit auth path", () => {
         }
 
         const builder = {
-          values: vi.fn((values: unknown) => {
-            dailyInsertValues = values;
-            return Promise.resolve();
-          }),
+          values: vi.fn(() => Promise.resolve()),
         };
         return builder;
       }),
-      execute: vi.fn(() => Promise.resolve()),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
       // Nested transaction (Postgres SAVEPOINT). Mock just invokes the
       // callback with the same tx so calls inside the savepoint still
       // count toward tx.execute / tx.update / etc.
@@ -1608,14 +1936,18 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(tx.insert).toHaveBeenCalledTimes(2);
-    expect(tx.execute).toHaveBeenCalledTimes(1);
-    expect(dailyInsertValues).toEqual([expect.objectContaining({
-      submittedDeviceId: "submitted-device-2",
-      date: "2026-04-30",
-      tokens: 15,
-      sourceBreakdown: insertedBreakdown,
-    })]);
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown"),
+        "submission-1",
+        "submitted-device-2",
+        "2026-04-30",
+        15,
+        JSON.stringify(insertedBreakdown),
+      ]),
+    );
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).not.toHaveBeenCalled();
     expect(await response.json()).toEqual(expect.objectContaining({
       success: true,

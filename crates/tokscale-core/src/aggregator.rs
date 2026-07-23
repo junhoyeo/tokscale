@@ -102,7 +102,12 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
 
 /// Calculate summary statistics
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
-    let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
+    // Daily totals already saturate at i64::MAX (clamped extreme inputs), so
+    // summing several such days must saturate too rather than overflow.
+    let total_tokens: i64 = contributions
+        .iter()
+        .map(|c| c.totals.tokens)
+        .fold(0i64, i64::saturating_add);
     let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum();
     let active_days = contributions
         .iter()
@@ -162,7 +167,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         }
         let year = &c.date[0..4];
         let entry = years_map.entry(year.to_string()).or_default();
-        entry.tokens += c.totals.tokens;
+        entry.tokens = entry.tokens.saturating_add(c.totals.tokens);
         entry.cost += c.totals.cost;
 
         if entry.start.is_empty() || c.date < entry.start {
@@ -706,7 +711,9 @@ struct YearAccumulator {
     end: String,
 }
 
-fn calculate_intensities(contributions: &mut [DailyContribution]) {
+/// Cost-relative intensity buckets (0-4): each day's intensity is a function
+/// of its cost relative to the maximum cost across all `contributions`.
+pub fn calculate_intensities(contributions: &mut [DailyContribution]) {
     let max_cost = contributions
         .iter()
         .map(|c| c.totals.cost)
@@ -773,6 +780,7 @@ mod tests {
             message_count: 1,
             agent: None,
             dedup_key: None,
+            session_title: None,
             is_turn_start: false,
         }
     }
@@ -992,6 +1000,32 @@ mod tests {
         assert_eq!(summary.total_days, 3);
         assert_eq!(summary.active_days, 2);
         assert!((summary.average_per_day - 0.65).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_extreme_day_totals_saturate_in_summary_and_years() {
+        // Daily totals clamp extreme inputs to i64::MAX; summing several such
+        // days must saturate rather than overflow (debug panic / release wrap).
+        let saturated_day = |date: &str| DailyContribution {
+            date: date.to_string(),
+            totals: DailyTotals {
+                tokens: i64::MAX,
+                cost: 1.0,
+                messages: 1,
+            },
+            intensity: 0,
+            token_breakdown: TokenBreakdown::default(),
+            clients: Vec::new(),
+            active_time_ms: None,
+        };
+        let contributions = vec![saturated_day("2024-01-01"), saturated_day("2024-01-02")];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_tokens, i64::MAX);
+
+        let years = calculate_years(&contributions);
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].total_tokens, i64::MAX);
     }
 
     #[test]
@@ -1361,6 +1395,7 @@ mod tests {
             message_count: 1,
             agent: None,
             dedup_key: None,
+            session_title: None,
             is_turn_start: false,
             duration_ms: None,
         }

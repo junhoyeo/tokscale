@@ -7,8 +7,8 @@ use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
-    normalize_model_for_grouping, parse_local_unified_messages, sessions, ClientId, GroupBy,
-    LocalParseOptions, ModelPerformance,
+    model_name_for_grouping, normalize_model_for_grouping, parse_local_unified_messages, sessions,
+    ClientId, GroupBy, LocalParseOptions, ModelPerformance,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -48,6 +48,7 @@ impl TokenBreakdown {
 #[derive(Debug, Clone)]
 pub struct ModelUsage {
     pub model: String,
+    pub color_key: String,
     pub provider: String,
     pub client: String,
     pub workspace_key: Option<String>,
@@ -141,6 +142,29 @@ pub struct MonthlyUsage {
     pub turn_count: u32,
 }
 
+/// Per-session usage rollup. One row per `(client, session_id)` pair so the
+/// Sessions tab can show cost/tokens broken down by individual conversation
+/// alongside how long the session was active and when it last saw activity.
+#[derive(Debug, Clone)]
+pub struct SessionUsage {
+    pub session_id: String,
+    pub client: String,
+    /// Human-readable session title when the source client stores one
+    /// (e.g. OpenCode's `session.title` column). `None` for clients that
+    /// don't record a title.
+    pub title: Option<String>,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub message_count: u32,
+    pub turn_count: u32,
+    /// Unix-ms timestamp of the first message observed in this session.
+    /// `0` when every message lacked a usable timestamp.
+    pub first_active_ms: i64,
+    /// Unix-ms timestamp of the most recent message observed in this session.
+    /// `0` when every message lacked a usable timestamp.
+    pub last_active_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ContributionDay {
     pub date: NaiveDate,
@@ -162,6 +186,7 @@ pub struct UsageData {
     pub hourly: Vec<HourlyUsage>,
     pub minutely: Vec<MinutelyUsage>,
     pub monthly: Vec<MonthlyUsage>,
+    pub sessions: Vec<SessionUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -430,9 +455,12 @@ impl DataLoader {
         let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
         let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut session_map: HashMap<String, SessionUsage> = HashMap::new();
 
         for msg in &messages {
-            let normalized_model = normalize_model_for_grouping(&msg.model_id);
+            let normalized_model =
+                model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
+            let model_key = normalize_model_for_grouping(&msg.model_id);
             let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
             let key = match group_by {
                 GroupBy::Model => normalized_model.clone(),
@@ -452,6 +480,7 @@ impl DataLoader {
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
+                color_key: model_key.clone(),
                 provider: msg.provider_id.clone(),
                 client: msg.client.clone(),
                 workspace_key: if *group_by == GroupBy::WorkspaceModel {
@@ -658,7 +687,7 @@ impl DataLoader {
                             &msg.provider_id,
                             &normalized_model,
                         ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
+                        color_key: model_color_key(group_by, &msg.provider_id, &model_key),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                         messages: 0,
@@ -748,7 +777,7 @@ impl DataLoader {
                             &msg.provider_id,
                             &normalized_model,
                         ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
+                        color_key: model_color_key(group_by, &msg.provider_id, &model_key),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                     });
@@ -842,11 +871,7 @@ impl DataLoader {
                                 &msg.provider_id,
                                 &normalized_model,
                             ),
-                            color_key: model_color_key(
-                                group_by,
-                                &msg.provider_id,
-                                &normalized_model,
-                            ),
+                            color_key: model_color_key(group_by, &msg.provider_id, &model_key),
                             tokens: TokenBreakdown::default(),
                             cost: 0.0,
                         });
@@ -871,6 +896,79 @@ impl DataLoader {
                     .reasoning
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
                 m_model.cost += m_cost;
+            }
+
+            // Session aggregation: one bucket per (client, session_id) so the
+            // Sessions tab can show cost/tokens per individual conversation.
+            // Skips messages with an empty session_id (some legacy/scanner
+            // records lack one) rather than lumping them into a single bogus
+            // "no-session" row.
+            if !msg.session_id.is_empty() {
+                let session_key = format!("{}:{}", msg.client, msg.session_id);
+                let session_entry =
+                    session_map
+                        .entry(session_key)
+                        .or_insert_with(|| SessionUsage {
+                            session_id: msg.session_id.clone(),
+                            client: msg.client.clone(),
+                            title: None,
+                            tokens: TokenBreakdown::default(),
+                            cost: 0.0,
+                            message_count: 0,
+                            turn_count: 0,
+                            first_active_ms: 0,
+                            last_active_ms: 0,
+                        });
+
+                session_entry.tokens.input = session_entry
+                    .tokens
+                    .input
+                    .saturating_add(msg.tokens.input.max(0) as u64);
+                session_entry.tokens.output = session_entry
+                    .tokens
+                    .output
+                    .saturating_add(msg.tokens.output.max(0) as u64);
+                session_entry.tokens.cache_read = session_entry
+                    .tokens
+                    .cache_read
+                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
+                session_entry.tokens.cache_write = session_entry
+                    .tokens
+                    .cache_write
+                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
+                session_entry.tokens.reasoning = session_entry
+                    .tokens
+                    .reasoning
+                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
+                session_entry.cost += msg_cost;
+                session_entry.message_count = session_entry
+                    .message_count
+                    .saturating_add(msg.message_count.max(0) as u32);
+                if msg.is_turn_start {
+                    session_entry.turn_count += 1;
+                }
+
+                let ts = message_timestamp_ms(msg);
+                if ts > 0 {
+                    if session_entry.first_active_ms == 0 || ts < session_entry.first_active_ms {
+                        session_entry.first_active_ms = ts;
+                    }
+                    if ts > session_entry.last_active_ms {
+                        session_entry.last_active_ms = ts;
+                    }
+                }
+
+                // Adopt the first non-empty session_title seen across the
+                // session's messages. Parsers that don't populate the field
+                // leave it `None` and the Sessions tab falls back to the ID.
+                if session_entry.title.is_none() {
+                    if let Some(ref title) = msg.session_title {
+                        let trimmed = title.trim();
+                        if !trimmed.is_empty() {
+                            session_entry.title = Some(trimmed.to_string());
+                        }
+                    }
+                }
             }
         }
 
@@ -913,7 +1011,22 @@ impl DataLoader {
 
         let monthly = aggregate_monthly_from_daily(&daily);
 
-        let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
+        let mut sessions: Vec<SessionUsage> = session_map.into_values().collect();
+        sessions.sort_by(|a, b| {
+            b.cost
+                .total_cmp(&a.cost)
+                .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
+                .then_with(|| a.client.cmp(&b.client))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+
+        // Plain `.sum()` panics (debug) / wraps (release) on overflow across
+        // many models; a single corrupt/huge bucket must not poison the
+        // whole total, so fold with saturating_add like `TokenBreakdown::total`.
+        let total_tokens: u64 = models
+            .iter()
+            .map(|m| m.tokens.total())
+            .fold(0u64, u64::saturating_add);
         let total_cost: f64 = models
             .iter()
             .map(|m| if m.cost.is_finite() { m.cost } else { 0.0 })
@@ -929,6 +1042,7 @@ impl DataLoader {
             hourly,
             minutely,
             monthly,
+            sessions,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -942,6 +1056,29 @@ impl DataLoader {
 
 fn parse_date(date_str: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+}
+
+/// Resolve a message to a Unix-ms timestamp, falling back to the `date`
+/// string's midnight when `timestamp` is missing/zero. Local midnight is
+/// preferred so the date renders on the same calendar day in the user's
+/// timezone. DST edge cases are handled explicitly:
+/// - Fall-back overlap (two valid midnights): take the earliest so the date
+///   stays on the correct day.
+/// - Spring-forward gap (midnight doesn't exist): fall back to UTC midnight
+///   rather than silently returning 0 and losing the session boundary.
+fn message_timestamp_ms(msg: &UnifiedMessage) -> i64 {
+    if msg.timestamp > 0 {
+        return msg.timestamp;
+    }
+    use chrono::TimeZone;
+    parse_date(&msg.date)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| match Local.from_local_datetime(&dt) {
+            chrono::LocalResult::Single(local) => local.timestamp_millis(),
+            chrono::LocalResult::Ambiguous(earliest, _) => earliest.timestamp_millis(),
+            chrono::LocalResult::None => dt.and_utc().timestamp_millis(),
+        })
+        .unwrap_or(0)
 }
 
 /// Convert Unix ms timestamp to a NaiveDateTime truncated to the hour (local tz).
@@ -1863,6 +2000,40 @@ mod tests {
         assert_eq!(usage.agents[0].message_count, 2);
         assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
         assert_eq!(usage.agents[0].tokens.total(), 45);
+    }
+
+    #[test]
+    fn total_tokens_saturates_across_corrupt_model_buckets() {
+        let loader = DataLoader::new(None);
+        // Three distinct models each carrying i64::MAX input tokens: no
+        // single model bucket overflows (TokenBreakdown::total saturates
+        // internally), but summing three of them plainly overflows u64.
+        let messages: Vec<UnifiedMessage> = (0..3)
+            .map(|i| {
+                UnifiedMessage::new(
+                    "claude",
+                    format!("model-{i}"),
+                    "anthropic",
+                    format!("session-{i}"),
+                    1_735_689_600_000,
+                    tokscale_core::TokenBreakdown {
+                        input: i64::MAX,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                )
+            })
+            .collect();
+
+        let usage = loader
+            .aggregate_messages(messages, &GroupBy::Model)
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 3);
+        assert_eq!(usage.total_tokens, u64::MAX);
     }
 
     #[test]

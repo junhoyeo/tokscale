@@ -98,6 +98,26 @@ pub(crate) fn read_file_or_none(path: &Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
+/// Back-calculate a start anchor from a recorded end timestamp and an elapsed
+/// duration: `end - duration`.
+///
+/// Several session sources only record the timestamp at which a call/turn
+/// *finished*, plus its elapsed duration. Anchoring the message at that end
+/// timestamp directly would make `sessionize()`'s
+/// `[timestamp, timestamp + duration_ms]` span project forward past the
+/// actual completion into phantom idle time (see #890), so callers
+/// back-calculate the start instead. That subtraction can itself produce a
+/// non-positive result when `duration` exceeds `end` (e.g. a corrupt or
+/// clock-skewed duration value) — `sessionize()` silently drops any message
+/// with `timestamp <= 0`, so this guards against that by falling back to the
+/// unadjusted `end` timestamp when the back-calculated candidate would not
+/// be positive.
+pub(crate) fn back_anchor_timestamp(end: i64, duration: i64) -> i64 {
+    end.checked_sub(duration)
+        .filter(|candidate| *candidate > 0)
+        .unwrap_or(end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

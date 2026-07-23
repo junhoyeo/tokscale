@@ -901,8 +901,7 @@ fn merge_claude_duplicate(
                 // streaming chunks), so never let a later-processed duplicate
                 // with an earlier completion timestamp shrink a duration
                 // already established by another duplicate.
-                existing.duration_ms =
-                    Some(existing.duration_ms.unwrap_or(0).max(new_duration));
+                existing.duration_ms = Some(existing.duration_ms.unwrap_or(0).max(new_duration));
             }
         }
     }

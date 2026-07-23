@@ -162,6 +162,7 @@ fn current_count_label(app: &App) -> String {
             format!(" ({} days)", app.get_sorted_monthly_detail_days().len())
         }
         Tab::Monthly => format!(" ({} months)", app.data.monthly.len()),
+        Tab::Sessions => format!(" ({} sessions)", app.data.sessions.len()),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }
@@ -435,6 +436,10 @@ mod tests {
         assert_eq!(
             current_count_label(&make_app_on(Tab::Monthly)),
             " (0 months)"
+        );
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Sessions)),
+            " (0 sessions)"
         );
         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
     }

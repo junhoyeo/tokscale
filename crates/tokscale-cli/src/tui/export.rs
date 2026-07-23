@@ -62,6 +62,23 @@ pub fn build_export_json(data: &UsageData) -> Result<String> {
             "turnCount": m.turn_count,
             "cost": m.cost
         })).collect::<Vec<_>>(),
+        "sessions": data.sessions.iter().map(|s| json!({
+            "sessionId": s.session_id,
+            "client": s.client,
+            "title": s.title,
+            "tokens": {
+                "input": s.tokens.input,
+                "output": s.tokens.output,
+                "cacheRead": s.tokens.cache_read,
+                "cacheWrite": s.tokens.cache_write,
+                "total": s.tokens.total()
+            },
+            "messageCount": s.message_count,
+            "turnCount": s.turn_count,
+            "cost": s.cost,
+            "firstActiveMs": s.first_active_ms,
+            "lastActiveMs": s.last_active_ms
+        })).collect::<Vec<_>>(),
         "totals": {
             "tokens": data.total_tokens,
             "cost": data.total_cost

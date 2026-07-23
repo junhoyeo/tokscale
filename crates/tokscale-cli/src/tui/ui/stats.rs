@@ -222,7 +222,11 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .flat_map(|w| w.iter())
                 .filter_map(|d| d.as_ref())
                 .map(|d| d.tokens)
-                .sum()
+                // Plain `.sum()` panics (debug) / wraps (release) if a single
+                // corrupt/huge day's token count overflows u64 across the
+                // graph; saturate instead so one bad day doesn't poison the
+                // whole panel's total.
+                .fold(0u64, u64::saturating_add)
         })
         .unwrap_or(0);
 
@@ -268,7 +272,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     });
     let favorite_model_name = favorite_model.map(|m| m.model.as_str()).unwrap_or("N/A");
     let model_color = favorite_model
-        .map(|m| app.model_color_for(&m.provider, &m.model))
+        .map(|m| app.model_color_for(&m.provider, &m.color_key))
         .unwrap_or_else(|| app.model_color("N/A"));
     let sessions: u32 = app.data.models.iter().map(|m| m.session_count).sum();
 
@@ -670,5 +674,67 @@ fn truncate_model_name(s: &str, max_chars: usize) -> String {
     } else {
         let head: String = s.chars().take(max_chars - 1).collect();
         format!("{}…", head)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{ContributionDay, GraphData};
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn make_app() -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        App::new_with_cached_data(config, None).unwrap()
+    }
+
+    fn corrupt_day(date: NaiveDate) -> ContributionDay {
+        ContributionDay {
+            date,
+            tokens: u64::MAX,
+            cost: 0.0,
+            intensity: 1.0,
+        }
+    }
+
+    #[test]
+    fn saturated_graph_days_render_without_overflowing_total() {
+        let mut app = make_app();
+        // Three days each at u64::MAX: no single day overflows, but a plain
+        // `.sum()` across them does. render_stats_panel must saturate
+        // instead of panicking (debug) or wrapping (release).
+        app.data.graph = Some(GraphData {
+            weeks: vec![vec![
+                Some(corrupt_day(NaiveDate::from_ymd_opt(2026, 5, 27).unwrap())),
+                Some(corrupt_day(NaiveDate::from_ymd_opt(2026, 5, 28).unwrap())),
+                Some(corrupt_day(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap())),
+            ]],
+        });
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_stats_panel(frame, &app, Rect::new(0, 0, 80, 20)))
+            .unwrap();
+
+        let body = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect::<String>();
+        assert!(!body.trim().is_empty());
     }
 }

@@ -165,6 +165,7 @@ export async function getPublicProfileResponse(
             cliVersion: submissions.cliVersion,
             schemaVersion: submissions.schemaVersion,
             mcpServers: submissions.mcpServers,
+            hasBackfill: submissions.hasBackfill,
           })
           .from(submissions)
           .where(eq(submissions.userId, user.id))
@@ -625,6 +626,9 @@ export async function getPublicProfileResponse(
         ? periodModels
         : latestSubmission?.modelsUsed || [],
       mcpServers: latestSubmission?.mcpServers || [],
+      // Sticky per-user flag: true once any accepted submission carried a
+      // backfill provenance tag (badge-only; ranking is unaffected).
+      hasBackfill: latestSubmission?.hasBackfill ?? false,
       modelUsage,
       contributions: graphContributions,
     });
