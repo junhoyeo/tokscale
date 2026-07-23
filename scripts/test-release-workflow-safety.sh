@@ -10,8 +10,27 @@ write_good_workflows() {
   local work="$1"
   mkdir -p \
     "${work}/.github/workflows" \
+    "${work}/packages/cli" \
+    "${work}/packages/cli-android-arm64" \
     "${work}/packages/cli-darwin-x64" \
     "${work}/packages/cli-linux-x64-gnu"
+  cat > "${work}/packages/cli/package.json" <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli",
+  "version": "3.0.0",
+  "optionalDependencies": {
+    "@tokscale/cli-android-arm64": "3.0.0",
+    "@tokscale/cli-darwin-x64": "3.0.0",
+    "@tokscale/cli-linux-x64-gnu": "3.0.0"
+  }
+}
+EOF_MANIFEST
+  cat > "${work}/packages/cli-android-arm64/package.json" <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli-android-arm64",
+  "version": "3.0.0"
+}
+EOF_MANIFEST
   cat > "${work}/packages/cli-darwin-x64/package.json" <<'EOF_MANIFEST'
 {
   "name": "@tokscale/cli-darwin-x64",
@@ -58,6 +77,13 @@ jobs:
             build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
             bin_name: tokscale
+          - host: ubuntu-latest
+            target: aarch64-linux-android
+            package_dir: cli-android-arm64
+            artifact_name: cli-binary-aarch64-linux-android
+            build: cargo build --release -p tokscale-cli --target aarch64-linux-android
+            strip: ""
+            bin_name: tokscale
     steps:
       - uses: actions/download-artifact@v6
         with:
@@ -103,6 +129,10 @@ jobs:
             package_dir: cli-linux-x64-gnu
             artifact_name: cli-binary-x86_64-unknown-linux-gnu
             binary_name: tokscale
+          - package_name: '@tokscale/cli-android-arm64'
+            package_dir: cli-android-arm64
+            artifact_name: cli-binary-aarch64-linux-android
+            binary_name: tokscale
 EOF_YAML
 }
 
@@ -116,6 +146,70 @@ test_accepts_matching_publish_and_native_workflows() {
   )
 
   grep -q "Release workflow safety OK" "${TMP_DIR}/good-output.txt"
+}
+
+test_accepts_workflows_without_android_platform() {
+  local work="${TMP_DIR}/without-android"
+  write_good_workflows "${work}"
+  python3 - \
+    "${work}/packages/cli/package.json" \
+    "${work}/.github/workflows/build-native.yml" \
+    "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+manifest = json.loads(manifest_path.read_text())
+manifest["optionalDependencies"].pop("@tokscale/cli-android-arm64")
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+build_path = pathlib.Path(sys.argv[2])
+build_text = build_path.read_text()
+build_text = build_text.replace(
+    """          - host: ubuntu-latest
+            target: aarch64-linux-android
+            package_dir: cli-android-arm64
+            artifact_name: cli-binary-aarch64-linux-android
+            build: cargo build --release -p tokscale-cli --target aarch64-linux-android
+            strip: ""
+            bin_name: tokscale
+""",
+    "",
+)
+build_text = build_text.replace(
+    """      - name: Setup Android cross toolchain
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: aarch64-linux-android
+          runner: qemu-user
+      - name: Smoke Android binary
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version
+""",
+    "",
+)
+build_path.write_text(build_text)
+
+publish_path = pathlib.Path(sys.argv[3])
+publish_text = publish_path.read_text().replace(
+    """          - package_name: '@tokscale/cli-android-arm64'
+            package_dir: cli-android-arm64
+            artifact_name: cli-binary-aarch64-linux-android
+            binary_name: tokscale
+""",
+    "",
+)
+publish_path.write_text(publish_text)
+PY
+
+  (
+    cd "${work}"
+    python3 "${SCRIPT_UNDER_TEST}" >"${TMP_DIR}/without-android-output.txt" 2>&1
+  )
+
+  grep -q "Release workflow safety OK" "${TMP_DIR}/without-android-output.txt"
 }
 
 test_reads_workflows_as_utf8_when_locale_is_non_utf8() {
@@ -152,6 +246,29 @@ PY
   fi
 
   grep -q "canonical build matrix has unknown targets" "${output}"
+}
+
+test_rejects_unmapped_cli_platform_dependency() {
+  local work="${TMP_DIR}/unmapped-platform"
+  write_good_workflows "${work}"
+  python3 - "${work}/packages/cli/package.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+manifest = json.loads(path.read_text())
+manifest["optionalDependencies"]["@tokscale/cli-plan9-x64"] = "3.0.0"
+path.write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+
+  local output="${TMP_DIR}/unmapped-platform-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject an unmapped CLI platform dependency" >&2
+    return 1
+  fi
+
+  grep -q "CLI optionalDependencies have unmapped platform packages: \['cli-plan9-x64'\]" "${output}"
 }
 
 test_rejects_missing_canonical_target() {
@@ -291,6 +408,36 @@ PY
   local output="${TMP_DIR}/missing-android-runner-output.txt"
   if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
     echo "Expected workflow safety check to require the Android QEMU runner" >&2
+    return 1
+  fi
+
+  grep -q "build-native workflow must configure the Android QEMU runner" "${output}"
+}
+
+test_rejects_android_runner_outside_build_job() {
+  local work="${TMP_DIR}/android-runner-outside-build"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/build-native.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+runner = """      - name: Setup Android cross toolchain
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: aarch64-linux-android
+          runner: qemu-user
+"""
+text = text.replace(runner, "", 1)
+text += "\n  decoy:\n    steps:\n" + runner
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/android-runner-outside-build-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject an Android runner outside the build job" >&2
     return 1
   fi
 
@@ -437,13 +584,16 @@ PY
 }
 
 test_accepts_matching_publish_and_native_workflows
+test_accepts_workflows_without_android_platform
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
+test_rejects_unmapped_cli_platform_dependency
 test_rejects_missing_canonical_target
 test_rejects_publish_build_call_drift
 test_rejects_missing_bumped_manifest_handoff
 test_rejects_missing_android_smoke
 test_rejects_missing_android_qemu_runner
+test_rejects_android_runner_outside_build_job
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
 test_rejects_missing_release_artifact_smoke_job

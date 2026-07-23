@@ -8,6 +8,7 @@ import sys
 ROOT = pathlib.Path.cwd()
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish-cli.yml"
 BUILD_NATIVE_WORKFLOW = ROOT / ".github/workflows/build-native.yml"
+CLI_PACKAGE_MANIFEST = ROOT / "packages/cli/package.json"
 REQUIRED_ENV_KEYS = ("MACOSX_DEPLOYMENT_TARGET", "CARGO_TERM_COLOR", "CARGO_INCREMENTAL")
 REQUIRED_BUILD_FIELDS = (
     "host",
@@ -146,6 +147,21 @@ def package_manifest_name(package_dir: str) -> str:
     return name
 
 
+def cli_platform_package_dirs() -> set[str]:
+    if not CLI_PACKAGE_MANIFEST.exists():
+        fail(f"Missing CLI package manifest: {CLI_PACKAGE_MANIFEST}")
+    manifest = json.loads(CLI_PACKAGE_MANIFEST.read_text(encoding="utf-8"))
+    optional_dependencies = manifest.get("optionalDependencies")
+    if not isinstance(optional_dependencies, dict):
+        fail(f"{CLI_PACKAGE_MANIFEST} missing optionalDependencies")
+    prefix = "@tokscale/"
+    return {
+        package_name.removeprefix(prefix)
+        for package_name in optional_dependencies
+        if package_name.startswith(f"{prefix}cli-")
+    }
+
+
 def block_contains(block: list[str], needle: str) -> bool:
     return any(needle in line for line in uncommented_lines(block))
 
@@ -200,10 +216,18 @@ def main() -> None:
 
     native_build = by_target(matrix_settings(native_lines, "build"), "build-native")
 
+    cli_package_dirs = cli_platform_package_dirs()
+    mapped_package_dirs = set(TARGET_PACKAGES.values())
+    unmapped_package_dirs = cli_package_dirs - mapped_package_dirs
+    if unmapped_package_dirs:
+        errors.append(
+            f"CLI optionalDependencies have unmapped platform packages: {sorted(unmapped_package_dirs)}"
+        )
+
     expected_targets = {
         target
         for target, package_dir in TARGET_PACKAGES.items()
-        if (ROOT / "packages" / package_dir / "package.json").exists()
+        if package_dir in cli_package_dirs
     }
     missing_targets = expected_targets - set(native_build)
     unknown_targets = set(native_build) - expected_targets
@@ -234,33 +258,35 @@ def main() -> None:
             )
 
     native_uncommented = uncommented_lines(native_lines)
+    native_build_uncommented = uncommented_lines(job_block(native_lines, "build"))
     if not any(line.strip() == "workflow_call:" for line in native_uncommented):
         errors.append("build-native workflow must expose workflow_call")
     if not any("bumped-manifests:" in line for line in native_uncommented):
         errors.append("build-native workflow must accept bumped-manifests input")
     if not any("name: ${{ inputs.bumped-manifests }}" in line for line in native_uncommented):
         errors.append("build-native workflow must download the bumped-manifests input")
-    android_runner = "\n".join(
-        [
-            "      - name: Setup Android cross toolchain",
-            "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
-            "        uses: taiki-e/setup-cross-toolchain-action@v1",
-            "        with:",
-            "          target: aarch64-linux-android",
-            "          runner: qemu-user",
-        ]
-    )
-    if android_runner not in "\n".join(native_uncommented):
-        errors.append("build-native workflow must configure the Android QEMU runner")
-    android_smoke = "\n".join(
-        [
-            "      - name: Smoke Android binary",
-            "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
-            "        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version",
-        ]
-    )
-    if android_smoke not in "\n".join(native_uncommented):
-        errors.append("build-native workflow must execute the Android binary smoke")
+    if "aarch64-linux-android" in native_build:
+        android_runner = "\n".join(
+            [
+                "      - name: Setup Android cross toolchain",
+                "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
+                "        uses: taiki-e/setup-cross-toolchain-action@v1",
+                "        with:",
+                "          target: aarch64-linux-android",
+                "          runner: qemu-user",
+            ]
+        )
+        if android_runner not in "\n".join(native_build_uncommented):
+            errors.append("build-native workflow must configure the Android QEMU runner")
+        android_smoke = "\n".join(
+            [
+                "      - name: Smoke Android binary",
+                "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
+                "        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version",
+            ]
+        )
+        if android_smoke not in "\n".join(native_build_uncommented):
+            errors.append("build-native workflow must execute the Android binary smoke")
 
     publish_build_block = job_block(publish_lines, "build-cli-binary")
     if not block_contains(
