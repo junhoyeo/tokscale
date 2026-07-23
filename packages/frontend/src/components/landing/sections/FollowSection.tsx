@@ -29,13 +29,22 @@ export function FollowSection() {
                 <br />
                 Don&#39;t miss the next one.
               </HeadingText>
-              <FollowLink
-                href="https://github.com/junhoyeo"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Follow @junhoyeo on GitHub
-              </FollowLink>
+              <Actions>
+                <FollowLink
+                  href="https://github.com/junhoyeo"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Follow @junhoyeo on GitHub
+                </FollowLink>
+                <SponsorLink
+                  href="https://github.com/sponsors/junhoyeo"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Sponsor Tokscale
+                </SponsorLink>
+              </Actions>
             </TextGroup>
           </MiddleContentInner>
         </MiddleContentOuter>
@@ -183,7 +192,24 @@ const HeadingText = styled.p`
   }
 `;
 
+const Actions = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-width: 0;
+
+  @media (max-width: 480px) {
+    flex-direction: column;
+    width: 100%;
+  }
+`;
+
 const FollowLink = styled.a`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   font-family: var(--font-figtree), "Figtree", sans-serif;
   font-weight: 600;
   font-size: 24px;
@@ -192,10 +218,14 @@ const FollowLink = styled.a`
   text-align: center;
   color: #b6c0d4;
   text-decoration: none;
-  transition: color 0.15s;
 
   &:hover {
     color: #ffffff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #75b6ff;
+    outline-offset: 3px;
   }
 
   @media (max-width: 768px) {
@@ -203,7 +233,42 @@ const FollowLink = styled.a`
   }
 
   @media (max-width: 480px) {
+    min-height: 48px;
     font-size: 18px;
+  }
+`;
+
+const SponsorLink = styled.a`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 18px;
+  flex-shrink: 0;
+  border: 1px solid rgba(135, 240, 242, 0.32);
+  border-radius: 12px;
+  background: rgba(0, 115, 255, 0.08);
+  font-family: var(--font-figtree), "Figtree", sans-serif;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 1.2em;
+  color: #d8f8ff;
+  text-decoration: none;
+
+  &:hover {
+    border-color: rgba(135, 240, 242, 0.56);
+    background: rgba(0, 115, 255, 0.16);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #75b6ff;
+    outline-offset: 3px;
+  }
+
+  @media (max-width: 480px) {
+    width: 100%;
+    max-width: 240px;
+    min-height: 48px;
   }
 `;
 
