@@ -282,12 +282,13 @@ def main() -> None:
     native_on_block = mapping_block(native_lines, "on", 0)
     native_workflow_call_block = mapping_block(native_on_block, "workflow_call", 2)
     native_pull_request_block = mapping_block(native_on_block, "pull_request", 2)
+    native_pull_request_paths = mapping_block(native_pull_request_block, "paths", 4)
     native_build_uncommented = uncommented_lines(job_block(native_lines, "build"))
     if not native_workflow_call_block:
         errors.append("build-native workflow must expose workflow_call")
     if not any(
         line.strip() == '- "packages/cli/package.json"'
-        for line in uncommented_lines(native_pull_request_block)
+        for line in uncommented_lines(native_pull_request_paths)
     ):
         errors.append("build-native workflow must run for CLI package manifest changes")
     if not any(

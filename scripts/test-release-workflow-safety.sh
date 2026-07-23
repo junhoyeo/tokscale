@@ -283,7 +283,11 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 text = path.read_text().replace('      - "packages/cli/package.json"\n', "", 1)
-text += '\nx-decoy:\n  - "packages/cli/package.json"\n'
+text = text.replace(
+    "  pull_request:\n",
+    '  pull_request:\n    branches:\n      - "packages/cli/package.json"\n',
+    1,
+)
 path.write_text(text)
 PY
 
