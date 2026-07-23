@@ -674,7 +674,34 @@ pub(crate) fn discover_micode_dbs(data_dir: &Path) -> Vec<PathBuf> {
     dbs
 }
 
-/// Discover Devin CLI `sessions.db` files from the default path and any
+/// Discover MiMo Code SQLite databases across several data directories,
+/// returning a single sorted list with duplicate files removed.
+///
+/// MiMo Code can be reached from more than one root (the XDG data dir and
+/// orca's hook sandbox), so this unions `discover_micode_dbs` over each
+/// directory. Files that canonicalize to the same path (e.g. one root is a
+/// symlink to another) are collapsed: the row-id dedup fallback in
+/// `parse_micode_sqlite` namespaces by the *path string*, so scanning the same
+/// file under two different path spellings would otherwise double-count any
+/// message that lacks an embedded id.
+pub(crate) fn discover_micode_dbs_in_dirs(
+    dirs: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut dbs = Vec::new();
+
+    for dir in dirs {
+        for db_path in discover_micode_dbs(&dir) {
+            let key = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
+            if seen.insert(key) {
+                dbs.push(db_path);
+            }
+        }
+    }
+
+    dbs.sort_unstable();
+    dbs
+}
 /// configured extra scan roots. Extra roots preserve the generic scanner's
 /// behavior: a root may be the database itself or a directory containing one
 /// or more `sessions.db` files.
@@ -1278,18 +1305,29 @@ fn scan_all_clients_with_env_strategy_inner(
         );
     }
 
-    // MiMo Code: SQLite database(s) at ~/.local/share/mimocode/mimocode*.db
+    // MiMo Code: SQLite database(s). The primary location is the XDG data dir
+    // (`~/.local/share/mimocode/mimocode*.db`). MiMo Code driven through orca's
+    // hook sandbox additionally writes to
+    // `~/Library/Application Support/orca/mimocode-hooks/shared/data/`, and that
+    // copy can hold sessions the XDG copy is missing (scanning only XDG then
+    // undercounts). Scan both so the totals are the union; the cross-file dedup
+    // in the parse loop (keyed on the globally unique embedded message id)
+    // collapses any message present in both locations, so overlapping data is
+    // never double-counted.
     if enabled.contains(&ClientId::MiMoCode) {
-        // Derive the data dir from the client metadata so the scan path stays
-        // in sync with `ClientId::MiMoCode` (XdgData root + `mimocode`) rather
-        // than duplicating it here.
+        // Derive the primary data dir from the client metadata so the scan path
+        // stays in sync with `ClientId::MiMoCode` (XdgData root + `mimocode`)
+        // rather than duplicating it here.
         let micode_data_dir = PathBuf::from(
             ClientId::MiMoCode
                 .data()
                 .resolve_path_with_env_strategy(home_dir, use_env_roots),
         );
-        // `discover_micode_dbs` already returns a sorted list.
-        result.micode_dbs = discover_micode_dbs(&micode_data_dir);
+        let orca_data_dir = PathBuf::from(format!(
+            "{}/Library/Application Support/orca/mimocode-hooks/shared/data",
+            home_dir
+        ));
+        result.micode_dbs = discover_micode_dbs_in_dirs([micode_data_dir, orca_data_dir]);
     }
 
     if enabled.contains(&ClientId::Kimi) {
@@ -2579,6 +2617,59 @@ mod tests {
         // WAL/SHM sidecar files share the prefix — must be ignored.
         assert!(!is_micode_db_filename("mimocode.db-wal"));
         assert!(!is_micode_db_filename("mimocode.db-shm"));
+    }
+
+    #[test]
+    fn test_discover_micode_dbs_in_dirs_unions_xdg_and_orca_roots() {
+        let dir = TempDir::new().unwrap();
+        // Primary XDG location.
+        let xdg_dir = dir.path().join(".local/share/mimocode");
+        fs::create_dir_all(&xdg_dir).unwrap();
+        let xdg_db = xdg_dir.join("mimocode.db");
+        fs::write(&xdg_db, b"").unwrap();
+
+        // orca hook-sandbox location, holding both the default db and a
+        // channel-suffixed one that the XDG root is missing.
+        let orca_dir = dir
+            .path()
+            .join("Library/Application Support/orca/mimocode-hooks/shared/data");
+        fs::create_dir_all(&orca_dir).unwrap();
+        let orca_db = orca_dir.join("mimocode.db");
+        let orca_channel_db = orca_dir.join("mimocode-nightly.db");
+        fs::write(&orca_db, b"").unwrap();
+        fs::write(&orca_channel_db, b"").unwrap();
+        // Sidecar files must be ignored across both roots.
+        fs::write(orca_dir.join("mimocode.db-wal"), b"").unwrap();
+
+        let dbs = discover_micode_dbs_in_dirs([xdg_dir, orca_dir]);
+
+        assert!(dbs.contains(&xdg_db), "XDG db should be discovered");
+        assert!(dbs.contains(&orca_db), "orca db should be discovered");
+        assert!(
+            dbs.contains(&orca_channel_db),
+            "orca channel db should be discovered"
+        );
+        assert_eq!(dbs.len(), 3, "no sidecar files, no missed dbs");
+    }
+
+    #[test]
+    fn test_discover_micode_dbs_in_dirs_collapses_same_file_via_symlink() {
+        // A symlink making two roots resolve to the same file must not yield the
+        // db twice, or its non-embedded-id messages would be double-counted.
+        let dir = TempDir::new().unwrap();
+        let real_dir = dir.path().join("real/mimocode");
+        fs::create_dir_all(&real_dir).unwrap();
+        let real_db = real_dir.join("mimocode.db");
+        fs::write(&real_db, b"").unwrap();
+
+        let link_dir = dir.path().join("linked");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_dir(&real_dir, &link_dir).unwrap();
+
+        let dbs = discover_micode_dbs_in_dirs([real_dir, link_dir]);
+        assert_eq!(dbs.len(), 1, "symlinked duplicate must collapse to one db");
     }
 
     #[test]
