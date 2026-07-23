@@ -672,52 +672,50 @@ pub(crate) fn discover_micode_dbs(data_dir: &Path) -> Vec<PathBuf> {
     dbs
 }
 
-/// Discover MiMo Code SQLite databases across several data directories,
-/// returning a single sorted list with duplicate files removed.
+/// Collapse a stream of discovered database paths into a sorted, duplicate-free
+/// list, keeping the first spelling seen of any file.
 ///
-/// MiMo Code can be reached from more than one root (the XDG data dir and
-/// orca's hook sandbox), so this unions `discover_micode_dbs` over each
-/// directory. Files that canonicalize to the same path (e.g. one root is a
-/// symlink to another) are collapsed: the row-id dedup fallback in
-/// `parse_micode_sqlite` namespaces by the *path string*, so scanning the same
-/// file under two different path spellings would otherwise double-count any
-/// message that lacks an embedded id.
-pub(crate) fn discover_micode_dbs_in_dirs(
-    dirs: impl IntoIterator<Item = PathBuf>,
-) -> Vec<PathBuf> {
+/// Two paths that `canonicalize` to the same file (e.g. one scan root is a
+/// symlink to another) are treated as one: the row-id dedup fallback in the
+/// SQLite parsers namespaces by the *path string*, so scanning a single file
+/// under two spellings would otherwise double-count any message that lacks an
+/// embedded id. Paths that fail to canonicalize (missing file, permissions)
+/// fall back to their literal form, so an identical spelling still dedups.
+fn dedup_dbs_by_canonical_path(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut dbs = Vec::new();
 
-    for dir in dirs {
-        for db_path in discover_micode_dbs(&dir) {
-            let key = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
-            if seen.insert(key) {
-                dbs.push(db_path);
-            }
+    for db_path in paths {
+        let key = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
+        if seen.insert(key) {
+            dbs.push(db_path);
         }
     }
 
     dbs.sort_unstable();
     dbs
 }
+
+/// Discover MiMo Code SQLite databases across several data directories,
+/// returning a single sorted list with duplicate files removed.
+///
+/// MiMo Code can be reached from more than one root (the XDG data dir and
+/// orca's hook sandbox), so this unions `discover_micode_dbs` over each
+/// directory and collapses duplicates via `dedup_dbs_by_canonical_path`.
+pub(crate) fn discover_micode_dbs_in_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    dedup_dbs_by_canonical_path(dirs.into_iter().flat_map(|dir| discover_micode_dbs(&dir)))
+}
+
+/// Discover Devin CLI `sessions.db` files from the default path and any
 /// configured extra scan roots. Extra roots preserve the generic scanner's
 /// behavior: a root may be the database itself or a directory containing one
 /// or more `sessions.db` files.
 fn discover_devin_cli_dbs(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    let mut dbs = Vec::new();
-
-    for root in roots {
-        for db_path in scan_directory(&root.to_string_lossy(), "sessions.db") {
-            let key = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
-            if seen.insert(key) {
-                dbs.push(db_path);
-            }
-        }
-    }
-
-    dbs.sort_unstable();
-    dbs
+    dedup_dbs_by_canonical_path(
+        roots
+            .into_iter()
+            .flat_map(|root| scan_directory(&root.to_string_lossy(), "sessions.db")),
+    )
 }
 
 /// Returns true if `name` matches the MiMo Code db naming rule:
