@@ -240,6 +240,18 @@ def main() -> None:
         errors.append("build-native workflow must accept bumped-manifests input")
     if not any("name: ${{ inputs.bumped-manifests }}" in line for line in native_uncommented):
         errors.append("build-native workflow must download the bumped-manifests input")
+    android_runner = "\n".join(
+        [
+            "      - name: Setup Android cross toolchain",
+            "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
+            "        uses: taiki-e/setup-cross-toolchain-action@v1",
+            "        with:",
+            "          target: aarch64-linux-android",
+            "          runner: qemu-user",
+        ]
+    )
+    if android_runner not in "\n".join(native_uncommented):
+        errors.append("build-native workflow must configure the Android QEMU runner")
     android_smoke = "\n".join(
         [
             "      - name: Smoke Android binary",

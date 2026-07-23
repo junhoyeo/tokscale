@@ -162,6 +162,7 @@ jobs:
         uses: taiki-e/setup-cross-toolchain-action@v1
         with:
           target: aarch64-linux-android
+          runner: qemu-user
 
       - name: Build CLI binary
         run: ${{ matrix.settings.build }}

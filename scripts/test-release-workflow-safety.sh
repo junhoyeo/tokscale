@@ -62,6 +62,12 @@ jobs:
       - uses: actions/download-artifact@v6
         with:
           name: ${{ inputs.bumped-manifests }}
+      - name: Setup Android cross toolchain
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: aarch64-linux-android
+          runner: qemu-user
       - name: Smoke Android binary
         if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
         run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version
@@ -270,6 +276,27 @@ PY
   grep -q "build-native workflow must execute the Android binary smoke" "${output}"
 }
 
+test_rejects_missing_android_qemu_runner() {
+  local work="${TMP_DIR}/missing-android-runner"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/build-native.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace("          runner: qemu-user\n", "", 1)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-android-runner-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to require the Android QEMU runner" >&2
+    return 1
+  fi
+
+  grep -q "build-native workflow must configure the Android QEMU runner" "${output}"
+}
+
 test_rejects_missing_required_release_env() {
   local work="${TMP_DIR}/missing-env"
   write_good_workflows "${work}"
@@ -416,6 +443,7 @@ test_rejects_missing_canonical_target
 test_rejects_publish_build_call_drift
 test_rejects_missing_bumped_manifest_handoff
 test_rejects_missing_android_smoke
+test_rejects_missing_android_qemu_runner
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
 test_rejects_missing_release_artifact_smoke_job
