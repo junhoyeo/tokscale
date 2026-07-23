@@ -32,6 +32,7 @@ import {
   type GraphColorPalette,
 } from "@/lib/themes";
 import { formatCurrency, formatTokenCount } from "@/lib/utils";
+import { calendarInstantInTimeZone } from "@/lib/timezone";
 
 export interface ProfileContributionGraphProps {
   breakdownId?: string;
@@ -51,6 +52,7 @@ export interface ProfileContributionGraphProps {
   selectableRangeEnd?: string | null;
   selectedDate?: string | null;
   showBreakdown?: boolean;
+  timeZone?: string;
   view?: ProfileContributionView;
 }
 
@@ -132,6 +134,7 @@ export interface ProfileContributionBreakdownProps {
   id: string;
   onClose?: () => void;
   paletteName?: ColorPaletteName;
+  timeZone?: string;
 }
 
 export interface ContributionCalendar {
@@ -198,25 +201,49 @@ export function isContributionDateHit(target: Element | null): boolean {
   return Boolean(target?.closest("[data-contribution-date]"));
 }
 
-const dayFormatter = new Intl.DateTimeFormat("en-US", {
-  day: "numeric",
-  month: "short",
-  timeZone: "UTC",
-  year: "numeric",
-});
+type CalendarDateFormat = "day" | "fullDay" | "month";
 
-const fullDayFormatter = new Intl.DateTimeFormat("en-US", {
-  day: "numeric",
-  month: "long",
-  timeZone: "UTC",
-  weekday: "long",
-  year: "numeric",
-});
+const CALENDAR_DATE_FORMAT_OPTIONS: Record<
+  CalendarDateFormat,
+  Intl.DateTimeFormatOptions
+> = {
+  day: { day: "numeric", month: "short", year: "numeric" },
+  fullDay: { day: "numeric", month: "long", weekday: "long", year: "numeric" },
+  month: { month: "short" },
+};
 
-const monthFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  timeZone: "UTC",
-});
+const calendarDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function getCalendarDateFormatter(
+  format: CalendarDateFormat,
+  timeZone: string,
+): Intl.DateTimeFormat {
+  const key = `${format}:${timeZone}`;
+  let formatter = calendarDateFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      ...CALENDAR_DATE_FORMAT_OPTIONS[format],
+      timeZone,
+    });
+    calendarDateFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
+/**
+ * Format a calendar date (as its UTC-midnight timestamp) for display. The
+ * instant is shifted to that date's midnight in `timeZone` first, so the
+ * label always names the intended calendar day regardless of the zone offset.
+ */
+function formatCalendarDate(
+  format: CalendarDateFormat,
+  utcMidnight: number,
+  timeZone: string,
+): string {
+  return getCalendarDateFormatter(format, timeZone).format(
+    calendarInstantInTimeZone(utcMidnight, timeZone),
+  );
+}
 
 const tokenFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
@@ -579,6 +606,7 @@ export function createContributionCalendar(
   rangeStart?: string | null,
   rangeEnd?: string | null,
   selectableRangeEnd?: string | null,
+  timeZone = "UTC",
 ): ContributionCalendar {
   const contributionsByDate = new Map<
     string,
@@ -685,7 +713,7 @@ export function createContributionCalendar(
       const month = date.getUTCMonth();
       const marker = {
         compactVisible: monthMarkers.length === 0 || month % 3 === 0,
-        label: monthFormatter.format(date),
+        label: formatCalendarDate("month", cursor, timeZone),
         weekIndex,
       };
       const previous = monthMarkers.at(-1);
@@ -905,19 +933,26 @@ export function getNearestContributionDate(
   return nearestDistanceSquared <= maximumDistance ** 2 ? nearestDate : null;
 }
 
-function formatRange(startDate: string | null, endDate: string | null): string {
+function formatRange(
+  startDate: string | null,
+  endDate: string | null,
+  timeZone = "UTC",
+): string {
   if (!startDate || !endDate) return "No activity yet";
 
   const start = parseUtcDate(startDate);
   const end = parseUtcDate(endDate);
   if (start === null || end === null) return "No activity yet";
-  if (start === end) return dayFormatter.format(start);
-  return `${dayFormatter.format(start)} – ${dayFormatter.format(end)}`;
+  if (start === end) return formatCalendarDate("day", start, timeZone);
+  return `${formatCalendarDate("day", start, timeZone)} – ${formatCalendarDate("day", end, timeZone)}`;
 }
 
-function cellTitle(cell: ContributionCell): string {
+function cellTitle(cell: ContributionCell, timeZone = "UTC"): string {
   const timestamp = parseUtcDate(cell.date);
-  const date = timestamp === null ? cell.date : dayFormatter.format(timestamp);
+  const date =
+    timestamp === null
+      ? cell.date
+      : formatCalendarDate("day", timestamp, timeZone);
   const tokenLabel = cell.tokens === 1 ? "token" : "tokens";
   return `${date}: ${tokenFormatter.format(cell.tokens)} ${tokenLabel}`;
 }
@@ -1823,9 +1858,11 @@ const NoDayActivity = styled.p`
   font-size: 0.75rem;
 `;
 
-function formatFullDay(date: string): string {
+function formatFullDay(date: string, timeZone = "UTC"): string {
   const timestamp = parseUtcDate(date);
-  return timestamp === null ? date : fullDayFormatter.format(timestamp);
+  return timestamp === null
+    ? date
+    : formatCalendarDate("fullDay", timestamp, timeZone);
 }
 
 function getClientName(client: ClientType): string {
@@ -1855,7 +1892,13 @@ function modelMeta(model: ContributionModelDetail): string {
   return metrics.join(" · ");
 }
 
-function ContributionDayTooltip({ day }: { day: DailyContribution }) {
+function ContributionDayTooltip({
+  day,
+  timeZone = "UTC",
+}: {
+  day: DailyContribution;
+  timeZone?: string;
+}) {
   const clients = createContributionClientDetails(day);
   const messageCount = getContributionDayMessageCount(day, clients);
   const visibleCategories = TOKEN_CATEGORIES.filter(
@@ -1864,7 +1907,7 @@ function ContributionDayTooltip({ day }: { day: DailyContribution }) {
 
   return (
     <>
-      <CellTooltipDate>{formatFullDay(day.date)}</CellTooltipDate>
+      <CellTooltipDate>{formatFullDay(day.date, timeZone)}</CellTooltipDate>
       <TooltipTotal>
         <TooltipTotalLabel>Total tokens</TooltipTotalLabel>
         <CellTooltipValue>
@@ -1931,6 +1974,7 @@ function ContributionDayBreakdown({
   onClose,
   palette,
   standalone = false,
+  timeZone = "UTC",
 }: {
   className?: string;
   day: DailyContribution;
@@ -1938,6 +1982,7 @@ function ContributionDayBreakdown({
   onClose?: () => void;
   palette: GraphColorPalette;
   standalone?: boolean;
+  timeZone?: string;
 }) {
   const headingId = `${id}-heading`;
   const clients = createContributionClientDetails(day);
@@ -1953,7 +1998,9 @@ function ContributionDayBreakdown({
       <DetailHeader>
         <div>
           <DetailEyebrow>Day breakdown</DetailEyebrow>
-          <DetailTitle id={headingId}>{formatFullDay(day.date)}</DetailTitle>
+          <DetailTitle id={headingId}>
+            {formatFullDay(day.date, timeZone)}
+          </DetailTitle>
         </div>
         {onClose && (
           <DetailClose
@@ -2084,6 +2131,7 @@ export function ProfileContributionBreakdown({
   id,
   onClose,
   paletteName = DEFAULT_PALETTE,
+  timeZone = "UTC",
 }: ProfileContributionBreakdownProps) {
   return (
     <ContributionDayBreakdown
@@ -2093,6 +2141,7 @@ export function ProfileContributionBreakdown({
       onClose={onClose}
       palette={getPalette(paletteName)}
       standalone
+      timeZone={timeZone}
     />
   );
 }
@@ -2134,6 +2183,7 @@ export function ProfileContributionGraph({
   selectableRangeEnd,
   selectedDate: providedSelectedDate,
   showBreakdown = true,
+  timeZone = "UTC",
   view: providedView,
 }: ProfileContributionGraphProps) {
   const titleId = useId();
@@ -2172,14 +2222,15 @@ export function ProfileContributionGraph({
         rangeStart,
         rangeEnd,
         selectableRangeEnd,
+        timeZone,
       ),
-    [contributions, rangeStart, rangeEnd, selectableRangeEnd],
+    [contributions, rangeStart, rangeEnd, selectableRangeEnd, timeZone],
   );
   const activeDayLabel = `${calendar.activeDays.toLocaleString("en-US")} active ${
     calendar.activeDays === 1 ? "day" : "days"
   }`;
   const accessibleDetail = calendar.highestDay
-    ? `Highest activity: ${cellTitle(calendar.highestDay)}. ${calendar.freeTokenDays.toLocaleString(
+    ? `Highest activity: ${cellTitle(calendar.highestDay, timeZone)}. ${calendar.freeTokenDays.toLocaleString(
         "en-US",
       )} active days used tokens with no recorded cost.`
     : "No active contribution days are available.";
@@ -2468,7 +2519,9 @@ export function ProfileContributionGraph({
           </ViewToggle>
           <Summary aria-live="polite">
             <ActiveDays>{activeDayLabel}</ActiveDays>
-            <Range>{formatRange(calendar.startDate, calendar.endDate)}</Range>
+            <Range>
+              {formatRange(calendar.startDate, calendar.endDate, timeZone)}
+            </Range>
           </Summary>
         </HeaderAside>
       </Header>
@@ -2517,7 +2570,7 @@ export function ProfileContributionGraph({
                         cell.selectable && cell.date === tabbableDate ? 0 : -1
                       }
                       aria-hidden={cell.inRange ? undefined : true}
-                      aria-label={cell.inRange ? cellTitle(cell) : undefined}
+                      aria-label={cell.inRange ? cellTitle(cell, timeZone) : undefined}
                       aria-current={
                         cell.selectable && cell.date === selectedDate
                           ? "date"
@@ -2586,7 +2639,7 @@ export function ProfileContributionGraph({
                         interactive && cell.date === tabbableDate ? 0 : -1
                       }
                       aria-hidden={interactive ? undefined : true}
-                      aria-label={interactive ? cellTitle(cell) : undefined}
+                      aria-label={interactive ? cellTitle(cell, timeZone) : undefined}
                       aria-current={
                         interactive && selected ? "date" : undefined
                       }
@@ -2644,7 +2697,7 @@ export function ProfileContributionGraph({
               $left={tooltip.left}
               $top={tooltip.top}
             >
-              <ContributionDayTooltip day={tooltip.day} />
+              <ContributionDayTooltip day={tooltip.day} timeZone={timeZone} />
             </CellTooltip>
           )}
           <Footer>
@@ -2695,6 +2748,7 @@ export function ProfileContributionGraph({
               id={breakdownId}
               onClose={closeSelectedDay}
               palette={palette}
+              timeZone={timeZone}
             />
           )}
         </>

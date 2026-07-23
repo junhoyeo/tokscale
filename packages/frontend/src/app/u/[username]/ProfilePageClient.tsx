@@ -29,6 +29,10 @@ import {
 } from "@/components/profile";
 import type { DailyContribution } from "@/lib/types";
 import { useSettings } from "@/lib/useSettings";
+import {
+  extendDateRangeEndToToday,
+  resolveEffectiveTimeZone,
+} from "@/lib/timezone";
 
 type ProfilePeriod = "all" | "week" | "month";
 
@@ -99,14 +103,29 @@ export default function ProfilePageClient({
   const {
     paletteName: contributionPalette,
     setPalette: setContributionPalette,
+    timezone: timezonePreference,
+    mounted,
   } = useSettings();
   const contributionBreakdownId = useId();
   const data = initialData;
   const period = data.period ?? "all";
-  const rollingChartRange = useMemo(
-    () => getProfileChartRange(period, data.dateRange, data.chartRange),
-    [period, data.chartRange, data.dateRange],
-  );
+  // Server chart ranges end at UTC "today", which clips contributions the CLI
+  // bucketed into the viewer's local-tomorrow date. Extend the display end to
+  // today in the effective timezone — only after mount, so the first client
+  // render matches the server-rendered range, and only for the lifetime view:
+  // week/month contributions are filtered by the UTC range server-side, so a
+  // local-today cell there could never carry data.
+  const effectiveTimeZone = mounted
+    ? resolveEffectiveTimeZone(timezonePreference)
+    : "UTC";
+  const rollingChartRange = useMemo(() => {
+    const range = getProfileChartRange(period, data.dateRange, data.chartRange);
+    if (!mounted || period !== "all") return range;
+    return {
+      start: range.start,
+      end: extendDateRangeEndToToday(range.end, effectiveTimeZone),
+    };
+  }, [period, data.chartRange, data.dateRange, mounted, effectiveTimeZone]);
   const contributionRangeOptions = useMemo(
     () =>
       period === "all"
@@ -236,6 +255,7 @@ export default function ProfilePageClient({
             stats={stats}
             lastUpdated={data.updatedAt ?? undefined}
             period={period}
+            timeZone={effectiveTimeZone}
           />
 
           {data.hasBackfill && (
@@ -287,6 +307,7 @@ export default function ProfilePageClient({
                         selectableRangeEnd={contributionSelectionEnd}
                         selectedDate={selectedContributionDate}
                         showBreakdown={false}
+                        timeZone={effectiveTimeZone}
                         view={contributionView}
                         description={
                           period === "all"
@@ -305,6 +326,7 @@ export default function ProfilePageClient({
                           day={selectedContributionDay}
                           id={contributionBreakdownId}
                           paletteName={contributionPalette}
+                          timeZone={effectiveTimeZone}
                         />
                       </BreakdownArea>
                     )}

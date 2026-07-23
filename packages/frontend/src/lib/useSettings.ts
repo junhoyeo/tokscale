@@ -8,17 +8,21 @@ import {
   SORT_BY_COOKIE_NAME,
   isValidSortBy,
 } from "./leaderboard/constants";
+import { isValidTimeZone } from "./timezone";
 
 export type { LeaderboardSortBy };
 
 export interface Settings {
   paletteName: ColorPaletteName;
   leaderboardSortBy: LeaderboardSortBy;
+  /** Display timezone for profile charts: "auto" (browser) or an IANA zone. */
+  timezone: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
   paletteName: DEFAULT_PALETTE,
   leaderboardSortBy: "tokens",
+  timezone: "auto",
 };
 
 const STORAGE_KEY = "tokscale-settings";
@@ -54,6 +58,11 @@ function getStoredSettings(): Settings {
       leaderboardSortBy: isValidSortBy(parsed.leaderboardSortBy)
         ? parsed.leaderboardSortBy
         : DEFAULT_SETTINGS.leaderboardSortBy,
+      timezone:
+        typeof parsed.timezone === "string" &&
+        (parsed.timezone === "auto" || isValidTimeZone(parsed.timezone))
+          ? parsed.timezone
+          : DEFAULT_SETTINGS.timezone,
     };
     return cachedSettings;
   } catch {
@@ -134,11 +143,17 @@ export function useSettings() {
     saveSettings({ ...getStoredSettings(), leaderboardSortBy: sortBy });
   }, []);
 
+  const setTimezone = useCallback((timezone: string) => {
+    saveSettings({ ...getStoredSettings(), timezone });
+  }, []);
+
   return {
     paletteName: settings.paletteName,
     setPalette,
     leaderboardSortBy: settings.leaderboardSortBy,
     setLeaderboardSort,
+    timezone: settings.timezone,
+    setTimezone,
     mounted,
   };
 }

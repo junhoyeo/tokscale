@@ -9,6 +9,8 @@ import { Footer } from "@/components/layout/Footer";
 import { deviceDisplayLabel } from "@/lib/devices/shared";
 import { formatNumber, formatCurrency } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
+import { useSettings } from "@/lib/useSettings";
+import { COMMON_TIMEZONE_GROUPS, getBrowserTimeZone } from "@/lib/timezone";
 
 interface User {
   id: string;
@@ -149,6 +151,17 @@ const ActionRow = styled.div`
 
 const TextInput = styled.input`
   height: 40px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-default);
+  color: var(--color-fg-default);
+  font-size: 14px;
+`;
+
+const SelectInput = styled.select`
+  height: 40px;
+  max-width: 360px;
   padding: 0 12px;
   border-radius: 6px;
   border: 1px solid var(--color-border-default);
@@ -694,6 +707,7 @@ async function fetchDevices(username: string): Promise<SettingsDevice[]> {
 
 export default function SettingsClient() {
   const router = useRouter();
+  const { timezone, setTimezone } = useSettings();
   const [user, setUser] = useState<User | null>(null);
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -933,6 +947,50 @@ export default function SettingsClient() {
           <InfoBanner style={{ marginTop: 16 }}>
             Profile information is synced from GitHub and cannot be edited here.
           </InfoBanner>
+        </Section>
+
+        <Section
+          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+        >
+          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+            Timezone
+          </SectionTitle>
+          <Description style={{ color: "var(--color-fg-muted)" }}>
+            Used to display dates on profile pages, including the contribution
+            graph. Stored only in this browser; the leaderboard always uses
+            UTC.
+          </Description>
+
+          <FieldLabel
+            htmlFor="timezone-select"
+            style={{ color: "var(--color-fg-default)" }}
+          >
+            Display timezone
+          </FieldLabel>
+          <SelectInput
+            id="timezone-select"
+            value={timezone}
+            onChange={(event) => setTimezone(event.target.value)}
+          >
+            <option value="auto">
+              Auto (browser) — {getBrowserTimeZone()}
+            </option>
+            {COMMON_TIMEZONE_GROUPS.map((group) => (
+              <optgroup key={group.region} label={group.region}>
+                {group.zones.map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone.replace(/_/g, " ")}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+            {timezone !== "auto" &&
+              !COMMON_TIMEZONE_GROUPS.some((group) =>
+                group.zones.includes(timezone),
+              ) && (
+                <option value={timezone}>{timezone.replace(/_/g, " ")}</option>
+              )}
+          </SelectInput>
         </Section>
 
         <Section

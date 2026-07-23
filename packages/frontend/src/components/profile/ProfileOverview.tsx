@@ -13,6 +13,8 @@ export interface ProfileOverviewProps {
   stats: ProfileStatsData;
   lastUpdated?: string | null;
   period?: "all" | "month" | "week";
+  /** Display timezone for user-facing dates; defaults to the viewer's zone. */
+  timeZone?: string;
   className?: string;
 }
 
@@ -303,15 +305,19 @@ const subscribeNoop = () => () => {};
 export function formatLastUpdated(
   lastUpdated: string | null | undefined,
   isMounted: boolean,
+  timeZone?: string,
 ): string | null {
   if (!lastUpdated) return null;
   const date = new Date(lastUpdated);
   return isMounted
-    ? date.toLocaleString("en-US")
+    ? date.toLocaleString("en-US", timeZone ? { timeZone } : undefined)
     : date.toLocaleString("en-US", { timeZone: "UTC" });
 }
 
-function formatJoined(createdAt: string | null | undefined): string | null {
+function formatJoined(
+  createdAt: string | null | undefined,
+  timeZone = "UTC",
+): string | null {
   if (!createdAt) return null;
   const date = new Date(createdAt);
   if (Number.isNaN(date.getTime())) return null;
@@ -319,7 +325,7 @@ function formatJoined(createdAt: string | null | undefined): string | null {
   return date.toLocaleDateString("en-US", {
     month: "short",
     year: "numeric",
-    timeZone: "UTC",
+    timeZone,
   });
 }
 
@@ -328,6 +334,7 @@ export function ProfileOverview({
   stats,
   lastUpdated,
   period = "all",
+  timeZone,
   className,
 }: ProfileOverviewProps) {
   const [isEmbedDialogOpen, setIsEmbedDialogOpen] = useState(false);
@@ -337,10 +344,13 @@ export function ProfileOverview({
     () => false,
   );
   const formattedLastUpdated = useMemo(
-    () => formatLastUpdated(lastUpdated, isMounted),
-    [isMounted, lastUpdated],
+    () => formatLastUpdated(lastUpdated, isMounted, timeZone),
+    [isMounted, lastUpdated, timeZone],
   );
-  const joined = useMemo(() => formatJoined(user.createdAt), [user.createdAt]);
+  const joined = useMemo(
+    () => formatJoined(user.createdAt, isMounted ? timeZone : undefined),
+    [user.createdAt, isMounted, timeZone],
+  );
   const displayName = user.displayName || user.username;
   const avatarUrl = user.avatarUrl || `https://github.com/${user.username}.png`;
 
