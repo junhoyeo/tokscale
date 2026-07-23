@@ -9,7 +9,15 @@ ROOT = pathlib.Path.cwd()
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish-cli.yml"
 BUILD_NATIVE_WORKFLOW = ROOT / ".github/workflows/build-native.yml"
 REQUIRED_ENV_KEYS = ("MACOSX_DEPLOYMENT_TARGET", "CARGO_TERM_COLOR", "CARGO_INCREMENTAL")
-COMMON_BUILD_FIELDS = ("host", "target", "build", "strip", "bin_name")
+REQUIRED_BUILD_FIELDS = (
+    "host",
+    "target",
+    "package_dir",
+    "artifact_name",
+    "build",
+    "strip",
+    "bin_name",
+)
 TARGET_PACKAGES = {
     "x86_64-apple-darwin": "cli-darwin-x64",
     "aarch64-apple-darwin": "cli-darwin-arm64",
@@ -185,52 +193,72 @@ def main() -> None:
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
     errors: list[str] = []
 
-    publish_env = top_level_env(publish_lines)
     native_env = top_level_env(native_lines)
     for key in REQUIRED_ENV_KEYS:
-        publish_has_key = key in publish_env
-        native_has_key = key in native_env
-        if not publish_has_key:
-            errors.append(f"publish workflow missing required env {key}")
-        if not native_has_key:
+        if key not in native_env:
             errors.append(f"build-native workflow missing required env {key}")
-        if (
-            publish_has_key
-            and native_has_key
-            and publish_env.get(key) != native_env.get(key)
-        ):
-            errors.append(
-                f"env {key} differs: publish={publish_env.get(key)!r}, build-native={native_env.get(key)!r}"
-            )
 
-    publish_build = by_target(matrix_settings(publish_lines, "build-cli-binary"), "publish build")
     native_build = by_target(matrix_settings(native_lines, "build"), "build-native")
 
-    if list(publish_build) != list(native_build):
+    expected_targets = {
+        target
+        for target, package_dir in TARGET_PACKAGES.items()
+        if (ROOT / "packages" / package_dir / "package.json").exists()
+    }
+    missing_targets = expected_targets - set(native_build)
+    unknown_targets = set(native_build) - expected_targets
+    if missing_targets:
         errors.append(
-            f"build matrix targets differ: publish={list(publish_build)}, build-native={list(native_build)}"
+            f"canonical build matrix is missing targets: {sorted(missing_targets)}"
+        )
+    if unknown_targets:
+        errors.append(
+            f"canonical build matrix has unknown targets: {sorted(unknown_targets)}"
         )
 
-    for target, publish_entry in publish_build.items():
-        native_entry = native_build.get(target)
-        if native_entry is None:
-            continue
-        for field in COMMON_BUILD_FIELDS:
-            if publish_entry.get(field, "") != native_entry.get(field, ""):
-                errors.append(
-                    f"build matrix {target} field {field} differs: publish={publish_entry.get(field)!r}, build-native={native_entry.get(field)!r}"
-                )
-
-        expected_package_dir = TARGET_PACKAGES.get(target)
-        if publish_entry.get("package_dir") != expected_package_dir:
+    for target, native_entry in native_build.items():
+        missing_fields = [field for field in REQUIRED_BUILD_FIELDS if field not in native_entry]
+        if missing_fields:
             errors.append(
-                f"build matrix {target} package_dir drift: expected {expected_package_dir}, found {publish_entry.get('package_dir')}"
+                f"canonical build matrix {target} missing fields: {missing_fields}"
+            )
+        expected_package_dir = TARGET_PACKAGES.get(target)
+        if native_entry.get("package_dir") != expected_package_dir:
+            errors.append(
+                f"build matrix {target} package_dir drift: expected {expected_package_dir}, found {native_entry.get('package_dir')}"
             )
         expected_artifact = f"cli-binary-{target}"
-        if publish_entry.get("artifact_name") != expected_artifact:
+        if native_entry.get("artifact_name") != expected_artifact:
             errors.append(
-                f"build matrix {target} artifact drift: expected {expected_artifact}, found {publish_entry.get('artifact_name')}"
+                f"build matrix {target} artifact drift: expected {expected_artifact}, found {native_entry.get('artifact_name')}"
             )
+
+    native_uncommented = uncommented_lines(native_lines)
+    if not any(line.strip() == "workflow_call:" for line in native_uncommented):
+        errors.append("build-native workflow must expose workflow_call")
+    if not any("bumped-manifests:" in line for line in native_uncommented):
+        errors.append("build-native workflow must accept bumped-manifests input")
+    if not any("name: ${{ inputs.bumped-manifests }}" in line for line in native_uncommented):
+        errors.append("build-native workflow must download the bumped-manifests input")
+    android_smoke = "\n".join(
+        [
+            "      - name: Smoke Android binary",
+            "        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}",
+            "        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version",
+        ]
+    )
+    if android_smoke not in "\n".join(native_uncommented):
+        errors.append("build-native workflow must execute the Android binary smoke")
+
+    publish_build_block = job_block(publish_lines, "build-cli-binary")
+    if not block_contains(
+        publish_build_block, "uses: ./.github/workflows/build-native.yml"
+    ):
+        errors.append("publish build must call the canonical build-native workflow")
+    if "bump-versions" not in parse_needs(publish_build_block):
+        errors.append("publish build must depend on bump-versions")
+    if not block_contains(publish_build_block, "bumped-manifests: bumped-manifests"):
+        errors.append("publish build must pass the bumped-manifests artifact")
 
     publish_platform = matrix_settings(publish_lines, "publish-platform-packages")
     platform_by_dir: dict[str, dict[str, str]] = {}
@@ -245,7 +273,7 @@ def main() -> None:
         platform_by_dir[package_dir] = entry
 
     expected_package_dirs = {
-        entry["package_dir"] for entry in publish_build.values() if entry.get("package_dir")
+        entry["package_dir"] for entry in native_build.values() if entry.get("package_dir")
     }
     if set(platform_by_dir) != expected_package_dirs:
         errors.append(
@@ -253,7 +281,7 @@ def main() -> None:
         )
 
     build_by_package_dir = {
-        entry["package_dir"]: entry for entry in publish_build.values() if entry.get("package_dir")
+        entry["package_dir"]: entry for entry in native_build.values() if entry.get("package_dir")
     }
     for package_dir, platform_entry in platform_by_dir.items():
         build_entry = build_by_package_dir.get(package_dir)

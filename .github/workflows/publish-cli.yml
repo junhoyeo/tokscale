@@ -24,13 +24,11 @@ on:
         default: false
 
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
 
-env:
-  MACOSX_DEPLOYMENT_TARGET: "10.13"
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
+concurrency:
+  group: publish-cli
+  cancel-in-progress: false
 
 jobs:
   bump-versions:
@@ -147,171 +145,13 @@ jobs:
           retention-days: 1
 
   build-cli-binary:
-    name: Build CLI binary - ${{ matrix.settings.target }}
+    name: Build CLI binaries
     needs: bump-versions
-    runs-on: ${{ matrix.settings.host }}
-    strategy:
-      fail-fast: false
-      matrix:
-        settings:
-          - host: macos-latest
-            target: x86_64-apple-darwin
-            package_dir: cli-darwin-x64
-            artifact_name: cli-binary-x86_64-apple-darwin
-            bin_name: tokscale
-            build: cargo build --release -p tokscale-cli --target x86_64-apple-darwin
-            strip: strip -x target/x86_64-apple-darwin/release/tokscale
-          # Apple Silicon ships with the `apple-fm` feature (on-device Apple
-          # Foundation Models summarizer). Needs the macOS 26 SDK + Swift
-          # toolchain (Xcode 26 on macos-26) to build the vendored
-          # foundation-models-c shim; it is statically linked so the published
-          # binary stays self-contained. Not enabled for x86_64 — Apple
-          # Intelligence is Apple-Silicon-only (those installs use the heuristic).
-          - host: macos-26
-            target: aarch64-apple-darwin
-            package_dir: cli-darwin-arm64
-            artifact_name: cli-binary-aarch64-apple-darwin
-            bin_name: tokscale
-            build: cargo build --release -p tokscale-cli --target aarch64-apple-darwin --features apple-fm
-            strip: strip -x target/aarch64-apple-darwin/release/tokscale
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            package_dir: cli-linux-x64-gnu
-            artifact_name: cli-binary-x86_64-unknown-linux-gnu
-            bin_name: tokscale
-            build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
-            strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            package_dir: cli-linux-x64-musl
-            artifact_name: cli-binary-x86_64-unknown-linux-musl
-            bin_name: tokscale
-            build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-musl
-            strip: strip target/x86_64-unknown-linux-musl/release/tokscale
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            package_dir: cli-linux-arm64-gnu
-            artifact_name: cli-binary-aarch64-unknown-linux-gnu
-            bin_name: tokscale
-            build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-gnu
-            strip: ""
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            package_dir: cli-linux-arm64-musl
-            artifact_name: cli-binary-aarch64-unknown-linux-musl
-            bin_name: tokscale
-            build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-musl
-            strip: ""
-          # Android (Termux) on aarch64: links against Bionic. The
-          # taiki-e/setup-cross-toolchain-action handles NDK setup
-          # automatically (Clang 14, API 21 by default) and wires the
-          # CC/AR env vars. See build-native.yml for the matching
-          # toolchain setup.
-          - host: ubuntu-latest
-            target: aarch64-linux-android
-            package_dir: cli-android-arm64
-            artifact_name: cli-binary-aarch64-linux-android
-            bin_name: tokscale
-            build: cargo build --release -p tokscale-cli --target aarch64-linux-android
-            strip: ""
-          - host: windows-latest
-            target: x86_64-pc-windows-msvc
-            package_dir: cli-win32-x64-msvc
-            artifact_name: cli-binary-x86_64-pc-windows-msvc
-            bin_name: tokscale.exe
-            build: cargo build --release -p tokscale-cli --target x86_64-pc-windows-msvc
-            strip: ""
-          - host: windows-latest
-            target: aarch64-pc-windows-msvc
-            package_dir: cli-win32-arm64-msvc
-            artifact_name: cli-binary-aarch64-pc-windows-msvc
-            bin_name: tokscale.exe
-            build: cargo build --release -p tokscale-cli --target aarch64-pc-windows-msvc
-            strip: ""
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Download bumped release files
-        uses: actions/download-artifact@v6
-        with:
-          name: bumped-manifests
-          path: .
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 20
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.settings.target }}
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: cli-${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('Cargo.lock') }}
-
-      - uses: mlugg/setup-zig@v2
-        if: ${{ contains(matrix.settings.target, 'linux') && !contains(matrix.settings.target, 'android') }}
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        if: ${{ contains(matrix.settings.target, 'linux') && !contains(matrix.settings.target, 'android') }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          tool: cargo-zigbuild
-
-      - name: Setup Android cross toolchain
-        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
-        uses: taiki-e/setup-cross-toolchain-action@v1
-        with:
-          target: aarch64-linux-android
-
-      - name: Build CLI binary
-        shell: bash
-        run: ${{ matrix.settings.build }}
-
-      - name: Install cross-compilation strip tool
-        if: contains(matrix.settings.target, 'aarch64') && !contains(matrix.settings.target, 'android') && runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
-
-      - name: Strip CLI binary
-        if: ${{ matrix.settings.strip != '' }}
-        shell: bash
-        run: ${{ matrix.settings.strip }}
-
-      # Stage the binary plus, for the apple-fm arm64 build, the sidecar
-      # libFoundationModels.dylib that build.rs places next to it. The dylib is
-      # dlopen'd at runtime (never linked), so it must travel inside the npm
-      # package alongside tokscale. Other targets stage only the binary.
-      - name: Stage release artifact
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp "target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}" dist/
-          if [ -f "target/${{ matrix.settings.target }}/release/libFoundationModels.dylib" ]; then
-            cp "target/${{ matrix.settings.target }}/release/libFoundationModels.dylib" dist/
-            echo "staged sidecar libFoundationModels.dylib"
-          fi
-          ls -la dist
-
-      - name: Upload CLI binary artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ matrix.settings.artifact_name }}
-          path: dist
-          if-no-files-found: error
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-native.yml
+    with:
+      bumped-manifests: bumped-manifests
 
   smoke-release-artifacts:
     name: Smoke release artifacts
@@ -353,6 +193,8 @@ jobs:
     name: Commit release provenance
     needs: [bump-versions, build-cli-binary, smoke-release-artifacts]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       release_commit: ${{ steps.prepare.outputs.release_commit }}
 
@@ -450,11 +292,6 @@ jobs:
         with:
           ref: ${{ needs.prepare-release-provenance.outputs.release_commit }}
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.1.38
-
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
@@ -539,11 +376,6 @@ jobs:
         with:
           ref: ${{ needs.prepare-release-provenance.outputs.release_commit }}
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.1.38
-
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
@@ -562,6 +394,9 @@ jobs:
     name: Create release
     needs: [bump-versions, prepare-release-provenance, publish-alias]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
 
     steps:
       - uses: actions/checkout@v5

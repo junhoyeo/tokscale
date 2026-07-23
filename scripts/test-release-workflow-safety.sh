@@ -8,7 +8,16 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 write_good_workflows() {
   local work="$1"
-  mkdir -p "${work}/.github/workflows" "${work}/packages/cli-linux-x64-gnu"
+  mkdir -p \
+    "${work}/.github/workflows" \
+    "${work}/packages/cli-darwin-x64" \
+    "${work}/packages/cli-linux-x64-gnu"
+  cat > "${work}/packages/cli-darwin-x64/package.json" <<'EOF_MANIFEST'
+{
+  "name": "@tokscale/cli-darwin-x64",
+  "version": "3.0.0"
+}
+EOF_MANIFEST
   cat > "${work}/packages/cli-linux-x64-gnu/package.json" <<'EOF_MANIFEST'
 {
   "name": "@tokscale/cli-linux-x64-gnu",
@@ -17,6 +26,13 @@ write_good_workflows() {
 EOF_MANIFEST
   cat > "${work}/.github/workflows/build-native.yml" <<'EOF_YAML'
 name: Build Native (Test Only)
+
+on:
+  workflow_call:
+    inputs:
+      bumped-manifests:
+        type: string
+        default: ""
 
 env:
   MACOSX_DEPLOYMENT_TARGET: "10.13"
@@ -28,32 +44,37 @@ jobs:
     strategy:
       matrix:
         settings:
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
-            strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            package_dir: cli-darwin-x64
+            artifact_name: cli-binary-x86_64-apple-darwin
+            build: cargo build --release -p tokscale-cli --target x86_64-apple-darwin
+            strip: strip -x target/x86_64-apple-darwin/release/tokscale
             bin_name: tokscale
-EOF_YAML
-  cat > "${work}/.github/workflows/publish-cli.yml" <<'EOF_YAML'
-name: Publish
-
-env:
-  MACOSX_DEPLOYMENT_TARGET: "10.13"
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-
-jobs:
-  build-cli-binary:
-    strategy:
-      matrix:
-        settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             package_dir: cli-linux-x64-gnu
             artifact_name: cli-binary-x86_64-unknown-linux-gnu
-            bin_name: tokscale
             build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
+            bin_name: tokscale
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: ${{ inputs.bumped-manifests }}
+      - name: Smoke Android binary
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version
+EOF_YAML
+  cat > "${work}/.github/workflows/publish-cli.yml" <<'EOF_YAML'
+name: Publish
+
+jobs:
+  build-cli-binary:
+    needs: bump-versions
+    uses: ./.github/workflows/build-native.yml
+    with:
+      bumped-manifests: bumped-manifests
   smoke-release-artifacts:
     needs: [bump-versions, build-cli-binary]
     steps:
@@ -68,6 +89,10 @@ jobs:
     strategy:
       matrix:
         settings:
+          - package_name: '@tokscale/cli-darwin-x64'
+            package_dir: cli-darwin-x64
+            artifact_name: cli-binary-x86_64-apple-darwin
+            binary_name: tokscale
           - package_name: '@tokscale/cli-linux-x64-gnu'
             package_dir: cli-linux-x64-gnu
             artifact_name: cli-binary-x86_64-unknown-linux-gnu
@@ -104,13 +129,13 @@ test_reads_workflows_as_utf8_when_locale_is_non_utf8() {
 test_rejects_build_matrix_target_drift() {
   local work="${TMP_DIR}/target-drift"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+  python3 - "${work}/.github/workflows/build-native.yml" <<'PY'
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
-text = text.replace("target: x86_64-unknown-linux-gnu", "target: x86_64-unknown-linux-musl", 1)
+text = text.replace("target: x86_64-unknown-linux-gnu", "target: unsupported-target", 1)
 path.write_text(text)
 PY
 
@@ -120,34 +145,135 @@ PY
     return 1
   fi
 
-  grep -q "build matrix targets differ" "${output}"
+  grep -q "canonical build matrix has unknown targets" "${output}"
 }
 
-test_rejects_release_env_drift() {
-  local work="${TMP_DIR}/env-drift"
+test_rejects_missing_canonical_target() {
+  local work="${TMP_DIR}/missing-target"
+  write_good_workflows "${work}"
+  python3 - \
+    "${work}/.github/workflows/build-native.yml" \
+    "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import re
+import sys
+
+build_path = pathlib.Path(sys.argv[1])
+build_text = build_path.read_text()
+build_text, build_count = re.subn(
+    r"\n          - host: macos-latest\n"
+    r"            target: x86_64-apple-darwin\n"
+    r"(?:            .*\n){5}",
+    "\n",
+    build_text,
+    count=1,
+)
+if build_count != 1:
+    raise SystemExit("failed to remove canonical Darwin build target")
+build_path.write_text(build_text)
+
+publish_path = pathlib.Path(sys.argv[2])
+publish_text = publish_path.read_text()
+publish_text, publish_count = re.subn(
+    r"\n          - package_name: '@tokscale/cli-darwin-x64'\n"
+    r"(?:            .*\n){3}",
+    "\n",
+    publish_text,
+    count=1,
+)
+if publish_count != 1:
+    raise SystemExit("failed to remove Darwin publish target")
+publish_path.write_text(publish_text)
+PY
+
+  local output="${TMP_DIR}/missing-target-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a missing canonical target" >&2
+    return 1
+  fi
+
+  grep -q "canonical build matrix is missing targets: \\['x86_64-apple-darwin'\\]" "${output}"
+}
+
+test_rejects_publish_build_call_drift() {
+  local work="${TMP_DIR}/call-drift"
   write_good_workflows "${work}"
   python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
-text = path.read_text().replace('MACOSX_DEPLOYMENT_TARGET: "10.13"', 'MACOSX_DEPLOYMENT_TARGET: "11.0"')
+text = path.read_text().replace(
+    "uses: ./.github/workflows/build-native.yml",
+    "uses: ./.github/workflows/other.yml",
+)
 path.write_text(text)
 PY
 
-  local output="${TMP_DIR}/env-drift-output.txt"
+  local output="${TMP_DIR}/call-drift-output.txt"
   if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
-    echo "Expected workflow safety check to reject env drift" >&2
+    echo "Expected workflow safety check to reject reusable workflow drift" >&2
     return 1
   fi
 
-  grep -q "env MACOSX_DEPLOYMENT_TARGET differs" "${output}"
+  grep -q "publish build must call the canonical build-native workflow" "${output}"
+}
+
+test_rejects_missing_bumped_manifest_handoff() {
+  local work="${TMP_DIR}/missing-bumped-manifests"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "bumped-manifests: bumped-manifests",
+    "bumped-manifests: stale-manifests",
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-bumped-manifests-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a stale manifest handoff" >&2
+    return 1
+  fi
+
+  grep -q "publish build must pass the bumped-manifests artifact" "${output}"
+}
+
+test_rejects_missing_android_smoke() {
+  local work="${TMP_DIR}/missing-android-smoke"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/build-native.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    """      - name: Smoke Android binary
+        if: ${{ matrix.settings.target == 'aarch64-linux-android' }}
+        run: cargo run --release -p tokscale-cli --target aarch64-linux-android -- --no-spinner --version
+""",
+    "",
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-android-smoke-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to require the Android execution smoke" >&2
+    return 1
+  fi
+
+  grep -q "build-native workflow must execute the Android binary smoke" "${output}"
 }
 
 test_rejects_missing_required_release_env() {
   local work="${TMP_DIR}/missing-env"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" "${work}/.github/workflows/build-native.yml" <<'PY'
+  python3 - "${work}/.github/workflows/build-native.yml" <<'PY'
 import pathlib
 import sys
 
@@ -165,7 +291,6 @@ PY
     return 1
   fi
 
-  grep -q "publish workflow missing required env CARGO_INCREMENTAL" "${output}"
   grep -q "build-native workflow missing required env CARGO_INCREMENTAL" "${output}"
 }
 
@@ -287,7 +412,10 @@ PY
 test_accepts_matching_publish_and_native_workflows
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
-test_rejects_release_env_drift
+test_rejects_missing_canonical_target
+test_rejects_publish_build_call_drift
+test_rejects_missing_bumped_manifest_handoff
+test_rejects_missing_android_smoke
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
 test_rejects_missing_release_artifact_smoke_job
