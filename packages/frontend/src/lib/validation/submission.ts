@@ -213,7 +213,19 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
   device: SubmitDeviceSchema.optional(),
   summary: DataSummarySchema,
   years: z.array(YearSummarySchema),
-  contributions: z.array(DailyContributionSchema),
+  // Each date must appear at most once. The submit route builds its insert
+  // batch from a date-keyed map of EXISTING rows that is not updated as the
+  // loop runs, so a repeated date produces two rows with the same
+  // (submission_id, submitted_device_id, date). Postgres then either aborts
+  // the statement ("ON CONFLICT DO UPDATE command cannot affect row a second
+  // time") or, if the duplicates land in different INSERT chunks, lets the
+  // second silently overwrite the first through the ON CONFLICT arm --
+  // bypassing the monotonic active-time guard. Rejecting up front turns both
+  // into a clear 400.
+  contributions: z.array(DailyContributionSchema).refine(
+    (days) => new Set(days.map((day) => day.date)).size === days.length,
+    { message: "Duplicate dates in contributions: each date may appear at most once" }
+  ),
   timeMetrics: TimeMetricsSchema.optional(),
   provenance: SubmissionProvenanceSchema.optional(),
 }));
