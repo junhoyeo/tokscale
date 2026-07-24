@@ -1116,7 +1116,7 @@ describe("POST /api/submit auth path", () => {
     }));
   });
 
-  it("sets all-time active time from all submitted device daily rows", async () => {
+  it("sums per-device session metrics across devices instead of taking a max", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",
       tokenId: "token-1",
@@ -1216,12 +1216,22 @@ describe("POST /api/submit auth path", () => {
         dateEnd: "2026-04-30",
         activeDays: 1,
         rowCount: 3,
+      }],
+      // deviceTotals: this desktop contributed 4_000ms / 1 session and a second
+      // machine previously contributed 6_000ms / 2 sessions. Session counts are
+      // additive across devices (independent local sessions); the shape metrics
+      // are a max because concurrency and streak length are per-machine.
+      [{
         totalActiveTimeMs: 10_000,
+        sessionCount: 3,
+        longestContinuousMs: 6_000,
+        maxConcurrentSessions: 2,
       }],
       [{ sourceBreakdown: insertedBreakdown }],
     ];
 
     const submissionUpdateSets: Array<Record<string, unknown>> = [];
+    const selectFields: Array<Record<string, unknown>> = [];
     let insertCall = 0;
     const tx = {
       update: vi.fn((table: unknown) => {
@@ -1236,7 +1246,10 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((fields?: Record<string, unknown>) => {
+        if (fields) selectFields.push(fields);
+        return makeAwaitableBuilder(selectResults.shift() ?? []);
+      }),
       insert: vi.fn(() => {
         insertCall += 1;
         if (insertCall === 1) {
@@ -1287,12 +1300,44 @@ describe("POST /api/submit auth path", () => {
         4_000,
       ]),
     );
+    // 3, not 1: the submitting device reported sessionCount 1, so a
+    // max-across-devices merge would report 1 and drop the other machine.
     expect(submissionUpdateSets.at(-1)).toEqual(expect.objectContaining({
       totalActiveTimeMs: 10_000,
-      longestContinuousMs: 4_000,
-      maxConcurrentSessions: 1,
-      sessionCount: 1,
+      longestContinuousMs: 6_000,
+      maxConcurrentSessions: 2,
+      sessionCount: 3,
     }));
+
+    // deviceTotals is a mocked row, so the assertion above cannot tell SUM from
+    // MAX -- it only proves the route reads the aggregate instead of the
+    // submitting device's own snapshot. Pin the aggregate functions directly:
+    // counts are additive across machines, shape metrics are not.
+    const deviceAggregate = selectFields.find(
+      (fields) => !("id" in fields) && "sessionCount" in fields,
+    );
+    expect(deviceAggregate).toBeDefined();
+    expect(flattenSqlChunks(deviceAggregate!.sessionCount)).toEqual(
+      expect.arrayContaining([expect.stringContaining("SUM(")]),
+    );
+    expect(flattenSqlChunks(deviceAggregate!.totalActiveTimeMs)).toEqual(
+      expect.arrayContaining([expect.stringContaining("SUM(")]),
+    );
+    expect(flattenSqlChunks(deviceAggregate!.maxConcurrentSessions)).toEqual(
+      expect.arrayContaining([expect.stringContaining("MAX(")]),
+    );
+    expect(flattenSqlChunks(deviceAggregate!.longestContinuousMs)).toEqual(
+      expect.arrayContaining([expect.stringContaining("MAX(")]),
+    );
+
+    // The ON CONFLICT arm is unreachable while the per-user submissions row
+    // lock holds, but it must not be a silent hole in the monotonic guard if
+    // that ever changes (or if duplicate dates straddle an INSERT chunk).
+    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("GREATEST(daily_breakdown.active_time_ms"),
+      ]),
+    );
   });
 
   it("preserves same-device active time and session metrics when local history shrinks", async () => {
@@ -1398,6 +1443,7 @@ describe("POST /api/submit auth path", () => {
     const selectResults = [
       [{
         id: "submission-1",
+        totalActiveTimeMs: 13_000,
         longestContinuousMs: 9_000,
         maxConcurrentSessions: 4,
         sessionCount: 12,
@@ -1418,7 +1464,16 @@ describe("POST /api/submit auth path", () => {
         dateEnd: "2026-04-30",
         activeDays: 1,
         rowCount: 2,
-        totalActiveTimeMs: 13_000,
+      }],
+      // deviceTotals deliberately LOWER than the stored submission values, the
+      // shape of the migration transition: device rows start with NULL metrics,
+      // so until every device submits again the SUM under-reports. The stored
+      // value must act as a floor or the account total would drop.
+      [{
+        totalActiveTimeMs: 5_000,
+        sessionCount: 1,
+        longestContinuousMs: 5_000,
+        maxConcurrentSessions: 1,
       }],
       [{ sourceBreakdown: mergedBreakdown }],
     ];
@@ -1471,16 +1526,243 @@ describe("POST /api/submit auth path", () => {
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
     expect(tx.execute).toHaveBeenCalledTimes(1);
-    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).toEqual(
-      expect.arrayContaining([7_000]),
+    const updateChunks = flattenSqlChunks(tx.execute.mock.calls[0][0]);
+    expect(updateChunks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("UPDATE daily_breakdown"),
+        "daily-1",
+        456,
+        7_000,
+      ]),
     );
+    // The VALUES tuple is (id, tokens, cost, input, output, timestamp_ms,
+    // active_time_ms, source_breakdown). arrayContaining is order-blind, so it
+    // alone cannot catch timestamp_ms and active_time_ms being transposed --
+    // which would write an epoch millisecond into active_time_ms. Pin the
+    // relative order of the two bound parameters.
+    expect(updateChunks.indexOf(456)).toBeGreaterThan(updateChunks.indexOf("daily-1"));
+    expect(updateChunks.indexOf(7_000)).toBeGreaterThan(updateChunks.indexOf(456));
     expect(submissionUpdateSets.at(-1)).toEqual(expect.objectContaining({
       totalActiveTimeMs: 13_000,
       longestContinuousMs: 9_000,
       maxConcurrentSessions: 4,
       sessionCount: 12,
     }));
+    // The preservation is silent otherwise: the CLI prints these warnings, so
+    // the user's only signal that their local scan came back short.
+    const body = await response.json();
+    expect(body.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Preserved 7000ms active time"),
+      ]),
+    );
   });
+  it("accepts a larger incoming active time and keeps the device upsert monotonic", async () => {
+    mockState.authenticatePersonalToken.mockResolvedValue({
+      status: "valid",
+      tokenId: "token-1",
+      userId: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      expiresAt: null,
+    });
+
+    mockState.validateSubmission.mockReturnValue({
+      valid: true,
+      data: {
+        device: {
+          id: "dev_laptop",
+        },
+        meta: {
+          version: "2.0.0",
+          dateRange: { start: "2026-04-30", end: "2026-04-30" },
+        },
+        summary: {
+          clients: ["codex"],
+        },
+        contributions: [
+          {
+            date: "2026-04-30",
+            timestampMs: 789,
+            activeTimeMs: 9_000,
+            clients: [
+              {
+                client: "codex",
+                modelId: "gpt-5.5",
+                tokens: 15,
+                cost: 0.75,
+                input: 10,
+                output: 5,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+        timeMetrics: {
+          totalActiveTimeMs: 9_000,
+          longestContinuousMs: 9_000,
+          maxConcurrentSessions: 1,
+          sessionCount: 1,
+        },
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    const incomingBreakdown = {
+      tokens: 15,
+      cost: 0.75,
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages: 1,
+    };
+    const existingBreakdown = {
+      codex: {
+        tokens: 12,
+        cost: 0.5,
+        input: 7,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        messages: 1,
+        models: { "gpt-5.5": { tokens: 12 } },
+      },
+    };
+    const mergedBreakdown = {
+      codex: {
+        ...incomingBreakdown,
+        models: { "gpt-5.5": incomingBreakdown },
+      },
+    };
+
+    mockState.clientContributionToBreakdownData.mockReturnValue(incomingBreakdown);
+    mockState.mergeClientBreakdownsWithRegressionGuard.mockReturnValue({
+      merged: mergedBreakdown,
+      warnings: [],
+      foldPreservedClients: new Set<string>(),
+    });
+    mockState.recalculateDayTotals.mockReturnValue({
+      tokens: 15,
+      cost: 0.75,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    mockState.mergeTimestampMs.mockReturnValue(789);
+
+    const selectResults = [
+      [{ id: "submission-1" }],
+      [{
+        id: "daily-1",
+        date: "2026-04-30",
+        timestampMs: 123,
+        // Smaller than the incoming 9_000: growth must not be clamped.
+        activeTimeMs: 2_000,
+        sourceBreakdown: existingBreakdown,
+      }],
+      [{
+        totalTokens: 27,
+        totalCost: "1.2500",
+        inputTokens: 17,
+        outputTokens: 10,
+        dateStart: "2026-04-30",
+        dateEnd: "2026-04-30",
+        activeDays: 1,
+        rowCount: 2,
+      }],
+      [{
+        totalActiveTimeMs: 9_000,
+        sessionCount: 1,
+        longestContinuousMs: 9_000,
+        maxConcurrentSessions: 1,
+      }],
+      [{ sourceBreakdown: mergedBreakdown }],
+    ];
+
+    const submissionUpdateSets: Array<Record<string, unknown>> = [];
+    const deviceUpsertSets: Array<Record<string, unknown>> = [];
+    const tx = {
+      update: vi.fn((table: unknown) => {
+        const builder = {
+          set: vi.fn((values: Record<string, unknown>) => {
+            if ((table as { id?: unknown }).id === "submissions.id") {
+              submissionUpdateSets.push(values);
+            }
+            return builder;
+          }),
+          where: vi.fn(() => Promise.resolve()),
+        };
+        return builder;
+      }),
+      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      insert: vi.fn(() => {
+        const builder = {
+          values: vi.fn(() => builder),
+          onConflictDoUpdate: vi.fn((config: { set?: Record<string, unknown> }) => {
+            if (config?.set) deviceUpsertSets.push(config.set);
+            return builder;
+          }),
+          returning: vi.fn(() => Promise.resolve([{ id: "submitted-device-1" }])),
+        };
+        return builder;
+      }),
+      execute: vi.fn((..._args: unknown[]) => Promise.resolve()),
+      transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
+        callback(tx)
+      ),
+    };
+    type MockTransaction = typeof tx;
+
+    mockState.db.transaction.mockImplementation(async (callback: (tx: MockTransaction) => Promise<unknown>) =>
+      callback(tx)
+    );
+
+    const response = await POST(
+      new Request("http://localhost:3000/api/submit", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer tt_valid",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: {}, contributions: [] }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    // 9_000, not the stored 2_000: the monotonic guard preserves the LARGER
+    // value, it does not freeze the row at whatever landed first.
+    const updateChunks = flattenSqlChunks(tx.execute.mock.calls[0][0]);
+    expect(updateChunks).toEqual(expect.arrayContaining([9_000]));
+    expect(updateChunks).not.toEqual(expect.arrayContaining([2_000]));
+
+    // Nothing was preserved, so the shrink warning must stay silent.
+    const body = await response.json();
+    expect(body.warnings ?? []).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Preserved")]),
+    );
+
+    // The per-device high-water mark is enforced in SQL, so assert the upsert
+    // actually carries GREATEST rather than a plain overwrite.
+    const deviceSet = deviceUpsertSets.at(-1) ?? {};
+    for (const column of [
+      "totalActiveTimeMs",
+      "longestContinuousMs",
+      "maxConcurrentSessions",
+      "sessionCount",
+    ]) {
+      expect(flattenSqlChunks(deviceSet[column])).toEqual(
+        expect.arrayContaining([expect.stringContaining("GREATEST")]),
+      );
+    }
+  });
+
   it("adopts legacy daily rows into the first modern device instead of duplicating totals", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({
       status: "valid",

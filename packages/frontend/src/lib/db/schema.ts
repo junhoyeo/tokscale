@@ -251,6 +251,26 @@ export const submittedDevices = pgTable(
       .notNull()
       .defaultNow(),
     lastSubmittedAt: timestamp("last_submitted_at", { withTimezone: true }),
+
+    /**
+     * Per-device session-shape metrics, kept as monotonic high-water marks.
+     *
+     * These mirror the identically-named columns on `submissions`, but at the
+     * scope the CLI actually measures: one machine's local session files. The
+     * submission-level values are DERIVED from these (SUM for additive metrics,
+     * MAX for shape metrics) so a second device no longer overwrites the first.
+     *
+     * `totalActiveTimeMs` here comes from the CLI's `timeMetrics`, which sums
+     * raw interval durations and is therefore TIMEZONE-INVARIANT. The daily
+     * `active_time_ms` rows are not: they apportion each interval across LOCAL
+     * calendar days, so re-scanning under a different TZ re-splits them and
+     * their monotonic merge inflates the sum. Deriving the submission total
+     * from these columns instead of SUM(daily) avoids that.
+     */
+    totalActiveTimeMs: bigint("total_active_time_ms", { mode: "number" }),
+    longestContinuousMs: bigint("longest_continuous_ms", { mode: "number" }),
+    maxConcurrentSessions: integer("max_concurrent_sessions"),
+    sessionCount: integer("session_count"),
   },
   (table) => [
     index("idx_submitted_devices_user_id").on(table.userId),

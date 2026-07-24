@@ -152,6 +152,16 @@ export async function getPublicProfileResponse(
             submissionCount: sql<number>`COALESCE(MAX(${submissions.submitCount}), 0)`,
             earliestDate: sql<string>`MIN(${submissions.dateStart})`,
             latestDate: sql<string>`MAX(${submissions.dateEnd})`,
+            // `submissions` is unique per user, so this SUM reads a single row.
+            // That row's sessionCount is itself derived in the submit route by
+            // summing PER-DEVICE counts, which is what makes the "all-time"
+            // label defensible for multi-device users -- before that it was one
+            // device's snapshot overwriting another's.
+            //
+            // Still an approximate historical maximum, not an exact count: each
+            // device's stored value is a high-water mark, so a submit filtered
+            // by --clients/--date can never lower it, and a re-sessionization
+            // that legitimately merges two intervals cannot correct it down.
             sessionCount: sql<number>`COALESCE(SUM(${submissions.sessionCount}), 0)`,
           })
           .from(submissions)

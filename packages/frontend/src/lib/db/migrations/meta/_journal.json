@@ -134,6 +134,13 @@
       "when": 1784611194680,
       "tag": "0018_add_has_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1784927483081,
+      "tag": "0019_add_device_session_metrics",
+      "breakpoints": true
     }
   ]
 }

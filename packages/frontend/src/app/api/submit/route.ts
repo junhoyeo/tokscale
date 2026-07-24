@@ -303,6 +303,7 @@ export async function POST(request: Request) {
       const [existingSubmission] = await tx
         .select({
           id: submissions.id,
+          totalActiveTimeMs: submissions.totalActiveTimeMs,
           longestContinuousMs: submissions.longestContinuousMs,
           maxConcurrentSessions: submissions.maxConcurrentSessions,
           sessionCount: submissions.sessionCount,
@@ -352,6 +353,7 @@ export async function POST(request: Request) {
           const [racedSubmission] = await tx
             .select({
               id: submissions.id,
+              totalActiveTimeMs: submissions.totalActiveTimeMs,
               longestContinuousMs: submissions.longestContinuousMs,
               maxConcurrentSessions: submissions.maxConcurrentSessions,
               sessionCount: submissions.sessionCount,
@@ -372,6 +374,19 @@ export async function POST(request: Request) {
 
       const submitDevice = getSubmitDevice(data);
       const submittedAt = new Date();
+      // Session-shape metrics are recorded PER DEVICE as monotonic high-water
+      // marks. The per-device max still protects against a truncated local
+      // rescan (the d9df8c9c case), but keeping the metrics device-scoped is
+      // what lets the submission-level values be derived additively below
+      // instead of one device's snapshot overwriting another's.
+      const incomingDeviceMetrics = data.timeMetrics
+        ? {
+            totalActiveTimeMs: data.timeMetrics.totalActiveTimeMs,
+            longestContinuousMs: data.timeMetrics.longestContinuousMs,
+            maxConcurrentSessions: data.timeMetrics.maxConcurrentSessions,
+            sessionCount: data.timeMetrics.sessionCount,
+          }
+        : null;
       const [submittedDevice] = await tx
         .insert(submittedDevices)
         .values({
@@ -380,6 +395,7 @@ export async function POST(request: Request) {
           displayName: submitDevice.name,
           lastSubmittedAt: submittedAt,
           updatedAt: submittedAt,
+          ...(incomingDeviceMetrics ?? {}),
         })
         .onConflictDoUpdate({
           target: [submittedDevices.userId, submittedDevices.deviceKey],
@@ -387,6 +403,18 @@ export async function POST(request: Request) {
             displayName: sql`COALESCE(EXCLUDED.display_name, ${submittedDevices.displayName})`,
             lastSubmittedAt: submittedAt,
             updatedAt: submittedAt,
+            // A submit filtered by --clients/--date reports metrics for only
+            // that slice, so it must never lower the device's stored value.
+            // GREATEST ignores NULLs in Postgres, so a first-time metric write
+            // onto a pre-migration row adopts the incoming value cleanly.
+            ...(incomingDeviceMetrics
+              ? {
+                  totalActiveTimeMs: sql`GREATEST(${submittedDevices.totalActiveTimeMs}, EXCLUDED.total_active_time_ms)`,
+                  longestContinuousMs: sql`GREATEST(${submittedDevices.longestContinuousMs}, EXCLUDED.longest_continuous_ms)`,
+                  maxConcurrentSessions: sql`GREATEST(${submittedDevices.maxConcurrentSessions}, EXCLUDED.max_concurrent_sessions)`,
+                  sessionCount: sql`GREATEST(${submittedDevices.sessionCount}, EXCLUDED.session_count)`,
+                }
+              : {}),
           },
         })
         .returning({ id: submittedDevices.id });
@@ -673,7 +701,10 @@ export async function POST(request: Request) {
             input_tokens = EXCLUDED.input_tokens,
             output_tokens = EXCLUDED.output_tokens,
             timestamp_ms = EXCLUDED.timestamp_ms,
-            active_time_ms = EXCLUDED.active_time_ms,
+            -- Mirrors mergeActiveTimeMs(): this arm must not be a hole in the
+            -- monotonic guard the in-memory merge path applies. GREATEST
+            -- ignores NULLs in Postgres, matching the helper's null handling.
+            active_time_ms = GREATEST(daily_breakdown.active_time_ms, EXCLUDED.active_time_ms),
             source_breakdown = EXCLUDED.source_breakdown
         `);
       }
@@ -717,11 +748,32 @@ export async function POST(request: Request) {
           dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
           dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
           activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
-          totalActiveTimeMs: sql<number>`COALESCE(SUM(${dailyBreakdown.activeTimeMs}), 0)::bigint`,
           rowCount: sql<number>`COUNT(*)::int`,
         })
         .from(dailyBreakdown)
         .where(eq(dailyBreakdown.submissionId, submissionId));
+
+      // Session-shape totals come from the PER-DEVICE high-water marks, not
+      // from SUM(daily_breakdown.active_time_ms).
+      //
+      // Two reasons. (1) Additivity: sessionCount is a count of independent
+      // local sessions, so two devices reporting 100 and 40 total 140 -- taking
+      // a max across devices would report 100 and silently drop the second
+      // machine. (2) Timezone stability: the daily rows apportion each interval
+      // across LOCAL calendar days, so rescanning the same history under a
+      // different TZ re-splits it; combined with the monotonic per-day merge
+      // that permanently inflates SUM(daily). The CLI's timeMetrics totals are
+      // plain sums of interval durations and carry no date bucketing, so they
+      // survive a TZ change unchanged.
+      const [deviceTotals] = await tx
+        .select({
+          totalActiveTimeMs: sql<number>`COALESCE(SUM(${submittedDevices.totalActiveTimeMs}), 0)::bigint`,
+          sessionCount: sql<number>`COALESCE(SUM(${submittedDevices.sessionCount}), 0)::int`,
+          longestContinuousMs: sql<number>`COALESCE(MAX(${submittedDevices.longestContinuousMs}), 0)::bigint`,
+          maxConcurrentSessions: sql<number>`COALESCE(MAX(${submittedDevices.maxConcurrentSessions}), 0)::int`,
+        })
+        .from(submittedDevices)
+        .where(eq(submittedDevices.userId, tokenRecord.userId));
 
       const allDays = await tx
         .select({
@@ -781,22 +833,36 @@ export async function POST(request: Request) {
           ...(isBackfill ? { hasBackfill: true } : {}),
           submitCount: sql`COALESCE(submit_count, 0) + 1`,
           schemaVersion: sql`GREATEST(COALESCE(${submissions.schemaVersion}, 0), ${submitDevice.schemaVersion})`,
-          totalActiveTimeMs: aggregates.totalActiveTimeMs,
-          // Session-shape metrics cannot be safely recomputed from daily active-time buckets.
-          ...(data.timeMetrics ? {
-            longestContinuousMs: Math.max(
-              storedSessionMetrics?.longestContinuousMs ?? 0,
-              data.timeMetrics.longestContinuousMs,
-            ),
-            maxConcurrentSessions: Math.max(
-              storedSessionMetrics?.maxConcurrentSessions ?? 0,
-              data.timeMetrics.maxConcurrentSessions,
-            ),
-            sessionCount: Math.max(
-              storedSessionMetrics?.sessionCount ?? 0,
-              data.timeMetrics.sessionCount,
-            ),
-          } : {}),
+          // Derived from the per-device high-water marks (see deviceTotals
+          // above), floored by whatever is already stored.
+          //
+          // The floor exists for the migration transition: every device row
+          // starts with NULL metrics, so until a device submits again its
+          // contribution to the SUM is 0. Without the floor a user's first
+          // post-migration submit from one of two machines would drop the
+          // account total -- exactly the regression d9df8c9c fixed. It also
+          // preserves monotonicity generally.
+          //
+          // Consequence worth knowing: a total that was already inflated by a
+          // pre-migration TZ re-split stays frozen at the inflated value; the
+          // floor can only hold it, never correct it down. New inflation is
+          // prevented, historical inflation is not repaired.
+          totalActiveTimeMs: Math.max(
+            deviceTotals?.totalActiveTimeMs ?? 0,
+            storedSessionMetrics?.totalActiveTimeMs ?? 0,
+          ),
+          longestContinuousMs: Math.max(
+            deviceTotals?.longestContinuousMs ?? 0,
+            storedSessionMetrics?.longestContinuousMs ?? 0,
+          ),
+          maxConcurrentSessions: Math.max(
+            deviceTotals?.maxConcurrentSessions ?? 0,
+            storedSessionMetrics?.maxConcurrentSessions ?? 0,
+          ),
+          sessionCount: Math.max(
+            deviceTotals?.sessionCount ?? 0,
+            storedSessionMetrics?.sessionCount ?? 0,
+          ),
           mcpServers: mcpServers && mcpServers.length > 0 ? mcpServers : null,
           updatedAt: new Date(),
         })
