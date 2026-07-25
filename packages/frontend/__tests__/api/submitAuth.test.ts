@@ -1341,6 +1341,17 @@ describe("POST /api/submit auth path", () => {
     expect(activeTimeSql).toContain("LEAST(");
     expect(activeTimeSql).toContain("9223372036854775807");
 
+    // Same overflow shape on the daily-breakdown totals. These feed the
+    // leaderboard, so an unclamped SUM turns one inflated day into a 500 on
+    // every subsequent submit for that user.
+    const tokenAggregate = selectFields.find((fields) => "totalTokens" in fields);
+    expect(tokenAggregate).toBeDefined();
+    for (const column of ["totalTokens", "inputTokens", "outputTokens"] as const) {
+      const columnSql = flattenSqlChunks(tokenAggregate![column]).join(" ");
+      expect(columnSql).toContain("LEAST(");
+      expect(columnSql).toContain("9223372036854775807");
+    }
+
     // The ON CONFLICT arm is unreachable while the per-user submissions row
     // lock holds, but it must not be a silent hole in the monotonic guard if
     // that ever changes (or if duplicate dates straddle an INSERT chunk).

@@ -741,10 +741,17 @@ export async function POST(request: Request) {
       // ------------------------------------------
       const [aggregates] = await tx
         .select({
-          totalTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.tokens}), 0)::bigint`,
+          // SUM(int8) returns numeric, so casting back to bigint raises "out of
+          // range" once the day rows total past int8 -- aborting the submit for
+          // a user whose history is otherwise fine. Clamp rather than abort;
+          // see the same treatment on the per-device aggregate below. The bound
+          // is int8 max (~9.2e18 tokens), orders of magnitude above any honest
+          // total, so this cannot alter a real ranking -- it only replaces a
+          // 500 with a saturated value.
+          totalTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.tokens}), 0), 9223372036854775807)::bigint`,
           totalCost: sql<string>`COALESCE(SUM(CAST(${dailyBreakdown.cost} AS DECIMAL(14,4))), 0)::text`,
-          inputTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.inputTokens}), 0)::bigint`,
-          outputTokens: sql<number>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)::bigint`,
+          inputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.inputTokens}), 0), 9223372036854775807)::bigint`,
+          outputTokens: sql<number>`LEAST(COALESCE(SUM(${dailyBreakdown.outputTokens}), 0), 9223372036854775807)::bigint`,
           dateStart: sql<string>`MIN(${dailyBreakdown.date})`,
           dateEnd: sql<string>`MAX(${dailyBreakdown.date})`,
           activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
