@@ -767,8 +767,18 @@ export async function POST(request: Request) {
       // survive a TZ change unchanged.
       const [deviceTotals] = await tx
         .select({
-          totalActiveTimeMs: sql<number>`COALESCE(SUM(${submittedDevices.totalActiveTimeMs}), 0)::bigint`,
-          sessionCount: sql<number>`COALESCE(SUM(${submittedDevices.sessionCount}), 0)::int`,
+          // LEAST() clamps rather than aborting the submit. SUM() widens its
+          // input (int4 -> bigint, int8 -> numeric), so the casts back down to
+          // the column type raise "out of range" as soon as the per-device
+          // values total past it. TimeMetricsSchema bounds these at min(0)
+          // with no maximum, so a client reporting ~2.1B sessions on one
+          // device would otherwise make every submit from a SECOND device
+          // fail: the aggregate reads both rows, overflows ::int, and rolls
+          // the transaction back. Clamping keeps a dishonest payload from
+          // locking a real device out. MAX() needs no clamp -- it returns a
+          // value that already fit the column.
+          totalActiveTimeMs: sql<number>`LEAST(COALESCE(SUM(${submittedDevices.totalActiveTimeMs}), 0), 9223372036854775807)::bigint`,
+          sessionCount: sql<number>`LEAST(COALESCE(SUM(${submittedDevices.sessionCount}), 0), 2147483647)::int`,
           longestContinuousMs: sql<number>`COALESCE(MAX(${submittedDevices.longestContinuousMs}), 0)::bigint`,
           maxConcurrentSessions: sql<number>`COALESCE(MAX(${submittedDevices.maxConcurrentSessions}), 0)::int`,
         })

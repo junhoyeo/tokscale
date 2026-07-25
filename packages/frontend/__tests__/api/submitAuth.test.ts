@@ -1330,6 +1330,17 @@ describe("POST /api/submit auth path", () => {
       expect.arrayContaining([expect.stringContaining("MAX(")]),
     );
 
+    // Only the SUM columns need the clamp: SUM() widens its input, so casting
+    // back to the column type overflows once the per-device values total past
+    // it, aborting the submit. Pin the bounds too -- a wrong constant is as
+    // broken as a missing LEAST().
+    const sessionCountSql = flattenSqlChunks(deviceAggregate!.sessionCount).join(" ");
+    expect(sessionCountSql).toContain("LEAST(");
+    expect(sessionCountSql).toContain("2147483647");
+    const activeTimeSql = flattenSqlChunks(deviceAggregate!.totalActiveTimeMs).join(" ");
+    expect(activeTimeSql).toContain("LEAST(");
+    expect(activeTimeSql).toContain("9223372036854775807");
+
     // The ON CONFLICT arm is unreachable while the per-user submissions row
     // lock holds, but it must not be a silent hole in the monotonic guard if
     // that ever changes (or if duplicate dates straddle an INSERT chunk).
