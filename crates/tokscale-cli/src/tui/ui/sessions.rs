@@ -9,6 +9,7 @@ use super::widgets::{
     get_client_display_name, total_tokens_cell, truncate_text, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::tui::data::SessionModel;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -388,7 +389,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// same family-shade system used in the Overview and Models tabs. Multiple
 /// models are joined with `", "`. The total display width is truncated to
 /// `max_chars` with an ellipsis when it overflows.
-fn build_model_cell(models: &[String], max_chars: usize, app: &App) -> Cell<'static> {
+fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cell<'static> {
     if models.is_empty() {
         return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
     }
@@ -409,17 +410,18 @@ fn build_model_cell(models: &[String], max_chars: usize, app: &App) -> Cell<'sta
             break;
         }
 
-        let color = app.model_color(model);
-        let model_len = model.chars().count();
+        let color = app.model_color_for(&model.provider, &model.color_key);
+        let name = &model.display_name;
+        let model_len = name.chars().count();
 
         if model_len <= budget {
-            spans.push(Span::styled(model.clone(), Style::default().fg(color)));
+            spans.push(Span::styled(name.clone(), Style::default().fg(color)));
             budget -= model_len;
         } else if budget <= 1 {
             spans.push(Span::styled("…".to_string(), Style::default().fg(color)));
             budget = 0;
         } else {
-            let head: String = model.chars().take(budget - 1).collect();
+            let head: String = name.chars().take(budget - 1).collect();
             spans.push(Span::styled(
                 format!("{}…", head),
                 Style::default().fg(color),
@@ -480,7 +482,11 @@ mod tests {
             session_id: id.to_string(),
             client: client.to_string(),
             title: None,
-            models: vec!["test-model".to_string()],
+            models: vec![SessionModel {
+                display_name: "test-model".to_string(),
+                provider: "test".to_string(),
+                color_key: "test-model".to_string(),
+            }],
             tokens: TokenBreakdown {
                 input: 1000,
                 output: 500,
@@ -558,7 +564,11 @@ mod tests {
     fn model_column_shows_model_names() {
         let mut app = make_app(200);
         let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
-        s.models = vec!["claude-sonnet-4".to_string()];
+        s.models = vec![SessionModel {
+            display_name: "claude-sonnet-4".to_string(),
+            provider: "anthropic".to_string(),
+            color_key: "claude-sonnet-4".to_string(),
+        }];
         app.data.sessions = vec![s];
         let body = render_body(&mut app, 200, 12);
         assert!(body.contains("Model"), "expected Model header\n{body}");
@@ -572,7 +582,18 @@ mod tests {
     fn model_column_shows_multiple_models() {
         let mut app = make_app(220);
         let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
-        s.models = vec!["gpt-4o".to_string(), "o3-mini".to_string()];
+        s.models = vec![
+            SessionModel {
+                display_name: "gpt-4o".to_string(),
+                provider: "openai".to_string(),
+                color_key: "gpt-4o".to_string(),
+            },
+            SessionModel {
+                display_name: "o3-mini".to_string(),
+                provider: "openai".to_string(),
+                color_key: "o3-mini".to_string(),
+            },
+        ];
         app.data.sessions = vec![s];
         let body = render_body(&mut app, 220, 12);
         assert!(

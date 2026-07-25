@@ -153,10 +153,9 @@ pub struct SessionUsage {
     /// (e.g. OpenCode's `session.title` column). `None` for clients that
     /// don't record a title.
     pub title: Option<String>,
-    /// Distinct model display names used across messages in this session,
-    /// in first-seen order. Most sessions use a single model; a few switch
-    /// mid-conversation and show multiple entries.
-    pub models: Vec<String>,
+    /// Distinct models used across messages in this session, in first-seen
+    /// order. Most sessions use a single model; a few switch mid-conversation.
+    pub models: Vec<SessionModel>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub message_count: u32,
@@ -167,6 +166,15 @@ pub struct SessionUsage {
     /// Unix-ms timestamp of the most recent message observed in this session.
     /// `0` when every message lacked a usable timestamp.
     pub last_active_ms: i64,
+}
+
+/// A model entry within a session, retaining the provider and color_key
+/// needed for correct family-shade color lookup alongside the display name.
+#[derive(Debug, Clone)]
+pub struct SessionModel {
+    pub display_name: String,
+    pub provider: String,
+    pub color_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -975,9 +983,18 @@ impl DataLoader {
                     }
                 }
 
-                // Track distinct model display names in first-seen order.
-                if !session_entry.models.contains(&normalized_model) {
-                    session_entry.models.push(normalized_model.clone());
+                // Track distinct models in first-seen order, retaining
+                // provider and color_key for correct shade-map lookups.
+                if !session_entry
+                    .models
+                    .iter()
+                    .any(|m| m.color_key == model_key)
+                {
+                    session_entry.models.push(SessionModel {
+                        display_name: normalized_model.clone(),
+                        provider: msg.provider_id.clone(),
+                        color_key: model_key.clone(),
+                    });
                 }
             }
         }
