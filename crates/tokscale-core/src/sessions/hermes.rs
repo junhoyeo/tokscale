@@ -13,6 +13,10 @@ use tracing::warn;
 
 const HERMES_AGENT_NAME: &str = "Hermes Agent";
 
+/// Stands in for a NULL `billing_provider` inside a per-model dedup key. Angle
+/// brackets keep it out of the slug space real provider ids live in.
+const NULL_PROVIDER_KEY: &str = "<null>";
+
 fn timestamp_secs_to_ms(timestamp: f64) -> i64 {
     if timestamp > 1e12 {
         timestamp as i64
@@ -37,14 +41,17 @@ fn resolved_provider(billing_provider: Option<String>, model_id: &str) -> String
 /// erase one provider from the breakdown and credit its tokens to the other.
 /// Cost is resolved per row (actual when non-zero, otherwise estimated) before
 /// the SUM, so a reconciled sibling row cannot discard estimate-only siblings.
-/// `ORDER BY` makes the message_count credit below deterministic.
+/// `ORDER BY` sorts the row matching `sessions.model` first within each session
+/// and is otherwise total, so the caller can hand `sessions.message_count` to
+/// the first row it sees per session and get the primary model whenever one
+/// survives grouping — and a deterministic row when none does.
 const PER_MODEL_QUERY: &str = r#"
         SELECT
             smu.session_id,
             smu.model,
             smu.billing_provider,
             s.started_at,
-            CASE WHEN smu.model = s.model THEN COALESCE(s.message_count, 0) ELSE 0 END AS message_count,
+            COALESCE(s.message_count, 0) AS message_count,
             SUM(smu.input_tokens)        AS input_tokens,
             SUM(smu.output_tokens)       AS output_tokens,
             SUM(smu.cache_read_tokens)   AS cache_read_tokens,
@@ -62,7 +69,10 @@ const PER_MODEL_QUERY: &str = r#"
             OR SUM(smu.cache_write_tokens) > 0
             OR SUM(smu.reasoning_tokens) > 0
             OR SUM(COALESCE(NULLIF(smu.actual_cost_usd, 0), smu.estimated_cost_usd, 0)) > 0
-        ORDER BY smu.session_id, smu.model, smu.billing_provider
+        ORDER BY smu.session_id,
+                 CASE WHEN smu.model = s.model THEN 0 ELSE 1 END,
+                 smu.model,
+                 smu.billing_provider
 "#;
 
 /// Session-level totals credited to `sessions.model`. Covers Hermes builds that
@@ -248,18 +258,26 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 
     for mut row in per_model_rows.unwrap_or_default() {
         covered_sessions.insert(row.session_id.clone());
-        // `sessions.message_count` is a per-session total that the query credits
-        // to the row whose model matches `sessions.model`. Grouping by
-        // billing_provider can split that model across several rows, so credit
-        // only the first of them; ORDER BY makes "first" deterministic.
-        if row.message_count > 0 && !counted_sessions.insert(row.session_id.clone()) {
+        // `sessions.message_count` is a per-session total, so exactly one row
+        // per session may carry it. ORDER BY sorts the row matching
+        // `sessions.model` first, so "the first row of the session" is that
+        // primary model when it survives grouping, and a deterministic
+        // stand-in when it does not — a NULL `sessions.model`, a rename
+        // between the two tables, or a primary model whose rows were all zero
+        // and got filtered out. Zeroing every later row keeps the per-session
+        // sum equal to `sessions.message_count` instead of dropping it.
+        if !counted_sessions.insert(row.session_id.clone()) {
             row.message_count = 0;
         }
+        // SQLite groups NULL and '' separately, so one (session, model) can
+        // reach this loop as two rows that differ only in a NULL vs empty
+        // billing_provider. Rendering NULL as a sentinel keeps their keys
+        // apart; folding NULL to "" would collide and the caller's dedup pass
+        // would then drop the second row's tokens outright.
+        let provider_key = row.billing_provider.as_deref().unwrap_or(NULL_PROVIDER_KEY);
         let dedup_key = format!(
             "hermes:{}:{}:{}",
-            row.session_id,
-            row.model_id,
-            row.billing_provider.as_deref().unwrap_or_default()
+            row.session_id, row.model_id, provider_key
         );
         messages.push(build_message(row, dedup_key));
     }

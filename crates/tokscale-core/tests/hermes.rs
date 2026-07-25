@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 use tempfile::TempDir;
 use tokscale_core::sessions::hermes::parse_hermes_sqlite;
 
@@ -1099,4 +1100,124 @@ fn test_parse_hermes_sqlite_emits_cost_only_rows() {
     let messages = parse_hermes_sqlite(&db_path);
     assert_eq!(messages.len(), 1);
     assert!((messages[0].cost - 0.07).abs() < 1e-9);
+}
+
+/// `sessions.message_count` is credited to the row matching `sessions.model`,
+/// but nothing guarantees such a row exists — the session can have no model, or
+/// name one that `session_model_usage` never recorded. The count still belongs
+/// to the session, so a deterministic stand-in row has to carry it.
+#[test]
+fn test_parse_hermes_sqlite_keeps_message_count_when_no_row_matches_session_model() {
+    let dir = TempDir::new().unwrap();
+    let db_path = create_test_db(&dir);
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        r#"
+        INSERT INTO sessions (
+            id, source, model, started_at, message_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            "session-orphan-count",
+            "cli",
+            "glm-5.2",
+            1_775_007_000.0_f64,
+            11_i64,
+        ],
+    )
+    .unwrap();
+
+    for (model, input) in [("gpt-5.4", 2000_i64), ("mimo-v2.5-free", 1000_i64)] {
+        conn.execute(
+            r#"
+            INSERT INTO session_model_usage (
+                session_id, model, billing_provider, billing_base_url, billing_mode, task,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                estimated_cost_usd, actual_cost_usd
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                "session-orphan-count",
+                model,
+                "openai",
+                "",
+                "",
+                "",
+                input,
+                0_i64,
+                0_i64,
+                0_i64,
+                0_i64,
+                0.0_f64,
+                0.0_f64,
+            ],
+        )
+        .unwrap();
+    }
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages.iter().map(|m| m.message_count).sum::<i32>(),
+        11,
+        "session message_count must survive, and exactly once"
+    );
+}
+
+/// A nullable `billing_provider` lets one (session, model) group twice — once
+/// under NULL, once under ''. Both rows carry real tokens, so their dedup keys
+/// must differ or the caller's dedup pass drops one of them.
+#[test]
+fn test_parse_hermes_sqlite_separates_null_and_empty_billing_providers() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("nullable-provider.db");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0,
+            cache_write_tokens INTEGER DEFAULT 0,
+            reasoning_tokens INTEGER DEFAULT 0,
+            billing_provider TEXT,
+            estimated_cost_usd REAL,
+            actual_cost_usd REAL
+        );
+        CREATE TABLE session_model_usage (
+            session_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            billing_provider TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            actual_cost_usd REAL NOT NULL DEFAULT 0
+        );
+        INSERT INTO sessions (id, source, model, started_at, message_count)
+        VALUES ('session-nullable', 'cli', 'glm-5.2', 1775008000.0, 3);
+        INSERT INTO session_model_usage (session_id, model, billing_provider, input_tokens)
+        VALUES ('session-nullable', 'glm-5.2', NULL, 2000),
+               ('session-nullable', 'glm-5.2', '',   1000);
+        "#,
+    )
+    .unwrap();
+
+    let messages = parse_hermes_sqlite(&db_path);
+    assert_eq!(messages.len(), 2);
+
+    let keys: HashSet<&str> = messages
+        .iter()
+        .filter_map(|m| m.dedup_key.as_deref())
+        .collect();
+    assert_eq!(keys.len(), 2, "NULL and '' must not share a dedup key");
+    assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 3000);
 }
