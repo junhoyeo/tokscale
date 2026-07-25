@@ -4021,6 +4021,27 @@ mod tests {
                 billing_provider TEXT,
                 estimated_cost_usd REAL,
                 actual_cost_usd REAL
+            );
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                model TEXT NOT NULL,
+                billing_provider TEXT NOT NULL DEFAULT '',
+                billing_base_url TEXT NOT NULL DEFAULT '',
+                billing_mode TEXT NOT NULL DEFAULT '',
+                task TEXT NOT NULL DEFAULT '',
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                actual_cost_usd REAL NOT NULL DEFAULT 0,
+                cost_status TEXT,
+                cost_source TEXT,
+                first_seen REAL,
+                last_seen REAL,
+                PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
             );",
         )
         .unwrap();
@@ -4089,6 +4110,21 @@ mod tests {
                 id,
                 model,
                 message_count,
+                input_tokens,
+                output_tokens,
+                actual_cost_usd
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_model_usage (
+                session_id, model, billing_provider, billing_base_url, billing_mode, task,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                estimated_cost_usd, actual_cost_usd
+            ) VALUES (?1, ?2, 'anthropic', '', '', '', ?3, ?4, 0, 0, 0, 0, ?5)",
+            rusqlite::params![
+                id,
+                model,
                 input_tokens,
                 output_tokens,
                 actual_cost_usd

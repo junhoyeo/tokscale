@@ -46,29 +46,30 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 
     let query = r#"
         SELECT
-            id,
-            model,
-            billing_provider,
-            started_at,
-            message_count,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-            reasoning_tokens,
-            estimated_cost_usd,
-            actual_cost_usd
-        FROM sessions
-        WHERE model IS NOT NULL
-          AND TRIM(model) != ''
-          AND (
-            COALESCE(input_tokens, 0) > 0 OR
-            COALESCE(output_tokens, 0) > 0 OR
-            COALESCE(cache_read_tokens, 0) > 0 OR
-            COALESCE(cache_write_tokens, 0) > 0 OR
-            COALESCE(reasoning_tokens, 0) > 0 OR
-            COALESCE(actual_cost_usd, estimated_cost_usd, 0) > 0
-          )
+            smu.session_id,
+            smu.model,
+            MAX(smu.billing_provider) AS billing_provider,
+            s.started_at,
+            CASE WHEN smu.model = s.model THEN COALESCE(s.message_count, 0) ELSE 0 END AS message_count,
+            SUM(smu.input_tokens)        AS input_tokens,
+            SUM(smu.output_tokens)       AS output_tokens,
+            SUM(smu.cache_read_tokens)   AS cache_read_tokens,
+            SUM(smu.cache_write_tokens)  AS cache_write_tokens,
+            SUM(smu.reasoning_tokens)    AS reasoning_tokens,
+            SUM(smu.estimated_cost_usd)  AS estimated_cost_usd,
+            SUM(smu.actual_cost_usd)     AS actual_cost_usd
+        FROM session_model_usage smu
+        JOIN sessions s ON s.id = smu.session_id
+        WHERE smu.model IS NOT NULL
+          AND TRIM(smu.model) != ''
+        GROUP BY smu.session_id, smu.model, s.started_at, s.message_count
+        HAVING SUM(smu.input_tokens) > 0
+            OR SUM(smu.output_tokens) > 0
+            OR SUM(smu.cache_read_tokens) > 0
+            OR SUM(smu.cache_write_tokens) > 0
+            OR SUM(smu.reasoning_tokens) > 0
+            OR MAX(smu.actual_cost_usd) > 0
+            OR MAX(smu.estimated_cost_usd) > 0
     "#;
 
     let mut stmt = match conn.prepare(query) {
@@ -137,6 +138,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             actual_cost,
         )| {
             let provider = resolved_provider(billing_provider, &model_id);
+            let dedup_key = format!("hermes:{session_id}:{model_id}");
             let mut msg = UnifiedMessage::new_with_agent(
                 "hermes",
                 model_id,
@@ -150,11 +152,15 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                     cache_write: cache_write.max(0),
                     reasoning: reasoning.max(0),
                 },
-                actual_cost.or(estimated_cost).unwrap_or(0.0).max(0.0),
+                actual_cost
+                    .filter(|c| *c > 0.0)
+                    .or(estimated_cost.filter(|c| *c > 0.0))
+                    .unwrap_or(0.0)
+                    .max(0.0),
                 Some(HERMES_AGENT_NAME.to_string()),
             );
             msg.message_count = message_count.max(0);
-            msg.dedup_key = Some(session_id);
+            msg.dedup_key = Some(dedup_key);
             msg
         },
     )
