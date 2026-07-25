@@ -170,7 +170,7 @@ pub struct SessionUsage {
 
 /// A model entry within a session, retaining the provider and color_key
 /// needed for correct family-shade color lookup alongside the display name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionModel {
     pub display_name: String,
     pub provider: String,
@@ -2815,6 +2815,76 @@ after"#,
             },
             cost,
         )
+    }
+
+    /// The Sessions tab's Model column reads `SessionUsage.models`. Each entry
+    /// keeps the provider and color key its family-shade lookup needs, and the
+    /// list is deduped by display name so a model reached under two spellings
+    /// (here a dated id and its normalized form) lands once, in first-seen order.
+    #[test]
+    fn test_session_models_dedup_by_display_name_and_retain_provider() {
+        let loader = DataLoader::new(None);
+        let base_ms = 1_735_689_600_000_i64;
+        let tokens = || tokscale_core::TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5-20250929",
+                        "anthropic",
+                        "session-1",
+                        base_ms,
+                        tokens(),
+                        1.0,
+                    ),
+                    UnifiedMessage::new(
+                        "claude",
+                        "gpt-5",
+                        "openai",
+                        "session-1",
+                        base_ms + 1_000,
+                        tokens(),
+                        1.0,
+                    ),
+                    // Same model as the first message, spelled without the date
+                    // and served through a gateway: must not add a second entry.
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4-5",
+                        "github-copilot",
+                        "session-1",
+                        base_ms + 2_000,
+                        tokens(),
+                        1.0,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.sessions.len(), 1, "expected a single session bucket");
+        assert_eq!(
+            usage.sessions[0].models,
+            vec![
+                SessionModel {
+                    display_name: "claude-sonnet-4-5".to_string(),
+                    provider: "anthropic".to_string(),
+                    color_key: "claude-sonnet-4-5".to_string(),
+                },
+                SessionModel {
+                    display_name: "gpt-5".to_string(),
+                    provider: "openai".to_string(),
+                    color_key: "gpt-5".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
