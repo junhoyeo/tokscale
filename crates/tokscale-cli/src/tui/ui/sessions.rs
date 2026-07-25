@@ -11,6 +11,11 @@ use super::widgets::{
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::SessionModel;
 
+/// Terminal width at which the Sessions table starts showing the Model column.
+/// The wide layout kicks in at 80 columns but its constraints already exceed the
+/// space available there, so Model waits for a terminal that can absorb it.
+const MODEL_COLUMN_MIN_WIDTH: u16 = 120;
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -62,6 +67,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         "%Y-%m-%d %H:%M"
     };
 
+    // The wide layout is already over-subscribed at its own 80-column threshold, so
+    // Model gets a threshold of its own rather than riding along with `!is_narrow`.
+    let show_model = !is_narrow && !is_very_narrow && app.terminal_width >= MODEL_COLUMN_MIN_WIDTH;
+
     // Model column grows on wide terminals: base 18, +1 per 8 chars past 80, capped at 36.
     let model_col_width = (18 + (app.terminal_width as usize).saturating_sub(80) / 8).min(36);
 
@@ -73,29 +82,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             vec!["Session", "Client", "Msgs", "Tokens", "Cost"]
         }
-    } else if has_turn_data {
-        vec![
-            "Session",
-            "Client",
-            "Model",
-            "Turn",
-            "Msgs",
-            "Input",
-            "Output",
-            "Cache R",
-            "Cache W",
-            "Cache×",
-            "Total",
-            "Cost",
-            "Cost/1M",
-            "Duration",
-            "Last Active",
-        ]
     } else {
-        vec![
-            "Session",
-            "Client",
-            "Model",
+        let mut cells = vec!["Session", "Client"];
+        if show_model {
+            cells.push("Model");
+        }
+        if has_turn_data {
+            cells.push("Turn");
+        }
+        cells.extend([
             "Msgs",
             "Input",
             "Output",
@@ -107,7 +102,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             "Cost/1M",
             "Duration",
             "Last Active",
-        ]
+        ]);
+        cells
     };
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -121,48 +117,45 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
+    // Every wide-layout column after Client shifts right by one for each optional
+    // column that is present, so the sort indicators must track both gates.
+    let optional_cols = usize::from(show_model) + usize::from(has_turn_data);
+
+    // "Last Active" column index is the sort target for Date.
+    let last_active_idx = if is_very_narrow || is_narrow {
+        // neither narrow layout keeps a last-active column, so Date sort has no indicator
+        usize::MAX
+    } else {
+        12 + optional_cols
+    };
+    let total_idx = if is_very_narrow {
+        usize::MAX
+    } else if is_narrow {
+        if has_turn_data {
+            4
+        } else {
+            3
+        }
+    } else {
+        8 + optional_cols
+    };
+    let cost_idx = if is_very_narrow {
+        1
+    } else if is_narrow {
+        if has_turn_data {
+            5
+        } else {
+            4
+        }
+    } else {
+        9 + optional_cols
+    };
+
     let header = Row::new(
         header_cells
             .iter()
             .enumerate()
             .map(|(i, h)| {
-                // "Last Active" column index is the sort target for Date.
-                let last_active_idx = if is_very_narrow {
-                    usize::MAX // no last-active column in very narrow mode
-                } else if is_narrow {
-                    // narrow drops last-active entirely; Date sort has no header indicator
-                    usize::MAX
-                } else if has_turn_data {
-                    14
-                } else {
-                    13
-                };
-                let total_idx = if is_very_narrow {
-                    usize::MAX
-                } else if is_narrow {
-                    if has_turn_data {
-                        4
-                    } else {
-                        3
-                    }
-                } else if has_turn_data {
-                    10
-                } else {
-                    9
-                };
-                let cost_idx = if is_very_narrow {
-                    1
-                } else if is_narrow {
-                    if has_turn_data {
-                        5
-                    } else {
-                        4
-                    }
-                } else if has_turn_data {
-                    11
-                } else {
-                    10
-                };
                 let indicator = if i == last_active_idx {
                     sort_indicator(SortField::Date)
                 } else if i == total_idx {
@@ -255,8 +248,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(get_client_display_name(&session.client))
                         .style(Style::default().fg(theme_muted)),
                 );
-                let model_cell = build_model_cell(&session.models, model_col_width, app);
-                cells.push(model_cell);
+                if show_model {
+                    cells.push(build_model_cell(&session.models, model_col_width, app));
+                }
                 if has_turn_data {
                     let turn_str = if session.turn_count > 0 {
                         session.turn_count.to_string()
@@ -323,30 +317,17 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(18),
             Constraint::Percentage(20),
         ]
-    } else if has_turn_data {
-        vec![
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(model_col_width as u16),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(9),
-            Constraint::Length(17),
-        ]
     } else {
-        vec![
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(model_col_width as u16),
-            Constraint::Length(6),
+        let mut widths = vec![Constraint::Min(20), Constraint::Length(12)];
+        if show_model {
+            widths.push(Constraint::Length(model_col_width as u16));
+        }
+        if has_turn_data {
+            widths.push(Constraint::Length(5));
+        }
+        // Msgs borrows a column from Turn when both are shown.
+        widths.push(Constraint::Length(if has_turn_data { 5 } else { 6 }));
+        widths.extend([
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
@@ -357,7 +338,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(9),
             Constraint::Length(17),
-        ]
+        ]);
+        widths
     };
 
     let table = Table::new(rows, widths)
@@ -387,8 +369,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// Build a table cell for the Model column with each model name colored by the
 /// same family-shade system used in the Overview and Models tabs. Multiple
-/// models are joined with `", "`. The total display width is truncated to
-/// `max_chars` with an ellipsis when it overflows.
+/// models are joined with `", "`. The total width is truncated to `max_chars`
+/// with an ellipsis when it overflows, counted in `chars()` to match
+/// `truncate_text`, which measures the Session and Client cells in this table.
 fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cell<'static> {
     if models.is_empty() {
         return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
@@ -402,7 +385,7 @@ fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cel
             if budget < 3 {
                 break;
             }
-            spans.push(Span::raw(", "));
+            spans.push(Span::styled(", ", Style::default().fg(app.theme.muted)));
             budget -= 2;
         }
 
@@ -541,6 +524,15 @@ mod tests {
             .join("\n")
     }
 
+    /// The header is the first line inside the block border.
+    fn header_line(app: &mut App, width: u16) -> String {
+        render_body(app, width, 6)
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string()
+    }
+
     #[test]
     fn wide_terminal_renders_session_and_duration_columns() {
         let mut app = make_app(200);
@@ -648,6 +640,104 @@ mod tests {
             body.contains("No session usage data"),
             "expected empty message\n{body}"
         );
+    }
+
+    #[test]
+    fn model_column_hidden_below_its_width_threshold() {
+        // 119 is still the wide layout (>= 80) but one short of the Model gate.
+        let mut app = make_app(119);
+        app.data.sessions = vec![session("abc-123", "opencode", 1.5, 1_736_000_000_000)];
+        let body = render_body(&mut app, 119, 12);
+        assert!(
+            !body.contains("Model"),
+            "Model header should be gated off at 119 columns\n{body}"
+        );
+        assert!(
+            !body.contains("test-model"),
+            "Model cell should be gated off at 119 columns\n{body}"
+        );
+        // The rest of the wide layout is still intact.
+        assert!(body.contains("Client"), "expected Client header\n{body}");
+        assert!(body.contains("Cache×"), "expected Cache× header\n{body}");
+    }
+
+    #[test]
+    fn model_column_appears_at_its_width_threshold() {
+        let mut app = make_app(120);
+        app.data.sessions = vec![session("abc-123", "opencode", 1.5, 1_736_000_000_000)];
+        let body = render_body(&mut app, 120, 12);
+        assert!(
+            body.contains("Model"),
+            "expected Model header at 120 columns\n{body}"
+        );
+        assert!(
+            body.contains("test-model"),
+            "expected model name at 120 columns\n{body}"
+        );
+    }
+
+    /// The Cost/Tokens/Date sort indicators are placed by hand-computed column
+    /// indices, which shift for every optional column. Walk all four
+    /// Model x Turn combinations and confirm the indicator still lands on Cost.
+    #[test]
+    fn cost_sort_indicator_tracks_model_and_turn_gating() {
+        for (width, expect_model, has_turn) in [
+            (200u16, true, true),
+            (200, true, false),
+            (119, false, true),
+            (119, false, false),
+        ] {
+            let mut app = make_app(width);
+            let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+            if !has_turn {
+                s.turn_count = 0;
+            }
+            app.data.sessions = vec![s];
+            let header = header_line(&mut app, width);
+            assert_eq!(
+                header.contains("Model"),
+                expect_model,
+                "Model gating wrong at width {width}\n{header}"
+            );
+            assert_eq!(
+                header.contains("Turn"),
+                has_turn,
+                "Turn gating wrong at width {width}\n{header}"
+            );
+            assert!(
+                header.contains("Cost ▼"),
+                "cost sort indicator landed on the wrong column at width {width} \
+                 (model={expect_model}, turn={has_turn})\n{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn tokens_and_date_sort_indicators_land_on_their_columns() {
+        for has_turn in [true, false] {
+            let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+            if !has_turn {
+                s.turn_count = 0;
+            }
+
+            let mut app = make_app(200);
+            app.data.sessions = vec![s.clone()];
+            app.sort_field = SortField::Tokens;
+            let header = header_line(&mut app, 200);
+            assert!(
+                header.contains("Total ▼"),
+                "tokens sort indicator misplaced (turn={has_turn})\n{header}"
+            );
+
+            let mut app = make_app(200);
+            app.data.sessions = vec![s];
+            app.sort_field = SortField::Date;
+            let header = header_line(&mut app, 200);
+            assert!(
+                header.contains("Last Active ▼"),
+                "date sort indicator misplaced (turn={has_turn})\n{header}"
+            );
+        }
     }
 
     #[test]
