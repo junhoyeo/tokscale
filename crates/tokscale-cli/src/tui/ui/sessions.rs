@@ -11,10 +11,34 @@ use super::widgets::{
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::SessionModel;
 
-/// Terminal width at which the Sessions table starts showing the Model column.
-/// The wide layout kicks in at 80 columns but its constraints already exceed the
-/// space available there, so Model waits for a terminal that can absorb it.
-const MODEL_COLUMN_MIN_WIDTH: u16 = 120;
+/// Narrowest Model column worth showing. Below this the names are cut so short
+/// that the column carries no information, so it stays hidden instead.
+const MODEL_COLUMN_MIN_CHARS: u16 = 18;
+
+/// Widest the Model column ever grows; surplus past this goes to Session.
+const MODEL_COLUMN_MAX_CHARS: u16 = 36;
+
+/// Cells the wide Sessions layout needs *before* a Model column: Session (20),
+/// Client (12), the optional Turn (5), Msgs (5 or 6), the ten trailing metric
+/// columns, and one separator cell between every pair.
+///
+/// The wide layout kicks in at 80 columns but is heavily over-subscribed there:
+/// ratatui shrinks every column to fit, which truncates the header labels and
+/// clips the sort indicator off whichever column carries it. Model is gated on
+/// this budget rather than a magic terminal width so it only appears once the
+/// rest of the table renders at its natural size.
+fn wide_layout_fixed_width(has_turn: bool) -> u16 {
+    // Input, Output, Cache R, Cache W, Cache×, Total, Cost, Cost/1M, Duration,
+    // Last Active.
+    const TRAILING: u16 = 10 + 10 + 10 + 10 + 8 + 10 + 10 + 10 + 9 + 17;
+    if has_turn {
+        // 14 columns, so 13 separators.
+        20 + 12 + 5 + 5 + TRAILING + 13
+    } else {
+        // 13 columns, so 12 separators.
+        20 + 12 + 6 + TRAILING + 12
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -67,12 +91,17 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         "%Y-%m-%d %H:%M"
     };
 
-    // The wide layout is already over-subscribed at its own 80-column threshold, so
-    // Model gets a threshold of its own rather than riding along with `!is_narrow`.
-    let show_model = !is_narrow && !is_very_narrow && app.terminal_width >= MODEL_COLUMN_MIN_WIDTH;
+    // What the wide layout can spare for Model once every other column has its
+    // natural width, including the separator Model itself would add. Measured
+    // against `inner` rather than the terminal so the budget matches the width
+    // ratatui actually divides up, which keeps `build_model_cell`'s ellipsis
+    // budget equal to the rendered cell instead of being re-cut by the solver.
+    let model_budget = inner
+        .width
+        .saturating_sub(wide_layout_fixed_width(has_turn_data) + 1);
 
-    // Model column grows on wide terminals: base 18, +1 per 8 chars past 80, capped at 36.
-    let model_col_width = (18 + (app.terminal_width as usize).saturating_sub(80) / 8).min(36);
+    let show_model = !is_narrow && !is_very_narrow && model_budget >= MODEL_COLUMN_MIN_CHARS;
+    let model_col_width = model_budget.min(MODEL_COLUMN_MAX_CHARS);
 
     let header_cells = if is_very_narrow {
         vec!["Session", "Cost"]
@@ -249,7 +278,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         .style(Style::default().fg(theme_muted)),
                 );
                 if show_model {
-                    cells.push(build_model_cell(&session.models, model_col_width, app));
+                    cells.push(build_model_cell(
+                        &session.models,
+                        model_col_width as usize,
+                        app,
+                    ));
                 }
                 if has_turn_data {
                     let turn_str = if session.turn_count > 0 {
@@ -320,7 +353,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         let mut widths = vec![Constraint::Min(20), Constraint::Length(12)];
         if show_model {
-            widths.push(Constraint::Length(model_col_width as u16));
+            widths.push(Constraint::Length(model_col_width));
         }
         if has_turn_data {
             widths.push(Constraint::Length(5));
@@ -642,38 +675,98 @@ mod tests {
         );
     }
 
+    /// Narrowest terminal that still shows the Model column, derived the way
+    /// `render` derives it: the fixed wide-layout budget, Model's own separator
+    /// and minimum width, plus the two block borders `inner` strips off.
+    fn model_gate_width(has_turn: bool) -> u16 {
+        wide_layout_fixed_width(has_turn) + 1 + MODEL_COLUMN_MIN_CHARS + 2
+    }
+
     #[test]
     fn model_column_hidden_below_its_width_threshold() {
-        // 119 is still the wide layout (>= 80) but one short of the Model gate.
-        let mut app = make_app(119);
-        app.data.sessions = vec![session("abc-123", "opencode", 1.5, 1_736_000_000_000)];
-        let body = render_body(&mut app, 119, 12);
-        assert!(
-            !body.contains("Model"),
-            "Model header should be gated off at 119 columns\n{body}"
-        );
-        assert!(
-            !body.contains("test-model"),
-            "Model cell should be gated off at 119 columns\n{body}"
-        );
-        // The rest of the wide layout is still intact.
-        assert!(body.contains("Client"), "expected Client header\n{body}");
-        assert!(body.contains("Cache×"), "expected Cache× header\n{body}");
+        for has_turn in [true, false] {
+            let width = model_gate_width(has_turn) - 1;
+            let mut app = make_app(width);
+            let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+            if !has_turn {
+                s.turn_count = 0;
+            }
+            app.data.sessions = vec![s];
+            let body = render_body(&mut app, width, 12);
+            assert!(
+                !body.contains("Model"),
+                "Model header should be gated off at {width} columns (turn={has_turn})\n{body}"
+            );
+            assert!(
+                !body.contains("test-model"),
+                "Model cell should be gated off at {width} columns (turn={has_turn})\n{body}"
+            );
+            // The rest of the wide layout is still intact.
+            assert!(body.contains("Client"), "expected Client header\n{body}");
+            assert!(body.contains("Cache×"), "expected Cache× header\n{body}");
+        }
     }
 
     #[test]
     fn model_column_appears_at_its_width_threshold() {
-        let mut app = make_app(120);
-        app.data.sessions = vec![session("abc-123", "opencode", 1.5, 1_736_000_000_000)];
-        let body = render_body(&mut app, 120, 12);
-        assert!(
-            body.contains("Model"),
-            "expected Model header at 120 columns\n{body}"
-        );
-        assert!(
-            body.contains("test-model"),
-            "expected model name at 120 columns\n{body}"
-        );
+        for has_turn in [true, false] {
+            let width = model_gate_width(has_turn);
+            let mut app = make_app(width);
+            let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+            if !has_turn {
+                s.turn_count = 0;
+            }
+            app.data.sessions = vec![s];
+            let body = render_body(&mut app, width, 12);
+            assert!(
+                body.contains("Model"),
+                "expected Model header at {width} columns (turn={has_turn})\n{body}"
+            );
+            assert!(
+                body.contains("test-model"),
+                "expected model name at {width} columns (turn={has_turn})\n{body}"
+            );
+        }
+    }
+
+    /// The gate exists so the Model column never squeezes the rest of the table.
+    /// At the exact width where Model first appears every other header must still
+    /// render in full, indicator included — the previous fixed 120-column gate
+    /// clipped the Cost indicator the moment Model showed up.
+    #[test]
+    fn model_column_gate_keeps_the_rest_of_the_header_legible() {
+        for has_turn in [true, false] {
+            let width = model_gate_width(has_turn);
+            for (expected, field) in [
+                ("Cost ▼", SortField::Cost),
+                ("Total ▼", SortField::Tokens),
+                ("Last Active ▼", SortField::Date),
+            ] {
+                let mut app = make_app(width);
+                let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+                if !has_turn {
+                    s.turn_count = 0;
+                }
+                app.data.sessions = vec![s];
+                app.sort_field = field;
+                let header = header_line(&mut app, width);
+                assert!(
+                    header.contains("Model"),
+                    "Model should be shown at its gate width {width} (turn={has_turn})\n{header}"
+                );
+                for label in ["Cache R", "Cache W", "Cost/1M", "Duration", "Last Active"] {
+                    assert!(
+                        header.contains(label),
+                        "header {label} was squeezed at width {width} (turn={has_turn})\n{header}"
+                    );
+                }
+                assert!(
+                    header.contains(expected),
+                    "sort indicator {expected} was clipped at the Model gate width {width} \
+                     (turn={has_turn})\n{header}"
+                );
+            }
+        }
     }
 
     /// The Cost/Tokens/Date sort indicators are placed by hand-computed column
@@ -684,8 +777,11 @@ mod tests {
         for (width, expect_model, has_turn) in [
             (200u16, true, true),
             (200, true, false),
-            (119, false, true),
-            (119, false, false),
+            // Straddle the gate itself, where the indicator is most at risk.
+            (model_gate_width(true), true, true),
+            (model_gate_width(false), true, false),
+            (model_gate_width(true) - 1, false, true),
+            (model_gate_width(false) - 1, false, false),
         ] {
             let mut app = make_app(width);
             let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
