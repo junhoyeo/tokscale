@@ -988,7 +988,7 @@ impl DataLoader {
                 if !session_entry
                     .models
                     .iter()
-                    .any(|m| m.color_key == model_key)
+                    .any(|m| m.display_name == normalized_model)
                 {
                     session_entry.models.push(SessionModel {
                         display_name: normalized_model.clone(),
