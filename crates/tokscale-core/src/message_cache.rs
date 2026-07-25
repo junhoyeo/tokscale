@@ -857,6 +857,10 @@ fn parser_version(client: ClientId) -> u32 {
         // Kimi now checks each token bucket independently when deciding
         // whether a usage record is empty, avoiding an overflowing sum.
         ClientId::Kimi => 2,
+        // v1->v2: per-model token attribution now comes from
+        // session_model_usage instead of crediting the whole session to
+        // sessions.model, and dedup keys are namespaced per (session, model).
+        ClientId::Hermes => 2,
         _ => 1,
     }
 }
@@ -2091,6 +2095,11 @@ mod tests {
     #[test]
     fn test_kimi_parser_version_invalidates_v1_entries() {
         assert_eq!(parser_version(ClientId::Kimi), 2);
+    }
+
+    #[test]
+    fn test_hermes_parser_version_invalidates_v1_entries() {
+        assert_eq!(parser_version(ClientId::Hermes), 2);
     }
 
     #[test]
