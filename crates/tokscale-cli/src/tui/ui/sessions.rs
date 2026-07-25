@@ -405,13 +405,19 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// models are joined with `", "`. The total width is truncated to `max_chars`
 /// with an ellipsis when it overflows, counted in `chars()` to match
 /// `truncate_text`, which measures the Session and Client cells in this table.
+///
+/// A multi-model session always ends in an ellipsis when some of its models did
+/// not fit, so a session that switched models never renders as a single-model
+/// one. One cell is held back for that marker when there is more than one model.
 fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cell<'static> {
     if models.is_empty() {
         return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut budget = max_chars;
+    let mut budget = max_chars.saturating_sub(usize::from(models.len() > 1));
+    let mut shown = 0usize;
+    let mut ellipsis = false;
 
     for (i, model) in models.iter().enumerate() {
         if i > 0 {
@@ -436,6 +442,7 @@ fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cel
         } else if budget <= 1 {
             spans.push(Span::styled("…".to_string(), Style::default().fg(color)));
             budget = 0;
+            ellipsis = true;
         } else {
             let head: String = name.chars().take(budget - 1).collect();
             spans.push(Span::styled(
@@ -443,7 +450,18 @@ fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cel
                 Style::default().fg(color),
             ));
             budget = 0;
+            ellipsis = true;
         }
+        shown += 1;
+    }
+
+    // Dropping whole models silently would misreport the session; a truncated
+    // name already carries its own ellipsis, so only mark the clean-break case.
+    if shown < models.len() && !ellipsis {
+        spans.push(Span::styled(
+            "…".to_string(),
+            Style::default().fg(app.theme.muted),
+        ));
     }
 
     Cell::from(Line::from(spans))
@@ -834,6 +852,67 @@ mod tests {
                 "date sort indicator misplaced (turn={has_turn})\n{header}"
             );
         }
+    }
+
+    /// A session that switched models must never render as a single-model
+    /// session. When the next name cannot fit, a trailing "…" marks that models
+    /// were dropped instead of them vanishing silently.
+    #[test]
+    fn multi_model_cell_marks_models_that_did_not_fit() {
+        // Width chosen so the Model column is 22 cells: exactly the 21-char
+        // first name plus the reserved marker cell, with nothing left for the
+        // ", " separator the second name would need.
+        let width = wide_layout_fixed_width(false) + 1 + 22 + 2;
+        let mut app = make_app(width);
+        let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+        s.turn_count = 0;
+        s.models = vec![
+            SessionModel {
+                display_name: "gemini-2-5-flash-lite".to_string(),
+                provider: "google".to_string(),
+                color_key: "gemini-2-5-flash-lite".to_string(),
+            },
+            SessionModel {
+                display_name: "claude-sonnet-4-5".to_string(),
+                provider: "anthropic".to_string(),
+                color_key: "claude-sonnet-4-5".to_string(),
+            },
+        ];
+        app.data.sessions = vec![s];
+        let body = render_body(&mut app, width, 12);
+        assert!(
+            body.contains("gemini-2-5-flash-lite…"),
+            "expected a truncation marker after the model that did fit\n{body}"
+        );
+        assert!(
+            !body.contains("claude"),
+            "second model was not supposed to fit at width {width}\n{body}"
+        );
+    }
+
+    /// A single model that overflows carries its own ellipsis, so the
+    /// dropped-model marker must not double up on it.
+    #[test]
+    fn single_model_cell_truncates_without_a_second_ellipsis() {
+        let width = wide_layout_fixed_width(false) + 1 + 22 + 2;
+        let mut app = make_app(width);
+        let mut s = session("abc-123", "opencode", 1.5, 1_736_000_000_000);
+        s.turn_count = 0;
+        s.models = vec![SessionModel {
+            display_name: "a-very-long-model-name-that-overflows".to_string(),
+            provider: "anthropic".to_string(),
+            color_key: "a-very-long-model-name-that-overflows".to_string(),
+        }];
+        app.data.sessions = vec![s];
+        let body = render_body(&mut app, width, 12);
+        assert!(
+            body.contains("a-very-long-model-nam…"),
+            "expected a single trailing ellipsis on the truncated name\n{body}"
+        );
+        assert!(
+            !body.contains("……"),
+            "truncated name must not pick up a second ellipsis\n{body}"
+        );
     }
 
     #[test]
