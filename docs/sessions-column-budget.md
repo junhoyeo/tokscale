@@ -260,10 +260,41 @@ kill — and hide it inside a descriptor that looks authoritative. The
 constraint is therefore *derived*, never written:
 
 ```rust
-fn constraint(c: SessionColumn, ctx: &WideCtx) -> Constraint {
-    if c.grows() { Constraint::Min(c.natural(ctx)) } else { Constraint::Length(c.natural(ctx)) }
+// `natural()` is the ADMISSION width — what a column must be given to be let
+// in at all. `allocated()` is what it actually receives after slack
+// distribution, and it is the only width the renderer may use. For every fixed
+// column the two are equal; for Session and Model they diverge, which is the
+// entire point of slack distribution.
+fn allocated(c: SessionColumn, layout: &WideLayout) -> u16 {
+    match c {
+        SessionColumn::Session => layout.session_width,
+        SessionColumn::Model => layout.model_width,
+        other => other.natural(&layout.ctx),
+    }
+}
+
+fn constraint(c: SessionColumn, layout: &WideLayout) -> Constraint {
+    if c.grows() {
+        Constraint::Min(allocated(c, layout))
+    } else {
+        Constraint::Length(allocated(c, layout))
+    }
 }
 ```
+
+**Both `constraint()` and `cell()` take `&WideLayout`, and neither may take
+`&WideCtx`.** An earlier revision of this document derived `constraint` from
+`ctx` while `cell` took `layout`, which is a real bug that two independent
+reviewers caught: `Model.grows()` is `false`, so its constraint came out as
+`Length(natural(Model))` — always 18 — while `cell()` formatted content to
+`layout.model_width`, up to 36. ratatui allocates what the constraint asks for,
+so every cell wider than 18 was silently clipped and the whole `model_extra`
+computation was dead. `Session` survived only because it is `Constraint::Min`
+and absorbs surplus regardless.
+
+The lesson generalises: any width that admission *computes* must flow to the
+constraint, not just to the formatter. Threading one `&WideLayout` through both
+derivations is what makes that structural rather than remembered.
 
 **`Msgs` is 5 cells with turn data and 6 without.** `sessions.rs:362` reads
 `Constraint::Length(if has_turn_data { 5 } else { 6 })` — Msgs borrows the
@@ -891,11 +922,39 @@ variant, forget the arrays, and you get either a column that never renders or a
 sort-key lookup with no answer. Without this test the refactor moves drift from
 six visible call sites into two arrays that look authoritative.
 
-**Value truncation** deserves a note but not an assertion here. The proposal
-prevents it structurally (a column is either admitted at natural width or
-absent), so an assertion would only restate the legibility invariant. If a
-future change reintroduces content that overflows its column, that belongs in a
-formatter test next to `format_duration_*`.
+**Value truncation** needs an assertion after all, and an earlier revision of
+this document was wrong to say otherwise. It claimed the proposal "prevents it
+structurally (a column is either admitted at natural width or absent)". That is
+true of the *squeeze* — no admitted column is ever narrowed below its natural
+width — but it is not true of truncation in general, because a formatter can
+produce content wider than the natural width it was sized for. Two reviewers
+caught this independently, and the document already contradicted itself: the
+"what this does not solve" section notes `format_cost_per_million` is unbounded.
+
+The concrete case: `format_cost_per_million` is `format!("${:.2}", per_m)`
+(`widgets.rs:54-60`) with no compact branch. A session with `cost = 100.0` over
+`100` tokens yields `$1000000.00` — 11 cells in a 10-cell column, clipped to
+`$1000000.` **even at 180 columns where every column is admitted at natural
+width**. Rare, but it is precisely the "plausible-looking wrong number" failure
+this whole document is about, and admission cannot fix it because the column is
+already as wide as it asked to be.
+
+So two things are required, and neither is optional:
+
+1. A per-formatter assertion that each column's output fits its `natural()`
+   width for a set of adversarial inputs — very large costs, very small token
+   counts, long durations, multi-model sessions. This is the formatter-level
+   twin of the layout-level invariant, and it belongs next to
+   `format_duration_*`.
+2. `format_cost_per_million` needs a compact branch (or a wider `natural()`).
+   Deciding which is a judgement call: widening Cost/1M to 11 raises every
+   threshold that admits it by one, whereas a compact branch keeps the
+   thresholds and changes what a handful of extreme sessions display. The
+   compact branch is the better trade — the thresholds in this document are
+   already tight, and `$1.00M/M` reads fine.
+
+Neither is scoped out. A design that prevents column squeeze but still ships a
+formatter that overflows its own column has not solved the reported problem.
 
 ## What this does not solve
 
@@ -993,6 +1052,13 @@ formatter test next to `format_duration_*`.
    place the proposal makes something visibly worse for some users, and it is
    the reason the priority order is a decision rather than an implementation
    detail.
+
+5. **`format_cost_per_million` overflow** — it is unbounded (`widgets.rs:54-60`,
+   a plain `${:.2}`), so `format_cost_per_million(100.0, 100)` renders
+   `$1000000.00`, 11 cells clipped into a 10-cell column *even at 180 columns*.
+   Recommended: give it a compact branch rather than widening the column to 11,
+   which would raise every threshold that admits Cost/1M. Raised by review; the
+   fix is required, only the form of it is a choice.
 
 Two things this document asks reviewers *not* to treat as decisions, because
 they are corrections rather than choices: the `ALL` / `WIDE_ORDER` /
