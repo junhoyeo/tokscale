@@ -318,7 +318,13 @@ export function formatLastUpdated(
     : date.toLocaleString("en-US", { timeZone: "UTC" });
 }
 
-function formatJoined(
+/**
+ * "Joined" is an absolute instant (`users.createdAt`), so projecting it into the
+ * viewer's chosen zone is meaningful and two viewers may legitimately read a
+ * different month across a UTC boundary. Contribution dates never take this
+ * path — see src/lib/timezone.ts.
+ */
+export function formatJoined(
   createdAt: string | null | undefined,
   timeZone?: string,
 ): string | null {
