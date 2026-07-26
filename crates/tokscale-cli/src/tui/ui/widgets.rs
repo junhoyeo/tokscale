@@ -1,7 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::ClientId;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
@@ -137,8 +138,13 @@ pub fn display_width(s: &str) -> usize {
 /// than one over it.
 pub fn prefix_to_width(s: &str, max_cells: usize) -> &str {
     let mut used = 0usize;
-    for (offset, ch) in s.char_indices() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+    // Grapheme clusters, not chars. A flag is two regional indicators and a
+    // family emoji is a ZWJ sequence, so cutting on a char boundary can leave
+    // half a flag or a dangling ZWJ -- and the width of the pieces does not
+    // add up to the width of the whole, so the cut would not even respect the
+    // budget it was measuring against.
+    for (offset, cluster) in s.grapheme_indices(true) {
+        let w = UnicodeWidthStr::width(cluster);
         if used + w > max_cells {
             return &s[..offset];
         }
@@ -645,6 +651,31 @@ mod tests {
         assert_eq!(prefix_to_width("세션제목", 6), "세션제");
         assert_eq!(prefix_to_width("abc", 10), "abc");
         assert_eq!(prefix_to_width("abc", 0), "");
+
+        // The cases the name actually promises. Hangul is one char per
+        // grapheme, so the assertions above hold under char iteration too and
+        // never exercised the claim. These are multi-char graphemes: a flag is
+        // two regional indicators and a family is a ZWJ sequence, so char-wise
+        // truncation yields half a flag or a dangling ZWJ.
+        let flag = "\u{1F1F0}\u{1F1F7}"; // KR
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+
+        for (label, s) in [("flag", flag), ("family", family)] {
+            assert_eq!(
+                prefix_to_width(s, 1),
+                "",
+                "{label}: a 2-cell grapheme must not be halved to fit 1 cell"
+            );
+            assert_eq!(prefix_to_width(s, 2), s, "{label}: fits whole at 2 cells");
+            // 'a' and 'b' take 2 of the 3 cells, leaving 1 — not enough for the
+            // 2-cell cluster, which must therefore be dropped whole rather than
+            // contributing a leading component.
+            assert_eq!(
+                prefix_to_width(&format!("ab{s}"), 3),
+                "ab",
+                "{label}: a cluster that does not fit is dropped, not split"
+            );
+        }
     }
 
     #[test]

@@ -65,6 +65,12 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 # anything else (`chars().count()`) disagrees with the solver on CJK and emoji.
 unicode-width = "0.2"
 
+# Grapheme cluster boundaries. `char_indices()` only respects UTF-8 character
+# boundaries, so truncating on it splits a flag (two regional indicators) or a
+# ZWJ family emoji mid-sequence and renders garbage. Already in the tree
+# transitively, so this adds no new dependency.
+unicode-segmentation = "1.12"
+
 # Async utilities
 tokio-stream = "0.1"
 futures = "0.3"
