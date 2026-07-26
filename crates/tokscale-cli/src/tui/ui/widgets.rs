@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::ClientId;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
@@ -103,6 +104,14 @@ pub fn viewport_scrollbar_state(
 /// truncation occurs. Returns the original string when it fits, and an empty
 /// string when `max_chars` is 0. Shared across all table-style tabs (Daily,
 /// Monthly, Sessions, Models, Agents) so ellipsis behavior stays consistent.
+///
+/// Counts code points, not terminal cells, so a CJK or emoji string it calls
+/// short is twice as wide as the column that asked for it and gets clipped by
+/// the solver with no marker. Every caller passes a column width, so cells are
+/// the unit they all actually want: prefer [`truncate_to_width`] for anything
+/// that can hold a non-ASCII name. Kept as-is only because the Daily, Models
+/// and Agents tables are pinned by golden renders that this commit does not
+/// touch.
 pub fn truncate_text(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -116,6 +125,44 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
         let head: String = s.chars().take(max_chars - 3).collect();
         format!("{}...", head)
     }
+}
+
+/// Terminal cells `s` occupies, which is the unit ratatui lays tables out in.
+pub fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Longest prefix of `s` that fits in `max_cells` terminal cells. Never splits
+/// a grapheme, so the result can come in one cell short of the budget rather
+/// than one over it.
+pub fn prefix_to_width(s: &str, max_cells: usize) -> &str {
+    let mut used = 0usize;
+    for (offset, ch) in s.char_indices() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > max_cells {
+            return &s[..offset];
+        }
+        used += w;
+    }
+    s
+}
+
+/// [`truncate_text`] measured in terminal cells instead of code points: the
+/// result never occupies more than `max_cells`, and carries a "..." whenever
+/// anything was dropped. Use this wherever the text can hold a full-width
+/// grapheme — a session title, a client display name — because those are the
+/// cases where a code-point count and the ratatui solver disagree.
+pub fn truncate_to_width(s: &str, max_cells: usize) -> String {
+    if max_cells == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max_cells {
+        return s.to_string();
+    }
+    if max_cells <= 3 {
+        return prefix_to_width(s, max_cells).to_string();
+    }
+    format!("{}...", prefix_to_width(s, max_cells - 3))
 }
 
 fn scrollbar_position(scroll_offset: usize, content_len: usize, viewport_len: usize) -> usize {
@@ -560,6 +607,52 @@ fn capitalize_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_to_width_never_exceeds_its_budget() {
+        // The case `truncate_text` gets wrong: 8 code points, 16 cells.
+        let cjk = "세션제목한글로";
+        assert_eq!(truncate_text(cjk, 10), cjk, "code points say it fits");
+        assert!(
+            display_width(&truncate_to_width(cjk, 10)) <= 10,
+            "cells say it does not"
+        );
+        for budget in 0..=20 {
+            for s in [cjk, "ascii-session-title", "🦞 OpenClaw", ""] {
+                assert!(
+                    display_width(&truncate_to_width(s, budget)) <= budget,
+                    "{s:?} overflowed a {budget}-cell budget"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_to_width_marks_what_it_dropped() {
+        assert_eq!(truncate_to_width("abcdefghij", 10), "abcdefghij");
+        assert_eq!(truncate_to_width("abcdefghijk", 10), "abcdefg...");
+        assert_eq!(truncate_to_width("abcdefghijk", 3), "abc");
+        assert_eq!(truncate_to_width("abcdefghijk", 0), "");
+        // 7 cells of budget, 3 for the marker: two syllables (4 cells) fit and
+        // the third would overshoot, so the result is one cell short, not one
+        // cell over.
+        assert_eq!(truncate_to_width("세션제목", 7), "세션...");
+    }
+
+    #[test]
+    fn prefix_to_width_never_splits_a_grapheme() {
+        assert_eq!(prefix_to_width("세션제목", 5), "세션");
+        assert_eq!(prefix_to_width("세션제목", 6), "세션제");
+        assert_eq!(prefix_to_width("abc", 10), "abc");
+        assert_eq!(prefix_to_width("abc", 0), "");
+    }
+
+    #[test]
+    fn display_width_counts_cells_not_code_points() {
+        assert_eq!(display_width("OpenCode"), 8);
+        assert_eq!(display_width("🦞 OpenClaw"), 11);
+        assert_eq!("🦞 OpenClaw".chars().count(), 10, "the disagreement");
+    }
 
     #[test]
     fn scrollbar_position_maps_bottom_offset_to_last_position() {

@@ -5,8 +5,9 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, total_tokens_cell, truncate_text, viewport_scrollbar_state,
+    display_width, format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    get_client_display_name, prefix_to_width, total_tokens_cell, truncate_text, truncate_to_width,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{SessionModel, SessionUsage};
@@ -17,7 +18,9 @@ const MODEL_COLUMN_MAX_CHARS: u16 = 36;
 /// Session title width that slack distribution buys before Model gets any.
 /// Model's 18-cell minimum already renders most model names in full, while
 /// session titles routinely run 40–80 characters, so the marginal cell is worth
-/// more to the title. (Decision B in `docs/sessions-column-budget.md`.)
+/// more to the title. (Decision B in `docs/sessions-column-budget.md`, which is
+/// #965 and lands with it — the path does not resolve in this tree until it
+/// does, which is why the PR number is here too.)
 const SESSION_COLUMN_COMFORTABLE_CHARS: u16 = 40;
 
 /// One column of the wide Sessions layout.
@@ -53,10 +56,17 @@ enum SessionColumn {
 }
 
 /// Every variant, exactly once. `WIDE_ORDER` and `WIDE_PRIORITY` are checked
-/// against this by `every_column_is_ordered_and_prioritized` — the compiler
-/// never looks at those two arrays, so that test is the only thing standing
-/// between a new column and silently never rendering. It lives here rather than
-/// in the test module because it belongs beside the arrays it audits.
+/// against this by `every_column_is_ordered_and_prioritized`, because the
+/// compiler never looks at those two arrays. It lives here rather than in the
+/// test module because it belongs beside the arrays it audits.
+///
+/// Note what that test cannot see: it compares the three arrays *to each other*,
+/// and `ALL` is hand-maintained too, so a variant missing from all three passes
+/// it — verified, with the whole suite green. That shape is caught by the
+/// compiler instead: these arrays are the only places a variant is ever
+/// constructed and `ALL` is `#[cfg(test)]`, so a column absent from all three
+/// is `dead_code` in the non-test build, which CI compiles with `-D warnings`.
+/// The property holds, but by two mechanisms and neither one alone.
 #[cfg(test)]
 const ALL: [SessionColumn; 15] = [
     SessionColumn::Session,
@@ -103,8 +113,8 @@ const WIDE_ORDER: [SessionColumn; 15] = [
 /// The core is one group rather than six so admission can never stop *inside*
 /// it: the wide layout always shows at least the column set the narrow layout
 /// shows, which makes crossing 80 columns widen the table instead of reshaping
-/// it. The tail order is decision A in `docs/sessions-column-budget.md`, ranked
-/// by whether a column helps you find and compare sessions in a list.
+/// it. The tail order is decision A in `docs/sessions-column-budget.md` (#965),
+/// ranked by whether a column helps you find and compare sessions in a list.
 const WIDE_PRIORITY: [&[SessionColumn]; 8] = [
     &[
         SessionColumn::Session,
@@ -214,10 +224,20 @@ impl SessionColumn {
     /// only width input to admission. `Constraint`s are *derived* from this
     /// rather than written beside it: a second literal is exactly the
     /// budget-versus-layout divergence this design exists to kill.
+    ///
+    /// "Realistic" is doing real work in that sentence, so `fit()` enforces
+    /// these numbers on the cell as well rather than trusting them.
     fn natural(self, ctx: &WideCtx) -> u16 {
         match self {
             Self::Session => 20,
-            Self::Client => 12,
+            // The widest name the client registry can produce
+            // (`Antigravity CLI`), pinned by
+            // `client_column_fits_every_registered_client`. At 12 this column
+            // clipped three shipped clients with no marker, and it rendered
+            // `Antigravity CLI` and `Antigravity` identically — a
+            // misattribution in the column whose only job is saying which tool
+            // the session came from.
+            Self::Client => 15,
             Self::Model => 18,
             Self::Turn => 5,
             // Msgs borrows the cell Turn gives up. Keyed on the data rather
@@ -271,7 +291,7 @@ impl SessionColumn {
         layout: &WideLayout,
     ) -> Cell<'static> {
         match self {
-            Self::Session => Cell::from(truncate_text(
+            Self::Session => Cell::from(truncate_to_width(
                 session_label(s),
                 layout.session_width as usize,
             ))
@@ -280,44 +300,74 @@ impl SessionColumn {
                     .fg(app.theme.muted)
                     .add_modifier(Modifier::BOLD),
             ),
-            Self::Client => Cell::from(get_client_display_name(&s.client))
+            Self::Client => Cell::from(self.fit(get_client_display_name(&s.client), ctx))
                 .style(Style::default().fg(app.theme.muted)),
             Self::Model => build_model_cell(&s.models, layout.model_width as usize, app),
-            Self::Turn => Cell::from(if s.turn_count > 0 {
-                s.turn_count.to_string()
-            } else {
-                "\u{2014}".to_string()
-            }),
-            Self::Msgs => Cell::from(s.message_count.to_string()),
-            Self::Input => {
-                Cell::from(format_tokens(s.tokens.input)).style(app.theme.metric_input_style())
-            }
-            Self::Output => {
-                Cell::from(format_tokens(s.tokens.output)).style(app.theme.metric_output_style())
-            }
-            Self::CacheRead => Cell::from(format_tokens(s.tokens.cache_read))
+            Self::Turn => Cell::from(self.fit(
+                if s.turn_count > 0 {
+                    s.turn_count.to_string()
+                } else {
+                    "\u{2014}".to_string()
+                },
+                ctx,
+            )),
+            Self::Msgs => Cell::from(self.fit(s.message_count.to_string(), ctx)),
+            Self::Input => Cell::from(self.fit(format_tokens(s.tokens.input), ctx))
+                .style(app.theme.metric_input_style()),
+            Self::Output => Cell::from(self.fit(format_tokens(s.tokens.output), ctx))
+                .style(app.theme.metric_output_style()),
+            Self::CacheRead => Cell::from(self.fit(format_tokens(s.tokens.cache_read), ctx))
                 .style(app.theme.metric_cache_read_style()),
-            Self::CacheWrite => Cell::from(format_tokens(s.tokens.cache_write))
+            Self::CacheWrite => Cell::from(self.fit(format_tokens(s.tokens.cache_write), ctx))
                 .style(app.theme.metric_cache_write_style()),
-            Self::CacheHit => Cell::from(format_cache_hit_rate(
-                s.tokens.cache_read,
-                s.tokens.input,
-                s.tokens.cache_write,
+            Self::CacheHit => Cell::from(self.fit(
+                format_cache_hit_rate(s.tokens.cache_read, s.tokens.input, s.tokens.cache_write),
+                ctx,
             ))
             .style(Style::default().fg(Color::Cyan)),
-            Self::Total => total_tokens_cell(s.tokens.total(), &app.theme),
-            Self::Cost => Cell::from(format_cost(s.cost)).style(Style::default().fg(Color::Green)),
-            Self::CostPerMillion => Cell::from(format_cost_per_million(s.cost, s.tokens.total()))
-                .style(Style::default().fg(Color::Rgb(150, 200, 150))),
-            Self::Duration => Cell::from(format_duration(s.first_active_ms, s.last_active_ms))
-                .style(Style::default().fg(Color::Yellow)),
+            // Spelled out rather than `total_tokens_cell` — same style, but the
+            // helper has no width to clamp against.
+            Self::Total => Cell::from(self.fit(format_tokens(s.tokens.total()), ctx))
+                .style(app.theme.metric_total_style()),
+            Self::Cost => Cell::from(self.fit(format_cost(s.cost), ctx))
+                .style(Style::default().fg(Color::Green)),
+            Self::CostPerMillion => {
+                Cell::from(self.fit(format_cost_per_million(s.cost, s.tokens.total()), ctx))
+                    .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+            }
+            Self::Duration => {
+                Cell::from(self.fit(format_duration(s.first_active_ms, s.last_active_ms), ctx))
+                    .style(Style::default().fg(Color::Yellow))
+            }
             Self::LastActive => Cell::from(
-                ms_to_local_naive(s.last_active_ms)
-                    .map(|dt| dt.format(ctx.last_active_fmt).to_string())
-                    .unwrap_or_else(|| "\u{2014}".to_string()),
+                self.fit(
+                    ms_to_local_naive(s.last_active_ms)
+                        .map(|dt| dt.format(ctx.last_active_fmt).to_string())
+                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                    ctx,
+                ),
             )
             .style(Style::default().fg(app.theme.muted)),
         }
+    }
+
+    /// Clamp a fixed-width column's text to the width it was laid out with.
+    ///
+    /// A no-op on every value the column was sized for — `natural()` is the
+    /// widest *realistic* one — but "realistic" is an assumption about parsed
+    /// data, not a guarantee about it, and the failure mode when it is wrong is
+    /// the one this whole file exists to remove: 1,234,567 messages rendering
+    /// as `12345`, a bad `first_active_ms` rendering `20092d 14h` as
+    /// `20092d 14`. Clipped by ratatui those are plausible wrong numbers;
+    /// clipped here they are `12...` and `20092d...`, which are visibly
+    /// incomplete. `TokscaleConfig` client names are the one case that is
+    /// user-controlled rather than absurd.
+    ///
+    /// Session and Model are absent because their width comes from the
+    /// resolved `WideLayout` rather than from `natural()`; they clamp against
+    /// `session_width` and `model_width` at their own call sites.
+    fn fit(self, text: String, ctx: &WideCtx) -> String {
+        truncate_to_width(&text, self.natural(ctx) as usize)
     }
 }
 
@@ -365,6 +415,12 @@ fn order_index(c: SessionColumn) -> usize {
 /// Cells a column set occupies: the widths themselves plus one separator
 /// between every pair (ratatui's `column_spacing`, which defaults to 1).
 /// Measured against `inner`, which already has the block borders removed.
+///
+/// The `1` is not a free-floating assumption: at every group threshold the
+/// admitted set exactly fills `inner`, so a second cell of spacing pushes the
+/// last column past the border and
+/// `admitted_columns_render_header_and_value_in_full` goes red. Setting
+/// `.column_spacing(2)` on the table fails six of the tests below.
 fn required(set: &[SessionColumn], ctx: &WideCtx) -> u16 {
     let widths: u16 = set.iter().map(|c| c.natural(ctx)).sum();
     widths + set.len().saturating_sub(1) as u16
@@ -474,14 +530,24 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // The wide layout is budget-driven: a column is admitted at its natural
     // width or it is not shown. Measured against `inner` rather than the
     // terminal so the budget equals the width ratatui actually divides up.
-    let wide = (!is_narrow && !is_very_narrow).then(|| {
-        let ctx = WideCtx {
-            has_turn: has_turn_data,
-            last_active_fmt,
-        };
-        let layout = admit_and_distribute(inner.width, &ctx);
-        (ctx, layout)
-    });
+    let wide = (!is_narrow && !is_very_narrow)
+        .then(|| {
+            let ctx = WideCtx {
+                has_turn: has_turn_data,
+                last_active_fmt,
+            };
+            let layout = admit_and_distribute(inner.width, &ctx);
+            (ctx, layout)
+        })
+        // The core group is atomic, so an `inner` narrower than its budget
+        // admits nothing at all and the table would render as an empty block —
+        // no header, no rows, no message. The gate above makes that
+        // unreachable through `ui::render`, which passes an `area` as wide as
+        // the terminal, but `render` is `pub` and takes `area` from its caller,
+        // so the precondition is one call site away rather than impossible.
+        // Falling back to the narrow layout costs nothing: it is
+        // percentage-based and renders something at any width.
+        .filter(|(_, layout)| !layout.chosen.is_empty());
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -672,20 +738,21 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// Build a table cell for the Model column with each model name colored by the
 /// same family-shade system used in the Overview and Models tabs. Multiple
-/// models are joined with `", "`. The total width is truncated to `max_chars`
-/// with an ellipsis when it overflows, counted in `chars()` to match
-/// `truncate_text`, which measures the Session and Client cells in this table.
+/// models are joined with `", "`. The total width is truncated to `max_cells`
+/// with an ellipsis when it overflows, counted in terminal cells to match
+/// `truncate_to_width`, which measures the Session and Client cells in this
+/// table, and to match the unit ratatui lays the column out in.
 ///
 /// A multi-model session always ends in an ellipsis when some of its models did
 /// not fit, so a session that switched models never renders as a single-model
 /// one. One cell is held back for that marker when there is more than one model.
-fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cell<'static> {
+fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
     if models.is_empty() {
         return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut budget = max_chars.saturating_sub(usize::from(models.len() > 1));
+    let mut budget = max_cells.saturating_sub(usize::from(models.len() > 1));
     let mut shown = 0usize;
     let mut ellipsis = false;
 
@@ -704,7 +771,7 @@ fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cel
 
         let color = app.model_color_for(&model.provider, &model.color_key);
         let name = &model.display_name;
-        let model_len = name.chars().count();
+        let model_len = display_width(name);
 
         if model_len <= budget {
             spans.push(Span::styled(name.clone(), Style::default().fg(color)));
@@ -714,7 +781,7 @@ fn build_model_cell(models: &[SessionModel], max_chars: usize, app: &App) -> Cel
             budget = 0;
             ellipsis = true;
         } else {
-            let head: String = name.chars().take(budget - 1).collect();
+            let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
                 format!("{}…", head),
                 Style::default().fg(color),
@@ -779,6 +846,7 @@ mod tests {
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::TokenBreakdown;
     use ratatui::{backend::TestBackend, Terminal};
+    use tokscale_core::ClientId;
 
     /// Terminal width at which each priority group first appears.
     ///
@@ -787,9 +855,14 @@ mod tests {
     /// the old `model_gate_width` helper never caught that the wide layout asked
     /// for 161 columns and turned on at 80. Amending decision A moves these
     /// numbers, and the diff then names which threshold moved and by how much.
+    ///
+    /// Every number here is three higher than the first draft of this table:
+    /// `natural(Client)` went 12 → 15 so `Antigravity CLI` stops rendering as
+    /// `Antigravity`, and a widened column pushes every later group right by
+    /// exactly its three cells.
     const THRESHOLDS_WITH_TURN: [(u16, &[SessionColumn]); 8] = [
         (
-            69,
+            72,
             &[
                 SessionColumn::Session,
                 SessionColumn::Client,
@@ -799,20 +872,20 @@ mod tests {
                 SessionColumn::Cost,
             ],
         ),
-        (87, &[SessionColumn::LastActive]),
-        (106, &[SessionColumn::Model]),
-        (128, &[SessionColumn::Input, SessionColumn::Output]),
-        (150, &[SessionColumn::CacheRead, SessionColumn::CacheWrite]),
-        (160, &[SessionColumn::Duration]),
-        (169, &[SessionColumn::CacheHit]),
-        (180, &[SessionColumn::CostPerMillion]),
+        (90, &[SessionColumn::LastActive]),
+        (109, &[SessionColumn::Model]),
+        (131, &[SessionColumn::Input, SessionColumn::Output]),
+        (153, &[SessionColumn::CacheRead, SessionColumn::CacheWrite]),
+        (163, &[SessionColumn::Duration]),
+        (172, &[SessionColumn::CacheHit]),
+        (183, &[SessionColumn::CostPerMillion]),
     ];
 
     /// Same table without turn data. Every threshold is five narrower: Turn's
     /// five cells and its separator go away, and Msgs takes one of them back.
     const THRESHOLDS_NO_TURN: [(u16, &[SessionColumn]); 8] = [
         (
-            64,
+            67,
             &[
                 SessionColumn::Session,
                 SessionColumn::Client,
@@ -821,16 +894,16 @@ mod tests {
                 SessionColumn::Cost,
             ],
         ),
-        (82, &[SessionColumn::LastActive]),
-        (101, &[SessionColumn::Model]),
-        (123, &[SessionColumn::Input, SessionColumn::Output]),
-        (145, &[SessionColumn::CacheRead, SessionColumn::CacheWrite]),
-        (155, &[SessionColumn::Duration]),
-        (164, &[SessionColumn::CacheHit]),
-        (175, &[SessionColumn::CostPerMillion]),
+        (85, &[SessionColumn::LastActive]),
+        (104, &[SessionColumn::Model]),
+        (126, &[SessionColumn::Input, SessionColumn::Output]),
+        (148, &[SessionColumn::CacheRead, SessionColumn::CacheWrite]),
+        (158, &[SessionColumn::Duration]),
+        (167, &[SessionColumn::CacheHit]),
+        (178, &[SessionColumn::CostPerMillion]),
     ];
 
-    /// Widest terminal the sweeps cover. Past the last threshold (180) nothing
+    /// Widest terminal the sweeps cover. Past the last threshold (183) nothing
     /// changes but the Session column's share of the slack.
     const SWEEP_MAX: u16 = 240;
 
@@ -983,11 +1056,19 @@ mod tests {
     }
 
     fn render_body(app: &mut App, width: u16, height: u16) -> String {
+        render_into(app, width, height, Rect::new(0, 0, width, height))
+    }
+
+    /// `render_body` with the drawing area decoupled from the terminal, which is
+    /// the only way to reach an `area` narrower than `app.terminal_width`.
+    ///
+    /// A wide grapheme occupies two cells and ratatui stores its symbol in the
+    /// first and an empty string in the second, so a returned line has one
+    /// `char` per grapheme, not one per cell.
+    fn render_into(app: &mut App, width: u16, height: u16, area: Rect) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
-            .unwrap();
+        terminal.draw(|frame| render(frame, app, area)).unwrap();
         terminal
             .backend()
             .buffer()
@@ -1107,7 +1188,7 @@ mod tests {
         for has_turn in [true, false] {
             let ctx = wide_ctx(has_turn);
             let core = thresholds(has_turn)[0].1;
-            let floor = if has_turn { 67 } else { 62 };
+            let floor = if has_turn { 70 } else { 65 };
             assert_eq!(
                 required(core, &ctx),
                 floor,
@@ -1124,6 +1205,33 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Admission takes whole groups, so an area narrower than the core group's
+    /// budget admits nothing and the wide branch would draw an empty block —
+    /// no header, no rows, no message. `ui::render` cannot produce that, but
+    /// `render` takes `area` from its caller and asserts the precondition
+    /// nowhere, so the fallback is what makes the blank panel unreachable
+    /// rather than merely unreached.
+    #[test]
+    fn an_area_below_the_core_budget_falls_back_instead_of_rendering_nothing() {
+        for area_width in [30u16, 40, 50, 60, 68, 71] {
+            let mut app = app_with(200, vec![fat_session()]);
+            let body = render_into(&mut app, 200, 6, Rect::new(0, 0, area_width, 6));
+            let mut lines = body.lines().skip(1);
+            let header = lines.next().unwrap_or_default();
+            let row = lines.next().unwrap_or_default();
+            // Cost is the last column of every narrow variant, so its header
+            // and its value are present whichever one the fallback picked.
+            assert!(
+                header.contains("Cost"),
+                "blank Sessions header at area width {area_width}\n{body}"
+            );
+            assert!(
+                row.contains("$12"),
+                "blank Sessions row at area width {area_width}\n{body}"
+            );
         }
     }
 
@@ -1221,34 +1329,53 @@ mod tests {
     /// The active sort arrow is legible whenever its column is admitted, and
     /// absent from the whole header when it is not. Today `Last Active ▼` is
     /// missing at 77 of 121 widths.
+    ///
+    /// Both directions, because `make_app` fixes the sort to descending and an
+    /// ascending-only clipping bug would otherwise pass. Placement is
+    /// direction-independent by construction — `sort_indicator` picks the glyph
+    /// and the header is formatted the same either way — so this is coverage of
+    /// the glyph, not of a second code path.
     #[test]
     fn sort_indicator_is_legible_exactly_when_its_column_is_admitted() {
         for width in 80u16..=SWEEP_MAX {
             for has_turn in [true, false] {
-                for (field, column) in [
-                    (SortField::Cost, SessionColumn::Cost),
-                    (SortField::Tokens, SessionColumn::Total),
-                    (SortField::Date, SessionColumn::LastActive),
+                for (direction, arrow) in [
+                    (SortDirection::Descending, '▼'),
+                    (SortDirection::Ascending, '▲'),
                 ] {
-                    let mut s = fat_session();
-                    if !has_turn {
-                        s.turn_count = 0;
-                    }
-                    let mut app = app_with(width, vec![s]);
-                    app.sort_field = field;
-                    let header = header_line(&mut app, width);
-                    if expected_columns(width, has_turn).contains(&column) {
+                    for (field, column) in [
+                        (SortField::Cost, SessionColumn::Cost),
+                        (SortField::Tokens, SessionColumn::Total),
+                        (SortField::Date, SessionColumn::LastActive),
+                    ] {
+                        let mut s = fat_session();
+                        if !has_turn {
+                            s.turn_count = 0;
+                        }
+                        let mut app = app_with(width, vec![s]);
+                        app.sort_field = field;
+                        app.sort_direction = direction;
+                        let header = header_line(&mut app, width);
+                        if expected_columns(width, has_turn).contains(&column) {
+                            assert!(
+                                header.contains(&format!("{} {arrow}", column.header())),
+                                "{:?} {arrow} clipped at width {width} (turn={has_turn})\n{header}",
+                                field
+                            );
+                        } else {
+                            assert!(
+                                !header.contains(arrow),
+                                "{:?} drew {arrow} with its column unadmitted at width {width} \
+                                 (turn={has_turn})\n{header}",
+                                field
+                            );
+                        }
+                        // The other glyph must never appear at all — one active
+                        // sort, one arrow.
+                        let other = if arrow == '▼' { '▲' } else { '▼' };
                         assert!(
-                            header.contains(&format!("{} ▼", column.header())),
-                            "{:?} indicator clipped at width {width} (turn={has_turn})\n{header}",
-                            field
-                        );
-                    } else {
-                        assert!(
-                            !header.contains('▼'),
-                            "{:?} drew an arrow with its column unadmitted at width {width} \
-                             (turn={has_turn})\n{header}",
-                            field
+                            !header.contains(other),
+                            "both arrows drawn at width {width} (turn={has_turn})\n{header}"
                         );
                     }
                 }
@@ -1321,6 +1448,110 @@ mod tests {
         }
     }
 
+    /// `natural()` is sized for realistic values, and every one of these is
+    /// unrealistic — a `first_active_ms` of 1, a session that paid for one
+    /// input token and read 45M from cache, a six-digit message count. None of
+    /// them is reachable through an honest session; all of them are reachable
+    /// through a bad timestamp or a bad token count, and this file exists
+    /// because of what ratatui does to a value that does not fit.
+    ///
+    /// Each line below names what the value rendered as before `fit()`: a
+    /// number that looks like a number and is wrong by two to five orders of
+    /// magnitude, which is #964 again in a column nobody was looking at.
+    #[test]
+    fn absurd_values_are_marked_rather_than_clipped_to_plausible_ones() {
+        let width = 240;
+        let mut s = fat_session();
+        s.first_active_ms = 1; // "20092d 14h" in nine cells -> `20092d 14`
+        s.tokens.input = 1;
+        s.tokens.cache_write = 0;
+        s.tokens.cache_read = 45_678_901; // "45678901.0x" in eight -> `45678901`
+        s.message_count = 1_234_567; // in five -> `12345`
+        s.turn_count = 999_999; // in five -> `99999`
+        let mut app = app_with(width, vec![s]);
+        let row = first_row_line(&mut app, width);
+        for plausible in ["12345", "99999", "45678901", "20092d 14"] {
+            assert!(
+                !row.contains(plausible),
+                "{plausible:?} is a clipped value passing for a whole one\n{row}"
+            );
+        }
+        // What they render as instead, so this test fails if the marker moves.
+        for marked in ["12...", "99...", "45678...", "20092d..."] {
+            assert!(
+                row.contains(marked),
+                "expected {marked:?} in the row\n{row}"
+            );
+        }
+    }
+
+    // ---- the Client budget is a claim about the client registry ------------
+
+    /// `natural(Client)` asserts something about `clients.rs`, so check it
+    /// against `clients.rs` rather than against a fixture. Every name the
+    /// registry can produce has to fit at its natural width, or the column that
+    /// says which tool a session came from starts answering with a prefix.
+    ///
+    /// Adding a client with a longer display name fails here. The fix is to
+    /// raise `natural(Client)` and move every threshold in the tables above by
+    /// the same number of cells — not to lower the budget back down.
+    #[test]
+    fn client_column_fits_every_registered_client() {
+        let budget = SessionColumn::Client.natural(&wide_ctx(true)) as usize;
+        for client in ClientId::iter() {
+            let name = get_client_display_name(client.as_str());
+            assert!(
+                display_width(&name) <= budget,
+                "{client:?} renders {name:?} ({} cells) in a {budget}-cell Client column",
+                display_width(&name)
+            );
+        }
+    }
+
+    /// The concrete failure the budget above prevents: at 12 cells these two
+    /// rows were byte-identical at every width, which is a misattribution and
+    /// not a cosmetic clip. `🦞 OpenClaw` is here because its emoji is one char
+    /// and two cells, so a code-point budget gets it wrong in the other
+    /// direction.
+    #[test]
+    fn clients_sharing_a_prefix_render_distinguishably() {
+        let width = 200;
+        for (a, b) in [
+            ("antigravity-cli", "antigravity"),
+            ("opencodereview", "opencode"),
+            ("devin-desktop", "devin"),
+            ("openclaw", "opencode"),
+        ] {
+            let render_one = |client: &str| {
+                let mut s = fat_session();
+                s.client = client.to_string();
+                let mut app = app_with(width, vec![s]);
+                first_row_line(&mut app, width)
+            };
+            assert_ne!(
+                render_one(a),
+                render_one(b),
+                "{a} and {b} render the same row at width {width}"
+            );
+        }
+    }
+
+    /// `TokscaleConfig` lets a user name a client anything, and an unrecognised
+    /// id is echoed through verbatim, so the budget has to be enforced at the
+    /// cell instead of trusted. Past it the name is marked, not silently cut.
+    #[test]
+    fn an_over_long_client_name_is_marked_truncated() {
+        let width = 200;
+        let mut s = fat_session();
+        s.client = "a-client-with-a-very-long-name".to_string();
+        let mut app = app_with(width, vec![s]);
+        let row = first_row_line(&mut app, width);
+        assert!(
+            row.contains("a-client-wit..."),
+            "an over-long client name must carry an ellipsis\n{row}"
+        );
+    }
+
     // ---- slack distribution ------------------------------------------------
 
     /// Session is the sole `Min` column, so ratatui hands it every cell that
@@ -1357,20 +1588,98 @@ mod tests {
         }
     }
 
+    /// The same claim with a title whose graphemes are two cells wide. A
+    /// code-point budget calls 28 Hangul syllables comfortable in a 34-cell
+    /// column, returns them untouched, and ratatui clips them at 17 with no
+    /// marker — the exact silent truncation this change exists to remove, in
+    /// the one column that was still measuring in the wrong unit.
+    #[test]
+    fn a_full_width_title_is_budgeted_in_cells_not_code_points() {
+        let title = "가".repeat(60);
+        for width in 80u16..=SWEEP_MAX {
+            for has_turn in [true, false] {
+                let ctx = wide_ctx(has_turn);
+                let layout = admit_and_distribute(width - 2, &ctx);
+                let mut s = fat_session();
+                s.title = Some(title.clone());
+                if !has_turn {
+                    s.turn_count = 0;
+                }
+                let mut app = app_with(width, vec![s]);
+                let row = first_row_line(&mut app, width);
+                // One `char` per grapheme, and ratatui blanks the second cell
+                // of a wide one, so each syllable shows up as "가 ".
+                let cells = row.chars().filter(|c| *c == '가').count() * 2;
+                assert!(
+                    cells + 3 <= layout.session_width as usize,
+                    "title took {cells} cells plus an ellipsis out of a {} cell budget at width \
+                     {width} (turn={has_turn})\n{row}",
+                    layout.session_width
+                );
+                // The marker has to sit in the Session cell, before Client.
+                let marker = row.find("...").unwrap_or(usize::MAX);
+                let client = row.find("OpenCode").unwrap_or(0);
+                assert!(
+                    marker < client,
+                    "an over-long full-width title must be marked as truncated at width \
+                     {width} (turn={has_turn})\n{row}"
+                );
+            }
+        }
+    }
+
+    /// `build_model_cell` measures in cells for the same reason the Session and
+    /// Client cells do, and needs its own fixture because every other model in
+    /// this file is ASCII. On a code-point budget a full-width name fills 17
+    /// graphemes of an 18-cell column, and the "…" it appends is the first
+    /// thing the solver cuts — a truncated name that does not look truncated.
+    #[test]
+    fn a_full_width_model_name_is_budgeted_in_cells_not_code_points() {
+        for width in [120u16, 160, 220] {
+            for has_turn in [true, false] {
+                let ctx = wide_ctx(has_turn);
+                let layout = admit_and_distribute(width - 2, &ctx);
+                let mut s = fat_session();
+                if !has_turn {
+                    s.turn_count = 0;
+                }
+                s.models = vec![SessionModel {
+                    display_name: "모".repeat(30),
+                    provider: "test".to_string(),
+                    color_key: "test-model".to_string(),
+                }];
+                let mut app = app_with(width, vec![s]);
+                let row = first_row_line(&mut app, width);
+                let cells = row.chars().filter(|c| *c == '모').count() * 2;
+                assert!(
+                    cells + 1 <= layout.model_width as usize,
+                    "model took {cells} cells plus an ellipsis out of a {} cell budget at width \
+                     {width} (turn={has_turn})\n{row}",
+                    layout.model_width
+                );
+                assert!(
+                    row.contains('…'),
+                    "an over-long full-width model name must be marked as truncated at width \
+                     {width} (turn={has_turn})\n{row}"
+                );
+            }
+        }
+    }
+
     /// Decision B: the session title gets slack up to 40 cells before Model gets
     /// any, then Model grows to 36, then the rest lands back on Session.
     #[test]
     fn slack_goes_to_the_session_title_before_the_model_column() {
         for (width, has_turn, session_width, model_width) in [
-            (120u16, true, 34, 18), // Model admitted, all slack to the title
-            (149, true, 40, 19),    // title comfortable, Model starts growing
-            (150, true, 20, 18),    // Cache R/W admitted, slack reclaimed
-            (199, true, 39, 18),
+            (120u16, true, 31, 18), // Model admitted, all slack to the title
+            (152, true, 40, 19),    // title comfortable, Model starts growing
+            (153, true, 20, 18),    // Cache R/W admitted, slack reclaimed
+            (199, true, 36, 18),
             // The width the model-truncation tests pin: without turn data every
-            // group is admitted at 175, so 199 leaves 24 cells of slack — 20 to
+            // group is admitted at 178, so 202 leaves 24 cells of slack — 20 to
             // the title, 4 to Model, which lands it on exactly 22.
-            (199, false, 40, 22),
-            (260, true, 82, 36), // Model capped, remainder back to the title
+            (202, false, 40, 22),
+            (260, true, 79, 36), // Model capped, remainder back to the title
         ] {
             let ctx = wide_ctx(has_turn);
             let layout = admit_and_distribute(width - 2, &ctx);
@@ -1658,7 +1967,7 @@ mod tests {
     /// left for the ", " a second name would need. Under decision B Session
     /// takes the first 20 cells of slack, so this sits 20 columns above where
     /// the Model-first rule put it. Pinned by `slack_goes_to_the_session_title_*`.
-    const MODEL_WIDTH_22_TERMINAL: u16 = 199;
+    const MODEL_WIDTH_22_TERMINAL: u16 = 202;
 
     /// A session that switched models must never render as a single-model
     /// session. When the next name cannot fit, a trailing "…" marks that models
