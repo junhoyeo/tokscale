@@ -150,6 +150,17 @@ fn normalize_kimi_code_model(model: &str) -> String {
         .to_string()
 }
 
+/// Normalize a Kimi Code model, excluding symbolic config references such as
+/// `__kimi_env_model__` that do not identify the model sent to the provider.
+fn concrete_kimi_code_model(model: &str) -> Option<String> {
+    let normalized = normalize_kimi_code_model(model.trim());
+    let normalized = normalized.trim();
+    let symbolic = normalized.len() >= 4
+        && normalized.starts_with("__")
+        && normalized.ends_with("__");
+    (!normalized.is_empty() && !symbolic).then(|| normalized.to_string())
+}
+
 /// Kimi Code wire.jsonl line structure.
 #[derive(Debug, Deserialize)]
 struct KimiCodeWireLine {
@@ -174,6 +185,7 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
+    let mut latest_request_model: Option<String> = None;
 
     for line in reader.lines() {
         let line = match line {
@@ -191,6 +203,19 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             Ok(wl) => wl,
             Err(_) => continue,
         };
+
+        // usage.record can contain only a symbolic config reference, while the
+        // preceding llm.request records the concrete model sent to the provider.
+        if wire_line.line_type == "llm.request" {
+            if let Some(model) = wire_line
+                .model
+                .as_deref()
+                .and_then(concrete_kimi_code_model)
+            {
+                latest_request_model = Some(model);
+            }
+            continue;
+        }
 
         // Only process usage.record lines.
         // step.end also carries usage, but it duplicates the same usage.record
@@ -216,7 +241,8 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
         let model = wire_line
             .model
             .as_deref()
-            .map(normalize_kimi_code_model)
+            .and_then(concrete_kimi_code_model)
+            .or_else(|| latest_request_model.clone())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         let timestamp_ms = wire_line.time.unwrap_or(fallback_timestamp);
@@ -614,6 +640,58 @@ not valid json at all
         assert_eq!(messages[0].tokens.cache_read, 13312);
         assert_eq!(messages[0].tokens.cache_write, 0);
         assert_eq!(messages[0].timestamp, 1780319377014);
+    }
+
+    #[test]
+    fn test_parse_kimi_code_keeps_latest_concrete_model_across_invalid_requests() {
+        let content = r#"{"type":"llm.request","model":"k3","time":1780319377000}
+{"type":"llm.request","time":1780319377001}
+{"type":"llm.request","model":" ","time":1780319377002}
+{"type":"llm.request","model":"__runtime_model__","time":1780319377003}
+{"type":"llm.request","model":"kimi-code/   ","time":1780319377004}
+{"type":"llm.request","model":"kimi-code/ __runtime_model__ ","time":1780319377005}
+{"type":"usage.record","model":"kimi-code/__kimi_env_model__","usage":{"inputOther":100,"output":50,"inputCacheRead":25,"inputCacheCreation":0},"usageScope":"turn","time":1780319377010}"#;
+        let (_dir, fake_path) = create_kimi_code_test_file(content);
+
+        let messages = parse_kimi_code_file(&fake_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "k3");
+    }
+
+    #[test]
+    fn test_parse_kimi_code_prefers_concrete_usage_model_and_tracks_requests() {
+        let content = r#"{"type":"llm.request","model":"k3","time":1780319377000}
+{"type":"usage.record","model":"__runtime_model__","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377010}
+{"type":"llm.request","model":"kimi-code/k3-256k","time":1780319377020}
+{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":200,"output":75,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377030}
+{"type":"usage.record","model":"__another_model_alias__","usage":{"inputOther":300,"output":100,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377040}"#;
+        let (_dir, fake_path) = create_kimi_code_test_file(content);
+
+        let messages = parse_kimi_code_file(&fake_path);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].model_id, "k3");
+        assert_eq!(messages[1].model_id, "kimi-for-coding");
+        assert_eq!(messages[2].model_id, "k3-256k");
+    }
+
+    #[test]
+    fn test_parse_kimi_code_invalid_usage_without_request_uses_default_model() {
+        let content = r#"{"type":"usage.record","model":"__kimi_env_model__","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377010}
+{"type":"usage.record","model":"kimi-code/__runtime_model__","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377020}
+{"type":"usage.record","model":"kimi-code/ __runtime_model__ ","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377030}
+{"type":"usage.record","model":"kimi-code/   ","usage":{"inputOther":100,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1780319377040}"#;
+        let (_dir, fake_path) = create_kimi_code_test_file(content);
+
+        let messages = parse_kimi_code_file(&fake_path);
+
+        assert_eq!(messages.len(), 4);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.model_id == DEFAULT_MODEL)
+        );
     }
 
     #[test]
