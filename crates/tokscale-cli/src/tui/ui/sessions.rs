@@ -1651,10 +1651,12 @@ mod tests {
                 let mut app = app_with(width, vec![s]);
                 let row = first_row_line(&mut app, width);
                 let cells = row.chars().filter(|c| *c == '모').count() * 2;
+                // Strictly less than the budget: the name has to leave room for
+                // the one ellipsis cell that marks what was dropped.
                 assert!(
-                    cells + 1 <= layout.model_width as usize,
-                    "model took {cells} cells plus an ellipsis out of a {} cell budget at width \
-                     {width} (turn={has_turn})\n{row}",
+                    cells < layout.model_width as usize,
+                    "model took {cells} cells, leaving no room for the ellipsis in a {} cell \
+                     budget at width {width} (turn={has_turn})\n{row}",
                     layout.model_width
                 );
                 assert!(
