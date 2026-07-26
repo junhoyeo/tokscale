@@ -6,11 +6,18 @@ document measures the gap, proposes replacing the hand-maintained column vectors
 with a single priority-ordered descriptor list, and asks the maintainer to
 settle one product question — the priority order itself.
 
-Status: **proposal**. Nothing here is implemented. Accept, reject, or amend.
+> **Status: proposal. Nothing in this document is implemented.** It describes
+> behavior the shipped binary does not have. Every `SessionColumn`,
+> `WideCtx`, `WideLayout`, `ALL`, `WIDE_ORDER` and `WIDE_PRIORITY` below is a
+> sketch, not a symbol you will find in the tree. Accept, reject, or amend.
+> (`docs/` otherwise holds operational guides; if this lands as a standing
+> document rather than an issue comment, `docs/design/` is the better home.)
 
 Everything numeric below was computed or rendered against `226dfc75`
 (`feat(tui): show model names with family-shade colors in Sessions tab (#956)`);
-each section says how to re-derive it.
+each section says how to re-derive it. Measured claims come from a
+`TestBackend` sweep, not from estimation — where an earlier draft estimated
+instead, the correction is called out in place.
 
 ## The problem
 
@@ -125,17 +132,28 @@ at 114. That is the ratatui solver's remainder distribution, and it is why no
 hand-picked constant can work here: widening your terminal by one column can
 remove information.
 
-The equivalent numbers for full header labels:
+The equivalent numbers for full header labels. The second column is the point:
+"first renders in full" is not "renders in full from here on", because the
+solver's remainder distribution keeps re-clipping labels above their first
+appearance. Turn data present:
 
-| label | first renders in full |
-|---|---|
-| `Client` | 101 |
-| `Cache×` | 108 |
-| `Cache R` | 119 |
-| `Cost/1M` | 119 |
-| `Cache W` | 121 |
-| `Duration` | 130 |
-| `Last Active` | 155 |
+| label | first renders in full | clipped again at |
+|---|---|---|
+| `Msgs` | 81 | 84 |
+| `Input` | 89 | 90, 91, 94, 95, 98 |
+| `Total` | 91 | 92, 93, 96 |
+| `Client` | 101 | — |
+| `Cache×` | 108 | 109, 111 |
+| `Output` | 110 | 112, 113, 114 |
+| `Cache R` | 119 | 120, 121, 125 |
+| `Cost/1M` | 119 | 120, 121, 122, 125 |
+| `Cache W` | 121 | 122, 123 |
+| `Duration` | 130 | 133, 134 |
+| `Last Active` | 155 | — |
+
+Every label is legible simultaneously only from **155** (turn data) / **150**
+(without) — the point at which the last of them, `Last Active`, arrives and
+nothing re-clips behind it.
 
 None of this is new. It predates #956 by a long way; #956 only made someone
 count.
@@ -157,7 +175,7 @@ budget. Fix the budget and the gate stops being a special case.
 
 ## Where the numbers live today
 
-The issue names four places that must stay in sync. There are five:
+The issue names four places that must stay in sync. There are six:
 
 | # | what | location |
 |---|---|---|
@@ -166,13 +184,22 @@ The issue names four places that must stay in sync. There are five:
 | 3 | `widths` / `Constraint` vector | `sessions.rs:353-376` |
 | 4 | sort-indicator indices `8/9/12 + optional_cols` | `sessions.rs:151-181` |
 | 5 | `wide_layout_fixed_width`'s hardcoded sum | `sessions.rs:30-41` |
+| 6 | `truncate_text(session_label, 60)` | `sessions.rs:271` |
 
 (1)–(3) desyncing misaligns the table: a header over the wrong data. (4)
 desyncing puts the sort arrow on the wrong column. (5) desyncing moves the
-Model gate to a width that no longer means what it says. None of the five is
-checked by the compiler. `has_turn_data` and `show_model` each have to be
-threaded through all five by hand, correctly, in the same commit — which #956
-did, and which was the single riskiest part of that PR.
+Model gate to a width that no longer means what it says. (6) caps the Session
+cell's *content* at 60 characters regardless of how wide the Session column is
+actually rendered — at 260 columns the column is 82 cells and the title still
+stops at 60. None of the six is checked by the compiler. `has_turn_data` and
+`show_model` each have to be threaded through the first five by hand,
+correctly, in the same commit — which #956 did, and which was the single
+riskiest part of that PR.
+
+(6) matters more under this proposal, not less: Session is the sole sink for
+leftover cells, so the design deliberately grows it. `SessionColumn::Session`'s
+`cell()` therefore has to be told what to truncate to, which is why `WideCtx`
+below carries a resolved `session_width` rather than a constant.
 
 This is a house pattern, not a one-off. `daily.rs:70` carries
 `let full_layout_width: u16 = if has_turn_data { 112 } else { 105 };` under a
@@ -193,36 +220,97 @@ enum SessionColumn {
     Total, Cost, CostPerMillion, Duration, LastActive,
 }
 
-/// Resolved once per render, before any column is built.
+/// Everything known *before* admission runs. Widths that depend on the
+/// admitted set are deliberately absent — see the two-phase note below.
 struct WideCtx {
     has_turn: bool,
     has_model: bool,
-    model_width: u16,
-    session_width: u16,
     last_active_fmt: &'static str,
     // theme-derived styles, extracted from `App` the way `render` already does
 }
 
+/// Produced by admission, consumed by rendering. This is where every width
+/// that depends on the chosen set lives.
+struct WideLayout {
+    chosen: Vec<SessionColumn>,
+    model_width: u16,    // >= MODEL_COLUMN_MIN_CHARS when Model is admitted
+    session_width: u16,  // what Session::cell truncates to — see sync point 6
+}
+
 impl SessionColumn {
     fn header(self) -> &'static str { /* match, no wildcard arm */ }
-    fn natural(self, ctx: &WideCtx) -> u16 { /* match, no wildcard arm */ }
-    fn constraint(self, ctx: &WideCtx) -> Constraint { /* Session => Min, else Length */ }
-    fn sort_field(self) -> Option<SortField> { /* Total/Cost/LastActive => Some */ }
     fn available(self, ctx: &WideCtx) -> bool { /* Turn => ctx.has_turn, ... */ }
-    fn cell(self, s: &SessionUsage, app: &App, ctx: &WideCtx) -> Cell<'static> { /* match */ }
+    fn sort_field(self) -> Option<SortField> { /* Total/Cost/LastActive => Some */ }
+
+    /// Minimum cells this column needs. The *only* width input to admission.
+    fn natural(self, ctx: &WideCtx) -> u16 { /* match, no wildcard arm */ }
+
+    /// Whether leftover cells may flow here (`Min`) or not (`Length`).
+    fn grows(self) -> bool { matches!(self, Self::Session) }
+
+    fn cell(self, s: &SessionUsage, app: &App, l: &WideLayout) -> Cell<'static> { /* match */ }
 }
 ```
 
-The load-bearing rule: **every one of those methods is an exhaustive `match`
-with no `_ =>` arm.** Adding a variant then fails to compile until the header,
-the width, the constraint, the sort field, the availability predicate and the
-cell builder all exist. That is the mechanism that replaces the current
-comment-and-hope discipline, and it is the main reason to prefer an enum over,
-say, a vector of closures.
-
-Two orderings, deliberately separate:
+**One width method, not two.** An earlier draft of this design had both
+`natural()` and a separate `constraint() -> Constraint`. Nothing would force
+`constraint(c) == Length(natural(c))`, so a single mistyped literal would
+reintroduce exactly the budget-vs-layout divergence this design exists to
+kill — and hide it inside a descriptor that looks authoritative. The
+constraint is therefore *derived*, never written:
 
 ```rust
+fn constraint(c: SessionColumn, ctx: &WideCtx) -> Constraint {
+    if c.grows() { Constraint::Min(c.natural(ctx)) } else { Constraint::Length(c.natural(ctx)) }
+}
+```
+
+**`Msgs` is 5 cells with turn data and 6 without.** `sessions.rs:362` reads
+`Constraint::Length(if has_turn_data { 5 } else { 6 })` — Msgs borrows the
+column Turn gives up. This is not cosmetic: every no-turn threshold in this
+document depends on it (64 = 20 + 12 + **6** + 10 + 10 + 4 separators + 2
+borders). `natural(Msgs, ctx)` must return `if ctx.has_turn { 5 } else { 6 }`,
+keyed on `ctx.has_turn` and *not* on whether `Turn` was admitted. An
+implementer who writes `Msgs => 5` shifts all eight no-turn thresholds down by
+one, to 63/81/100/122/144/154/163/174, and fails the literal-threshold test
+below with no indication of where the off-by-one came from.
+
+Keying it off `ctx.has_turn` rather than off `chosen.contains(&Turn)` is what
+makes the width answerable before admission runs — see the two-phase note
+below — and putting `Turn` and `Msgs` in the same atomic group is what makes
+the two formulations agree in the first place. With a per-column core they
+could disagree: `Msgs` admitted at width 5 while `Turn` was dropped would
+leave the table one cell short of what `required()` promised.
+
+**Two phases, and they must not be circular.** `natural()` is what `required()`
+sums, so it must be answerable before anything is admitted — which is why
+`WideCtx` holds no widths. Slack is distributed *after* admission, producing
+`WideLayout`, and only `cell()` sees it. Model's rendered width is therefore
+`layout.model_width`, never `natural(Model)`; if `natural(Model)` returned the
+post-slack width, admission would depend on its own output.
+
+The load-bearing rule: **every one of those methods is an exhaustive `match`
+with no `_ =>` arm.** Adding a variant then fails to compile until the header,
+the width, the sort field, the availability predicate and the cell builder all
+exist. That is the mechanism that replaces the current comment-and-hope
+discipline, and it is the main reason to prefer an enum over, say, a vector of
+closures.
+
+Three arrays, deliberately separate. `ALL` and `WIDE_ORDER` happen to be
+element-identical today because the display order and the declaration order
+coincide — they are not the same constant, because `WIDE_ORDER` is free to be
+reshuffled for looks and `ALL` is not. The completeness test below compares
+them as multisets, so reordering `WIDE_ORDER` never breaks it and dropping a
+column from it always does.
+
+```rust
+/// Every variant, exactly once. The other two arrays are checked against this.
+const ALL: [SessionColumn; 15] = [
+    Session, Client, Model, Turn, Msgs,
+    Input, Output, CacheRead, CacheWrite, CacheHit,
+    Total, Cost, CostPerMillion, Duration, LastActive,
+];
+
 /// Left-to-right display order. Cosmetic; changing it never changes what fits.
 const WIDE_ORDER: [SessionColumn; 15] = [
     Session, Client, Model, Turn, Msgs,
@@ -232,8 +320,8 @@ const WIDE_ORDER: [SessionColumn; 15] = [
 
 /// Admission order: earlier groups are admitted first and dropped last.
 /// Each group is all-or-nothing. This array is the product decision below.
-const WIDE_PRIORITY: [&[SessionColumn]; 12] = [
-    &[Session], &[Client], &[Total], &[Cost], &[Msgs], &[Turn],   // core
+const WIDE_PRIORITY: [&[SessionColumn]; 8] = [
+    &[Session, Client, Total, Cost, Msgs, Turn],   // core — one group, not six
     &[LastActive],
     &[Model],
     &[Input, Output],
@@ -247,6 +335,18 @@ const WIDE_PRIORITY: [&[SessionColumn]; 12] = [
 Grouping matters. `Input` without `Output` is worse than neither, because a
 reader will take Input for a total. Same for `Cache R` without `Cache W`.
 Admitting groups atomically encodes that.
+
+**The core is one group, not six.** An earlier draft listed `&[Session]`,
+`&[Client]`, `&[Total]`, `&[Cost]`, `&[Msgs]`, `&[Turn]` as six independent
+all-or-nothing groups, which permits admission to stop *inside* the core and
+render Session + Client + Total and nothing else. That is unreachable today
+(the wide path starts at inner ≥ 78, the core needs 67), but the follow-up
+floated at the end of this document — lowering the wide entry condition to
+absorb the narrow layouts — would make those sets live at 60–68. Making the
+core atomic turns "the wide layout always shows at least the narrow column
+set" from an unstated consequence of `is_narrow() == width < 80` into a
+property of the priority array. The floor it implies, `inner >= 67` with turn
+data and `>= 62` without, is worth asserting directly.
 
 ### The budget
 
@@ -279,7 +379,9 @@ fn admit(available: u16, ctx: &WideCtx) -> Vec<SessionColumn> {
             break;                  // stop at the first group that does not fit
         }
     }
-    chosen.sort_by_key(|c| WIDE_ORDER.iter().position(|o| o == c).unwrap());
+    // Total, not partial: a column missing from WIDE_ORDER sorts last instead
+    // of panicking. See "the arrays are not compiler-checked" below.
+    chosen.sort_by_key(|c| WIDE_ORDER.iter().position(|o| o == c).unwrap_or(usize::MAX));
     chosen
 }
 ```
@@ -291,12 +393,114 @@ instead and Cache× gone. That is the same disorienting behavior the ratatui
 solver already produces, and reproducing it deliberately would be worse.
 Breaking gives a property worth having and worth asserting in a test:
 
-> The set of columns shown at width *W* is a subset of the set shown at *W+1*,
-> for every *W*. Widening a terminal never removes information.
+> The **set of columns** shown at width *W* is a subset of the set shown at
+> *W+1*, for every *W*.
 
-The slack left by breaking early is not wasted. Session is `Constraint::Min`,
-so ratatui hands every leftover cell to it — the slack becomes session-title
-width, which is a good use for it.
+State it that way and no more. The tempting stronger form — "widening a
+terminal never removes information" — is false, and it is false because of the
+next paragraph.
+
+#### The Session sawtooth
+
+The slack left by breaking early is not wasted: Session is `Constraint::Min`,
+so ratatui hands every leftover cell to it and the slack becomes session-title
+width. That is a good use for it, and it is also why the column *set* being
+monotonic does not make the *display* monotonic. Slack is reclaimed the instant
+the next group is admitted, so the Session column collapses back to its
+minimum at every threshold:
+
+```
+W=149 (turn data): admitted through Input/Output, required 126, inner 147,
+                   slack 21  → B2: Session 40, Model 19
+W=150            : + Cache R/W,                  required 148, inner 148,
+                   slack 0   → B2: Session 20, Model 18
+```
+
+Widening 149 → 150 halves the visible session title from 40 characters to 20.
+It happens at all seven thresholds (turn data, B2 slack):
+
+| widening | Session before → after |
+|---|---|
+| 86 → 87 | 37 → 20 |
+| 105 → 106 | 38 → 20 |
+| 127 → 128 | 40 → 20 |
+| 149 → 150 | 40 → 20 |
+| 159 → 160 | 29 → 20 |
+| 168 → 169 | 28 → 20 |
+| 179 → 180 | 30 → 20 |
+
+Under decision B1 (Model-first) it is Model that sawtooths instead — 36 → 18 at
+149 → 150 — and Session moves 23 → 20. The slack rule chooses *which* column
+sawtooths; no slack rule avoids it. The cause is `break` plus a growing
+column, not the distribution policy.
+
+The "what changes for users" table further down already shows this: Session is
+31 at 80, 33 at 100, 34 at 120, and 21 at 161. That is not a typo.
+
+**This is accepted, not solved.** Two reasons. First, the alternative — pin
+Session and Model to `Length(minimum)` and spend slack only past the last
+threshold — removes the sawtooth but costs title width at every width below
+180: Session would be 20 rather than 31 at 80 columns, 20 rather than 34 at
+120, and the reclaimed cells would sit as dead space at the right edge of the
+table. That is a worse trade at exactly the widths most people use. Second,
+losing title characters is a soft degradation of one column, whereas losing a
+column is a hard loss of a number; the monotonicity that matters is the one
+this design does guarantee.
+
+It does, however, need to be *visible*. Proposed test #3 below asserts header
+**sets** only, so it stays green while a Session-width regression ships. If the
+sawtooth is ever meant to be bounded, that needs its own assertion.
+
+#### The arrays are not compiler-checked — and that is the whole risk
+
+The exhaustive-`match` rule above is real, but it covers the six *methods*. It
+says nothing about `WIDE_ORDER` and `WIDE_PRIORITY`, which are hand-maintained
+arrays of column names. Adding `SessionColumn::Reasoning` compiles cleanly
+while absent from both. Then:
+
+- **absent from `WIDE_PRIORITY`** → the column is never admitted at any width
+  and silently never renders;
+- **present in `WIDE_PRIORITY`, absent from `WIDE_ORDER`** → the `position()`
+  lookup in the sort key has no answer. Written as `.unwrap()` — which is how
+  the first draft of this section had it — that is a **panic inside `render`**,
+  i.e. inside the draw loop, leaving the terminal in raw mode. Worse, it fires
+  only once the column is actually admitted, so a test at 200 columns passes
+  and a user at 250 crashes.
+
+That would be strictly worse than the misalignment it replaces: a silent
+mis-render degrades, a panic in the draw loop does not. Drift is not designed
+out by the enum; it is *relocated* from six call sites to two arrays.
+
+This document supplies its own evidence. An earlier draft of the block above
+declared `const WIDE_PRIORITY: [&[SessionColumn]; 12]` and then listed
+thirteen elements. A hand-maintained count of columns drifted inside the
+document arguing that hand-maintained counts of columns drift.
+
+So the arrays need their own check, and it is about ten lines:
+
+```rust
+fn order_index(c: SessionColumn) -> usize {
+    WIDE_ORDER.iter().position(|o| *o == c).unwrap_or(usize::MAX)  // total, never panics
+}
+
+#[test]
+fn every_column_is_ordered_and_prioritized() {
+    let mut order = WIDE_ORDER.to_vec();
+    let mut prio: Vec<SessionColumn> = WIDE_PRIORITY.concat();
+    let mut all = ALL.to_vec();
+    for v in [&mut order, &mut prio, &mut all] {
+        v.sort_by_key(|c| *c as usize);
+    }
+    assert_eq!(order, all, "WIDE_ORDER is not a permutation of ALL");
+    assert_eq!(prio, all, "WIDE_PRIORITY is not a permutation of ALL");
+}
+```
+
+`ALL` is still hand-written, but it is one flat list checked against two
+others, and `#[deny(unreachable_patterns)]`-style pressure does not help here —
+only this assertion does. **It is the only test in this proposal that actually
+enforces the no-drift claim the design is sold on**, and it belongs in the
+first commit, not a follow-up.
 
 ### Slack distribution
 
@@ -320,25 +524,36 @@ multi-model sessions. Session titles are routinely 40–80 characters. In the
 100–130 band, where slack is 10–20 cells, those cells are worth much more to
 the title. This is a knob, not a principle; it is listed as decision B below.
 
-Model's width must be resolved before cells are built, so `ctx.model_width` is
-computed in this step and read by `SessionColumn::Model::cell`.
+This step is what produces `WideLayout`: it resolves `model_width` (read by
+`SessionColumn::Model`'s `cell()`) and `session_width` (read by
+`SessionColumn::Session`'s `cell()` as the `truncate_text` limit — sync point 6
+above, which today is the hardcoded 60). Both are outputs of admission, which
+is why neither appears in `WideCtx`.
 
-### The five derivations
+### The derivations
 
 ```rust
-let chosen  = admit(inner.width, &ctx);
-let headers = chosen.iter().map(|c| c.header());
-let widths  = chosen.iter().map(|c| c.constraint(&ctx));
-let cells   = chosen.iter().map(|c| c.cell(session, app, &ctx));   // per row
-let arrow   = |f: SortField| chosen.iter().position(|c| c.sort_field() == Some(f));
+let layout  = admit_and_distribute(inner.width, &ctx);   // -> WideLayout
+let chosen  = &layout.chosen;
+
+let widths  = chosen.iter().map(|c| constraint(*c, &ctx));
+let cells   = chosen.iter().map(|c| c.cell(session, app, &layout));   // per row
+
+// Headers carry the sort arrow, so these are one derivation, not two: the
+// arrow is chosen by identity (`sort_field()`), never by column index.
+let headers = chosen.iter().map(|c| match c.sort_field() {
+    Some(f) if f == app.sort_field => format!("{}{}", c.header(), sort_indicator(f)),
+    _ => c.header().to_string(),
+});
 ```
 
-Sync point (4) stops being arithmetic. `position()` cannot land on the wrong
-column, and when the sorted column is not admitted it returns `None` and no
-arrow is drawn — which is what `usize::MAX` currently fakes for the narrow
-branches. Sync point (5), `wide_layout_fixed_width`, is deleted: `required()`
-computes the same thing from the descriptor list instead of from a second copy
-of the numbers.
+Sync point (4) stops being arithmetic. Nothing computes an index at all, so
+the arrow cannot land on the wrong column; and when the sorted column is not
+admitted, no descriptor matches and no arrow is drawn — which is what
+`usize::MAX` currently fakes for the narrow branches. Sync point (5),
+`wide_layout_fixed_width`, is deleted: `required()` computes the same thing
+from the descriptor list instead of from a second copy of the numbers. Sync
+point (6)'s `60` becomes `layout.session_width`.
 
 ## Decision A: the priority order
 
@@ -472,8 +687,20 @@ Turn data present, recommended order, B2 slack:
 | **80** | 14 columns, every header a stub (`Cli`, `Inpu`, `Cach`, `Tot`, `Cos`, `Las`), Output renders `234` for 234K, Cost renders `$12.`, no sort arrow | 6 columns — Session (31), Client, Turn, Msgs, Total, Cost — all headers and values complete, `Cost ▼` legible. Same column set as narrow at 79. |
 | **100** | 14 columns, `Client`/`Cache R`/`Duration`/`Last Active` still stubs, Cost renders `$12.3`, no sort arrow | 7 columns — core + Last Active (full `2025-01-04 23:13`), Session 33 |
 | **120** | 14 columns, `Cost ▼` legible, `Cost/1`, `Duratio`, `Last A` stubs, Last Active shows `2025-0` | 8 columns — core + Last Active + **Model**, Session 34 |
-| **161** | 14 columns, everything legible for the first time, no Model | 13 columns — everything except Cache× and Cost/1M, **plus Model**, Session 21 |
+| **157** | 14 columns, every header label and the active sort arrow legible for the first time — but `Last Active` still renders `2025-01-04 23` | 12 columns — through Cache R/W, Session 27 |
+| **161** | 14 columns, every column finally at its natural width; first width at which no *value* is truncated either | 13 columns — everything except Cache× and Cost/1M, **plus Model**, Session 21 |
 | **180** | 15 columns, everything legible, Model appears here for the first time | 15 columns, identical to today |
+
+Three different widths get called "legible", so be precise about which is
+which (turn data present; without it, subtract 5):
+
+- **155** — every header *label* renders in full and stays that way.
+- **157** — the active sort arrow fits too, for all three sort fields; this is
+  the first width at which the header is completely honest.
+- **160** — the last truncated *value* (`Last Active`) becomes complete.
+- **161** — every column reaches its natural width. Nothing changes visually
+  from 160 for this row; it is the arithmetic milestone, and it is the number
+  #956's Model gate is derived from.
 
 Read that table honestly: below 161 this trades breadth for correctness. A user
 at 120 columns loses six columns they can currently see something in. What they
@@ -497,7 +724,7 @@ both of which are recomputable by eye from columns that are still on screen.
 | `wide_layout_fixed_width` | **Deleted.** It exists only to hold a second copy of the constraint sum; `required(&chosen, &ctx)` computes it from the descriptors. |
 | `show_model` / `model_budget` | Deleted. Replaced by `chosen.contains(&Model)` and the admission loop. |
 | `optional_cols`, `last_active_idx`, `total_idx`, `cost_idx` | **Deleted.** Replaced by `chosen.iter().position(...)`. |
-| `has_turn_data` | Kept as-is, becomes `WideCtx::has_turn` and feeds `Turn::available()`. |
+| `has_turn_data` | Kept as-is, becomes `WideCtx::has_turn`. Feeds both `Turn::available()` **and** `natural(Msgs)` (5 vs 6) — see the descriptor section. |
 
 ### `has_model_data`
 
@@ -507,6 +734,35 @@ session has an empty `models` renders a column of em-dashes. Adding
 data. This is a small, separable behavior change — recommended, but call it out
 in review rather than smuggling it in.
 
+**It is not independent of decision A, and adopting it changes the threshold
+table the tests below hardcode.** Dropping Model frees its 18 cells plus a
+separator, and under `break` semantics that budget flows down to the groups
+behind it, so every threshold after `Last Active` moves:
+
+| admitted | turn data, model data | turn data, **no** model data |
+|---|---|---|
+| core | 69 | 69 |
+| + `Last Active` | 87 | 87 |
+| + `Model` | 106 | — |
+| + `Input`, `Output` | 128 | **109** |
+| + `Cache R`, `Cache W` | 150 | **131** |
+| + `Duration` | 160 | **141** |
+| + `Cache×` | 169 | **150** |
+| + `Cost/1M` | 180 | **161** |
+
+Without turn data the no-model column reads 64 / 82 / — / 104 / 126 / 136 /
+145 / **156**.
+
+Those two final numbers are a free cross-check worth keeping: 161 and 156 are
+exactly today's full-table widths for the no-Model case (`sessions.rs:30-41`),
+which they have to be, because dropping Model from the descriptor set leaves
+precisely the constraint vector that ships today. If an implementation of this
+design produces anything else there, the descriptor widths are wrong.
+
+So decision A's test table becomes two-dimensional if this is adopted. Decide
+them together, or land `has_model_data` in a separate commit with its own
+threshold table.
+
 ### Existing tests
 
 | test | fate |
@@ -515,7 +771,7 @@ in review rather than smuggling it in.
 | `model_column_shows_model_names` (200) | Passes unchanged. |
 | `model_column_shows_multiple_models` (220) | Passes unchanged; Model reaches 36 at 220 under B2. |
 | `session_title_displayed_when_available` (200) | Passes unchanged. |
-| `session_column_expands_on_wide_terminal` (260) | Passes; Session gets 82 cells against the 54-char title asserted. |
+| `session_column_expands_on_wide_terminal` (260) | Passes; Session gets 82 cells against the 53-char title asserted — but only because 53 < the hardcoded `truncate_text(.., 60)`. That 60 is sync point 6 and this test is what would catch it regressing, so it should be re-pointed at `layout.session_width`. |
 | `narrow_terminal_drops_token_breakdown_columns` (70) | Untouched — narrow branch. |
 | `empty_sessions_shows_refresh_message` (120) | Untouched — early return. |
 | `model_column_hidden_below_its_width_threshold` | **Rewrite.** Its premise inverts: at 179 Model is now on and Cost/1M is off. |
@@ -584,8 +840,10 @@ for width in 80u16..=240 {
 }
 ```
 
-This fails today at every width from 80 to 154. It is the single assertion that
-would have turned #964 into a red test instead of a review comment.
+This fails today at every width from **80 to 154** with turn data, and **80 to
+149** without — contiguous bands in both cases, ending where `Last Active`
+finally fits. It is the single assertion that would have turned #964 into a red
+test instead of a review comment.
 
 **2. Sort-indicator invariant.** For every width in the sweep and each of
 `SortField::{Cost, Tokens, Date}`: if the field's column is admitted, the
@@ -601,9 +859,15 @@ ratatui solver produces today (`Cost ▼` legible at 111 and 112, gone at 113)
 and catches a priority list whose groups are ordered inconsistently with their
 widths.
 
+> Note what this does **not** cover: it compares header *sets*, so it stays
+> green through the Session sawtooth documented above (Session 40 at 149, 20 at
+> 150). That is deliberate — the sawtooth is accepted — but it means this test
+> must not be cited as evidence that widening never costs the user anything.
+
 **4. Threshold table.** Assert the exact width at which each group first
 appears — 69, 87, 106, 128, 150, 160, 169, 180 with turn data; 64, 82, 101,
-123, 145, 155, 164, 175 without.
+123, 145, 155, 164, 175 without. (If `has_model_data` is adopted, this becomes
+four rows, not two — see that section for the other eight numbers.)
 
 > **These must be literal numbers in the test, never derived from the
 > production function.** That is the mistake `model_gate_width` makes. A test
@@ -616,6 +880,16 @@ appears — 69, 87, 106, 128, 150, 160, 169, 180 with turn data; 64, 82, 101,
 lands: `headers.len() == widths.len() == cells.len()` for every row over the
 sweep and both turn states. It is worth writing precisely because it should be
 impossible to fail — if it can fail, the derivations are not actually derived.
+
+**6. Array completeness** — `WIDE_ORDER` and `WIDE_PRIORITY.concat()` are both
+permutations of `ALL` (code in the admission section above). Unlike the other
+five, this one is not about widths at all. **It is the only assertion in this
+set that enforces the no-drift property the whole design is sold on**, because
+the exhaustive-`match` rule covers the six descriptor methods and stops there —
+the two arrays are hand-maintained and the compiler never looks at them. Add a
+variant, forget the arrays, and you get either a column that never renders or a
+sort-key lookup with no answer. Without this test the refactor moves drift from
+six visible call sites into two arrays that look authoritative.
 
 **Value truncation** deserves a note but not an assertion here. The proposal
 prevents it structurally (a column is either admitted at natural width or
@@ -630,15 +904,30 @@ formatter test next to `format_duration_*`.
    proposal decides *what you lose* below that, not *whether* you lose
    something.
 
-2. **The natural widths are still padded.** They are budget inputs, not
-   measured content maxima. `format_tokens` produces at most `999.9B` (6) in
-   10-cell columns; `format_cost` at most `$999.99` (7) in 10. Tightening
-   Input/Output to 7, Cache R/W and Cost and Cost/1M to 8, Total to 7 and
-   Cache× to 7 would free ~18 cells and pull every threshold down by up to 18 —
-   the full table would land near 162. Deliberately *not* bundled: it is a
-   readability tradeoff (columns lose their breathing room) and it makes widths
-   content-dependent. This design makes it a one-line-per-column edit
-   afterwards, which is the point.
+2. **The natural widths are still padded — but by less than they look, and
+   two of them are not padded at all.** They are budget inputs, not measured
+   content maxima. `format_tokens` produces at most `999.9B` (6) in 10-cell
+   columns, so those have real slack. The cost formatters do not:
+
+   | formatter | actual maximum | column | measured |
+   |---|---|---|---|
+   | `format_cost` | `$1234.6K` (8) — there is a `>= 1000.0` branch at `widgets.rs:41-50` that switches to `${:.1}K`, so `$999.99` is *not* the ceiling | 10 | `format_cost(1_234_567.0)` |
+   | `format_cost_per_million` | **unbounded** — `widgets.rs:54-60` is a plain `${:.2}` with no compact branch at all | 10 | `format_cost_per_million(10.0, 100)` = `$100000.00` (10), exactly filling today's column |
+
+   So an earlier draft's proposal to tighten Cost and Cost/1M to 8 cells would
+   truncate on reachable inputs — a session costing over $1,000 already needs 8,
+   and Cost/1M has no ceiling to design against. Tightening Input/Output to 7,
+   Cache R/W to 8, Total to 7 and Cache× to 7 is still sound and frees 14 cells
+   (`3+3+2+2+3+1`), putting the full table at 166; the further 4 cells that
+   would reach 162 come only from the two cost columns, and require giving
+   `format_cost_per_million` a compact branch first.
+
+   Deliberately *not* bundled either way: it is a readability tradeoff (columns
+   lose their breathing room) and it makes widths content-dependent. This design
+   makes it a one-line-per-column edit afterwards, which is the point. The
+   lesson worth carrying is that this document's own first draft asserted a
+   formatter maximum it had not measured, in a section arguing that unmeasured
+   width constants are the bug.
 
 3. **`Last Active` is 17 cells for `%Y-%m-%d %H:%M`.** The narrow path already
    uses `%m-%d %H:%M` (11). Making the format width-adaptive the way
@@ -659,11 +948,30 @@ formatter test next to `format_duration_*`.
    *inside* a cell can still overshoot by one cell per wide character. Model
    ids are ASCII in practice; session titles are not necessarily.
 
-7. **No user-configurable columns**, no pinning, no per-client column sets. The
+7. **The Session column sawtooths at every threshold** (40 cells at 149, 20 at
+   150, and six more like it — full table in the admission section). The column
+   *set* is monotonic in width; the space given to the title is not. Accepted
+   rather than fixed, because the alternative costs title width at every common
+   terminal size. Under decision B1 it is Model that sawtooths instead.
+
+8. **Date sort still has no visible target at the narrowest wide widths.**
+   This document opens by complaining that "a user who presses the sort key
+   sees the row order change with no feedback about which column drives it".
+   Under the recommended order that is true from 80 to 86 with turn data, and
+   80 to 81 without, because `Last Active` is not admitted until 87 / 82 —
+   `position()` returns `None` and no arrow is drawn, by design. It is a
+   reduction from 77 of 121 widths to 7, not an elimination. The obvious fix,
+   force-admitting whichever column is currently sorted, is rejected: it breaks
+   the subset property, since changing the sort at a fixed width would change
+   the column set. Worth seeing before choosing a priority order — any order
+   that ranks `Last Active` lower makes this band wider (Order C leaves it
+   unanswered to 150).
+
+9. **No user-configurable columns**, no pinning, no per-client column sets. The
    descriptor list is the natural place to hang a config filter later; this
    proposal does not add one.
 
-8. **No data-adaptive hiding** (order F above), deliberately.
+10. **No data-adaptive hiding** (order F above), deliberately.
 
 ## Decisions requested
 
@@ -672,12 +980,23 @@ formatter test next to `format_duration_*`.
    `Duration` → `Cache×` → `Cost/1M`. Amending it means editing one array and
    one table of literal thresholds in the tests.
 2. **Decision B** — slack distribution. Recommended: Session to 40 first, then
-   Model to 36.
+   Model to 36. Note this decides *which* column sawtooths at the seven
+   thresholds, not whether one does: B2 sawtooths Session (40 → 20 at 149 →
+   150), B1 sawtooths Model (36 → 18 at the same step).
 3. **`has_model_data`** — add the availability gate symmetric with
    `has_turn_data`, or leave Model showing em-dashes when no session has model
-   data?
+   data? **Not independent of A**: adopting it doubles decision A's threshold
+   table (69/87/**109/131/141/150/161** with turn data). Decide with A or land
+   it separately.
 4. **The 120-column regression** — is trading six stub columns for eight
    complete ones the right call at common terminal widths? This is the one
    place the proposal makes something visibly worse for some users, and it is
    the reason the priority order is a decision rather than an implementation
    detail.
+
+Two things this document asks reviewers *not* to treat as decisions, because
+they are corrections rather than choices: the `ALL` / `WIDE_ORDER` /
+`WIDE_PRIORITY` permutation test (#6 in the testing section) must land in the
+first commit or the design's central no-drift claim is unenforced; and
+`natural()` must be the single source of every width, with `Constraint`
+derived from it rather than written alongside it.
