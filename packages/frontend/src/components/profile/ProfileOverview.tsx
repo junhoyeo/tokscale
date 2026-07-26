@@ -13,7 +13,11 @@ export interface ProfileOverviewProps {
   stats: ProfileStatsData;
   lastUpdated?: string | null;
   period?: "all" | "month" | "week";
-  /** Display timezone for user-facing dates; defaults to the viewer's zone. */
+  /**
+   * Zone for the two absolute instants rendered here — "Updated" and "Joined".
+   * Defaults to the viewer's browser zone. Never applies to contribution
+   * dates: those are calendar buckets the submitting machine already resolved.
+   */
   timeZone?: string;
   className?: string;
 }

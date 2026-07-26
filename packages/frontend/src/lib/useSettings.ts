@@ -15,7 +15,7 @@ export type { LeaderboardSortBy };
 export interface Settings {
   paletteName: ColorPaletteName;
   leaderboardSortBy: LeaderboardSortBy;
-  /** Display timezone for profile charts: "auto" (browser) or an IANA zone. */
+  /** Zone for profile timestamps: "auto" (browser) or an IANA zone. */
   timezone: string;
 }
 

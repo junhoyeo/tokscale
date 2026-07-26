@@ -1,11 +1,12 @@
 /**
  * Display-timezone helpers for the web dashboard.
  *
- * Contribution dates are calendar-day buckets (`YYYY-MM-DD`) submitted in the
- * user's local timezone, while the server computes chart ranges against UTC
- * "today". These helpers resolve the viewer's display timezone preference and
- * anchor calendar dates to it so freshly submitted local-today data renders
- * immediately. Display-only: the leaderboard stays UTC-based.
+ * Scope is deliberately narrow: the preference resolved here renders *absolute
+ * instants* — "Updated", "Joined" — in a zone the viewer chooses. It must never
+ * touch contribution dates. Those are calendar-day buckets (`YYYY-MM-DD`) that
+ * the CLI already resolved in the submitting machine's local timezone, so
+ * re-projecting them through a viewer's zone would move a day's usage onto a
+ * day its owner never worked. See #960 for the scan-timezone side of that split.
  */
 
 /** A modest list of common IANA zones for the settings select, by region. */
@@ -112,118 +113,4 @@ export function resolveEffectiveTimeZone(preference: string): string {
   return preference !== "auto" && isValidTimeZone(preference)
     ? preference
     : getBrowserTimeZone();
-}
-
-const dayPartsFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function getDayPartsFormatter(timeZone: string): Intl.DateTimeFormat {
-  let formatter = dayPartsFormatters.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-    dayPartsFormatters.set(timeZone, formatter);
-  }
-  return formatter;
-}
-
-/** "Today" as `YYYY-MM-DD` in the given timezone (never `toISOString`, which is UTC). */
-export function getTodayInTimeZone(
-  timeZone: string,
-  now: Date = new Date(),
-): string {
-  const parts = getDayPartsFormatter(timeZone).formatToParts(now);
-  const part = (type: string) =>
-    parts.find((candidate) => candidate.type === type)?.value ?? "";
-  return `${part("year")}-${part("month")}-${part("day")}`;
-}
-
-/**
- * Extend a range end to "today" in the effective timezone when the local day
- * is ahead of the (UTC-bucketed) end, so same-day contributions are not
- * clipped from profile charts. Never shortens the range.
- */
-export function extendDateRangeEndToToday(
-  rangeEnd: string | null | undefined,
-  timeZone: string,
-  now: Date = new Date(),
-): string | null {
-  if (!rangeEnd) return null;
-  const today = getTodayInTimeZone(timeZone, now);
-  return today > rangeEnd ? today : rangeEnd;
-}
-
-const offsetPartsFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function getOffsetPartsFormatter(timeZone: string): Intl.DateTimeFormat {
-  let formatter = offsetPartsFormatters.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hourCycle: "h23",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-    offsetPartsFormatters.set(timeZone, formatter);
-  }
-  return formatter;
-}
-
-function getTimeZoneOffsetMs(timeZone: string, utcMs: number): number {
-  const parts = getOffsetPartsFormatter(timeZone).formatToParts(
-    new Date(utcMs),
-  );
-  const part = (type: string) =>
-    Number(parts.find((candidate) => candidate.type === type)?.value ?? 0);
-  const asUtcMs = Date.UTC(
-    part("year"),
-    part("month") - 1,
-    part("day"),
-    part("hour"),
-    part("minute"),
-    part("second"),
-  );
-  return asUtcMs - utcMs;
-}
-
-function dateKeyInTimeZone(timeZone: string, timestamp: number): string {
-  const parts = getDayPartsFormatter(timeZone).formatToParts(
-    new Date(timestamp),
-  );
-  const part = (type: string) =>
-    parts.find((candidate) => candidate.type === type)?.value ?? "";
-  return `${part("year")}-${part("month")}-${part("day")}`;
-}
-
-/**
- * Shift a UTC-midnight calendar timestamp to the instant of that same
- * calendar midnight in `timeZone`, so timezone-aware formatters label the
- * intended date instead of the previous/next UTC day.
- */
-export function calendarInstantInTimeZone(
-  utcMidnightMs: number,
-  timeZone: string,
-): number {
-  if (timeZone === "UTC") return utcMidnightMs;
-  const offset = getTimeZoneOffsetMs(timeZone, utcMidnightMs);
-  const timestamp = utcMidnightMs - offset;
-  // Refine once: the offset at UTC midnight can differ from the offset at
-  // local midnight around DST transitions. Some zones skip local midnight at
-  // spring-forward, though; retain the first valid instant on the requested
-  // calendar day rather than moving the label into the prior day.
-  const refined = getTimeZoneOffsetMs(timeZone, timestamp);
-  if (refined === offset) return timestamp;
-
-  const refinedTimestamp = utcMidnightMs - refined;
-  const targetDate = new Date(utcMidnightMs).toISOString().slice(0, 10);
-  return dateKeyInTimeZone(timeZone, refinedTimestamp) === targetDate
-    ? refinedTimestamp
-    : timestamp;
 }

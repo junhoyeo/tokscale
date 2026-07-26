@@ -960,9 +960,12 @@ export default function SettingsClient() {
             Timezone
           </SectionTitle>
           <Description style={{ color: "var(--color-fg-muted)" }}>
-            Used to display dates on profile pages, including the contribution
-            graph. Stored only in this browser; the leaderboard always uses
-            UTC.
+            Renders the timestamps on profile pages — &ldquo;Updated&rdquo; and
+            &ldquo;Joined&rdquo; — in the zone you pick, and is stored only in
+            this browser. It does not move usage between days: which day a
+            session counts toward is decided by the machine that scanned it,
+            from that machine&rsquo;s own clock, so the contribution graph,
+            daily totals, and the leaderboard are unaffected.
           </Description>
 
           <FieldLabel
