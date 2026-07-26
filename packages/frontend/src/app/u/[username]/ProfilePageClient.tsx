@@ -74,9 +74,10 @@ export interface ProfileData {
 }
 
 // Both branches already end on or after the newest submitted date: the server
-// anchors the lifetime `chartRange` to it, and `apiRange.end` is that date.
-// Nothing here may depend on the viewer's clock — contribution dates are
-// calendar buckets the submitting machine already resolved.
+// anchors every window to it, so `chartRange.end` and the period `apiRange.end`
+// it also fills are both that anchor. Nothing here may depend on the viewer's
+// clock — contribution dates are calendar buckets the submitting machine
+// already resolved.
 function getProfileChartRange(
   period: ProfilePeriod,
   apiRange: ProfileData["dateRange"],

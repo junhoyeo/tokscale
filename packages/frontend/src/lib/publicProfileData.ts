@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { unstable_cache } from "next/cache";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
+import { eq, desc, sql, and, gte } from "drizzle-orm";
 import {
   AmbiguousUsernameError,
   USERNAME_LOOKUP_LIMIT,
@@ -30,30 +30,16 @@ function toUtcDateString(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+function getUtcToday(now: Date): Date {
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+}
+
 function parseProfilePeriod(value: string | null): ProfilePeriod {
   return PROFILE_PERIODS.includes(value as ProfilePeriod)
     ? (value as ProfilePeriod)
     : "all";
-}
-
-function getProfilePeriodDateRange(
-  period: ProfilePeriod,
-  now: Date = new Date(),
-): ProfilePeriodDateRange | null {
-  if (period === "all") {
-    return null;
-  }
-
-  const end = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
-  const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
-
-  return {
-    start: toUtcDateString(start),
-    end: toUtcDateString(end),
-  };
 }
 
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -66,24 +52,46 @@ function parseDateKey(value: string | null | undefined): Date | null {
 }
 
 /**
- * Rolling twelve-month window for the lifetime chart.
+ * The day every profile window ends on: the later of UTC today and the newest
+ * date the data itself carries.
  *
- * The end is anchored to the later of UTC today and the newest date the data
- * itself carries. Contribution dates are calendar-day buckets computed by the
- * CLI in the *submitting* machine's local timezone, so a user ahead of UTC
- * legitimately reports a date that is still tomorrow here. Anchoring to the
- * data keeps that day inside the window for every viewer, wherever they are,
- * and keeps the range-scoped stats on the same window the chart draws.
+ * Contribution dates are calendar-day buckets computed by the CLI in the
+ * *submitting* machine's local timezone, so a user ahead of UTC legitimately
+ * reports a date that is still tomorrow here. Anchoring to the data keeps that
+ * day inside every window for every viewer, wherever they are, and keeps the
+ * range-scoped stats on the same window the chart draws. Validation caps
+ * contribution dates at UTC today + 2 days, so the anchor can never run more
+ * than two days past the present.
  */
-function getRollingProfileDateRange(
-  latestDate?: string | null,
-  now: Date = new Date(),
-): ProfilePeriodDateRange {
-  const utcToday = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
+function getProfileRangeAnchor(
+  latestDate: string | null | undefined,
+  now: Date,
+): Date {
+  const utcToday = getUtcToday(now);
   const latest = parseDateKey(latestDate);
-  const end = latest && latest > utcToday ? latest : utcToday;
+  return latest && latest > utcToday ? latest : utcToday;
+}
+
+/** Trailing seven- or thirty-day window ending on `end`; null for lifetime. */
+function getProfilePeriodDateRange(
+  period: ProfilePeriod,
+  end: Date,
+): ProfilePeriodDateRange | null {
+  if (period === "all") {
+    return null;
+  }
+
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
+
+  return {
+    start: toUtcDateString(start),
+    end: toUtcDateString(end),
+  };
+}
+
+/** Rolling twelve-month window for the lifetime chart, ending on `end`. */
+function getRollingProfileDateRange(end: Date): ProfilePeriodDateRange {
   const targetYear = end.getUTCFullYear() - 1;
   const month = end.getUTCMonth();
   const lastValidDay = new Date(
@@ -123,7 +131,18 @@ export async function getPublicProfileResponse(
     const { username } = await params;
     const { searchParams } = new URL(request.url);
     const period = parseProfilePeriod(searchParams.get("period"));
-    const periodRange = getProfilePeriodDateRange(period);
+    // One clock reading for the whole request, so a UTC midnight crossed
+    // mid-request cannot put the query and the window on different days.
+    const now = new Date();
+    // The window a period request draws ends on the anchor, which is only known
+    // once the stats query returns. The anchor can only move *forward* of UTC
+    // today, so a window measured back from UTC today starts on or before the
+    // real one — fetching from there is a superset that `scopedContributions`
+    // trims to the anchored window.
+    const periodFetchStart = getProfilePeriodDateRange(
+      period,
+      getUtcToday(now),
+    )?.start;
 
     // Find user
     const matchingUsers = await db
@@ -151,11 +170,14 @@ export async function getPublicProfileResponse(
       return NextResponse.redirect(canonicalUrl, 308);
     }
 
-    const dailyBreakdownFilter = periodRange
+    // Deliberately unbounded above: `submissions.dateEnd` is
+    // `MAX(dailyBreakdown.date)`, so the anchor already dominates every row this
+    // user has and an upper bound could only ever drop the newest day of an
+    // owner whose calendar runs ahead of UTC.
+    const dailyBreakdownFilter = periodFetchStart
       ? and(
           eq(submissions.userId, user.id),
-          gte(dailyBreakdown.date, periodRange.start),
-          lte(dailyBreakdown.date, periodRange.end),
+          gte(dailyBreakdown.date, periodFetchStart),
         )
       : eq(submissions.userId, user.id);
 
@@ -232,10 +254,11 @@ export async function getPublicProfileResponse(
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
     const rank = (rankResult as unknown as { rank: number }[])[0]?.rank || null;
-    // Resolved only once the newest submitted date is known, so the lifetime
-    // window can end on the data instead of on UTC "today".
-    const chartRange =
-      periodRange ?? getRollingProfileDateRange(stats?.latestDate);
+    // Resolved only once the newest submitted date is known, so every window —
+    // lifetime and period alike — ends on the data instead of on UTC "today".
+    const rangeAnchor = getProfileRangeAnchor(stats?.latestDate, now);
+    const periodRange = getProfilePeriodDateRange(period, rangeAnchor);
+    const chartRange = periodRange ?? getRollingProfileDateRange(rangeAnchor);
 
     type ModelData = {
       tokens: number;
@@ -480,7 +503,14 @@ export async function getPublicProfileResponse(
     const scopedContributions = contributions.filter(
       ({ date }) => date >= chartRange.start && date <= chartRange.end,
     );
-    const maxCost = Math.max(...contributions.map((c) => c.cost), 0);
+    // A lifetime request ships every day it holds — the graph's year dropdown
+    // reads them. A period request ships only its window: the query fetches a
+    // day or two more than the anchored window draws, and neither the intensity
+    // scale nor the graph may see past the window's edge.
+    const visibleContributions = periodRange
+      ? scopedContributions
+      : contributions;
+    const maxCost = Math.max(...visibleContributions.map((c) => c.cost), 0);
     const periodTotals = scopedContributions.reduce(
       (totals, day) => {
         totals.totalTokens += day.tokens;
@@ -508,7 +538,7 @@ export async function getPublicProfileResponse(
     );
 
     // Build contribution graph data
-    const graphContributions = contributions.map((day) => {
+    const graphContributions = visibleContributions.map((day) => {
       const intensity =
         maxCost === 0
           ? 0
