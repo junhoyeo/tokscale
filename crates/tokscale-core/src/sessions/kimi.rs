@@ -155,9 +155,8 @@ fn normalize_kimi_code_model(model: &str) -> String {
 fn concrete_kimi_code_model(model: &str) -> Option<String> {
     let normalized = normalize_kimi_code_model(model.trim());
     let normalized = normalized.trim();
-    let symbolic = normalized.len() >= 4
-        && normalized.starts_with("__")
-        && normalized.ends_with("__");
+    let symbolic =
+        normalized.len() >= 4 && normalized.starts_with("__") && normalized.ends_with("__");
     (!normalized.is_empty() && !symbolic).then(|| normalized.to_string())
 }
 
@@ -687,11 +686,9 @@ not valid json at all
         let messages = parse_kimi_code_file(&fake_path);
 
         assert_eq!(messages.len(), 4);
-        assert!(
-            messages
-                .iter()
-                .all(|message| message.model_id == DEFAULT_MODEL)
-        );
+        assert!(messages
+            .iter()
+            .all(|message| message.model_id == DEFAULT_MODEL));
     }
 
     #[test]
