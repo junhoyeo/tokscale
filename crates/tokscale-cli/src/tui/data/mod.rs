@@ -2821,6 +2821,15 @@ after"#,
     /// keeps the provider and color key its family-shade lookup needs, and the
     /// list is deduped by display name so a model reached under two spellings
     /// (here a dated id and its normalized form) lands once, in first-seen order.
+    ///
+    /// The dedup below relies on `model_name_for_grouping` ignoring `provider_id`
+    /// for this input: it consults the provider only when `client == "opencode"`
+    /// (to apply an OpenCode-configured label), and every other client falls
+    /// through to `normalize_model_for_grouping`, which is a pure function of the
+    /// model id. That is why the third message can carry a different provider
+    /// (`github-copilot` vs `anthropic`) and still collapse onto the same display
+    /// name. If that scoping ever widens beyond OpenCode, this assertion is the
+    /// one that should start failing.
     #[test]
     fn test_session_models_dedup_by_display_name_and_retain_provider() {
         let loader = DataLoader::new(None);
