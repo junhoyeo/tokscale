@@ -261,40 +261,48 @@ constraint is therefore *derived*, never written:
 
 ```rust
 // `natural()` is the ADMISSION width — what a column must be given to be let
-// in at all. `allocated()` is what it actually receives after slack
-// distribution, and it is the only width the renderer may use. For every fixed
-// column the two are equal; for Session and Model they diverge, which is the
-// entire point of slack distribution.
-fn allocated(c: SessionColumn, layout: &WideLayout) -> u16 {
-    match c {
-        SessionColumn::Session => layout.session_width,
-        SessionColumn::Model => layout.model_width,
-        other => other.natural(&layout.ctx),
-    }
-}
-
-fn constraint(c: SessionColumn, layout: &WideLayout) -> Constraint {
-    if c.grows() {
-        Constraint::Min(allocated(c, layout))
-    } else {
-        Constraint::Length(allocated(c, layout))
+// in at all. What it actually RECEIVES after slack distribution is the only
+// width the renderer may use. For every fixed column the two are equal; for
+// Session and Model they diverge, which is the entire point of slack
+// distribution, so the resolved layout has to be in scope here.
+impl WideLayout {
+    fn constraint(&self, c: SessionColumn, ctx: &WideCtx) -> Constraint {
+        let width = match c {
+            // The allocated width, not the natural one — this is the whole point.
+            SessionColumn::Model => self.model_width,
+            other => other.natural(ctx),
+        };
+        if c.grows() { Constraint::Min(width) } else { Constraint::Length(width) }
     }
 }
 ```
 
-**Both `constraint()` and `cell()` take `&WideLayout`, and neither may take
-`&WideCtx`.** An earlier revision of this document derived `constraint` from
-`ctx` while `cell` took `layout`, which is a real bug that two independent
-reviewers caught: `Model.grows()` is `false`, so its constraint came out as
+`Session` needs no arm: it is the sole `Min` column, so ratatui hands it every
+cell slack distribution did not give `Model`. `self.session_width` exists for
+`cell()` to truncate the title against, and must equal what the solver actually
+allocates or the title is clipped with no ellipsis.
+
+**`constraint()` must have the resolved layout in scope, not only `WideCtx`.**
+An earlier revision of this document derived `constraint` from `ctx` alone
+while `cell` took `layout`, which is a real bug two independent reviewers
+caught: `Model.grows()` is `false`, so its constraint came out as
 `Length(natural(Model))` — always 18 — while `cell()` formatted content to
 `layout.model_width`, up to 36. ratatui allocates what the constraint asks for,
 so every cell wider than 18 was silently clipped and the whole `model_extra`
-computation was dead. `Session` survived only because it is `Constraint::Min`
-and absorbs surplus regardless.
+computation was dead code. `Session` survived only because it is
+`Constraint::Min` and absorbs surplus regardless.
+
+The first attempt at this correction was itself wrong, and a reviewer caught
+that too: it introduced a free function reading `layout.ctx`, a field
+`WideLayout` does not have, so it would not compile. Making `constraint` a
+method on `WideLayout` that *also* takes `&WideCtx` is what the implementation
+in #966 does, and it is the right shape — the layout supplies the widths
+admission computed, `ctx` supplies the fixed naturals, and neither is
+reachable without the other.
 
 The lesson generalises: any width that admission *computes* must flow to the
-constraint, not just to the formatter. Threading one `&WideLayout` through both
-derivations is what makes that structural rather than remembered.
+constraint, not just to the formatter. Having both derivations hang off the
+resolved layout is what makes that structural rather than remembered.
 
 **`Msgs` is 5 cells with turn data and 6 without.** `sessions.rs:362` reads
 `Constraint::Length(if has_turn_data { 5 } else { 6 })` — Msgs borrows the
