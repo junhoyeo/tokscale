@@ -8,6 +8,7 @@ import {
   vi,
 } from "vitest";
 
+import { createContributionCalendar } from "../../src/components/profile/ProfileContributionGraph";
 import { expectNoNarrowedCostCast } from "../support/costCastWidths";
 
 const mockState = vi.hoisted(() => {
@@ -579,6 +580,194 @@ describe("GET /api/users/[username]", () => {
     expect(body.chartRange).toEqual({
       start: "2023-02-28",
       end: "2024-02-29",
+    });
+  });
+
+  it("ends the lifetime range on the newest submitted date when it is ahead of UTC today", async () => {
+    // 2026-07-23T16:00Z is still the 23rd in UTC — and in America/Los_Angeles —
+    // but already the 24th in Asia/Seoul. The owner's CLI bucketed that session
+    // into their local 2026-07-24 and submitted it. The range is resolved here,
+    // on the server, from the data: no viewer's clock is an input, so the day
+    // is visible to a Los Angeles reader exactly as it is to a Seoul one.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T16:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-ahead-of-utc",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 35,
+        totalCost: 3.5,
+        inputTokens: 20,
+        outputTokens: 15,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 2,
+        earliestDate: "2026-07-22",
+        latestDate: "2026-07-24",
+        sessionCount: 2,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        sourcesUsed: ["codex"],
+        modelsUsed: ["gpt-5.5"],
+        updatedAt: new Date("2026-07-23T15:00:00.000Z"),
+        cliVersion: "2.0.0",
+        schemaVersion: 2,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        date: "2026-07-22",
+        timestampMs: 100,
+        tokens: 10,
+        cost: "1.0000",
+        inputTokens: 6,
+        outputTokens: 4,
+        sourceBreakdown: {
+          codex: {
+            tokens: 10,
+            cost: 1,
+            input: 6,
+            output: 4,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            messages: 1,
+            models: {
+              "gpt-5.5": {
+                tokens: 10,
+                cost: 1,
+                input: 6,
+                output: 4,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 1,
+              },
+            },
+          },
+        },
+      },
+      {
+        date: "2026-07-24",
+        timestampMs: 200,
+        tokens: 25,
+        cost: "2.5000",
+        inputTokens: 14,
+        outputTokens: 11,
+        sourceBreakdown: {
+          codex: {
+            tokens: 25,
+            cost: 2.5,
+            input: 14,
+            output: 11,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            messages: 2,
+            models: {
+              "gpt-5.5": {
+                tokens: 25,
+                cost: 2.5,
+                input: 14,
+                output: 11,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                messages: 2,
+              },
+            },
+          },
+        },
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: 1 }]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/users/alice"),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.chartRange).toEqual({
+      start: "2025-07-24",
+      end: "2026-07-24",
+    });
+    expect(body.dateRange.end).toBe("2026-07-24");
+
+    // The graph clips the payload's contributions to the payload's chartRange,
+    // so building the calendar the way the client does is the check that the
+    // newest day actually renders.
+    const calendar = createContributionCalendar(
+      body.contributions,
+      body.chartRange.start,
+      body.chartRange.end,
+    );
+    expect(calendar.endDate).toBe("2026-07-24");
+    expect(calendar.cells.find(({ date }) => date === "2026-07-24")).toEqual(
+      expect.objectContaining({ inRange: true, tokens: 25 }),
+    );
+
+    // ProfileOverview's "Active days (1y)" and the graph's own count sit on the
+    // same screen; both must be scoped to the same window.
+    expect(body.stats.activeDays).toBe(2);
+    expect(calendar.activeDays).toBe(body.stats.activeDays);
+  });
+
+  it("falls back to UTC today when the newest submitted date is unusable", async () => {
+    // A `date` column cannot hold this, but the anchor now feeds a Date
+    // constructor, and a public profile must not 500 on a malformed value.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T16:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-bad-date",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 0,
+        totalCost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 0,
+        earliestDate: "2026-07-22",
+        latestDate: "2026-13-45",
+      },
+    ]);
+    mockState.pushSelectResult([]);
+    mockState.pushSelectResult([]);
+    mockState.pushExecuteResult([]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/users/alice"),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.chartRange).toEqual({
+      start: "2025-07-23",
+      end: "2026-07-23",
     });
   });
 

@@ -29,10 +29,7 @@ import {
 } from "@/components/profile";
 import type { DailyContribution } from "@/lib/types";
 import { useSettings } from "@/lib/useSettings";
-import {
-  extendDateRangeEndToToday,
-  resolveEffectiveTimeZone,
-} from "@/lib/timezone";
+import { resolveEffectiveTimeZone } from "@/lib/timezone";
 
 type ProfilePeriod = "all" | "week" | "month";
 
@@ -76,6 +73,10 @@ export interface ProfileData {
   period?: ProfilePeriod;
 }
 
+// Both branches already end on or after the newest submitted date: the server
+// anchors the lifetime `chartRange` to it, and `apiRange.end` is that date.
+// Nothing here may depend on the viewer's clock — contribution dates are
+// calendar buckets the submitting machine already resolved.
 function getProfileChartRange(
   period: ProfilePeriod,
   apiRange: ProfileData["dateRange"],
@@ -109,23 +110,16 @@ export default function ProfilePageClient({
   const contributionBreakdownId = useId();
   const data = initialData;
   const period = data.period ?? "all";
-  // Server chart ranges end at UTC "today", which clips contributions the CLI
-  // bucketed into the viewer's local-tomorrow date. Extend the display end to
-  // today in the effective timezone — only after mount, so the first client
-  // render matches the server-rendered range, and only for the lifetime view:
-  // week/month contributions are filtered by the UTC range server-side, so a
-  // local-today cell there could never carry data.
+  // Absolute instants ("Updated", "Joined") render in the viewer's display
+  // timezone; calendar-day buckets never do — see resolveEffectiveTimeZone.
+  // UTC before mount so the first client render matches the server markup.
   const effectiveTimeZone = mounted
     ? resolveEffectiveTimeZone(timezonePreference)
     : "UTC";
-  const rollingChartRange = useMemo(() => {
-    const range = getProfileChartRange(period, data.dateRange, data.chartRange);
-    if (!mounted || period !== "all") return range;
-    return {
-      start: range.start,
-      end: extendDateRangeEndToToday(range.end, effectiveTimeZone),
-    };
-  }, [period, data.chartRange, data.dateRange, mounted, effectiveTimeZone]);
+  const rollingChartRange = useMemo(
+    () => getProfileChartRange(period, data.dateRange, data.chartRange),
+    [period, data.chartRange, data.dateRange],
+  );
   const contributionRangeOptions = useMemo(
     () =>
       period === "all"
@@ -307,7 +301,6 @@ export default function ProfilePageClient({
                         selectableRangeEnd={contributionSelectionEnd}
                         selectedDate={selectedContributionDate}
                         showBreakdown={false}
-                        timeZone={effectiveTimeZone}
                         view={contributionView}
                         description={
                           period === "all"
@@ -326,7 +319,6 @@ export default function ProfilePageClient({
                           day={selectedContributionDay}
                           id={contributionBreakdownId}
                           paletteName={contributionPalette}
-                          timeZone={effectiveTimeZone}
                         />
                       </BreakdownArea>
                     )}

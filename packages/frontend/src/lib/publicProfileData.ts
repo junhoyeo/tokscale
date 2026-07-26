@@ -56,12 +56,34 @@ function getProfilePeriodDateRange(
   };
 }
 
+const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** `YYYY-MM-DD` to its UTC midnight; null for anything that is not one. */
+function parseDateKey(value: string | null | undefined): Date | null {
+  if (!value || !DATE_KEY_PATTERN.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * Rolling twelve-month window for the lifetime chart.
+ *
+ * The end is anchored to the later of UTC today and the newest date the data
+ * itself carries. Contribution dates are calendar-day buckets computed by the
+ * CLI in the *submitting* machine's local timezone, so a user ahead of UTC
+ * legitimately reports a date that is still tomorrow here. Anchoring to the
+ * data keeps that day inside the window for every viewer, wherever they are,
+ * and keeps the range-scoped stats on the same window the chart draws.
+ */
 function getRollingProfileDateRange(
+  latestDate?: string | null,
   now: Date = new Date(),
 ): ProfilePeriodDateRange {
-  const end = new Date(
+  const utcToday = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
   );
+  const latest = parseDateKey(latestDate);
+  const end = latest && latest > utcToday ? latest : utcToday;
   const targetYear = end.getUTCFullYear() - 1;
   const month = end.getUTCMonth();
   const lastValidDay = new Date(
@@ -102,7 +124,6 @@ export async function getPublicProfileResponse(
     const { searchParams } = new URL(request.url);
     const period = parseProfilePeriod(searchParams.get("period"));
     const periodRange = getProfilePeriodDateRange(period);
-    const chartRange = periodRange ?? getRollingProfileDateRange();
 
     // Find user
     const matchingUsers = await db
@@ -211,6 +232,10 @@ export async function getPublicProfileResponse(
     const [stats] = statsResult;
     const [latestSubmission] = latestSubmissionResult;
     const rank = (rankResult as unknown as { rank: number }[])[0]?.rank || null;
+    // Resolved only once the newest submitted date is known, so the lifetime
+    // window can end on the data instead of on UTC "today".
+    const chartRange =
+      periodRange ?? getRollingProfileDateRange(stats?.latestDate);
 
     type ModelData = {
       tokens: number;
