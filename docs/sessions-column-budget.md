@@ -959,9 +959,21 @@ formatter that overflows its own column has not solved the reported problem.
 ## What this does not solve
 
 1. **It does not make fifteen columns fit in 120.** Nothing does. The full
-   table needs 180 columns and will still need 180 after this change. The
-   proposal decides *what you lose* below that, not *whether* you lose
-   something.
+   table needs 180 columns today and **183** after this change. The proposal
+   decides *what you lose* below that, not *whether* you lose something.
+
+   The extra three cells are not slippage. Implementing this surfaced a second
+   silent-truncation bug of exactly the kind the document is about: `Client` at
+   its current 12 cells clips three shipped client names with no marker, and
+   renders `Antigravity CLI` and `Antigravity` **identically** — a
+   misattribution in the one column whose job is saying which tool a session
+   came from. Its natural width becomes 15, the widest name the client registry
+   can produce, pinned by a test that enumerates the registry so a new client
+   cannot reintroduce the clip.
+
+   Verified by rendering, not arithmetic: `Cost/1M` — the last column in the
+   priority order, so the one that marks the full set — is absent at 182 and
+   present at 183.
 
 2. **The natural widths are still padded — but by less than they look, and
    two of them are not padded at all.** They are budget inputs, not measured
