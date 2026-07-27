@@ -386,7 +386,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum CursorSubcommand {
-    #[command(about = "Login to Cursor with a browser session token")]
+    #[command(about = "Login to Cursor (auto-detect desktop session, or paste browser token)")]
     Login {
         #[arg(long, help = "Label for this Cursor account (e.g., work, personal)")]
         name: Option<String>,

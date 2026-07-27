@@ -55,6 +55,9 @@ aes = { workspace = true }
 cbc = { workspace = true }
 base64 = { workspace = true }
 
+# Cursor desktop state.vscdb accessToken import
+rusqlite = { workspace = true }
+
 # arboard has no Android backend and fails to compile for
 # aarch64-linux-android. The clipboard module in tui/ provides a
 # no-op fallback on Android so the rest of the code stays portable.

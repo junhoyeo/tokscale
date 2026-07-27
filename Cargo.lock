@@ -3458,6 +3458,7 @@ dependencies = [
  "reqwest",
  "resvg",
  "rpassword",
+ "rusqlite",
  "serde",
  "serde_json",
  "serial_test",
