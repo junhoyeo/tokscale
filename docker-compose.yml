@@ -3,15 +3,15 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: tokscale
-      POSTGRES_PASSWORD: tokscale
-      POSTGRES_DB: tokscale
+      POSTGRES_USER: ${POSTGRES_USER:-tokscale}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tokscale}
+      POSTGRES_DB: ${POSTGRES_DB:-tokscale}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tokscale -d tokscale"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tokscale} -d ${POSTGRES_DB:-tokscale}"]
       interval: 5s
       timeout: 5s
       retries: 10

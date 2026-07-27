@@ -10,9 +10,6 @@ target/
 **/.turbo/
 **/.cache/
 
-# Rust build artifacts (not the lockfile — Dockerfile.tui needs Cargo.lock)
-target/
-
 # Test and dev files
 **/*.test.ts
 **/*.spec.ts
@@ -48,8 +45,10 @@ packages/benchmarks/results/
 # Dockerfile.tui — the Dockerfile.tui build references them directly.
 
 # Secrets / local env overrides
+.env
 .env.local
 .env.*.local
+*.pem
 
 # Scripts not needed in image
 scripts/systemd/
