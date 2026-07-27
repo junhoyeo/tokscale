@@ -1216,9 +1216,11 @@ The repo ships a `Makefile` and Docker/Podman compose stack. No local Rust or Bu
 
 ```bash
 make up/db          # 1. start postgres (127.0.0.1:5432)
-make docker/build   # 2. build the frontend image against the live DB
+make docker/build   # 2. build and tag the frontend image (tokscale:latest)
 make up             # 3. start the full stack (frontend on http://localhost:3333)
 ```
+
+`make up` uses the pre-built `tokscale:latest` image from step 2 — it does not trigger a compose rebuild.
 
 **Subsequent runs** — the image is already built; just start the services:
 
@@ -1241,6 +1243,17 @@ make logs/app     # tail app logs
 make db/migrate   # run pending migrations manually
 make help         # full target list
 ```
+
+**Custom credentials** — set all four variables together before running `make up/db` or `make docker/build`. Compose cannot derive `DATABASE_URL` from the `POSTGRES_*` vars automatically:
+
+```bash
+export POSTGRES_USER=myuser
+export POSTGRES_PASSWORD=mypass
+export POSTGRES_DB=mydb
+export DATABASE_URL=postgresql://myuser:mypass@db:5432/mydb
+```
+
+The defaults (`tokscale`/`tokscale`/`tokscale`) are for local dev only.
 
 ### How to Run (without containers)
 
