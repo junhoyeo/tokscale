@@ -1198,15 +1198,44 @@ The generated PNG is optimized for sharing on social media. Share your coding jo
 ### Prerequisites
 
 ```bash
-# Bun (required)
+# Bun (required for JS tooling)
 bun --version
 
-# Rust (for native module)
+# Rust (for native CLI binary)
 rustc --version
 cargo --version
 ```
 
-### How to Run
+Docker or Podman can substitute for both — see [Container Setup](#container-setup) below.
+
+### Container Setup
+
+The repo ships a `Makefile` and Docker/Podman compose stack. No local Rust or Bun install required.
+
+```bash
+# Start the web stack (Next.js frontend + PostgreSQL) on http://localhost:3333
+make up
+
+# Launch the TUI in a container (reads ~/.claude from the host)
+make tui
+
+# Build the frontend image only
+make docker/build
+
+# Stop everything
+make down
+```
+
+Run `make help` for all available targets. The stack auto-detects `podman` over `docker` and `podman compose` over `docker compose`.
+
+> **Note:** `make up` requires a live database at build time because the homepage and leaderboard are statically prerendered. Start the DB first if rebuilding the image locally:
+> ```bash
+> make up/db       # start postgres
+> make docker/build
+> make up
+> ```
+
+### How to Run (without containers)
 
 After following the [Development Setup](#development-setup), you can:
 

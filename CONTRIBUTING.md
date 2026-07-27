@@ -6,17 +6,21 @@ Thanks for your interest in improving Tokscale. This guide covers the developmen
 
 Tokscale is a Cargo workspace (the `tokscale` CLI and its core library) plus a Next.js web frontend.
 
-Prerequisites: a stable Rust toolchain (`rustup` recommended) and [Bun](https://bun.sh) for the frontend and package scripts.
+Prerequisites: a stable Rust toolchain (`rustup` recommended) and [Bun](https://bun.sh) for the frontend and package scripts. Alternatively, Docker or Podman (with `docker compose` / `podman compose`) can substitute for both — the repo ships a `Makefile` that builds and runs everything in containers.
 
-| Task | Command |
-| --- | --- |
-| Format check | `cargo fmt --all -- --check` |
-| Lint (must pass with **no** warnings) | `cargo clippy --locked --workspace --all-features -- -D warnings` |
-| Rust tests | `cargo test --workspace --all-features` |
-| Build the CLI | `cargo build --release -p tokscale-cli` |
-| Frontend dev server | `bun run dev:frontend` |
-| Frontend registry contract | `bun run --cwd packages/frontend test -- __tests__/lib/clientRegistry.test.ts` |
-| Frontend type check | `bun run --cwd packages/frontend typecheck` |
+| Task | `make` target | Raw command |
+| --- | --- | --- |
+| Format check | `make fmt/rs/check` | `cargo fmt --all -- --check` |
+| Lint (must pass with **no** warnings) | `make lint/rs` | `cargo clippy --locked --workspace --all-features -- -D warnings` |
+| Rust tests | `make test/rs` | `cargo test --workspace --all-features` |
+| Build the CLI | `make build/cli` | `cargo build --release -p tokscale-cli` |
+| Frontend dev server | `make dev/frontend` | `bun run dev:frontend` |
+| Frontend registry contract | `make test/frontend` | `bun run --cwd packages/frontend test` |
+| Frontend type check | `make typecheck` | `bun run --cwd packages/frontend typecheck` |
+| Start full stack (DB + web) | `make up` | `docker/podman compose up --build -d` |
+| Launch TUI in a container | `make tui` | `docker/podman compose --profile tui run --rm tui` |
+
+Run `make help` for the full target list.
 
 CI runs format, Clippy, and Rust tests on Linux, then builds the supported release targets separately. Frontend CI runs Vitest, migration replay, and the type check; it also runs when `crates/tokscale-core/src/clients.rs` or a GitHub CDN asset changes, so cross-registry client checks cannot be skipped by a Rust-only integration PR. A clean local `cargo fmt`, `cargo clippy`, and `cargo test` is the baseline for a reviewable PR.
 
