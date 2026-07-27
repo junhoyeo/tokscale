@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tokscale
+      POSTGRES_PASSWORD: tokscale
+      POSTGRES_DB: tokscale
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tokscale -d tokscale"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # next build statically prerenders pages that query the DB, so
+        # DATABASE_URL must resolve to a live database at build time.
+        # For local dev, run `docker compose up db -d` first, then
+        # `docker compose build app` once the DB is healthy.
+        DATABASE_URL: ${DATABASE_URL:-postgresql://tokscale:tokscale@db:5432/tokscale}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://tokscale:tokscale@db:5432/tokscale}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:-http://localhost:3000}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      # CSRF_ALLOWED_ORIGINS: ${CSRF_ALLOWED_ORIGINS}
+    ports:
+      - "3333:3000"
+
+  tui:
+    build:
+      context: .
+      dockerfile: Dockerfile.tui
+    profiles: [tui]
+    stdin_open: true
+    tty: true
+    volumes:
+      - ${HOME}/.claude:/root/.claude:ro
+      - ${HOME}/.config/tokscale:/root/.config/tokscale
+      - ${HOME}/.cache/tokscale:/root/.cache/tokscale
+
+volumes:
+  postgres_data:

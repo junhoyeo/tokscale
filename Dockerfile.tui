@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build for the tokscale TUI (Rust CLI)
+
+# ── 1. builder ────────────────────────────────────────────────────────────────
+FROM rust:alpine AS builder
+
+# Build dependencies for native crates (openssl, sqlite, etc.)
+RUN apk add --no-cache musl-dev pkgconf perl make
+
+WORKDIR /repo
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+# Override workspace release profile: full LTO + codegen-units=1 OOMs the
+# Podman VM linker. Thin LTO with parallel codegen cuts peak RSS significantly.
+ENV CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
+
+RUN cargo build --release -p tokscale-cli && \
+    cp target/release/tokscale /tokscale
+
+# ── 2. runner ─────────────────────────────────────────────────────────────────
+FROM alpine:3.20 AS runner
+
+# Runtime deps: ncurses for TUI rendering, ca-certs for HTTPS calls
+RUN apk add --no-cache ncurses ca-certificates libgcc
+
+COPY --from=builder /tokscale /usr/local/bin/tokscale
+
+# The TUI reads from the host via bind mounts; these dirs are mount points only
+VOLUME ["/root/.claude", "/root/.config/tokscale", "/root/.cache/tokscale"]
+
+ENV TERM=xterm-256color
+
+ENTRYPOINT ["tokscale"]

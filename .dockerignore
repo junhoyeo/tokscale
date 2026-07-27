@@ -1,0 +1,55 @@
+# Version control
+.git
+.gitignore
+
+# Build artifacts and caches
+target/
+**/node_modules/
+**/.next/
+**/dist/
+**/.turbo/
+**/.cache/
+
+# Rust build artifacts (not the lockfile — Dockerfile.tui needs Cargo.lock)
+target/
+
+# Test and dev files
+**/*.test.ts
+**/*.spec.ts
+**/coverage/
+**/.nyc_output/
+
+# OS / editor
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Docker files themselves (avoid recursive context)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs and assets (not needed for the app build)
+*.md
+.github/
+docs/
+
+# Platform-specific npm packages — exclude source but keep package.json
+# so bun can resolve the full workspace during `bun install`
+packages/cli/src/
+packages/benchmarks/generate.ts
+packages/benchmarks/runner.ts
+packages/benchmarks/results/
+
+# Crates are excluded from the frontend image build context but needed for
+# Dockerfile.tui — the Dockerfile.tui build references them directly.
+
+# Secrets / local env overrides
+.env.local
+.env.*.local
+
+# Scripts not needed in image
+scripts/systemd/

@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Produce a self-contained output directory for Docker / Node deployments
+  output: "standalone",
+
   // Enable styled-components SSR
   compiler: {
     styledComponents: true,
