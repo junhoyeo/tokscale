@@ -63,7 +63,7 @@
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 및 `$HERMES_HOME/profiles/*/state.db` (폴백: `~/.hermes/...`) |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (폴백: `~/.gemini/tmp/*/chats/*.json`) |
-| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 내보내기를 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱 (`~/.cursor` 아님) |
+| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 내보내기를 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱 (데스크톱 자동 로그인 또는 쿠키 붙여넣기; `~/.cursor` 아님) |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; `CODEBUFF_DATA_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -550,22 +550,30 @@ tokscale autosubmit disable
 
 ### Cursor IDE 명령어
 
-Cursor IDE 지원은 Cursor의 웹 API 내보내기를 사용하며, Tokscale이 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱합니다. Tokscale은 `~/.cursor` 아래의 로컬 Cursor Agent CLI 상태를 파싱하지 않습니다.
+Cursor IDE 지원은 Cursor의 웹 API 내보내기를 사용하며, Tokscale이 `~/.config/tokscale/cursor-cache/usage*.csv`에 캐싱합니다. Tokscale은 `~/.cursor` 아래의 로컬 Cursor Agent CLI 상태를 파싱하지 않으며, 데스크톱 SQLite DB를 사용량 원장으로 취급하지도 않습니다.
 
-설정:
+Cursor 데스크톱 앱이 설치되어 있고 로그인되어 있으면, `tokscale cursor login`은 Cursor의 `state.vscdb`에서 `cursorAuth/accessToken`을 우선 읽어 세션 쿠키를 자동으로 만듭니다. `tokscale cursor sync`도 가능할 때 이 토큰을 갱신합니다. 사용량 행은 계속 Cursor usage-export API에서만 가져옵니다.
+
+설정 (데스크톱 자동 로그인):
+
+1. Cursor 데스크톱 앱에 로그인하세요.
+2. `tokscale cursor login --name work`를 실행하세요 (로컬 데스크톱 세션이 있으면 자동 감지).
+3. `tokscale cursor sync --json`을 실행해 `~/.config/tokscale/cursor-cache/usage.csv`를 채우세요.
+4. `tokscale --client cursor` 또는 아무 리포트 명령을 실행하세요.
+
+대체 방법 (브라우저 쿠키 수동 붙여넣기) — 데스크톱 로그인을 쓸 수 없을 때:
 
 1. 브라우저에서 https://www.cursor.com/settings 를 열고 로그인하세요.
 2. `WorkosCursorSessionToken` 쿠키 값을 복사하세요:
    - Network 탭: `cursor.com/api/*`로 아무 요청이나 보낸 뒤, `Cookie` 요청 헤더에서 `WorkosCursorSessionToken=` 뒤의 값을 복사합니다.
    - Application 탭: Cookies → `https://www.cursor.com`을 열고 `WorkosCursorSessionToken` 값을 복사합니다.
-3. `tokscale cursor login --name work`를 실행하고 토큰을 붙여 넣으세요.
-4. `tokscale cursor sync --json`을 실행해 `~/.config/tokscale/cursor-cache/usage.csv`를 채우세요.
-5. `tokscale --client cursor` 또는 아무 리포트 명령을 실행하세요.
+3. `tokscale cursor login --name work`를 실행하고 프롬프트에서 토큰을 붙여 넣으세요.
+4. 위와 같이 `tokscale cursor sync --json`을 계속 진행하세요.
 
 세션 토큰은 비밀번호처럼 취급하세요. 토큰은 `~/.config/tokscale/cursor-credentials.json`에 로컬로 저장됩니다.
 
 ```bash
-# Cursor 로그인 (브라우저에서 세션 토큰 필요)
+# Cursor 로그인 (데스크톱 로그인 자동 감지; 실패 시 브라우저 쿠키 붙여넣기)
 # --name은 선택이며, 나중에 계정을 구분하는 데만 도움이 됩니다
 tokscale cursor login --name work
 
@@ -1555,7 +1563,7 @@ Tokscale은 `chat` span을 토큰 집계의 출처로 취급하고, 도구 span�
 
 위치: `~/.config/tokscale/cursor-cache/usage*.csv` (Cursor API를 통해 동기화)
 
-Cursor 데이터는 세션 토큰을 사용하여 Cursor API에서 가져와 로컬에 캐시됩니다. Tokscale은 리포트를 위해 해당 캐시 파일을 읽으며, 로컬 `~/.cursor` 세션 데이터는 파싱하지 않습니다. 설정 안내는 [Cursor IDE 명령어](#cursor-ide-명령어)를 참조하세요.
+Cursor 데이터는 세션 토큰을 사용하여 Cursor API에서 가져와 로컬에 캐시됩니다. 인증은 Cursor 데스크톱 `state.vscdb`(`cursorAuth/accessToken`만)에서 가져오거나 브라우저 쿠키를 붙여 넣을 수 있습니다. Tokscale은 리포트를 위해 API 캐시 파일을 읽으며, 로컬 `~/.cursor` 세션 데이터나 데스크톱 사용량 테이블은 파싱하지 않습니다. 설정 안내는 [Cursor IDE 명령어](#cursor-ide-명령어)를 참조하세요.
 
 ### Antigravity
 

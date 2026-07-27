@@ -3050,7 +3050,7 @@ fn cursor_setup_warning_for_wrapped(
     let action = if cursor_logged_in {
         "run `tokscale cursor sync --json`"
     } else {
-        "run `tokscale cursor login` and `tokscale cursor sync --json`"
+        "run `tokscale cursor login` (auto-detects Cursor desktop when signed in) and `tokscale cursor sync --json`"
     };
 
     Some(format!(
