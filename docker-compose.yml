@@ -3,15 +3,18 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-tokscale}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tokscale}
-      POSTGRES_DB: ${POSTGRES_DB:-tokscale}
+      # To change credentials set DATABASE_URL and these three together —
+      # compose cannot derive one from the other via variable nesting.
+      POSTGRES_USER: tokscale
+      POSTGRES_PASSWORD: tokscale
+      POSTGRES_DB: tokscale
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Bound to loopback only — not exposed on all interfaces.
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tokscale} -d ${POSTGRES_DB:-tokscale}"]
+      test: ["CMD-SHELL", "pg_isready -U tokscale -d tokscale"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -23,8 +26,8 @@ services:
       args:
         # next build statically prerenders pages that query the DB, so
         # DATABASE_URL must resolve to a live database at build time.
-        # For local dev, run `docker compose up db -d` first, then
-        # `docker compose build app` once the DB is healthy.
+        # Build the image separately with `make docker/build` after starting
+        # the db service; do not rely on compose's implicit --build here.
         DATABASE_URL: ${DATABASE_URL:-postgresql://tokscale:tokscale@db:5432/tokscale}
     restart: unless-stopped
     depends_on:
@@ -38,7 +41,7 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:-}
       # CSRF_ALLOWED_ORIGINS: ${CSRF_ALLOWED_ORIGINS}
     ports:
-      - "3333:3000"
+      - "127.0.0.1:3333:3000"
 
   tui:
     build:
@@ -48,9 +51,18 @@ services:
     stdin_open: true
     tty: true
     volumes:
-      - ${HOME}/.claude:/root/.claude:ro
+      # tokscale config and cache (read-write so settings persist across runs)
       - ${HOME}/.config/tokscale:/root/.config/tokscale
       - ${HOME}/.cache/tokscale:/root/.cache/tokscale
+      # Client data directories — add or remove mounts for the clients you use.
+      # All paths are read-only; the TUI only reads session data.
+      - ${HOME}/.claude:/root/.claude:ro
+      # VS Code extensions (Cline / Roo / Claude Dev) — Linux path
+      - ${HOME}/.config/Code/User/globalStorage:/root/.config/Code/User/globalStorage:ro
+      # Cursor
+      - ${HOME}/.config/Cursor/User/globalStorage:/root/.config/Cursor/User/globalStorage:ro
+      # Zed
+      - ${HOME}/.local/share/zed:/root/.local/share/zed:ro
 
 volumes:
   postgres_data:

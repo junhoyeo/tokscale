@@ -200,10 +200,11 @@ coverage:  ## Run Rust tests and generate coverage report (requires cargo-tarpau
 ## Docker
 
 .PHONY: docker/build
-docker/build:  ## Build the Docker image for the frontend
+docker/build:  ## Build the Docker image for the frontend (run make up/db first)
 	$(DOCKER) build \
 	  --build-arg DATABASE_URL=$${DATABASE_URL:-postgresql://tokscale:tokscale@localhost:5432/tokscale} \
 	  -t tokscale:latest .
+	@echo "Image built. Start with: make up"
 
 .PHONY: tui
 tui:  ## Run the tokscale TUI in a container (builds image if needed)
@@ -215,13 +216,13 @@ tui/build:  ## Build only the TUI container image
 
 .PHONY: up
 up:  ## Start all services (db + app) via docker compose
-	$(COMPOSE) up --build -d
+	$(COMPOSE) up -d
 	@echo "App: http://localhost:3333"
 
 .PHONY: up/db
 up/db:  ## Start only the database service
 	$(COMPOSE) up db -d
-	@echo "Postgres: localhost:5432 (db=tokscale user=tokscale)"
+	@echo "Postgres: 127.0.0.1:5432 (db=$${POSTGRES_DB:-tokscale} user=$${POSTGRES_USER:-tokscale})"
 
 .PHONY: down
 down:  ## Stop all docker compose services

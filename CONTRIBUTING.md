@@ -15,7 +15,7 @@ Prerequisites: a stable Rust toolchain (`rustup` recommended) and [Bun](https://
 | Rust tests | `make test/rs` | `cargo test --workspace --all-features` |
 | Build the CLI | `make build/cli` | `cargo build --release -p tokscale-cli` |
 | Frontend dev server | `make dev/frontend` | `bun run dev:frontend` |
-| Frontend registry contract | `make test/frontend` | `bun run --cwd packages/frontend test` |
+| Frontend tests (all) | `make test/frontend` | `bun run --cwd packages/frontend test` |
 | Frontend type check | `make typecheck` | `bun run --cwd packages/frontend typecheck` |
 | Start full stack (DB + web) | `make up` | `docker/podman compose up --build -d` |
 | Launch TUI in a container | `make tui` | `docker/podman compose --profile tui run --rm tui` |

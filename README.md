@@ -1210,30 +1210,37 @@ Docker or Podman can substitute for both — see [Container Setup](#container-se
 
 ### Container Setup
 
-The repo ships a `Makefile` and Docker/Podman compose stack. No local Rust or Bun install required.
+The repo ships a `Makefile` and Docker/Podman compose stack. No local Rust or Bun install required. The stack auto-detects `podman` over `docker`.
+
+**First run** — build the image before starting the stack. The homepage and leaderboard are statically prerendered and query the database at build time, so the DB must be running first:
 
 ```bash
-# Start the web stack (Next.js frontend + PostgreSQL) on http://localhost:3333
-make up
-
-# Launch the TUI in a container (reads ~/.claude from the host)
-make tui
-
-# Build the frontend image only
-make docker/build
-
-# Stop everything
-make down
+make up/db          # 1. start postgres (127.0.0.1:5432)
+make docker/build   # 2. build the frontend image against the live DB
+make up             # 3. start the full stack (frontend on http://localhost:3333)
 ```
 
-Run `make help` for all available targets. The stack auto-detects `podman` over `docker` and `podman compose` over `docker compose`.
+**Subsequent runs** — the image is already built; just start the services:
 
-> **Note:** `make up` requires a live database at build time because the homepage and leaderboard are statically prerendered. Start the DB first if rebuilding the image locally:
-> ```bash
-> make up/db       # start postgres
-> make docker/build
-> make up
-> ```
+```bash
+make up
+```
+
+**TUI** — runs independently of the web stack, reading session data directly from host filesystem mounts:
+
+```bash
+make tui/build   # build once
+make tui         # launch
+```
+
+**Other common targets:**
+
+```bash
+make down         # stop all services
+make logs/app     # tail app logs
+make db/migrate   # run pending migrations manually
+make help         # full target list
+```
 
 ### How to Run (without containers)
 
