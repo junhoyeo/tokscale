@@ -17,7 +17,7 @@ Prerequisites: a stable Rust toolchain (`rustup` recommended) and [Bun](https://
 | Frontend dev server | `make dev/frontend` | `bun run dev:frontend` |
 | Frontend tests (all) | `make test/frontend` | `bun run --cwd packages/frontend test` |
 | Frontend type check | `make typecheck` | `bun run --cwd packages/frontend typecheck` |
-| Build container image | `make docker/build` | `docker/podman build -t tokscale:latest .` |
+| Build container image | `make docker/build` | `docker/podman build --build-arg DATABASE_URL=postgresql://tokscale:tokscale@localhost:5432/tokscale -t tokscale:latest .` |
 | Start full stack (DB + web) | `make up` | `docker/podman compose up -d` |
 | Launch TUI in a container | `make tui` | `docker/podman compose --profile tui run --rm tui` |
 
