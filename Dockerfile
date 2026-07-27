@@ -63,6 +63,7 @@ COPY --from=builder /repo/packages/frontend/public            ./packages/fronten
 COPY --from=builder /repo/packages/frontend/drizzle.config.ts  ./packages/frontend/drizzle.config.ts
 COPY --from=builder /repo/packages/frontend/src/lib/db         ./packages/frontend/src/lib/db
 COPY --from=builder /repo/packages/frontend/scripts/migrate-docker.ts ./packages/frontend/scripts/migrate-docker.ts
+COPY --from=builder /repo/packages/frontend/scripts/migrate-core.ts   ./packages/frontend/scripts/migrate-core.ts
 COPY --from=builder /repo/packages/frontend/scripts/migrate-retry.ts  ./packages/frontend/scripts/migrate-retry.ts
 COPY --from=deps    /repo/packages/frontend/node_modules      ./packages/frontend/node_modules
 COPY --from=deps    /repo/node_modules                        ./node_modules

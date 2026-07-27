@@ -204,7 +204,7 @@ docker/build:  ## Build the Docker image for the frontend (run make up/db first)
 	$(DOCKER) build \
 	  --build-arg DATABASE_URL=$${DATABASE_URL:-postgresql://tokscale:tokscale@localhost:5432/tokscale} \
 	  -t tokscale:latest .
-	@echo "Image built. Start with: make up"
+	@echo "Image built: tokscale:latest. Start full stack with: make up"
 
 .PHONY: tui
 tui:  ## Run the tokscale TUI in a container (builds image if needed)

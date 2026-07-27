@@ -3,11 +3,11 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      # To change credentials set DATABASE_URL and these three together —
-      # compose cannot derive one from the other via variable nesting.
-      POSTGRES_USER: tokscale
-      POSTGRES_PASSWORD: tokscale
-      POSTGRES_DB: tokscale
+      # Override all four variables together when changing credentials —
+      # compose cannot derive DATABASE_URL from POSTGRES_* via variable nesting.
+      POSTGRES_USER: ${POSTGRES_USER:-tokscale}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tokscale}
+      POSTGRES_DB: ${POSTGRES_DB:-tokscale}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -20,6 +20,11 @@ services:
       retries: 10
 
   app:
+    # Use the image built by `make docker/build` (tagged tokscale:latest).
+    # Declaring `image` here prevents compose from triggering an implicit build
+    # on `make up`, which would fail because `db` is only resolvable inside the
+    # compose network — not from the Docker build context.
+    image: tokscale:latest
     build:
       context: .
       dockerfile: Dockerfile
