@@ -122,6 +122,31 @@ struct CapturedCommand {
     stderr: String,
 }
 
+#[derive(Debug, Clone)]
+struct SchedulerArtifactSnapshot {
+    scheduler: SchedulerKind,
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+    cron: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedExecutableSnapshot {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+    permissions: Option<fs::Permissions>,
+}
+
+struct EnableRollbackContext<'a> {
+    previous_settings: &'a crate::tui::settings::Settings,
+    previous_artifacts: Option<&'a SchedulerArtifactSnapshot>,
+    managed_snapshot: &'a ManagedExecutableSnapshot,
+    scheduler: SchedulerKind,
+    scheduler_started: bool,
+    previous_scheduler_was_displaced: bool,
+    exe: &'a Path,
+    next_settings: &'a AutosubmitSettings,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusOutput {
@@ -141,14 +166,30 @@ struct StatusOutput {
 }
 
 pub fn enable(args: AutosubmitEnableArgs) -> Result<()> {
+    enable_with_scheduler_operations(args, install_scheduler, |scheduler, _, _| {
+        uninstall_scheduler(scheduler)
+    })
+}
+
+fn enable_with_scheduler_operations<I, U>(
+    args: AutosubmitEnableArgs,
+    mut installer: I,
+    mut uninstaller: U,
+) -> Result<()>
+where
+    I: FnMut(SchedulerKind, &Path, &AutosubmitSettings) -> Result<()>,
+    U: FnMut(SchedulerKind, &Path, &AutosubmitSettings) -> Result<()>,
+{
     let interval_minutes = parse_interval_minutes(&args.interval)?;
     let scheduler = args.scheduler.unwrap_or_else(default_scheduler_kind);
-    let source_exe =
-        std::env::current_exe().context("Could not resolve current tokscale executable")?;
-    let exe = prepare_managed_scheduler_executable(&source_exe)?;
-
-    let mut settings = crate::tui::settings::Settings::load();
-    settings.autosubmit = AutosubmitSettings {
+    let previous_settings = crate::tui::settings::Settings::load();
+    let previous_scheduler = previous_settings
+        .autosubmit
+        .scheduler
+        .as_deref()
+        .and_then(SchedulerKind::from_str)
+        .unwrap_or_else(default_scheduler_kind);
+    let next_autosubmit = AutosubmitSettings {
         enabled: true,
         interval_minutes,
         clients: clients_for_settings(args.clients),
@@ -160,14 +201,91 @@ pub fn enable(args: AutosubmitEnableArgs) -> Result<()> {
         week: args.date.week,
         month: args.date.month,
         scheduler: Some(scheduler.as_str().to_string()),
-        last_run_at_ms: settings.autosubmit.last_run_at_ms,
+        last_run_at_ms: previous_settings.autosubmit.last_run_at_ms,
         last_error: None,
     };
+    let managed_snapshot = snapshot_managed_scheduler_executable()?;
+    let previous_artifacts = if previous_settings.autosubmit.enabled && !skip_scheduler_install() {
+        Some(snapshot_scheduler_artifacts(
+            previous_scheduler,
+            &previous_settings.autosubmit,
+        )?)
+    } else {
+        None
+    };
+    let source_exe =
+        std::env::current_exe().context("Could not resolve current tokscale executable")?;
+    let exe = match prepare_managed_scheduler_executable(&source_exe) {
+        Ok(exe) => exe,
+        Err(error) => match restore_managed_scheduler_executable(&managed_snapshot) {
+            Ok(()) => return Err(error),
+            Err(rollback_error) => {
+                return Err(anyhow!(
+                    "{error}; rollback failed while restoring managed executable: {rollback_error}"
+                ));
+            }
+        },
+    };
+
+    let mut next_settings = previous_settings.clone();
+    next_settings.autosubmit = next_autosubmit;
+    if let Err(error) = next_settings.save() {
+        return enable_failure_with_rollback(
+            error,
+            EnableRollbackContext {
+                previous_settings: &previous_settings,
+                previous_artifacts: previous_artifacts.as_ref(),
+                managed_snapshot: &managed_snapshot,
+                scheduler,
+                scheduler_started: false,
+                previous_scheduler_was_displaced: false,
+                exe: &exe,
+                next_settings: &next_settings.autosubmit,
+            },
+            &mut uninstaller,
+        );
+    }
 
     if !skip_scheduler_install() {
-        install_scheduler(scheduler, &exe, &settings.autosubmit)?;
+        let mut previous_scheduler_was_displaced = false;
+        if previous_settings.autosubmit.enabled {
+            previous_scheduler_was_displaced = true;
+            if let Err(error) = uninstaller(previous_scheduler, &exe, &previous_settings.autosubmit)
+            {
+                return enable_failure_with_rollback(
+                    error,
+                    EnableRollbackContext {
+                        previous_settings: &previous_settings,
+                        previous_artifacts: previous_artifacts.as_ref(),
+                        managed_snapshot: &managed_snapshot,
+                        scheduler,
+                        scheduler_started: false,
+                        previous_scheduler_was_displaced,
+                        exe: &exe,
+                        next_settings: &next_settings.autosubmit,
+                    },
+                    &mut uninstaller,
+                );
+            }
+        }
+
+        if let Err(error) = installer(scheduler, &exe, &next_settings.autosubmit) {
+            return enable_failure_with_rollback(
+                error,
+                EnableRollbackContext {
+                    previous_settings: &previous_settings,
+                    previous_artifacts: previous_artifacts.as_ref(),
+                    managed_snapshot: &managed_snapshot,
+                    scheduler,
+                    scheduler_started: true,
+                    previous_scheduler_was_displaced,
+                    exe: &exe,
+                    next_settings: &next_settings.autosubmit,
+                },
+                &mut uninstaller,
+            );
+        }
     }
-    settings.save()?;
 
     println!(
         "Autosubmit enabled: every {} minutes via {}.",
@@ -473,6 +591,175 @@ fn uninstall_scheduler(scheduler: SchedulerKind) -> Result<()> {
     Ok(())
 }
 
+fn snapshot_managed_scheduler_executable() -> Result<ManagedExecutableSnapshot> {
+    let path = managed_scheduler_executable_path()?;
+    match fs::read(&path) {
+        Ok(contents) => Ok(ManagedExecutableSnapshot {
+            permissions: Some(fs::metadata(&path)?.permissions()),
+            path,
+            contents: Some(contents),
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(ManagedExecutableSnapshot {
+            path,
+            contents: None,
+            permissions: None,
+        }),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn restore_managed_scheduler_executable(snapshot: &ManagedExecutableSnapshot) -> Result<()> {
+    let Some(contents) = &snapshot.contents else {
+        return match fs::remove_file(&snapshot.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        };
+    };
+    let permissions = snapshot
+        .permissions
+        .as_ref()
+        .context("Managed executable snapshot is missing permissions")?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temporary = snapshot.path.with_file_name(format!(
+        ".{MANAGED_EXECUTABLE_NAME}.restore.{}.{}.tmp",
+        std::process::id(),
+        timestamp
+    ));
+
+    let result = (|| -> Result<()> {
+        fs::write(&temporary, contents)?;
+        fs::set_permissions(&temporary, permissions.clone())?;
+        OpenOptions::new()
+            .write(true)
+            .open(&temporary)?
+            .sync_all()?;
+        tokscale_core::fs_atomic::replace_file(&temporary, &snapshot.path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+    validate_managed_scheduler_executable(&snapshot.path)
+}
+
+fn snapshot_scheduler_artifacts(
+    scheduler: SchedulerKind,
+    settings: &AutosubmitSettings,
+) -> Result<SchedulerArtifactSnapshot> {
+    let exe = managed_scheduler_executable_path()?;
+    let spec = render_scheduler_spec(scheduler, &exe, settings)?;
+    let mut files = Vec::with_capacity(spec.files.len());
+    for (path, _) in spec.files {
+        let contents = match fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        files.push((path, contents));
+    }
+    let cron = spec.cron_block.map(|_| read_crontab()).transpose()?;
+    Ok(SchedulerArtifactSnapshot {
+        scheduler,
+        files,
+        cron,
+    })
+}
+
+fn restore_scheduler_artifacts(snapshot: &SchedulerArtifactSnapshot) -> Result<()> {
+    for (path, contents) in &snapshot.files {
+        match contents {
+            Some(contents) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(path, contents)?;
+            }
+            None => match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            },
+        }
+    }
+    if let Some(cron) = &snapshot.cron {
+        write_crontab(cron)?;
+    }
+    Ok(())
+}
+
+fn reactivate_scheduler(scheduler: SchedulerKind, settings: &AutosubmitSettings) -> Result<()> {
+    let exe = managed_scheduler_executable_path()?;
+    let spec = render_scheduler_spec(scheduler, &exe, settings)?;
+    if scheduler == SchedulerKind::Launchd {
+        let plist = spec
+            .files
+            .first()
+            .map(|(path, _)| path)
+            .context("launchd scheduler is missing its plist")?;
+        let service = active_launchd_service()?;
+        let (program, args) = launchd_print_command(&service);
+        let current = capture_command(&program, &args)?;
+        if verify_launchd_service(&service, &current).is_err() {
+            activate_launchd_service(plist)?;
+        }
+        return Ok(());
+    }
+    for (program, args) in spec.install_commands {
+        run_status_command(&program, &args)?;
+    }
+    Ok(())
+}
+
+fn enable_failure_with_rollback<U>(
+    error: anyhow::Error,
+    context: EnableRollbackContext<'_>,
+    uninstaller: &mut U,
+) -> Result<()>
+where
+    U: FnMut(SchedulerKind, &Path, &AutosubmitSettings) -> Result<()>,
+{
+    let mut rollback_errors = Vec::new();
+    if context.scheduler_started {
+        if let Err(rollback_error) =
+            uninstaller(context.scheduler, context.exe, context.next_settings)
+        {
+            rollback_errors.push(format!("removing new scheduler: {rollback_error}"));
+        }
+    }
+    if let Err(rollback_error) = context.previous_settings.save() {
+        rollback_errors.push(format!("restoring settings: {rollback_error}"));
+    }
+    if let Err(rollback_error) = restore_managed_scheduler_executable(context.managed_snapshot) {
+        rollback_errors.push(format!("restoring managed executable: {rollback_error}"));
+    }
+    if let Some(snapshot) = context.previous_artifacts {
+        if let Err(rollback_error) = restore_scheduler_artifacts(snapshot) {
+            rollback_errors.push(format!("restoring scheduler artifacts: {rollback_error}"));
+        }
+        if context.previous_scheduler_was_displaced {
+            if let Err(rollback_error) =
+                reactivate_scheduler(snapshot.scheduler, &context.previous_settings.autosubmit)
+            {
+                rollback_errors.push(format!("reactivating previous scheduler: {rollback_error}"));
+            }
+        }
+    }
+
+    if rollback_errors.is_empty() {
+        Err(error)
+    } else {
+        Err(anyhow!(
+            "{error}; rollback failed: {}",
+            rollback_errors.join("; ")
+        ))
+    }
+}
+
 fn render_scheduler_spec(
     scheduler: SchedulerKind,
     exe: &Path,
@@ -489,6 +776,14 @@ fn render_scheduler_spec(
 
 fn render_launchd_spec(exe: &Path, settings: &AutosubmitSettings) -> Result<SchedulerSpec> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
+    render_launchd_spec_for_home(exe, settings, &home)
+}
+
+fn render_launchd_spec_for_home(
+    exe: &Path,
+    settings: &AutosubmitSettings,
+    home: &Path,
+) -> Result<SchedulerSpec> {
     let plist_path = home
         .join("Library")
         .join("LaunchAgents")
@@ -1134,14 +1429,25 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn launchd_spec_uses_program_arguments_without_shell() {
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
         let settings = AutosubmitSettings {
             interval_minutes: 60,
             ..AutosubmitSettings::default()
         };
-        let spec = render_launchd_spec(Path::new("/usr/local/bin/tokscale"), &settings).unwrap();
+        let managed = temp.path().join("autosubmit").join(MANAGED_EXECUTABLE_NAME);
+        let spec = render_launchd_spec_for_home(&managed, &settings, temp.path()).unwrap();
+        assert_eq!(
+            spec.files[0].0,
+            temp.path()
+                .join("Library")
+                .join("LaunchAgents")
+                .join("ai.tokscale.autosubmit.plist")
+        );
         let content = &spec.files[0].1;
-        assert!(content.contains("<string>/usr/local/bin/tokscale</string>"));
+        assert!(content.contains(&format!("<string>{}</string>", managed.display())));
         assert!(content.contains("<string>autosubmit</string>"));
         assert!(content.contains("<string>run</string>"));
         assert!(content.contains("<key>RunAtLoad</key><true/>"));
@@ -1402,6 +1708,89 @@ mod tests {
 
         let error = prepare_managed_scheduler_executable(&source).unwrap_err();
         assert!(error.to_string().contains("not executable"));
+    }
+
+    fn enable_args(scheduler: SchedulerKind) -> AutosubmitEnableArgs {
+        AutosubmitEnableArgs {
+            interval: "1h".to_string(),
+            clients: ClientFlags::default(),
+            date: DateRangeFlags::default(),
+            scheduler: Some(scheduler),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn enable_persists_settings_before_scheduler_installation() {
+        use std::cell::Cell;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let observed_enabled = Cell::new(false);
+
+        enable_with_scheduler_operations(
+            enable_args(SchedulerKind::Cron),
+            |_, _, _| {
+                observed_enabled.set(crate::tui::settings::Settings::load().autosubmit.enabled);
+                Ok(())
+            },
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+
+        assert!(observed_enabled.get());
+        assert!(crate::tui::settings::Settings::load().autosubmit.enabled);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn enable_rolls_back_settings_and_managed_executable_after_activation_failure() {
+        use std::cell::Cell;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let cleanup_calls = Cell::new(0);
+
+        let error = enable_with_scheduler_operations(
+            enable_args(SchedulerKind::Cron),
+            |_, _, _| Err(anyhow::anyhow!("scheduler activation failed")),
+            |_, _, _| {
+                cleanup_calls.set(cleanup_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("scheduler activation failed"));
+        assert_eq!(cleanup_calls.get(), 1);
+        let restored = crate::tui::settings::Settings::load().autosubmit;
+        assert!(!restored.enabled);
+        assert!(restored.scheduler.is_none());
+        assert!(!managed_scheduler_executable_path().unwrap().exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn enable_rolls_back_after_post_bootstrap_verification_failure() {
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+
+        let error = enable_with_scheduler_operations(
+            enable_args(SchedulerKind::Launchd),
+            |_, _, _| {
+                Err(anyhow::anyhow!(
+                    "launchd print verification failed: exact service target was absent"
+                ))
+            },
+            |_, _, _| Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("launchd print verification failed"));
+        assert!(!crate::tui::settings::Settings::load().autosubmit.enabled);
+        assert!(!managed_scheduler_executable_path().unwrap().exists());
     }
     #[test]
     fn submit_filters_keep_absolute_date_filters() {
