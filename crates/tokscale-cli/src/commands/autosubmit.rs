@@ -11,11 +11,17 @@ use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const JOB_ID: &str = "ai.tokscale.autosubmit";
 const CRON_MARKER_BEGIN: &str = "# BEGIN TOKSCALE AUTOSUBMIT";
 const CRON_MARKER_END: &str = "# END TOKSCALE AUTOSUBMIT";
 const SKIP_SCHEDULER_ENV: &str = "TOKSCALE_AUTOSUBMIT_SKIP_SCHEDULER";
+const MANAGED_EXECUTABLE_NAME: &str = if cfg!(target_os = "windows") {
+    "tokscale.exe"
+} else {
+    "tokscale"
+};
 
 #[derive(Subcommand)]
 pub enum AutosubmitSubcommand {
@@ -122,8 +128,9 @@ struct StatusOutput {
 pub fn enable(args: AutosubmitEnableArgs) -> Result<()> {
     let interval_minutes = parse_interval_minutes(&args.interval)?;
     let scheduler = args.scheduler.unwrap_or_else(default_scheduler_kind);
-    let exe = std::env::current_exe().context("Could not resolve current tokscale executable")?;
-    validate_scheduler_executable(&exe)?;
+    let source_exe =
+        std::env::current_exe().context("Could not resolve current tokscale executable")?;
+    let exe = prepare_managed_scheduler_executable(&source_exe)?;
 
     let mut settings = crate::tui::settings::Settings::load();
     settings.autosubmit = AutosubmitSettings {
@@ -200,6 +207,7 @@ pub fn disable() -> Result<()> {
 
     if settings.autosubmit.enabled && !skip_scheduler_install() {
         uninstall_scheduler(scheduler)?;
+        remove_managed_scheduler_executable()?;
     }
 
     settings.autosubmit.enabled = false;
@@ -419,16 +427,20 @@ fn uninstall_scheduler(scheduler: SchedulerKind) -> Result<()> {
         interval_minutes: DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES,
         ..AutosubmitSettings::default()
     };
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tokscale"));
+    let exe = managed_scheduler_executable_path()?;
     let spec = render_scheduler_spec(scheduler, &exe, &dummy)?;
     for (program, args) in spec.uninstall_commands {
-        let _ = Command::new(&program).args(&args).status();
+        run_status_command(&program, &args)?;
     }
     if scheduler == SchedulerKind::Cron {
-        let _ = uninstall_cron_block();
+        uninstall_cron_block()?;
     }
     for (path, _) in spec.files {
-        let _ = fs::remove_file(path);
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
     Ok(())
 }
@@ -720,16 +732,113 @@ fn run_status_command(program: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn autosubmit_log_path() -> Result<PathBuf> {
+fn autosubmit_dir() -> Result<PathBuf> {
     let dir = crate::paths::get_config_dir().join("autosubmit");
     fs::create_dir_all(&dir)?;
-    Ok(dir.join("autosubmit.log"))
+    Ok(dir)
+}
+
+fn autosubmit_log_path() -> Result<PathBuf> {
+    Ok(autosubmit_dir()?.join("autosubmit.log"))
 }
 
 fn autosubmit_lock_path() -> Result<PathBuf> {
-    let dir = crate::paths::get_config_dir().join("autosubmit");
-    fs::create_dir_all(&dir)?;
-    Ok(dir.join("autosubmit.lock"))
+    Ok(autosubmit_dir()?.join("autosubmit.lock"))
+}
+
+fn managed_scheduler_executable_path() -> Result<PathBuf> {
+    Ok(autosubmit_dir()?.join(MANAGED_EXECUTABLE_NAME))
+}
+
+fn prepare_managed_scheduler_executable(source: &Path) -> Result<PathBuf> {
+    validate_scheduler_executable(source)?;
+    let source_metadata = fs::metadata(source)
+        .with_context(|| format!("Could not read tokscale executable at {}", source.display()))?;
+    if !source_metadata.is_file() {
+        bail!(
+            "Tokscale executable is not a regular file: {}",
+            source.display()
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if source_metadata.permissions().mode() & 0o111 == 0 {
+            bail!(
+                "Tokscale executable is not executable: {}",
+                source.display()
+            );
+        }
+    }
+
+    let managed = managed_scheduler_executable_path()?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temporary = managed.with_file_name(format!(
+        ".{MANAGED_EXECUTABLE_NAME}.{}.{}.tmp",
+        std::process::id(),
+        timestamp
+    ));
+
+    let result = (|| -> Result<()> {
+        fs::copy(source, &temporary).with_context(|| {
+            format!(
+                "Could not copy tokscale executable from {} to {}",
+                source.display(),
+                temporary.display()
+            )
+        })?;
+        fs::set_permissions(&temporary, source_metadata.permissions())?;
+        OpenOptions::new()
+            .write(true)
+            .open(&temporary)?
+            .sync_all()?;
+        tokscale_core::fs_atomic::replace_file(&temporary, &managed)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+
+    validate_managed_scheduler_executable(&managed)?;
+    Ok(managed)
+}
+
+fn remove_managed_scheduler_executable() -> Result<()> {
+    let managed = managed_scheduler_executable_path()?;
+    match fs::remove_file(managed) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn validate_managed_scheduler_executable(path: &Path) -> Result<()> {
+    validate_scheduler_executable(path)?;
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("Managed tokscale executable is missing: {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "Managed tokscale executable is not a regular file: {}",
+            path.display()
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            bail!(
+                "Managed tokscale executable is not executable: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_scheduler_executable(path: &Path) -> Result<()> {
@@ -978,6 +1087,87 @@ mod tests {
         assert!(err.to_string().contains("whole-day multiples"));
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn scheduler_specs_use_the_managed_executable() {
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let managed = managed_scheduler_executable_path().unwrap();
+        let process_executable = Path::new("/workspace/node_modules/.bin/tokscale");
+        let settings = AutosubmitSettings {
+            interval_minutes: 60,
+            ..AutosubmitSettings::default()
+        };
+
+        for scheduler in [
+            SchedulerKind::Launchd,
+            SchedulerKind::Systemd,
+            SchedulerKind::Cron,
+            SchedulerKind::WindowsTaskScheduler,
+        ] {
+            let spec = render_scheduler_spec(scheduler, &managed, &settings).unwrap();
+            let rendered = format!("{spec:?}");
+            assert!(rendered.contains(managed.to_string_lossy().as_ref()));
+            assert!(!rendered.contains(process_executable.to_string_lossy().as_ref()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn managed_executable_refreshes_atomically_with_source_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let source = temp.path().join("tokscale-source");
+        fs::write(&source, "first binary").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let managed = prepare_managed_scheduler_executable(&source).unwrap();
+        assert_eq!(
+            managed,
+            temp.path().join("autosubmit").join(MANAGED_EXECUTABLE_NAME)
+        );
+        assert_eq!(fs::read_to_string(&managed).unwrap(), "first binary");
+        assert_eq!(
+            fs::metadata(&managed).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        fs::write(&source, "second binary").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o711)).unwrap();
+        prepare_managed_scheduler_executable(&source).unwrap();
+
+        assert_eq!(fs::read_to_string(&managed).unwrap(), "second binary");
+        assert_eq!(
+            fs::metadata(&managed).unwrap().permissions().mode() & 0o777,
+            0o711
+        );
+        assert!(fs::read_dir(managed.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn managed_executable_rejects_nonexecutable_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let source = temp.path().join("tokscale-source");
+        fs::write(&source, "not executable").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = prepare_managed_scheduler_executable(&source).unwrap_err();
+        assert!(error.to_string().contains("not executable"));
+    }
     #[test]
     fn submit_filters_keep_absolute_date_filters() {
         let settings = AutosubmitSettings {
