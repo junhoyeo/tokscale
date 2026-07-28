@@ -3,7 +3,7 @@ use crate::tui::settings::{
     MIN_AUTOSUBMIT_INTERVAL_MINUTES,
 };
 use crate::{ClientFlags, DateRangeFlags};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use fs2::FileExt;
 use serde::Serialize;
@@ -105,6 +105,21 @@ struct SchedulerSpec {
     install_commands: Vec<(String, Vec<String>)>,
     uninstall_commands: Vec<(String, Vec<String>)>,
     cron_block: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchdService {
+    domain: String,
+    target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedCommand {
+    command: String,
+    status: String,
+    success: bool,
+    stdout: String,
+    stderr: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -407,14 +422,23 @@ fn install_scheduler(
     settings: &AutosubmitSettings,
 ) -> Result<()> {
     let spec = render_scheduler_spec(scheduler, exe, settings)?;
-    for (path, content) in spec.files {
+    for (path, content) in &spec.files {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, content)?;
     }
-    for (program, args) in spec.install_commands {
-        run_status_command(&program, &args)?;
+    if scheduler == SchedulerKind::Launchd {
+        let plist = spec
+            .files
+            .first()
+            .map(|(path, _)| path)
+            .context("launchd scheduler is missing its plist")?;
+        activate_launchd_service(plist)?;
+    } else {
+        for (program, args) in spec.install_commands {
+            run_status_command(&program, &args)?;
+        }
     }
     if let Some(block) = spec.cron_block {
         install_cron_block(&block)?;
@@ -429,8 +453,12 @@ fn uninstall_scheduler(scheduler: SchedulerKind) -> Result<()> {
     };
     let exe = managed_scheduler_executable_path()?;
     let spec = render_scheduler_spec(scheduler, &exe, &dummy)?;
-    for (program, args) in spec.uninstall_commands {
-        run_status_command(&program, &args)?;
+    if scheduler == SchedulerKind::Launchd {
+        deactivate_launchd_service()?;
+    } else {
+        for (program, args) in spec.uninstall_commands {
+            run_status_command(&program, &args)?;
+        }
     }
     if scheduler == SchedulerKind::Cron {
         uninstall_cron_block()?;
@@ -492,22 +520,10 @@ fn render_launchd_spec(exe: &Path, settings: &AutosubmitSettings) -> Result<Sche
         log = xml_escape(&log_path.to_string_lossy())
     );
     Ok(SchedulerSpec {
-        files: vec![(plist_path.clone(), content)],
+        files: vec![(plist_path, content)],
         cron_block: None,
-        install_commands: vec![(
-            "launchctl".to_string(),
-            vec![
-                "load".to_string(),
-                plist_path.to_string_lossy().into_owned(),
-            ],
-        )],
-        uninstall_commands: vec![(
-            "launchctl".to_string(),
-            vec![
-                "unload".to_string(),
-                plist_path.to_string_lossy().into_owned(),
-            ],
-        )],
+        install_commands: Vec::new(),
+        uninstall_commands: Vec::new(),
     })
 }
 
@@ -730,6 +746,134 @@ fn run_status_command(program: &str, args: &[String]) -> Result<()> {
         bail!("{program} exited with status {status}");
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn geteuid() -> u32;
+}
+
+fn launchd_service_for_uid(uid: u32) -> LaunchdService {
+    let domain = format!("gui/{uid}");
+    let target = format!("{domain}/{JOB_ID}");
+    LaunchdService { domain, target }
+}
+
+#[cfg(target_os = "macos")]
+fn active_launchd_service() -> Result<LaunchdService> {
+    Ok(launchd_service_for_uid(unsafe { geteuid() }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn active_launchd_service() -> Result<LaunchdService> {
+    bail!("launchd scheduler is only available on macOS")
+}
+
+fn launchd_bootstrap_command(service: &LaunchdService, plist: &Path) -> (String, Vec<String>) {
+    (
+        "launchctl".to_string(),
+        vec![
+            "bootstrap".to_string(),
+            service.domain.clone(),
+            plist.to_string_lossy().into_owned(),
+        ],
+    )
+}
+
+fn launchd_bootout_command(service: &LaunchdService) -> (String, Vec<String>) {
+    (
+        "launchctl".to_string(),
+        vec![
+            "bootout".to_string(),
+            "--wait".to_string(),
+            service.target.clone(),
+        ],
+    )
+}
+
+fn launchd_print_command(service: &LaunchdService) -> (String, Vec<String>) {
+    (
+        "launchctl".to_string(),
+        vec!["print".to_string(), service.target.clone()],
+    )
+}
+
+fn activate_launchd_service(plist: &Path) -> Result<()> {
+    let service = active_launchd_service()?;
+    let (program, args) = launchd_bootstrap_command(&service, plist);
+    let bootstrap = capture_command(&program, &args)?;
+    if !bootstrap.success {
+        return Err(command_failure("launchd bootstrap", &bootstrap));
+    }
+
+    let (program, args) = launchd_print_command(&service);
+    let verification = capture_command(&program, &args)?;
+    verify_launchd_service(&service, &verification)
+}
+
+fn deactivate_launchd_service() -> Result<()> {
+    let service = active_launchd_service()?;
+    let (program, args) = launchd_bootout_command(&service);
+    let bootout = capture_command(&program, &args)?;
+    if bootout.success {
+        return Ok(());
+    }
+
+    let (program, args) = launchd_print_command(&service);
+    let verification = capture_command(&program, &args)?;
+    if launchd_service_is_absent(&service, &verification) {
+        return Ok(());
+    }
+
+    Err(command_failure("launchd bootout", &bootout))
+}
+
+fn verify_launchd_service(service: &LaunchdService, captured: &CapturedCommand) -> Result<()> {
+    if !captured.success || !captured.stdout.contains(&service.target) {
+        return Err(command_failure("launchd print verification", captured));
+    }
+    Ok(())
+}
+
+fn launchd_service_is_absent(service: &LaunchdService, captured: &CapturedCommand) -> bool {
+    if captured.success {
+        return false;
+    }
+    let missing_service = format!("could not find service \"{}\"", service.target).to_lowercase();
+    let diagnostic = format!("{}\n{}", captured.stdout, captured.stderr).to_lowercase();
+    diagnostic.contains(&missing_service)
+}
+
+fn capture_command(program: &str, args: &[String]) -> Result<CapturedCommand> {
+    let command = command_display(program, args);
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("Could not execute `{command}`"))?;
+    Ok(CapturedCommand {
+        command,
+        status: output.status.to_string(),
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+fn command_display(program: &str, args: &[String]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn command_failure(action: &str, captured: &CapturedCommand) -> anyhow::Error {
+    anyhow!(
+        "{action} failed: command `{}` exited with status {}; stdout: {}; stderr: {}",
+        captured.command,
+        captured.status,
+        captured.stdout.trim(),
+        captured.stderr.trim()
+    )
 }
 
 fn autosubmit_dir() -> Result<PathBuf> {
@@ -1000,7 +1144,98 @@ mod tests {
         assert!(content.contains("<string>/usr/local/bin/tokscale</string>"));
         assert!(content.contains("<string>autosubmit</string>"));
         assert!(content.contains("<string>run</string>"));
+        assert!(content.contains("<key>RunAtLoad</key><true/>"));
+        assert!(content.contains("<key>StartInterval</key><integer>3600</integer>"));
         assert!(!content.contains("/bin/sh"));
+        assert!(!content.contains("launchctl load"));
+        assert!(!content.contains("launchctl unload"));
+    }
+
+    #[test]
+    fn launchd_commands_target_the_active_user_domain() {
+        let service = launchd_service_for_uid(501);
+        let plist = Path::new("/Users/alice/Library/LaunchAgents/ai.tokscale.autosubmit.plist");
+
+        assert_eq!(service.domain, "gui/501");
+        assert_eq!(service.target, "gui/501/ai.tokscale.autosubmit");
+        assert_eq!(
+            launchd_bootstrap_command(&service, plist),
+            (
+                "launchctl".to_string(),
+                vec![
+                    "bootstrap".to_string(),
+                    "gui/501".to_string(),
+                    plist.to_string_lossy().into_owned()
+                ]
+            )
+        );
+        assert_eq!(
+            launchd_bootout_command(&service),
+            (
+                "launchctl".to_string(),
+                vec![
+                    "bootout".to_string(),
+                    "--wait".to_string(),
+                    "gui/501/ai.tokscale.autosubmit".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            launchd_print_command(&service),
+            (
+                "launchctl".to_string(),
+                vec![
+                    "print".to_string(),
+                    "gui/501/ai.tokscale.autosubmit".to_string()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn launchd_verification_requires_the_exact_service_target() {
+        let service = launchd_service_for_uid(501);
+        let verified = CapturedCommand {
+            command: "launchctl print gui/501/ai.tokscale.autosubmit".to_string(),
+            status: "exit status: 0".to_string(),
+            success: true,
+            stdout: "gui/501/ai.tokscale.autosubmit = {\n}".to_string(),
+            stderr: String::new(),
+        };
+        verify_launchd_service(&service, &verified).unwrap();
+
+        let unverified = CapturedCommand {
+            command: "launchctl print gui/501/ai.tokscale.autosubmit".to_string(),
+            status: "exit status: 0".to_string(),
+            success: true,
+            stdout: "gui/501/another.service = {\n}".to_string(),
+            stderr: "target was not found".to_string(),
+        };
+        let error = verify_launchd_service(&service, &unverified).unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("launchctl print gui/501/ai.tokscale.autosubmit"));
+        assert!(rendered.contains("exit status: 0"));
+        assert!(rendered.contains("gui/501/another.service"));
+        assert!(rendered.contains("target was not found"));
+    }
+
+    #[test]
+    fn launchd_absence_is_idempotent_only_for_the_service_target() {
+        let service = launchd_service_for_uid(501);
+        let absent = CapturedCommand {
+            command: "launchctl print gui/501/ai.tokscale.autosubmit".to_string(),
+            status: "exit status: 3".to_string(),
+            success: false,
+            stdout: String::new(),
+            stderr: "Could not find service \"gui/501/ai.tokscale.autosubmit\"".to_string(),
+        };
+        assert!(launchd_service_is_absent(&service, &absent));
+
+        let unrelated = CapturedCommand {
+            stderr: "Could not find service \"gui/501/other.service\"".to_string(),
+            ..absent
+        };
+        assert!(!launchd_service_is_absent(&service, &unrelated));
     }
 
     #[test]
