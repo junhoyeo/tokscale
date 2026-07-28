@@ -72,6 +72,8 @@ pub struct AutosubmitSettings {
     #[serde(default)]
     pub scheduler: Option<String>,
     #[serde(default)]
+    pub managed_executable: Option<String>,
+    #[serde(default)]
     pub last_run_at_ms: Option<i64>,
     #[serde(default)]
     pub last_error: Option<String>,
@@ -91,6 +93,7 @@ impl Default for AutosubmitSettings {
             week: false,
             month: false,
             scheduler: None,
+            managed_executable: None,
             last_run_at_ms: None,
             last_error: None,
         }

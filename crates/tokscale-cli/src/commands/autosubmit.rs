@@ -1,6 +1,5 @@
 use crate::tui::settings::{
-    AutosubmitSettings, DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES, MAX_AUTOSUBMIT_INTERVAL_MINUTES,
-    MIN_AUTOSUBMIT_INTERVAL_MINUTES,
+    AutosubmitSettings, MAX_AUTOSUBMIT_INTERVAL_MINUTES, MIN_AUTOSUBMIT_INTERVAL_MINUTES,
 };
 use crate::{ClientFlags, DateRangeFlags};
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,17 +10,26 @@ use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const JOB_ID: &str = "ai.tokscale.autosubmit";
 const CRON_MARKER_BEGIN: &str = "# BEGIN TOKSCALE AUTOSUBMIT";
 const CRON_MARKER_END: &str = "# END TOKSCALE AUTOSUBMIT";
 const SKIP_SCHEDULER_ENV: &str = "TOKSCALE_AUTOSUBMIT_SKIP_SCHEDULER";
+const SYSTEMD_TIMER_UNIT: &str = "tokscale-autosubmit.timer";
 const MANAGED_EXECUTABLE_NAME: &str = if cfg!(target_os = "windows") {
     "tokscale.exe"
 } else {
     "tokscale"
 };
+#[cfg(any(target_os = "windows", test))]
+const LEGACY_WINDOWS_MANAGED_EXECUTABLE_NAME: &str = "tokscale.exe";
+#[cfg(target_os = "windows")]
+static WINDOWS_MANAGED_EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
 
 #[derive(Subcommand)]
 pub enum AutosubmitSubcommand {
@@ -127,6 +135,7 @@ struct SchedulerArtifactSnapshot {
     scheduler: SchedulerKind,
     files: Vec<(PathBuf, Option<Vec<u8>>)>,
     cron: Option<String>,
+    executable: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -166,8 +175,8 @@ struct StatusOutput {
 }
 
 pub fn enable(args: AutosubmitEnableArgs) -> Result<()> {
-    enable_with_scheduler_operations(args, install_scheduler, |scheduler, _, _| {
-        uninstall_scheduler(scheduler)
+    enable_with_scheduler_operations(args, install_scheduler, |scheduler, _, settings| {
+        uninstall_scheduler(scheduler, settings)
     })
 }
 
@@ -203,8 +212,12 @@ where
         scheduler: Some(scheduler.as_str().to_string()),
         last_run_at_ms: previous_settings.autosubmit.last_run_at_ms,
         last_error: None,
+        managed_executable: None,
     };
-    let managed_snapshot = snapshot_managed_scheduler_executable()?;
+    let source_exe =
+        std::env::current_exe().context("Could not resolve current tokscale executable")?;
+    let managed_destination = next_managed_scheduler_executable_path()?;
+    let managed_snapshot = snapshot_managed_scheduler_executable(&managed_destination)?;
     let previous_artifacts = if previous_settings.autosubmit.enabled && !skip_scheduler_install() {
         Some(snapshot_scheduler_artifacts(
             previous_scheduler,
@@ -213,9 +226,7 @@ where
     } else {
         None
     };
-    let source_exe =
-        std::env::current_exe().context("Could not resolve current tokscale executable")?;
-    let exe = match prepare_managed_scheduler_executable(&source_exe) {
+    let exe = match prepare_managed_scheduler_executable(&source_exe, managed_destination) {
         Ok(exe) => exe,
         Err(error) => match restore_managed_scheduler_executable(&managed_snapshot) {
             Ok(()) => return Err(error),
@@ -226,6 +237,8 @@ where
             }
         },
     };
+    let mut next_autosubmit = next_autosubmit;
+    next_autosubmit.managed_executable = Some(exe.to_string_lossy().into_owned());
 
     let mut next_settings = previous_settings.clone();
     next_settings.autosubmit = next_autosubmit;
@@ -247,8 +260,11 @@ where
     }
 
     if !skip_scheduler_install() {
+        let retargets_previous_windows_task = previous_settings.autosubmit.enabled
+            && previous_scheduler == SchedulerKind::WindowsTaskScheduler
+            && scheduler == SchedulerKind::WindowsTaskScheduler;
         let mut previous_scheduler_was_displaced = false;
-        if previous_settings.autosubmit.enabled {
+        if previous_settings.autosubmit.enabled && !retargets_previous_windows_task {
             previous_scheduler_was_displaced = true;
             if let Err(error) = uninstaller(previous_scheduler, &exe, &previous_settings.autosubmit)
             {
@@ -277,7 +293,7 @@ where
                     previous_artifacts: previous_artifacts.as_ref(),
                     managed_snapshot: &managed_snapshot,
                     scheduler,
-                    scheduler_started: true,
+                    scheduler_started: !retargets_previous_windows_task,
                     previous_scheduler_was_displaced,
                     exe: &exe,
                     next_settings: &next_settings.autosubmit,
@@ -330,6 +346,17 @@ pub fn status(json: bool) -> Result<()> {
 }
 
 pub fn disable() -> Result<()> {
+    disable_with_scheduler_operations(uninstall_scheduler, remove_managed_scheduler_executable)
+}
+
+fn disable_with_scheduler_operations<U, R>(
+    mut uninstaller: U,
+    mut executable_cleanup: R,
+) -> Result<()>
+where
+    U: FnMut(SchedulerKind, &AutosubmitSettings) -> Result<()>,
+    R: FnMut() -> Result<()>,
+{
     let mut settings = crate::tui::settings::Settings::load();
     let scheduler = settings
         .autosubmit
@@ -338,12 +365,15 @@ pub fn disable() -> Result<()> {
         .and_then(SchedulerKind::from_str)
         .unwrap_or_else(default_scheduler_kind);
 
-    if settings.autosubmit.enabled && !skip_scheduler_install() {
-        uninstall_scheduler(scheduler)?;
-        remove_managed_scheduler_executable()?;
+    if !skip_scheduler_install() {
+        if settings.autosubmit.enabled {
+            uninstaller(scheduler, &settings.autosubmit)?;
+        }
+        executable_cleanup()?;
     }
 
     settings.autosubmit.enabled = false;
+    settings.autosubmit.managed_executable = None;
     settings.autosubmit.last_error = None;
     settings.save()?;
     println!("Autosubmit disabled.");
@@ -564,18 +594,14 @@ fn install_scheduler(
     Ok(())
 }
 
-fn uninstall_scheduler(scheduler: SchedulerKind) -> Result<()> {
-    let dummy = AutosubmitSettings {
-        interval_minutes: DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES,
-        ..AutosubmitSettings::default()
-    };
-    let exe = managed_scheduler_executable_path()?;
-    let spec = render_scheduler_spec(scheduler, &exe, &dummy)?;
+fn uninstall_scheduler(scheduler: SchedulerKind, settings: &AutosubmitSettings) -> Result<()> {
+    let exe = managed_scheduler_executable_for_settings(settings)?;
+    let spec = render_scheduler_spec(scheduler, &exe, settings)?;
     if scheduler == SchedulerKind::Launchd {
         deactivate_launchd_service()?;
     } else {
         for (program, args) in spec.uninstall_commands {
-            run_status_command(&program, &args)?;
+            run_scheduler_cleanup_command(scheduler, &program, &args)?;
         }
     }
     if scheduler == SchedulerKind::Cron {
@@ -591,8 +617,8 @@ fn uninstall_scheduler(scheduler: SchedulerKind) -> Result<()> {
     Ok(())
 }
 
-fn snapshot_managed_scheduler_executable() -> Result<ManagedExecutableSnapshot> {
-    let path = managed_scheduler_executable_path()?;
+fn snapshot_managed_scheduler_executable(path: &Path) -> Result<ManagedExecutableSnapshot> {
+    let path = path.to_path_buf();
     match fs::read(&path) {
         Ok(contents) => Ok(ManagedExecutableSnapshot {
             permissions: Some(fs::metadata(&path)?.permissions()),
@@ -651,7 +677,7 @@ fn snapshot_scheduler_artifacts(
     scheduler: SchedulerKind,
     settings: &AutosubmitSettings,
 ) -> Result<SchedulerArtifactSnapshot> {
-    let exe = managed_scheduler_executable_path()?;
+    let exe = managed_scheduler_executable_for_settings(settings)?;
     let spec = render_scheduler_spec(scheduler, &exe, settings)?;
     let mut files = Vec::with_capacity(spec.files.len());
     for (path, _) in spec.files {
@@ -664,6 +690,7 @@ fn snapshot_scheduler_artifacts(
     }
     let cron = spec.cron_block.map(|_| read_crontab()).transpose()?;
     Ok(SchedulerArtifactSnapshot {
+        executable: exe,
         scheduler,
         files,
         cron,
@@ -692,9 +719,12 @@ fn restore_scheduler_artifacts(snapshot: &SchedulerArtifactSnapshot) -> Result<(
     Ok(())
 }
 
-fn reactivate_scheduler(scheduler: SchedulerKind, settings: &AutosubmitSettings) -> Result<()> {
-    let exe = managed_scheduler_executable_path()?;
-    let spec = render_scheduler_spec(scheduler, &exe, settings)?;
+fn reactivate_scheduler(
+    scheduler: SchedulerKind,
+    exe: &Path,
+    settings: &AutosubmitSettings,
+) -> Result<()> {
+    let spec = render_scheduler_spec(scheduler, exe, settings)?;
     if scheduler == SchedulerKind::Launchd {
         let plist = spec
             .files
@@ -742,9 +772,11 @@ where
             rollback_errors.push(format!("restoring scheduler artifacts: {rollback_error}"));
         }
         if context.previous_scheduler_was_displaced {
-            if let Err(rollback_error) =
-                reactivate_scheduler(snapshot.scheduler, &context.previous_settings.autosubmit)
-            {
+            if let Err(rollback_error) = reactivate_scheduler(
+                snapshot.scheduler,
+                &snapshot.executable,
+                &context.previous_settings.autosubmit,
+            ) {
                 rollback_errors.push(format!("reactivating previous scheduler: {rollback_error}"));
             }
         }
@@ -825,7 +857,7 @@ fn render_launchd_spec_for_home(
 fn render_systemd_spec(exe: &Path, settings: &AutosubmitSettings) -> Result<SchedulerSpec> {
     let user_dir = systemd_user_dir()?;
     let service_path = user_dir.join("tokscale-autosubmit.service");
-    let timer_path = user_dir.join("tokscale-autosubmit.timer");
+    let timer_path = user_dir.join(SYSTEMD_TIMER_UNIT);
     let log_path = autosubmit_log_path()?;
     let service = format!(
         "[Unit]\nDescription=Tokscale autosubmit\n\n[Service]\nType=oneshot\nExecStart={} autosubmit run\nStandardOutput=append:{}\nStandardError=append:{}\n",
@@ -851,7 +883,7 @@ fn render_systemd_spec(exe: &Path, settings: &AutosubmitSettings) -> Result<Sche
                     "--user".to_string(),
                     "enable".to_string(),
                     "--now".to_string(),
-                    "tokscale-autosubmit.timer".to_string(),
+                    SYSTEMD_TIMER_UNIT.to_string(),
                 ],
             ),
         ],
@@ -862,7 +894,7 @@ fn render_systemd_spec(exe: &Path, settings: &AutosubmitSettings) -> Result<Sche
                     "--user".to_string(),
                     "disable".to_string(),
                     "--now".to_string(),
-                    "tokscale-autosubmit.timer".to_string(),
+                    SYSTEMD_TIMER_UNIT.to_string(),
                 ],
             ),
             (
@@ -1043,6 +1075,49 @@ fn run_status_command(program: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_scheduler_cleanup_command(
+    scheduler: SchedulerKind,
+    program: &str,
+    args: &[String],
+) -> Result<()> {
+    let captured = capture_command(program, args)?;
+    cleanup_scheduler_command_result(scheduler, "scheduler cleanup", &captured)
+}
+
+fn cleanup_scheduler_command_result(
+    scheduler: SchedulerKind,
+    action: &str,
+    captured: &CapturedCommand,
+) -> Result<()> {
+    if captured.success || scheduler_entry_is_absent(scheduler, captured) {
+        return Ok(());
+    }
+    Err(command_failure(action, captured))
+}
+
+fn scheduler_entry_is_absent(scheduler: SchedulerKind, captured: &CapturedCommand) -> bool {
+    if captured.success {
+        return false;
+    }
+
+    let diagnostic = format!("{}\n{}", captured.stdout, captured.stderr).to_lowercase();
+    let systemd_timer = SYSTEMD_TIMER_UNIT.to_ascii_lowercase();
+    let windows_task = JOB_ID.to_ascii_lowercase();
+    match scheduler {
+        SchedulerKind::Systemd => {
+            diagnostic.contains(&format!("unit {systemd_timer} not loaded"))
+                || diagnostic.contains(&format!("unit file {systemd_timer} does not exist"))
+        }
+        SchedulerKind::WindowsTaskScheduler => {
+            diagnostic.contains("error: the system cannot find the file specified.")
+                || diagnostic.contains(&format!(
+                "error: the specified task name \"{windows_task}\" does not exist in the system."
+            ))
+        }
+        SchedulerKind::Launchd | SchedulerKind::Cron => false,
+    }
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn geteuid() -> u32;
@@ -1189,7 +1264,48 @@ fn managed_scheduler_executable_path() -> Result<PathBuf> {
     Ok(autosubmit_dir()?.join(MANAGED_EXECUTABLE_NAME))
 }
 
-fn prepare_managed_scheduler_executable(source: &Path) -> Result<PathBuf> {
+fn managed_scheduler_executable_for_settings(settings: &AutosubmitSettings) -> Result<PathBuf> {
+    let path = settings
+        .managed_executable
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or(managed_scheduler_executable_path()?);
+    validate_scheduler_executable(&path)?;
+    Ok(path)
+}
+
+fn next_managed_scheduler_executable_path() -> Result<PathBuf> {
+    let dir = autosubmit_dir()?;
+    #[cfg(target_os = "windows")]
+    {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let sequence = WINDOWS_MANAGED_EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        return Ok(versioned_windows_managed_executable_path(
+            &dir, timestamp, sequence,
+        ));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(dir.join(MANAGED_EXECUTABLE_NAME))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn versioned_windows_managed_executable_path(
+    autosubmit_dir: &Path,
+    timestamp: u128,
+    sequence: u64,
+) -> PathBuf {
+    autosubmit_dir.join(format!(
+        "tokscale-{}-{timestamp}-{sequence}.exe",
+        std::process::id()
+    ))
+}
+
+fn prepare_managed_scheduler_executable(source: &Path, managed: PathBuf) -> Result<PathBuf> {
     validate_scheduler_executable(source)?;
     let source_metadata = fs::metadata(source)
         .with_context(|| format!("Could not read tokscale executable at {}", source.display()))?;
@@ -1211,7 +1327,6 @@ fn prepare_managed_scheduler_executable(source: &Path) -> Result<PathBuf> {
         }
     }
 
-    let managed = managed_scheduler_executable_path()?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -1247,12 +1362,41 @@ fn prepare_managed_scheduler_executable(source: &Path) -> Result<PathBuf> {
     Ok(managed)
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn is_windows_managed_executable_name(name: &str) -> bool {
+    name == LEGACY_WINDOWS_MANAGED_EXECUTABLE_NAME
+        || (name.starts_with("tokscale-") && name.ends_with(".exe"))
+}
+
 fn remove_managed_scheduler_executable() -> Result<()> {
-    let managed = managed_scheduler_executable_path()?;
-    match fs::remove_file(managed) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
+    #[cfg(target_os = "windows")]
+    {
+        for entry in fs::read_dir(autosubmit_dir()?)? {
+            let path = entry?.path();
+            let is_managed_executable = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_windows_managed_executable_name);
+            if !is_managed_executable {
+                continue;
+            }
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) if error.raw_os_error() == Some(WINDOWS_ERROR_SHARING_VIOLATION) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let managed = managed_scheduler_executable_path()?;
+        match fs::remove_file(managed) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -1665,7 +1809,8 @@ mod tests {
         fs::write(&source, "first binary").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let managed = prepare_managed_scheduler_executable(&source).unwrap();
+        let managed_destination = next_managed_scheduler_executable_path().unwrap();
+        let managed = prepare_managed_scheduler_executable(&source, managed_destination).unwrap();
         assert_eq!(
             managed,
             temp.path().join("autosubmit").join(MANAGED_EXECUTABLE_NAME)
@@ -1678,7 +1823,7 @@ mod tests {
 
         fs::write(&source, "second binary").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o711)).unwrap();
-        prepare_managed_scheduler_executable(&source).unwrap();
+        prepare_managed_scheduler_executable(&source, managed.clone()).unwrap();
 
         assert_eq!(fs::read_to_string(&managed).unwrap(), "second binary");
         assert_eq!(
@@ -1706,8 +1851,134 @@ mod tests {
         fs::write(&source, "not executable").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
 
-        let error = prepare_managed_scheduler_executable(&source).unwrap_err();
+        let error = prepare_managed_scheduler_executable(
+            &source,
+            next_managed_scheduler_executable_path().unwrap(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("not executable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn windows_reenable_renders_a_new_versioned_managed_executable_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let managed_dir = temp.path().join("autosubmit");
+        let existing = versioned_windows_managed_executable_path(&managed_dir, 1, 1);
+        let replacement = versioned_windows_managed_executable_path(&managed_dir, 2, 2);
+        fs::create_dir_all(&managed_dir).unwrap();
+        fs::write(&existing, "old executable").unwrap();
+        let source = temp.path().join("tokscale-source");
+        fs::write(&source, "new executable").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let prepared = prepare_managed_scheduler_executable(&source, replacement.clone()).unwrap();
+        let settings = AutosubmitSettings {
+            interval_minutes: 60,
+            ..AutosubmitSettings::default()
+        };
+        let existing_task = render_windows_task_spec(&existing, &settings).unwrap();
+        let replacement_task = render_windows_task_spec(&prepared, &settings).unwrap();
+
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "old executable");
+        assert_eq!(fs::read_to_string(&prepared).unwrap(), "new executable");
+        assert_ne!(existing, prepared);
+        assert!(existing.starts_with(&managed_dir));
+        assert!(prepared.starts_with(&managed_dir));
+        assert!(existing_task.install_commands[0]
+            .1
+            .iter()
+            .any(|arg| arg.contains(&existing.to_string_lossy().into_owned())));
+        assert!(replacement_task.install_commands[0]
+            .1
+            .iter()
+            .any(|arg| arg.contains(&prepared.to_string_lossy().into_owned())));
+        assert!(!replacement_task.install_commands[0]
+            .1
+            .iter()
+            .any(|arg| arg.contains(&existing.to_string_lossy().into_owned())));
+    }
+
+    #[test]
+    fn scheduler_cleanup_tolerates_only_known_absent_entries() {
+        let absent_windows_task = CapturedCommand {
+            command: format!("schtasks /Delete /F /TN {JOB_ID}"),
+            status: "exit status: 1".to_string(),
+            success: false,
+            stdout: String::new(),
+            stderr: "ERROR: The system cannot find the file specified.".to_string(),
+        };
+        assert!(scheduler_entry_is_absent(
+            SchedulerKind::WindowsTaskScheduler,
+            &absent_windows_task
+        ));
+        cleanup_scheduler_command_result(
+            SchedulerKind::WindowsTaskScheduler,
+            "schtasks delete",
+            &absent_windows_task,
+        )
+        .unwrap();
+
+        let absent_windows_task_by_name = CapturedCommand {
+            stderr: format!(
+                "ERROR: The specified task name \"{JOB_ID}\" does not exist in the system."
+            ),
+            ..absent_windows_task.clone()
+        };
+        assert!(scheduler_entry_is_absent(
+            SchedulerKind::WindowsTaskScheduler,
+            &absent_windows_task_by_name
+        ));
+
+        let absent_systemd_timer = CapturedCommand {
+            command: format!("systemctl --user disable --now {SYSTEMD_TIMER_UNIT}"),
+            status: "exit status: 1".to_string(),
+            success: false,
+            stdout: String::new(),
+            stderr: format!(
+                "Failed to disable unit: Unit file {SYSTEMD_TIMER_UNIT} does not exist."
+            ),
+        };
+        assert!(scheduler_entry_is_absent(
+            SchedulerKind::Systemd,
+            &absent_systemd_timer
+        ));
+
+        let invalid_task_name = CapturedCommand {
+            stderr: format!("ERROR: The specified task name \"{JOB_ID}\" is invalid."),
+            ..absent_windows_task.clone()
+        };
+        assert!(!scheduler_entry_is_absent(
+            SchedulerKind::WindowsTaskScheduler,
+            &invalid_task_name
+        ));
+
+        let cleanup_failure = CapturedCommand {
+            stderr: "Access is denied.".to_string(),
+            ..absent_windows_task
+        };
+        assert!(!scheduler_entry_is_absent(
+            SchedulerKind::WindowsTaskScheduler,
+            &cleanup_failure
+        ));
+        assert!(cleanup_scheduler_command_result(
+            SchedulerKind::WindowsTaskScheduler,
+            "schtasks delete",
+            &cleanup_failure,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn windows_managed_executable_cleanup_recognizes_versioned_and_legacy_names() {
+        assert!(is_windows_managed_executable_name("tokscale.exe"));
+        assert!(is_windows_managed_executable_name("tokscale-123-456-7.exe"));
+        assert!(!is_windows_managed_executable_name("tokscale.exe.tmp"));
+        assert!(!is_windows_managed_executable_name("unrelated.exe"));
     }
 
     fn enable_args(scheduler: SchedulerKind) -> AutosubmitEnableArgs {
@@ -1717,6 +1988,165 @@ mod tests {
             date: DateRangeFlags::default(),
             scheduler: Some(scheduler),
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn windows_reenable_failure_keeps_the_existing_task_intact() {
+        use std::cell::Cell;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let mut settings = crate::tui::settings::Settings::load();
+        settings.autosubmit = AutosubmitSettings {
+            enabled: true,
+            scheduler: Some(SchedulerKind::WindowsTaskScheduler.as_str().to_string()),
+            ..AutosubmitSettings::default()
+        };
+        settings.save().unwrap();
+        let uninstall_calls = Cell::new(0);
+
+        let error = enable_with_scheduler_operations(
+            enable_args(SchedulerKind::WindowsTaskScheduler),
+            |_, _, _| Err(anyhow::anyhow!("schtasks replacement failed")),
+            |_, _, _| {
+                uninstall_calls.set(uninstall_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("schtasks replacement failed"));
+        assert_eq!(uninstall_calls.get(), 0);
+        let restored = crate::tui::settings::Settings::load().autosubmit;
+        assert!(restored.enabled);
+        assert_eq!(
+            restored.scheduler.as_deref(),
+            Some(SchedulerKind::WindowsTaskScheduler.as_str())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn scheduler_snapshot_preserves_versioned_windows_executable_path() {
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let executable = temp
+            .path()
+            .join("autosubmit")
+            .join("tokscale-123-456-7.exe");
+        let settings = AutosubmitSettings {
+            scheduler: Some(SchedulerKind::WindowsTaskScheduler.as_str().to_string()),
+            managed_executable: Some(executable.to_string_lossy().into_owned()),
+            ..AutosubmitSettings::default()
+        };
+
+        let snapshot =
+            snapshot_scheduler_artifacts(SchedulerKind::WindowsTaskScheduler, &settings).unwrap();
+
+        assert_eq!(snapshot.executable, executable);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disable_persists_settings_after_known_absent_scheduler_cleanup() {
+        use std::cell::Cell;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let mut settings = crate::tui::settings::Settings::load();
+        settings.autosubmit = AutosubmitSettings {
+            enabled: true,
+            scheduler: Some(SchedulerKind::WindowsTaskScheduler.as_str().to_string()),
+            ..AutosubmitSettings::default()
+        };
+        settings.save().unwrap();
+        let executable_cleanup_calls = Cell::new(0);
+
+        disable_with_scheduler_operations(
+            |scheduler, _| {
+                let absent = CapturedCommand {
+                    command: format!("schtasks /Delete /F /TN {JOB_ID}"),
+                    status: "exit status: 1".to_string(),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "ERROR: The system cannot find the file specified.".to_string(),
+                };
+                cleanup_scheduler_command_result(scheduler, "schtasks delete", &absent)
+            },
+            || {
+                executable_cleanup_calls.set(executable_cleanup_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(!crate::tui::settings::Settings::load().autosubmit.enabled);
+        assert_eq!(executable_cleanup_calls.get(), 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disable_retries_executable_cleanup_after_a_previous_locked_run() {
+        use std::cell::Cell;
+
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let mut settings = crate::tui::settings::Settings::load();
+        settings.autosubmit = AutosubmitSettings {
+            enabled: false,
+            managed_executable: Some(
+                temp.path()
+                    .join("autosubmit")
+                    .join("tokscale-123-456-7.exe")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..AutosubmitSettings::default()
+        };
+        settings.save().unwrap();
+        let executable_cleanup_calls = Cell::new(0);
+
+        disable_with_scheduler_operations(
+            |_, _| panic!("disabled autosubmit must not uninstall a scheduler"),
+            || {
+                executable_cleanup_calls.set(executable_cleanup_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(executable_cleanup_calls.get(), 1);
+        assert!(crate::tui::settings::Settings::load()
+            .autosubmit
+            .managed_executable
+            .is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disable_keeps_settings_enabled_after_scheduler_cleanup_failure() {
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
+        let mut settings = crate::tui::settings::Settings::load();
+        settings.autosubmit = AutosubmitSettings {
+            enabled: true,
+            scheduler: Some(SchedulerKind::Systemd.as_str().to_string()),
+            last_error: Some("previous error".to_string()),
+            ..AutosubmitSettings::default()
+        };
+        settings.save().unwrap();
+
+        let error = disable_with_scheduler_operations(
+            |_, _| Err(anyhow::anyhow!("systemctl cleanup failed")),
+            || panic!("managed executable cleanup must not run after scheduler cleanup failure"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("systemctl cleanup failed"));
+        let restored = crate::tui::settings::Settings::load().autosubmit;
+        assert!(restored.enabled);
+        assert_eq!(restored.last_error.as_deref(), Some("previous error"));
     }
 
     #[test]
