@@ -373,7 +373,8 @@ pub fn status(json: bool) -> Result<()> {
             println!(
                 "  Scheduled binary: {scheduled} (this build is {RUNNING_VERSION})\n    \
                  The scheduler runs its own copy, which upgrades do not replace. \
-                 Re-run `tokscale autosubmit enable` to refresh it."
+                 Refresh it with:\n      {}",
+                enable_command_for(&autosubmit)
             );
         }
     } else {
@@ -524,6 +525,47 @@ fn managed_executable_is_stale(settings: &AutosubmitSettings) -> bool {
     // `None` predates this field, so the recorded build is genuinely unknown
     // and reported as drift. It resolves on the next enable.
     settings.managed_executable_version.as_deref() != Some(RUNNING_VERSION)
+}
+
+/// The `enable` invocation that reproduces the configuration already in
+/// settings.
+///
+/// `enable` rebuilds every field from its arguments — only `last_run_at_ms`
+/// survives — and `--interval` defaults to `24h`. So telling somebody to
+/// "re-run `tokscale autosubmit enable`" after an upgrade would silently reset
+/// a 30m interval to 24h and drop any client or date filter. Printing what they
+/// actually configured makes the advice safe to follow verbatim.
+fn enable_command_for(settings: &AutosubmitSettings) -> String {
+    let mut parts = vec![
+        "tokscale autosubmit enable".to_string(),
+        format!("--interval {}m", settings.interval_minutes),
+    ];
+    if !settings.clients.is_empty() {
+        parts.push(format!("--client {}", settings.clients.join(",")));
+    }
+    if let Some(since) = settings.since.as_deref() {
+        parts.push(format!("--since {since}"));
+    }
+    if let Some(until) = settings.until.as_deref() {
+        parts.push(format!("--until {until}"));
+    }
+    if let Some(year) = settings.year.as_deref() {
+        parts.push(format!("--year {year}"));
+    }
+    for (flag, enabled) in [
+        ("--today", settings.today),
+        ("--yesterday", settings.yesterday),
+        ("--week", settings.week),
+        ("--month", settings.month),
+    ] {
+        if enabled {
+            parts.push(flag.to_string());
+        }
+    }
+    if let Some(scheduler) = settings.scheduler.as_deref() {
+        parts.push(format!("--scheduler {scheduler}"));
+    }
+    parts.join(" ")
 }
 
 /// Whether the process answering this call is the binary at `path`, compared
@@ -1588,48 +1630,35 @@ fn build_date_filter_for_date(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::env;
     use std::ffi::{OsStr, OsString};
     use tempfile::TempDir;
 
-    /// Serializes every test that redirects `TOKSCALE_CONFIG_DIR`.
+    /// `TOKSCALE_CONFIG_DIR` is process-global while cargo runs tests on
+    /// parallel threads, so every test that redirects it is `#[serial]`.
+    /// Without that they read each other's config directory: one saves
+    /// settings, another's guard restores the variable underneath it, and the
+    /// first then loads from the wrong place.
     ///
-    /// The env is process-global while cargo runs tests on parallel threads, so
-    /// two such tests otherwise read each other's config directory: one saves
-    /// settings, the other's guard restores the variable underneath it, and the
-    /// first then loads from the wrong place. That was latent rather than
-    /// theoretical — the suite passed only because of scheduling luck, and
-    /// adding two more config-directory tests was enough to make it fail
-    /// differently on every run.
+    /// That was latent rather than theoretical -- this suite passed only
+    /// through scheduling luck, and adding two more config-directory tests made
+    /// it fail differently on every run.
     ///
-    /// Holding the lock inside the guard means every existing caller is
-    /// serialized without changing a single test body. No test takes two guards
-    /// at once, so this cannot deadlock.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// `serial_test` rather than a mutex local to this module, because
+    /// `device.rs`, `paths.rs` and `auth.rs` redirect the same variable and
+    /// already use `#[serial]`. A module-local lock coordinates none of those,
+    /// so it would leave exactly the race it appears to fix.
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
-        // Released on drop, after the variable is restored below.
-        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvVarGuard {
         fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-            // A test that panicked while holding the lock poisons it. The env
-            // is restored by the guard's Drop regardless, so the data is not
-            // actually corrupt and recovering keeps one failure from cascading
-            // into every later test.
-            let lock = ENV_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let previous = env::var_os(key);
             env::set_var(key, value);
-            Self {
-                key,
-                previous,
-                _lock: lock,
-            }
+            Self { key, previous }
         }
     }
 
@@ -1696,6 +1725,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn launchd_spec_uses_program_arguments_without_shell() {
         let temp = TempDir::new().unwrap();
@@ -1825,6 +1855,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn systemd_spec_honors_xdg_config_home() {
         let temp = TempDir::new().unwrap();
@@ -1896,6 +1927,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn scheduler_specs_use_the_managed_executable() {
         let temp = TempDir::new().unwrap();
@@ -1922,6 +1954,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn managed_executable_refreshes_atomically_with_source_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -1964,6 +1997,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn managed_executable_rejects_nonexecutable_source() {
         use std::os::unix::fs::PermissionsExt;
@@ -1984,6 +2018,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn windows_reenable_renders_a_new_versioned_managed_executable_path() {
         use std::os::unix::fs::PermissionsExt;
@@ -2114,6 +2149,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn windows_reenable_failure_keeps_the_existing_task_intact() {
         use std::cell::Cell;
@@ -2150,6 +2186,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn scheduler_snapshot_preserves_versioned_windows_executable_path() {
         let temp = TempDir::new().unwrap();
@@ -2171,6 +2208,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn disable_persists_settings_after_known_absent_scheduler_cleanup() {
         use std::cell::Cell;
@@ -2209,6 +2247,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn disable_retries_executable_cleanup_after_a_previous_locked_run() {
         use std::cell::Cell;
@@ -2247,6 +2286,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn disable_keeps_settings_enabled_after_scheduler_cleanup_failure() {
         let temp = TempDir::new().unwrap();
@@ -2273,6 +2313,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn enable_persists_settings_before_scheduler_installation() {
         use std::cell::Cell;
@@ -2296,6 +2337,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn enable_rolls_back_settings_and_managed_executable_after_activation_failure() {
         use std::cell::Cell;
@@ -2323,6 +2365,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn enable_rolls_back_after_post_bootstrap_verification_failure() {
         let temp = TempDir::new().unwrap();
@@ -2378,6 +2421,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial_test::serial]
     fn run_lock_blocks_concurrent_holder() {
         let temp = TempDir::new().unwrap();
@@ -2479,6 +2523,42 @@ mod tests {
     }
 
     #[test]
+    fn refresh_command_preserves_a_non_default_configuration() {
+        // `enable` rebuilds every field from its arguments and `--interval`
+        // defaults to 24h, so advising a bare re-run would turn a 30m interval
+        // into 24h and drop the filters. The printed command has to be safe to
+        // paste verbatim.
+        let settings = AutosubmitSettings {
+            enabled: true,
+            interval_minutes: 30,
+            clients: vec!["codex".to_string(), "claude".to_string()],
+            since: Some("2026-01-01".to_string()),
+            week: true,
+            scheduler: Some(SchedulerKind::Launchd.as_str().to_string()),
+            ..AutosubmitSettings::default()
+        };
+        assert_eq!(
+            enable_command_for(&settings),
+            "tokscale autosubmit enable --interval 30m --client codex,claude \
+             --since 2026-01-01 --week --scheduler launchd"
+        );
+    }
+
+    #[test]
+    fn refresh_command_omits_unset_options() {
+        let settings = AutosubmitSettings {
+            enabled: true,
+            interval_minutes: 1440,
+            ..AutosubmitSettings::default()
+        };
+        assert_eq!(
+            enable_command_for(&settings),
+            "tokscale autosubmit enable --interval 1440m"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn enable_withholds_the_version_until_the_scheduler_is_installed() {
         use std::cell::Cell;
 
@@ -2523,6 +2603,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn enable_records_the_running_version_beside_the_managed_copy() {
         let temp = TempDir::new().unwrap();
         let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
@@ -2544,6 +2625,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn disable_clears_the_recorded_managed_version() {
         let temp = TempDir::new().unwrap();
         let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
