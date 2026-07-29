@@ -34,3 +34,7 @@ self-host/
 .next/
 .vercel
 .env*.local
+.claude/skills/
+.omp/
+.omx/
+.codegraph/
