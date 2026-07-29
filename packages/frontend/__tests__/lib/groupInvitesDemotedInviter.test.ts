@@ -206,6 +206,7 @@ describe("acceptGroupInvite — inviter role re-check", () => {
         username: "carol",
         displayName: null,
         avatarUrl: null,
+        githubId: null,
       })
     ).rejects.toMatchObject({
       code: "forbidden",
@@ -228,6 +229,7 @@ describe("acceptGroupInvite — inviter role re-check", () => {
         username: "carol",
         displayName: null,
         avatarUrl: null,
+        githubId: null,
       })
     ).rejects.toMatchObject({
       code: "forbidden",
@@ -250,6 +252,7 @@ describe("acceptGroupInvite — inviter role re-check", () => {
         username: "carol",
         displayName: null,
         avatarUrl: null,
+        githubId: null,
       })
     ).rejects.toMatchObject({
       code: "forbidden",
@@ -289,6 +292,7 @@ describe("acceptGroupInvite — inviter role re-check", () => {
       username: "carol",
       displayName: null,
       avatarUrl: null,
+      githubId: null,
     });
 
     expect(result).toEqual({

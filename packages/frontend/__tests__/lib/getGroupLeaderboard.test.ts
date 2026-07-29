@@ -346,7 +346,10 @@ describe("group leaderboard data", () => {
 
     expect(mockState.or).toHaveBeenCalledTimes(2);
     expect(mockState.or.mock.calls.map((call) => call.length)).toEqual([2, 1]);
+    // The rankable-user predicate is ANDed ahead of the directive groups: a
+    // site-wide hide applies to group boards too.
     expect(mockState.and).toHaveBeenLastCalledWith(
+      expect.anything(),
       mockState.or.mock.results[0]?.value,
       mockState.or.mock.results[1]?.value
     );

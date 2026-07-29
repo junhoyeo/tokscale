@@ -199,10 +199,19 @@ describe("all-time leaderboard queries", () => {
 
   it("counts distinct users for all-time pagination and global stats", async () => {
     mockState.pushAwaitedResult([]);
-    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 2 }]);
+    // Site-wide stats: every submitting user, hidden ones included.
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 3 }]);
+    // Pagination: only users the ranked query can actually return.
+    mockState.pushAwaitedResult([{ count: 2 }]);
 
     const list = await getLeaderboardData("all", 1, 50, "tokens");
+
+    // The two counts are deliberately different sources. Pagination must track
+    // the rankable set, or hiding a user leaves a trailing page that renders
+    // empty; stats must track everyone, because hiding withdraws someone from
+    // the competition without erasing their usage from the totals.
     expect(list.pagination.totalUsers).toBe(2);
+    expect(list.stats.uniqueUsers).toBe(3);
     expect(serializeSqlCalls().some((text) =>
       text.includes("COUNT(DISTINCT submissions.userId)")
     )).toBe(true);

@@ -16,6 +16,16 @@ import {
 
 export type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
 
+/**
+ * Restricts a query to users eligible for a leaderboard position.
+ *
+ * Applies to RANKINGS ONLY. The site-wide totals queries deliberately omit it,
+ * so a hidden user still contributes to total tokens, total cost and unique
+ * user counts — hiding withdraws someone from the competition, it does not
+ * erase their usage. Their profile, badge and embeds are likewise unaffected.
+ */
+const RANKABLE_USER = eq(users.leaderboardHidden, false);
+
 interface LeaderboardPeriodRow {
   userId: string;
   username: string;
@@ -24,6 +34,12 @@ interface LeaderboardPeriodRow {
   tokens: number;
   cost: number;
   sourceBreakdown: Record<string, { models: Record<string, unknown> }> | null;
+  /**
+   * Carried through so the period path can drop the user from the rankings
+   * while still counting them in the period totals. Internal only — it must
+   * never reach LeaderboardUser, which is serialized to the public API.
+   */
+  leaderboardHidden: boolean;
 }
 
 interface PeriodDateRange {
@@ -39,6 +55,7 @@ interface PeriodLeaderboardDbRow {
   tokens: number | string | null;
   cost: number | string | null;
   sourceBreakdown: Record<string, { models: Record<string, unknown> }> | null;
+  leaderboardHidden: boolean;
 }
 
 interface AllTimeLeaderboardDbRow {
@@ -215,8 +232,19 @@ function buildPeriodLeaderboardData(
     });
   }
 
+  // Aggregated twice on purpose. `aggregatedUsers` includes hidden users and
+  // is what the period totals are computed from; `visibleUsers` excludes them
+  // and is what gets ranked. Filtering once, before the totals, would silently
+  // shrink the headline numbers — the opposite of the intended behaviour.
   const aggregatedUsers = aggregatePeriodRows(filteredRows, sortBy);
-  const rankedUsers = aggregatedUsers.map((user, index) => ({
+  const visibleUsers = aggregatePeriodRows(
+    filteredRows.filter((row) => !row.leaderboardHidden),
+    sortBy
+  );
+
+  // Ranked over the visible set, so ranks stay dense (1,2,3…) instead of
+  // leaving a gap where the hidden user used to sit.
+  const rankedUsers = visibleUsers.map((user, index) => ({
     ...user,
     rank: index + 1,
   }));
@@ -250,7 +278,13 @@ function buildPeriodUserRank(
   username: string,
   sortBy: SortBy = "tokens"
 ): LeaderboardUser | null {
-  const aggregatedUsers = aggregatePeriodRows(rows, sortBy);
+  // Ranked against the visible set only. A hidden user is therefore absent
+  // here and reports no rank at all, rather than a rank that does not
+  // correspond to any position on the leaderboard.
+  const aggregatedUsers = aggregatePeriodRows(
+    rows.filter((row) => !row.leaderboardHidden),
+    sortBy
+  );
   const usernameCacheKey = normalizeUsernameCacheKey(username);
   const matchingUsers = aggregatedUsers.filter(
     (user) => normalizeUsernameCacheKey(user.username) === usernameCacheKey
@@ -287,6 +321,7 @@ async function fetchPeriodLeaderboardRows(
       tokens: dailyBreakdown.tokens,
       cost: dailyBreakdown.cost,
       sourceBreakdown: dailyBreakdown.sourceBreakdown,
+      leaderboardHidden: users.leaderboardHidden,
     })
     .from(dailyBreakdown)
     .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
@@ -306,6 +341,9 @@ async function fetchPeriodLeaderboardRows(
     tokens: Number(row.tokens) || 0,
     cost: Number(row.cost) || 0,
     sourceBreakdown: row.sourceBreakdown ?? null,
+    // Deliberately NOT filtered in SQL: the period totals are derived from
+    // these same rows, and hidden users still count toward totals.
+    leaderboardHidden: row.leaderboardHidden === true,
   }));
 }
 
@@ -360,7 +398,13 @@ async function fetchLeaderboardData(
       })
       .from(submissions)
       .innerJoin(users, eq(submissions.userId, users.id))
-      .where(hasDirectiveFilters ? and(...directiveConditions) : undefined)
+      // Inside the ranked subquery, so RANK() renumbers densely rather than
+      // leaving a hole where a hidden user was.
+      .where(
+        hasDirectiveFilters
+          ? and(RANKABLE_USER, ...directiveConditions)
+          : RANKABLE_USER
+      )
       .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
       .as("ranked");
     const rankedSecondaryOrderByColumn = sortBy === "cost"
@@ -443,6 +487,7 @@ async function fetchLeaderboardData(
     })
     .from(submissions)
     .innerJoin(users, eq(submissions.userId, users.id))
+    .where(RANKABLE_USER)
     .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
     .orderBy(
       desc(orderByColumn),
@@ -452,8 +497,9 @@ async function fetchLeaderboardData(
     .limit(limit)
     .offset(offset);
 
-  const [results, globalStats] = await Promise.all([
+  const [results, globalStats, rankableCount] = await Promise.all([
     leaderboardQuery,
+    // Unfiltered: site-wide totals count every submission, hidden or not.
     db
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
@@ -461,9 +507,17 @@ async function fetchLeaderboardData(
         uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
       .from(submissions),
+    // Pagination must count only the rows this query can actually return.
+    // Reusing globalStats.uniqueUsers here would over-report by the number of
+    // hidden users and leave a trailing page that renders empty.
+    db
+      .select({ count: sql<number>`COUNT(DISTINCT ${submissions.userId})`.as("count") })
+      .from(submissions)
+      .innerJoin(users, eq(submissions.userId, users.id))
+      .where(RANKABLE_USER),
   ]);
 
-  const totalUsers = Number(globalStats[0]?.uniqueUsers) || 0;
+  const totalUsers = Number(rankableCount[0]?.count) || 0;
   const totalPages = Math.ceil(totalUsers / limit);
 
   return {
@@ -534,7 +588,13 @@ async function fetchUserRank(
   }
 
   const userResult = await db
-    .select({ id: users.id, username: users.username, displayName: users.displayName, avatarUrl: users.avatarUrl })
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      avatarUrl: users.avatarUrl,
+      leaderboardHidden: users.leaderboardHidden,
+    })
     .from(users)
     .where(usernameEqualsIgnoreCase(username))
     .limit(USERNAME_LOOKUP_LIMIT);
@@ -542,6 +602,12 @@ async function fetchUserRank(
   const user = getSingleUsernameMatch(userResult, username);
 
   if (!user) {
+    return null;
+  }
+
+  // A hidden user holds no leaderboard position, so they report no rank at all
+  // rather than a number that matches nothing on the board.
+  if (user.leaderboardHidden) {
     return null;
   }
 
@@ -579,6 +645,11 @@ async function fetchUserRank(
           total: compareColumn.as("total"),
         })
         .from(submissions)
+        // Hidden users hold no position, so they must not be counted as being
+        // "above" anyone — otherwise every visible user's rank is inflated by
+        // however many hidden accounts outrank them.
+        .innerJoin(users, eq(submissions.userId, users.id))
+        .where(RANKABLE_USER)
         .groupBy(submissions.userId)
         .having(sql`${compareColumn} > ${userCompareValue}`)
         .as("higher_ranked")

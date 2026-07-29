@@ -32,6 +32,20 @@ export const users = pgTable(
     displayName: varchar("display_name", { length: 255 }),
     avatarUrl: text("avatar_url"),
     email: varchar("email", { length: 255 }),
+    /**
+     * Excludes the user from leaderboard RANKINGS only. Their profile, badge
+     * and embeds stay public, and their usage still counts toward site-wide
+     * totals — see lib/leaderboard/getLeaderboard.ts for exactly which queries
+     * honour this and which deliberately do not.
+     *
+     * Reversible by design: moderation_actions keeps the full hide/unhide
+     * history, so this column is current state, not the record.
+     *
+     * Intentionally unindexed. Nearly every row passes `NOT leaderboard_hidden`,
+     * so an index has no selectivity to offer; the check rides the existing
+     * join against users.
+     */
+    leaderboardHidden: boolean("leaderboard_hidden").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -60,6 +74,8 @@ export const usersRelations = relations(users, ({ many }) => ({
   groupMemberships: many(groupMembers, { relationName: "memberUser" }),
   createdGroups: many(groups, { relationName: "groupCreator" }),
   createdGroupInvites: many(groupInvites, { relationName: "groupInviteCreator" }),
+  moderationActionsReceived: many(moderationActions, { relationName: "moderationTarget" }),
+  moderationActionsTaken: many(moderationActions, { relationName: "moderationActor" }),
 }));
 
 // ============================================================================
@@ -509,6 +525,62 @@ export const groupInvitesRelations = relations(groupInvites, ({ one }) => ({
 }));
 
 // ============================================================================
+// MODERATION
+// ============================================================================
+export const MODERATION_ACTION_TYPES = ["hide", "unhide"] as const;
+export type ModerationAction = (typeof MODERATION_ACTION_TYPES)[number];
+
+/**
+ * Append-only log of every leaderboard hide/unhide.
+ *
+ * `users.leaderboard_hidden` is current state; this is the record of how it got
+ * there. Rows are never updated or deleted, so a sequence of hide → unhide →
+ * hide stays fully reconstructible — which is the point of preferring a
+ * reversible flag over deleting an account.
+ */
+export const moderationActions = pgTable(
+  "moderation_actions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    targetUserId: uuid("target_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** The moderator. Retained even if the target is later removed. */
+    actorUserId: uuid("actor_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    action: varchar("action", { length: 10 }).notNull().$type<ModerationAction>(),
+    /** Free-text justification, required at the API layer. */
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Serves the per-user history panel on the review screen.
+    index("idx_moderation_actions_target_created").on(
+      table.targetUserId,
+      table.createdAt
+    ),
+    // FK coverage: cascade-delete of an actor does a seq scan without this.
+    index("idx_moderation_actions_actor").on(table.actorUserId),
+  ]
+);
+
+export const moderationActionsRelations = relations(moderationActions, ({ one }) => ({
+  targetUser: one(users, {
+    fields: [moderationActions.targetUserId],
+    references: [users.id],
+    relationName: "moderationTarget",
+  }),
+  actorUser: one(users, {
+    fields: [moderationActions.actorUserId],
+    references: [users.id],
+    relationName: "moderationActor",
+  }),
+}));
+
+// ============================================================================
 // TYPE EXPORTS
 // ============================================================================
 export type User = typeof users.$inferSelect;
@@ -531,3 +603,5 @@ export type GroupMember = typeof groupMembers.$inferSelect;
 export type NewGroupMember = typeof groupMembers.$inferInsert;
 export type GroupInvite = typeof groupInvites.$inferSelect;
 export type NewGroupInvite = typeof groupInvites.$inferInsert;
+export type ModerationActionRow = typeof moderationActions.$inferSelect;
+export type NewModerationActionRow = typeof moderationActions.$inferInsert;

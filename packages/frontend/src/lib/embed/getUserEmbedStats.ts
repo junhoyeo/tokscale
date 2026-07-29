@@ -73,8 +73,17 @@ async function fetchUserEmbedStats(
       : Number(result.totalTokens) || 0;
 
   if (rankingValue > 0) {
+    // Both the rank and the "of N" denominator count rankable users only, so a
+    // hidden account neither holds a position nor inflates the total. A hidden
+    // user is absent from the CTE, so this returns no row and rank stays null.
     const rankResult = await db.execute<{ rank: number; total: number }>(sql`
-      WITH ranked AS (
+      WITH rankable AS (
+        SELECT s.*
+        FROM submissions s
+        JOIN users u ON u.id = s.user_id
+        WHERE u.leaderboard_hidden = false
+      ),
+      ranked AS (
         SELECT
           user_id,
           RANK() OVER (
@@ -85,9 +94,9 @@ async function fetchUserEmbedStats(
                   : sql`total_tokens DESC`
               }
           ) AS rank
-        FROM submissions
+        FROM rankable
       )
-      SELECT rank, (SELECT COUNT(*)::int FROM submissions) AS total
+      SELECT rank, (SELECT COUNT(*)::int FROM rankable) AS total
       FROM ranked WHERE user_id = ${result.id}
     `);
 

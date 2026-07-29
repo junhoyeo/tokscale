@@ -225,13 +225,19 @@ export async function getPublicProfileResponse(
           .orderBy(desc(submissions.updatedAt))
           .limit(1),
 
+        // Ranks over rankable users only. A hidden user is absent from the CTE
+        // entirely, so this returns no row and the profile reports rank null —
+        // which is the intent: hiding withdraws someone from the standings, so
+        // there is no position left to display.
         db.execute<{ rank: number }>(sql`
         WITH user_totals AS (
           SELECT
-            user_id,
-            SUM(total_tokens) as total_tokens
-          FROM submissions
-          GROUP BY user_id
+            s.user_id,
+            SUM(s.total_tokens) as total_tokens
+          FROM submissions s
+          JOIN users u ON u.id = s.user_id
+          WHERE u.leaderboard_hidden = false
+          GROUP BY s.user_id
         ),
         ranked AS (
           SELECT

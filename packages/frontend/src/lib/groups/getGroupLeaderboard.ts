@@ -244,7 +244,15 @@ async function fetchPeriodRows(
         eq(groupMembers.groupId, groupId)
       )
     )
-    .where(and(gte(dailyBreakdown.date, dateRange.start), lte(dailyBreakdown.date, dateRange.end)));
+    // A group board is still a ranking, so a site-wide hide applies here too —
+    // otherwise a hidden account keeps topping every group it belongs to.
+    .where(
+      and(
+        eq(users.leaderboardHidden, false),
+        gte(dailyBreakdown.date, dateRange.start),
+        lte(dailyBreakdown.date, dateRange.end)
+      )
+    );
 
   return rows.map((row) => ({
     userId: row.userId,
@@ -298,7 +306,7 @@ async function fetchAllTimeRows(groupId: string, sortBy: SortBy, search: string 
         eq(groupMembers.groupId, groupId)
       )
     )
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .where(and(eq(users.leaderboardHidden, false), ...conditions))
     .groupBy(users.id, users.username, users.displayName, users.avatarUrl, groupMembers.role)
     .orderBy(
       desc(primaryOrderByColumn),

@@ -141,6 +141,13 @@
       "when": 1784927483081,
       "tag": "0019_add_device_session_metrics",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1785341011049,
+      "tag": "0020_mighty_whiplash",
+      "breakpoints": true
     }
   ]
 }

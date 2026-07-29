@@ -202,6 +202,84 @@ describe("period leaderboard data", () => {
     },
   ];
 
+  it("drops hidden users from the rankings but keeps them in the totals", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
+    // carol outranks everyone on raw tokens but is hidden.
+    mockState.setPeriodRows([
+      ...rows,
+      {
+        userId: "user-carol",
+        username: "carol",
+        displayName: "Carol",
+        avatarUrl: null,
+        tokens: 9_000_000,
+        cost: 500,
+        leaderboardHidden: true,
+      },
+    ]);
+
+    const leaderboard = await getLeaderboardData("week", 1, 50, "tokens");
+
+    expect(leaderboard.users.map((user) => user.username)).toEqual(["bob", "alice"]);
+
+    // Dense ranks: bob takes 1st rather than 2nd. Leaving carol's position
+    // vacant would advertise that someone was removed.
+    expect(leaderboard.users.map((user) => user.rank)).toEqual([1, 2]);
+
+    // ...but the totals still count carol. Hiding withdraws an account from
+    // the competition; it does not retract the usage from the site figures.
+    expect(leaderboard.stats.totalTokens).toBe(9_001_250);
+    expect(leaderboard.stats.uniqueUsers).toBe(3);
+
+    // Pagination must track the rankable set, not the totals, or a trailing
+    // page renders empty.
+    expect(leaderboard.pagination.totalUsers).toBe(2);
+  });
+
+  it("reports no rank for a hidden user rather than a phantom position", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
+    mockState.setPeriodRows([
+      ...rows,
+      {
+        userId: "user-carol",
+        username: "carol",
+        displayName: "Carol",
+        avatarUrl: null,
+        tokens: 9_000_000,
+        cost: 500,
+        leaderboardHidden: true,
+      },
+    ]);
+
+    // A rank would not correspond to any row on the board she is absent from.
+    await expect(getUserRank("carol", "week", "tokens")).resolves.toBeNull();
+  });
+
+  it("does not let a hidden user above you inflate your own rank", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
+    mockState.setPeriodRows([
+      ...rows,
+      {
+        userId: "user-carol",
+        username: "carol",
+        displayName: "Carol",
+        avatarUrl: null,
+        tokens: 9_000_000,
+        cost: 500,
+        leaderboardHidden: true,
+      },
+    ]);
+
+    // bob is 2nd by raw tokens but 1st among rankable users.
+    await expect(getUserRank("bob", "week", "tokens")).resolves.toMatchObject({
+      username: "bob",
+      rank: 1,
+    });
+  });
+
   it("builds the week leaderboard from daily rows", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-07T18:45:00Z"));
@@ -253,6 +331,10 @@ describe("period leaderboard data", () => {
       "tokens",
       "cost",
       "sourceBreakdown",
+      // Selected, not filtered in SQL: the period totals are summed from these
+      // same rows and must still include hidden users, so the exclusion is
+      // applied after aggregation rather than in the WHERE clause.
+      "leaderboardHidden",
     ]);
   });
 
@@ -370,7 +452,10 @@ describe("all-time leaderboard directives", () => {
 
     expect(mockState.or).toHaveBeenCalledTimes(2);
     expect(mockState.or.mock.calls.map((call) => call.length)).toEqual([2, 1]);
+    // The rankable-user predicate is ANDed ahead of the directive groups, so
+    // a search can never surface a hidden user.
     expect(mockState.and).toHaveBeenCalledWith(
+      expect.anything(),
       mockState.or.mock.results[0]?.value,
       mockState.or.mock.results[1]?.value
     );
