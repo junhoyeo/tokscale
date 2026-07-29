@@ -651,6 +651,20 @@ def test_convert_usage_history_row_missing_cost_paid_model():
     assert "cost" not in result["entry"]["message"]["usage"]
 
 
+def test_convert_usage_history_row_malformed_cost():
+    """Non-numeric cost values are normalized to None and follow
+    the missing-cost policy: free models get $0.00, paid omit."""
+    row = make_usage_history_row(cost="corrupted")
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert "cost" not in result["entry"]["message"]["usage"]
+
+    row = make_usage_history_row(model="kimi-k2.5-free", cost="corrupted")
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert result["entry"]["message"]["usage"]["cost"] == {"total": 0.0}
+
+
 # ---- convert_usage_history_row: timestamp handling -------------------------
 
 

@@ -292,9 +292,17 @@ def convert_usage_history_row(row, stats: dict | None = None) -> dict | None:
     }
 
     # usageHistory has a dedicated `cost` REAL column.
+    # Normalize non-numeric values to None so they follow the
+    # missing-cost policy (free → $0.00, paid → omit).
     cost = row["cost"]
+    if cost is not None:
+        try:
+            cost = float(cost)
+        except (ValueError, TypeError):
+            cost = None
+
     if cost is not None and cost > 0.0:
-        msg["usage"]["cost"] = {"total": float(cost)}
+        msg["usage"]["cost"] = {"total": cost}
     elif is_free_model(model):
         msg["usage"]["cost"] = {"total": 0.0}
     # Paid models with zero/missing cost omit cost (let tokscale reprice)
