@@ -14,7 +14,6 @@ impl TerminalColorMode {
         V: AsRef<str>,
     {
         let mut term = String::new();
-        let mut term_program = String::new();
         let mut colorterm = String::new();
         let mut no_color = false;
 
@@ -23,14 +22,19 @@ impl TerminalColorMode {
             let value = value.as_ref();
             match key {
                 "TERM" => term = value.to_ascii_lowercase(),
-                "TERM_PROGRAM" => term_program = value.to_ascii_lowercase(),
                 "COLORTERM" => colorterm = value.to_ascii_lowercase(),
                 "NO_COLOR" => no_color = true,
                 _ => {}
             }
         }
 
-        if no_color || term == "dumb" || term_program == "apple_terminal" {
+        // `TERM_PROGRAM == "Apple_Terminal"` used to land here too. Terminal.app
+        // does render 24-bit SGR colors (verified: `ESC[38;2;255;80;0m` paints
+        // its own orange, distinct from indexed 208), and it never sets
+        // COLORTERM, so blacklisting it dropped Terminal.app to `Compatible`,
+        // which overwrites every theme with one palette and made theme
+        // switching a no-op there. Re-test before reinstating it.
+        if no_color || term == "dumb" {
             return Self::Compatible;
         }
 
@@ -540,13 +544,20 @@ mod tests {
     }
 
     #[test]
-    fn apple_terminal_uses_compatible_color_mode() {
+    fn apple_terminal_keeps_full_color_and_per_theme_palettes() {
         let mode = TerminalColorMode::from_env(env(&[
             ("TERM_PROGRAM", "Apple_Terminal"),
             ("TERM", "xterm-256color"),
         ]));
 
-        assert_eq!(mode, TerminalColorMode::Compatible);
+        assert_eq!(mode, TerminalColorMode::FullColor);
+
+        // The regression this guards: in `Compatible` mode every theme collapses
+        // onto one grey/cyan palette, so cycling themes changed the footer label
+        // and nothing else.
+        let green = Theme::from_name_with_color_mode(ThemeName::Green, mode);
+        let blue = Theme::from_name_with_color_mode(ThemeName::Blue, mode);
+        assert_ne!(green.colors, blue.colors);
     }
 
     #[test]
