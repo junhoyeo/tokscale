@@ -3458,6 +3458,7 @@ dependencies = [
  "reqwest",
  "resvg",
  "rpassword",
+ "rusqlite",
  "serde",
  "serde_json",
  "serial_test",
@@ -3469,6 +3470,8 @@ dependencies = [
  "toml",
  "tracing-subscriber",
  "unicode-normalization",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
  "usvg",
  "uuid",
 ]

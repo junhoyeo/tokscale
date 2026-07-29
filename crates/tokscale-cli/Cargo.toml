@@ -49,11 +49,16 @@ rpassword = "7.0"
 sha2 = "0.10"
 csv = "1.3"
 unicode-normalization = "0.1"
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 # Trae iCubeAuthInfo decryption (Electron globalStorage)
 aes = { workspace = true }
 cbc = { workspace = true }
 base64 = { workspace = true }
+
+# Cursor desktop state.vscdb accessToken import
+rusqlite = { workspace = true }
 
 # arboard has no Android backend and fails to compile for
 # aarch64-linux-android. The clipboard module in tui/ provides a

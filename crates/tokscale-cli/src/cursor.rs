@@ -257,6 +257,193 @@ fn extract_user_id_from_session_token(token: &str) -> Option<String> {
     None
 }
 
+/// Candidate paths for Cursor desktop `state.vscdb` (VS Code globalStorage).
+///
+/// Mirrors the layout used by Cursor Usage Agent on Windows, plus the standard
+/// Electron/Chromium config dirs on Linux and macOS.
+pub fn cursor_state_vscdb_candidates(home_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        paths.push(
+            home_dir.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            paths.push(
+                PathBuf::from(appdata)
+                    .join("Cursor")
+                    .join("User/globalStorage/state.vscdb"),
+            );
+        }
+        paths.push(home_dir.join("AppData/Roaming/Cursor/User/globalStorage/state.vscdb"));
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        paths.push(home_dir.join(".config/Cursor/User/globalStorage/state.vscdb"));
+    }
+
+    paths
+}
+
+fn find_cursor_state_vscdb(home_dir: &Path) -> Option<PathBuf> {
+    cursor_state_vscdb_candidates(home_dir)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+/// Read `cursorAuth/accessToken` from a Cursor `state.vscdb` SQLite DB.
+pub fn read_access_token_from_state_vscdb(db_path: &Path) -> Result<String> {
+    use rusqlite::{Connection, OpenFlags};
+
+    // Prefer URI read-only so a running Cursor IDE holding a write lock does
+    // not block us (WAL readers are allowed while the app is open).
+    let uri = format!("file:{}?mode=ro", db_path.display());
+    let conn = Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .with_context(|| format!("Failed to open Cursor state DB at {}", db_path.display()))?;
+
+    let token: String = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+            [],
+            |row| row.get(0),
+        )
+        .context("cursorAuth/accessToken not found in Cursor state DB (is Cursor logged in?)")?;
+
+    if token.trim().is_empty() {
+        anyhow::bail!("cursorAuth/accessToken is empty");
+    }
+    Ok(token)
+}
+
+/// Extract the Cursor `user_…` id from a JWT `sub` claim (e.g. `auth0|user_abc`).
+fn user_id_from_access_token_jwt(access_token: &str) -> Result<String> {
+    use base64::Engine;
+
+    let payload_b64 = access_token
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("Invalid Cursor access token JWT"))?;
+    let padded = match payload_b64.len() % 4 {
+        2 => format!("{}==", payload_b64),
+        3 => format!("{}=", payload_b64),
+        _ => payload_b64.to_string(),
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE
+        .decode(padded.as_bytes())
+        .or_else(|_| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64.as_bytes())
+        })
+        .context("Failed to decode Cursor access token JWT payload")?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&bytes).context("Failed to parse Cursor access token JWT")?;
+    let sub = payload
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Cursor access token JWT missing sub claim"))?;
+
+    if let Some(idx) = sub.find("user_") {
+        let rest = &sub[idx..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        let user_id = &rest[..end];
+        if user_id.len() > "user_".len() {
+            return Ok(user_id.to_string());
+        }
+    }
+
+    anyhow::bail!("Cannot parse Cursor user id from JWT sub: {sub}");
+}
+
+/// Build the `WorkosCursorSessionToken` cookie value from a desktop access token.
+///
+/// Format matches browser cookies and Cursor Usage Agent:
+/// `{user_id}%3A%3A{access_token}` (`%3A%3A` is URL-encoded `::`).
+pub fn session_token_from_access_token(access_token: &str) -> Result<String> {
+    let user_id = user_id_from_access_token_jwt(access_token)?;
+    Ok(format!("{user_id}%3A%3A{access_token}"))
+}
+
+/// Read the local Cursor desktop login and build a session token cookie value.
+pub fn read_local_cursor_session_token() -> Result<String> {
+    let home = home_dir()?;
+    let db_path = find_cursor_state_vscdb(&home).ok_or_else(|| {
+        anyhow::anyhow!("Cursor desktop state.vscdb not found (install Cursor and sign in first)")
+    })?;
+    let access_token = read_access_token_from_state_vscdb(&db_path)?;
+    session_token_from_access_token(&access_token)
+}
+
+/// Save credentials while preserving an existing account label / created_at when
+/// the caller does not supply a new label (used by local desktop refresh).
+fn upsert_credentials(token: &str, label: Option<&str>) -> Result<String> {
+    let account_id = derive_account_id(token);
+    let user_id = extract_user_id_from_session_token(token);
+
+    let mut store = load_credentials_store().unwrap_or_else(|| CursorCredentialsStore {
+        version: 1,
+        active_account_id: account_id.clone(),
+        accounts: HashMap::new(),
+    });
+
+    if let Some(lbl) = label {
+        let needle = lbl.trim().to_lowercase();
+        if !needle.is_empty() {
+            for (id, acct) in &store.accounts {
+                if id == &account_id {
+                    continue;
+                }
+                if let Some(existing_label) = &acct.label {
+                    if existing_label.trim().to_lowercase() == needle {
+                        anyhow::bail!("Cursor account label already exists: {}", lbl);
+                    }
+                }
+            }
+        }
+    }
+
+    let existing = store.accounts.get(&account_id);
+    let created_at = existing
+        .map(|c| c.created_at.clone())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let resolved_label = label
+        .map(|s| s.to_string())
+        .or_else(|| existing.and_then(|c| c.label.clone()));
+
+    let credentials = CursorCredentials {
+        session_token: token.to_string(),
+        user_id,
+        created_at,
+        expires_at: None,
+        label: resolved_label,
+    };
+
+    store.accounts.insert(account_id.clone(), credentials);
+    store.active_account_id = account_id.clone();
+    save_credentials_store(&store)?;
+    Ok(account_id)
+}
+
+/// Best-effort: refresh saved Cursor credentials from the desktop `state.vscdb`.
+///
+/// Used before sync so tokscale picks up tokens refreshed by the Cursor app
+/// without requiring a manual cookie paste.
+fn ensure_credentials_from_local_cursor() -> Result<Option<String>> {
+    match read_local_cursor_session_token() {
+        Ok(token) => Ok(Some(upsert_credentials(&token, None)?)),
+        Err(_) => Ok(None),
+    }
+}
+
 fn derive_account_id(session_token: &str) -> String {
     if let Some(user_id) = extract_user_id_from_session_token(session_token) {
         return user_id;
@@ -441,45 +628,7 @@ pub fn find_account(name_or_id: &str) -> Option<AccountInfo> {
 }
 
 pub fn save_credentials(token: &str, label: Option<&str>) -> Result<String> {
-    let account_id = derive_account_id(token);
-    let user_id = extract_user_id_from_session_token(token);
-
-    let mut store = load_credentials_store().unwrap_or_else(|| CursorCredentialsStore {
-        version: 1,
-        active_account_id: account_id.clone(),
-        accounts: HashMap::new(),
-    });
-
-    if let Some(lbl) = label {
-        let needle = lbl.trim().to_lowercase();
-        if !needle.is_empty() {
-            for (id, acct) in &store.accounts {
-                if id == &account_id {
-                    continue;
-                }
-                if let Some(existing_label) = &acct.label {
-                    if existing_label.trim().to_lowercase() == needle {
-                        anyhow::bail!("Cursor account label already exists: {}", lbl);
-                    }
-                }
-            }
-        }
-    }
-
-    let credentials = CursorCredentials {
-        session_token: token.to_string(),
-        user_id,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        expires_at: None,
-        label: label.map(|s| s.to_string()),
-    };
-
-    store.accounts.insert(account_id.clone(), credentials);
-    store.active_account_id = account_id.clone();
-
-    save_credentials_store(&store)?;
-
-    Ok(account_id)
+    upsert_credentials(token, label)
 }
 
 pub fn remove_account(name_or_id: &str, purge_cache: bool) -> Result<()> {
@@ -1030,6 +1179,10 @@ where
 }
 
 pub async fn sync_cursor_cache() -> SyncCursorResult {
+    // Prefer a fresh token from the local Cursor desktop login when available.
+    // This avoids stale manually-pasted cookies after Cursor refreshes its JWT.
+    let _ = ensure_credentials_from_local_cursor();
+
     sync_cursor_cache_with_fetcher(|session_token| async move {
         fetch_cursor_usage_csv(&session_token).await
     })
@@ -1078,15 +1231,39 @@ pub fn run_cursor_login(name: Option<String>) -> Result<()> {
         }
     }
 
-    print!("  Enter Cursor WorkosCursorSessionToken value: ");
-    std::io::stdout().flush()?;
-    let token = rpassword::read_password().context("Failed to read session token")?;
-    let token = token.trim().to_string();
-
-    if token.is_empty() {
-        println!("\n  {}\n", "No token provided.".yellow());
-        return Ok(());
-    }
+    // Prefer the local Cursor desktop accessToken (state.vscdb) when present.
+    println!(
+        "{}",
+        "  Checking local Cursor desktop login...".bright_black()
+    );
+    let token = match read_local_cursor_session_token() {
+        Ok(token) => {
+            if let Some(user_id) = extract_user_id_from_session_token(&token) {
+                println!(
+                    "{}",
+                    format!("  Found local Cursor session ({user_id}).").bright_black()
+                );
+            } else {
+                println!("{}", "  Found local Cursor session.".bright_black());
+            }
+            token
+        }
+        Err(local_err) => {
+            println!(
+                "{}",
+                format!("  Local desktop login unavailable: {local_err}").bright_black()
+            );
+            print!("  Enter Cursor WorkosCursorSessionToken value: ");
+            std::io::stdout().flush()?;
+            let pasted = rpassword::read_password().context("Failed to read session token")?;
+            let pasted = pasted.trim().to_string();
+            if pasted.is_empty() {
+                println!("\n  {}\n", "No token provided.".yellow());
+                return Ok(());
+            }
+            pasted
+        }
+    };
 
     println!();
     println!("{}", "  Validating session token...".bright_black());
@@ -1350,6 +1527,48 @@ mod tests {
         assert_eq!(extract_user_id_from_session_token(""), None);
         // Whitespace only
         assert_eq!(extract_user_id_from_session_token("   "), None);
+    }
+
+    fn make_access_token_jwt(sub: &str) -> String {
+        use base64::Engine;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(format!(r#"{{"sub":"{sub}"}}"#).as_bytes());
+        format!("{header}.{payload}.sig")
+    }
+
+    #[test]
+    fn test_session_token_from_access_token_builds_cookie_value() {
+        let access = make_access_token_jwt("auth0|user_01ABCXYZ");
+        let session = session_token_from_access_token(&access).unwrap();
+        assert_eq!(session, format!("user_01ABCXYZ%3A%3A{access}"));
+        assert_eq!(
+            extract_user_id_from_session_token(&session),
+            Some("user_01ABCXYZ".to_string())
+        );
+    }
+
+    #[test]
+    fn test_read_access_token_from_state_vscdb() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let db_path = temp_dir.path().join("state.vscdb");
+        let access = make_access_token_jwt("auth0|user_LOCAL123");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            conn.execute(
+                "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                rusqlite::params!["cursorAuth/accessToken", access],
+            )?;
+        }
+
+        let read = read_access_token_from_state_vscdb(&db_path)?;
+        assert_eq!(read, access);
+        Ok(())
     }
 
     #[test]

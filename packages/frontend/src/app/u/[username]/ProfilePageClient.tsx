@@ -29,6 +29,7 @@ import {
 } from "@/components/profile";
 import type { DailyContribution } from "@/lib/types";
 import { useSettings } from "@/lib/useSettings";
+import { resolveEffectiveTimeZone } from "@/lib/timezone";
 
 type ProfilePeriod = "all" | "week" | "month";
 
@@ -72,6 +73,11 @@ export interface ProfileData {
   period?: ProfilePeriod;
 }
 
+// Both branches already end on or after the newest submitted date: the server
+// anchors every window to it, so `chartRange.end` and the period `apiRange.end`
+// it also fills are both that anchor. Nothing here may depend on the viewer's
+// clock — contribution dates are calendar buckets the submitting machine
+// already resolved.
 function getProfileChartRange(
   period: ProfilePeriod,
   apiRange: ProfileData["dateRange"],
@@ -99,10 +105,18 @@ export default function ProfilePageClient({
   const {
     paletteName: contributionPalette,
     setPalette: setContributionPalette,
+    timezone: timezonePreference,
+    mounted,
   } = useSettings();
   const contributionBreakdownId = useId();
   const data = initialData;
   const period = data.period ?? "all";
+  // Absolute instants ("Updated", "Joined") render in the viewer's display
+  // timezone; calendar-day buckets never do — see resolveEffectiveTimeZone.
+  // UTC before mount so the first client render matches the server markup.
+  const effectiveTimeZone = mounted
+    ? resolveEffectiveTimeZone(timezonePreference)
+    : "UTC";
   const rollingChartRange = useMemo(
     () => getProfileChartRange(period, data.dateRange, data.chartRange),
     [period, data.chartRange, data.dateRange],
@@ -236,6 +250,7 @@ export default function ProfilePageClient({
             stats={stats}
             lastUpdated={data.updatedAt ?? undefined}
             period={period}
+            timeZone={effectiveTimeZone}
           />
 
           {data.hasBackfill && (

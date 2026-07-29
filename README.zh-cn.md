@@ -64,7 +64,7 @@
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` 和 `$HERMES_HOME/profiles/*/state.db`（回退：`~/.hermes/...`） |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json`（回退：`~/.gemini/tmp/*/chats/*.json`） |
-| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 导出缓存于 `~/.config/tokscale/cursor-cache/usage*.csv`（而非 `~/.cursor`） |
+| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API 导出缓存于 `~/.config/tokscale/cursor-cache/usage*.csv`（桌面端自动登录或粘贴 cookie；而非 `~/.cursor`） |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/`（+ `manicode-dev`、`manicode-staging`；可通过 `CODEBUFF_DATA_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
@@ -550,10 +550,27 @@ tokscale autosubmit disable
 
 ### Cursor IDE 命令
 
-Cursor IDE 需要通过会话令牌进行单独认证（与社交平台登录不同）：
+Cursor IDE 通过 Cursor 的网页用量导出 API 获取数据，并缓存在 `~/.config/tokscale/cursor-cache/usage*.csv`。Tokscale **不会**解析 `~/.cursor` 下的 Cursor Agent CLI 本地会话，也不会把桌面端 SQLite 当作用量账本。
+
+若本机已安装并登录 Cursor 桌面端，`tokscale cursor login` 会优先从 Cursor 的 `state.vscdb` 读取 `cursorAuth/accessToken` 并自动构造会话 cookie；`tokscale cursor sync` 在可用时也会刷新该 token。用量数据仍只来自 Cursor 的 usage-export API。
+
+设置（桌面端自动登录）：
+
+1. 登录 Cursor 桌面端。
+2. 运行 `tokscale cursor login --name work`（有本地桌面会话时会自动检测）。
+3. 运行 `tokscale cursor sync --json`，填充 `~/.config/tokscale/cursor-cache/usage.csv`。
+4. 运行 `tokscale --client cursor` 或任意报告命令。
+
+回退（手动粘贴浏览器 cookie）：桌面端不可用时：
+
+1. 在浏览器中打开 https://www.cursor.com/settings
+2. 打开开发者工具（F12）
+3. **选项 A - Network 标签**：在页面上执行任何操作，找到对 `cursor.com/api/*` 的请求，在 Request Headers 中查看 `Cookie` 头，仅复制 `WorkosCursorSessionToken=` 后面的值
+4. **选项 B - Application 标签**：转到 Application → Cookies → `https://www.cursor.com`，找到 `WorkosCursorSessionToken` cookie，复制其值（不是 cookie 名称）
+5. 运行 `tokscale cursor login --name work`，在提示时粘贴令牌，然后继续 `tokscale cursor sync --json`
 
 ```bash
-# 登录 Cursor（需要从浏览器获取会话令牌）
+# 登录 Cursor（优先自动检测桌面端登录；失败再粘贴浏览器 cookie）
 # --name 是可选的，用于之后区分账户的标签
 tokscale cursor login --name work
 
@@ -562,6 +579,9 @@ tokscale cursor status
 
 # 列出已保存的 Cursor 账户
 tokscale cursor accounts
+
+# 手动刷新缓存的 Cursor 使用量
+tokscale cursor sync --json
 
 # 切换活动账户（同步到 cursor-cache/usage.csv 的账户）
 tokscale cursor switch work
@@ -584,12 +604,6 @@ tokscale cursor logout --all --purge-cache
 默认情况下，tokscale 会 **合并统计所有已保存 Cursor 账户的使用量**（`cursor-cache/usage*.csv`）。为保持兼容性，活动账户会同步到 `cursor-cache/usage.csv`。
 
 登出时，tokscale 会将缓存的历史记录移动到 `cursor-cache/archive/`（因此不会参与合并统计）。如需彻底删除缓存，请使用 `--purge-cache`。
-
-**获取 Cursor 会话令牌的方法：**
-1. 在浏览器中打开 https://www.cursor.com/settings
-2. 打开开发者工具（F12）
-3. **选项 A - Network 标签**：在页面上执行任何操作，找到对 `cursor.com/api/*` 的请求，在 Request Headers 中查看 `Cookie` 头，仅复制 `WorkosCursorSessionToken=` 后面的值
-4. **选项 B - Application 标签**：转到 Application → Cookies → `https://www.cursor.com`，找到 `WorkosCursorSessionToken` cookie，复制其值（不是 cookie 名称）
 
 > ⚠️ **安全警告**：像对待密码一样对待您的会话令牌。切勿公开分享或提交到版本控制。该令牌授予对您 Cursor 账户的完全访问权限。
 
@@ -1298,7 +1312,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | 可通过 `HERMES_HOME` 环境变量配置（[源码](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)） |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | 可通过 `GEMINI_CLI_HOME` 环境变量配置 |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | 与 OpenCode 一样使用 `xdg-basedir` |
-| Cursor | API 同步 | API 同步 | 通过 API 获取数据，缓存在 `%USERPROFILE%\.config\tokscale\cursor-cache\` |
+| Cursor | API 同步 | API 同步 | 通过 API 获取并缓存为 `usage*.csv`；桌面端自动登录仅读取 `state.vscdb` 认证；不解析本地 `~/.cursor` 会话数据 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 所有平台使用相同路径 |
 | Pi | `~/.pi/` and `~/.omp/` | `%USERPROFILE%\.pi\` and `%USERPROFILE%\.omp\` | 所有平台使用相同路径（支持 Pi 和 [Oh My Pi](https://github.com/can1357/oh-my-pi)） |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | 所有平台使用相同路径 |
@@ -1547,7 +1561,7 @@ Tokscale 将 `chat` span 作为 Token 统计的真实来源，并在第一阶段
 
 位置：`~/.config/tokscale/cursor-cache/usage*.csv`（通过 Cursor API 同步）
 
-Cursor 数据使用您的会话令牌从 Cursor API 获取并本地缓存。Tokscale 读取这些缓存文件来生成报告；它不会解析本地的 `~/.cursor` 会话数据。设置说明请参阅 [Cursor IDE 命令](#cursor-ide-命令)。
+Cursor 数据使用会话令牌从 Cursor API 获取并本地缓存。认证可从 Cursor 桌面端 `state.vscdb`（仅 `cursorAuth/accessToken`）导入，或粘贴浏览器 cookie。Tokscale 读取 API 缓存文件生成报告；不会解析本地 `~/.cursor` 会话数据或桌面端用量表。设置说明请参阅 [Cursor IDE 命令](#cursor-ide-命令)。
 
 ### Antigravity
 

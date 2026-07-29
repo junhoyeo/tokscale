@@ -386,7 +386,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum CursorSubcommand {
-    #[command(about = "Login to Cursor with a browser session token")]
+    #[command(about = "Login to Cursor (auto-detect desktop session, or paste browser token)")]
     Login {
         #[arg(long, help = "Label for this Cursor account (e.g., work, personal)")]
         name: Option<String>,
@@ -1353,7 +1353,7 @@ fn cursor_setup_warnings_for_report(
 
     let Some(state) = cursor_setup_state(home_dir) else {
         return vec![
-            "Cursor usage requires Tokscale's Cursor API cache, but the home directory could not be resolved. Run `tokscale cursor login` and `tokscale cursor sync --json`. Tokscale does not parse local `~/.cursor` session data.".to_string(),
+            "Cursor usage requires Tokscale's Cursor API cache, but the home directory could not be resolved. Run `tokscale cursor login` (auto-detects Cursor desktop when signed in) and `tokscale cursor sync --json`. Tokscale does not parse local `~/.cursor` session data.".to_string(),
         ];
     };
     if state.has_cache {
@@ -1361,11 +1361,11 @@ fn cursor_setup_warnings_for_report(
     }
 
     let action = if state.home_override {
-        "run `tokscale cursor login` and `tokscale cursor sync --json`, or populate that cache before running a report with --home"
+        "run `tokscale cursor login` (auto-detects Cursor desktop when signed in) and `tokscale cursor sync --json`, or populate that cache before running a report with --home"
     } else if state.has_credentials {
         "run `tokscale cursor sync --json`"
     } else {
-        "run `tokscale cursor login` and `tokscale cursor sync --json`"
+        "run `tokscale cursor login` (auto-detects Cursor desktop when signed in) and `tokscale cursor sync --json`"
     };
 
     vec![format!(
