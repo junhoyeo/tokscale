@@ -34,3 +34,10 @@ self-host/
 .next/
 .vercel
 .env*.local
+
+# Ephemeral git worktrees created by Claude Code. These are real checkouts
+# containing their own .git file, so `git add -A` from the repo root stages
+# them as embedded-repository gitlinks rather than ignoring them. Only the
+# worktrees are ignored, not all of .claude/ -- project-level agent config
+# there is worth committing deliberately.
+.claude/worktrees/
