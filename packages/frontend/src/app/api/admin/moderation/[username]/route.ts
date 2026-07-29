@@ -77,6 +77,7 @@ export async function POST(request: Request, { params }: RouteParams) {
     const result = await applyModerationAction({
       target,
       actorUserId: auth.session.id,
+      actorUsername: auth.session.username,
       action: parsed.data.action,
       reason: parsed.data.reason,
     });

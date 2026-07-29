@@ -148,6 +148,13 @@
       "when": 1785341011049,
       "tag": "0020_mighty_whiplash",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785356630413,
+      "tag": "0021_lethal_killraven",
+      "breakpoints": true
     }
   ]
 }

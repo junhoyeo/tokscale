@@ -17,7 +17,7 @@ export const metadata: Metadata = {
  * notFound() rather than a 403 — a forbidden response confirms the page exists.
  */
 export default async function ModerationPage() {
-  const session = await getSession().catch(() => null);
+  const session = await getSession();
 
   if (!isAdmin(session)) {
     notFound();

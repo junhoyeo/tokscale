@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { isAdmin, resolveAdminGithubIds } from "@/lib/auth/admin";
 import type { SessionUser } from "@/lib/auth/session";
 
-const JUNHOYEO_GITHUB_ID = 32605822;
-
 function session(overrides: Partial<SessionUser> = {}): SessionUser {
   return {
     id: "user-1",
@@ -21,8 +19,8 @@ afterEach(() => {
 });
 
 describe("resolveAdminGithubIds", () => {
-  it("defaults to the maintainer when the env var is unset", () => {
-    expect(resolveAdminGithubIds(undefined)).toEqual([JUNHOYEO_GITHUB_ID]);
+  it("grants nobody access when the env var is unset", () => {
+    expect(resolveAdminGithubIds(undefined)).toEqual([]);
   });
 
   it("parses a comma-separated list, tolerating whitespace", () => {
@@ -57,16 +55,23 @@ describe("resolveAdminGithubIds", () => {
     expect(resolveAdminGithubIds("9007199254740993")).toEqual([]);
   });
 
-  it("does not fall back to the default on malformed input", () => {
+  it("does not grant an arbitrary fallback on malformed input", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
 
-    expect(resolveAdminGithubIds("nonsense")).not.toContain(JUNHOYEO_GITHUB_ID);
+    expect(resolveAdminGithubIds("nonsense")).toEqual([]);
   });
 });
 
 describe("isAdmin", () => {
-  it("accepts the maintainer's GitHub id", () => {
-    expect(isAdmin(session({ githubId: JUNHOYEO_GITHUB_ID }))).toBe(true);
+  it("accepts an explicitly configured GitHub id", () => {
+    const env = process.env.TOKSCALE_ADMIN_GITHUB_IDS;
+    process.env.TOKSCALE_ADMIN_GITHUB_IDS = "32605822";
+    expect(isAdmin(session({ githubId: 32605822 }))).toBe(true);
+    if (env === undefined) {
+      delete process.env.TOKSCALE_ADMIN_GITHUB_IDS;
+    } else {
+      process.env.TOKSCALE_ADMIN_GITHUB_IDS = env;
+    }
   });
 
   it("rejects a different GitHub id", () => {

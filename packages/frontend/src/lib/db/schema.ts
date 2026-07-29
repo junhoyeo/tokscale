@@ -542,13 +542,17 @@ export const moderationActions = pgTable(
   "moderation_actions",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    targetUserId: uuid("target_user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    /** The moderator. Retained even if the target is later removed. */
-    actorUserId: uuid("actor_user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+    // User accounts are deletable, while this record is intentionally not.
+    // The immutable names preserve a useful audit trail after either account
+    // has gone away; nullable FKs retain relational lookup while present.
+    targetUserId: uuid("target_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    targetUsername: varchar("target_username", { length: 39 }).notNull(),
+    actorUserId: uuid("actor_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    actorUsername: varchar("actor_username", { length: 39 }).notNull(),
     action: varchar("action", { length: 10 }).notNull().$type<ModerationAction>(),
     /** Free-text justification, required at the API layer. */
     reason: text("reason").notNull(),
@@ -562,7 +566,7 @@ export const moderationActions = pgTable(
       table.targetUserId,
       table.createdAt
     ),
-    // FK coverage: cascade-delete of an actor does a seq scan without this.
+    // FK coverage: nulling a deleted actor does a seq scan without this.
     index("idx_moderation_actions_actor").on(table.actorUserId),
   ]
 );

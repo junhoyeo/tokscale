@@ -25,23 +25,29 @@ export default function ModerationClient() {
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [pendingUser, setPendingUser] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setError(null);
     try {
-      const response = await fetch("/api/admin/moderation/candidates");
+      const response = await fetch("/api/admin/moderation/candidates", { signal });
       if (!response.ok) {
         throw new Error("Failed to load candidates");
       }
       const data = await response.json();
-      setCandidates(data.candidates ?? []);
+      if (!signal?.aborted) {
+        setCandidates(data.candidates ?? []);
+      }
     } catch {
-      setError("Could not load the review queue.");
-      setCandidates([]);
+      if (!signal?.aborted) {
+        setError("Could not load the review queue.");
+        setCandidates([]);
+      }
     }
   }, []);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
   }, [load]);
 
   async function applyAction(candidate: Candidate) {
@@ -137,6 +143,7 @@ export default function ModerationClient() {
 
                 <ActionRow>
                   <ReasonInput
+                    aria-label={`Reason for changing @${candidate.username}`}
                     value={reasons[candidate.username] ?? ""}
                     placeholder="Reason (recorded permanently)"
                     onChange={(event) =>

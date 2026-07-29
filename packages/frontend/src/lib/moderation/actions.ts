@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { revalidatePath, revalidateTag } from "next/cache";
 import { db, moderationActions, users } from "@/lib/db";
 import {
@@ -9,6 +9,7 @@ import {
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
 import type { ModerationAction } from "@/lib/db/schema";
+import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 
 export interface ModerationTarget {
   id: string;
@@ -54,33 +55,49 @@ export async function findModerationTarget(
 export async function applyModerationAction(params: {
   target: ModerationTarget;
   actorUserId: string;
+  actorUsername: string;
   action: ModerationAction;
   reason: string;
 }): Promise<{ changed: boolean; leaderboardHidden: boolean }> {
-  const { target, actorUserId, action, reason } = params;
+  const { target, actorUserId, actorUsername, action, reason } = params;
   const nextHidden = action === "hide";
 
-  if (target.leaderboardHidden === nextHidden) {
-    return { changed: false, leaderboardHidden: target.leaderboardHidden };
-  }
-
-  await db.transaction(async (tx) => {
-    await tx
+  const changed = await db.transaction(async (tx) => {
+    const updated = await tx
       .update(users)
       .set({ leaderboardHidden: nextHidden, updatedAt: new Date() })
-      .where(eq(users.id, target.id));
+      // PostgreSQL rechecks this state predicate after concurrent writers
+      // commit. Only the transition that actually changed the flag can write
+      // the corresponding audit row.
+      .where(
+        and(
+          eq(users.id, target.id),
+          ne(users.leaderboardHidden, nextHidden)
+        )
+      )
+      .returning({ id: users.id });
+
+    if (updated.length === 0) {
+      return false;
+    }
 
     await tx.insert(moderationActions).values({
       targetUserId: target.id,
+      targetUsername: target.username,
       actorUserId,
+      actorUsername,
       action,
       reason,
     });
+
+    return true;
   });
 
-  invalidateAfterModeration(target.username);
+  if (changed) {
+    await invalidateAfterModeration(target.id, target.username);
+  }
 
-  return { changed: true, leaderboardHidden: nextHidden };
+  return { changed, leaderboardHidden: nextHidden };
 }
 
 /**
@@ -91,13 +108,14 @@ export async function applyModerationAction(params: {
  * change appears after the existing TTLs expire (60s for the leaderboard and
  * profiles, an hour for the sitemap).
  */
-function invalidateAfterModeration(username: string): void {
+async function invalidateAfterModeration(userId: string, username: string): Promise<void> {
   try {
     // Every leaderboard cache entry carries this tag, including the per-period
     // ones, so one call covers all of them.
     revalidateTag("leaderboard", "max");
     revalidateTag(`user:${normalizeUsernameCacheKey(username)}`, "max");
     revalidateUsernamePaths(username);
+    await revalidateUserGroupLeaderboards(userId);
     // The landing page renders its own top-5 outside the leaderboard cache.
     revalidatePath("/");
     revalidatePath("/leaderboard");
@@ -110,18 +128,15 @@ export async function getModerationHistory(
   targetUserId: string,
   limit = 20
 ): Promise<ModerationHistoryEntry[]> {
-  // Joins users once, on the actor. No alias needed: the target is already
-  // pinned by the WHERE clause rather than joined.
   const rows = await db
     .select({
       id: moderationActions.id,
       action: moderationActions.action,
       reason: moderationActions.reason,
       createdAt: moderationActions.createdAt,
-      actorUsername: users.username,
+      actorUsername: moderationActions.actorUsername,
     })
     .from(moderationActions)
-    .innerJoin(users, eq(moderationActions.actorUserId, users.id))
     .where(eq(moderationActions.targetUserId, targetUserId))
     .orderBy(desc(moderationActions.createdAt))
     .limit(limit);

@@ -7,12 +7,10 @@ import type { SessionUser } from "./session";
  * be renamed, and a released username can be claimed by someone else, so
  * authorizing against one would be a standing account-takeover risk.
  *
- * 32605822 is @junhoyeo. The env var exists so additional moderators can be
- * added without a code change; it replaces the default rather than extending
- * it, so setting it to an empty value leaves nobody with access.
+ * The deployment operator must configure the allowlist explicitly. A default
+ * would accidentally grant a project maintainer moderator access on every
+ * self-hosted deployment that enables GitHub OAuth.
  */
-const DEFAULT_ADMIN_GITHUB_IDS = [32605822];
-
 const ENV_VAR = "TOKSCALE_ADMIN_GITHUB_IDS";
 
 /**
@@ -20,15 +18,14 @@ const ENV_VAR = "TOKSCALE_ADMIN_GITHUB_IDS";
  *
  * A malformed entry means the operator intended to grant access to someone and
  * we cannot tell who, so the whole list is rejected rather than silently
- * honouring the entries that happened to parse. Returning the built-in default
- * on malformed input would be worse still: a typo would quietly restore
- * single-admin access that the operator believed they had changed.
+ * honouring the entries that happened to parse. An operator must correct a
+ * malformed list before anyone can regain moderation access.
  */
 export function resolveAdminGithubIds(
   rawValue: string | undefined = process.env[ENV_VAR]
 ): number[] {
   if (rawValue === undefined) {
-    return DEFAULT_ADMIN_GITHUB_IDS;
+    return [];
   }
 
   const entries = rawValue
