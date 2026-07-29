@@ -11,6 +11,7 @@ export default function robots(): MetadataRoute.Robots {
       // tokens and must never reach an index.
       disallow: [
         "/api/",
+        "/admin",
         "/settings",
         "/profile",
         "/device",
