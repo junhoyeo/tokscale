@@ -28,7 +28,7 @@ spec.loader.exec_module(bridge)
 def make_row(**overrides):
     """Build a dict-based fake DB row with sensible defaults.
 
-    `convert_row_to_entry` only ever accesses rows via `row["col"]`
+    `convert_request_details_row` only ever accesses rows via `row["col"]`
     (bracket access), which a plain dict supports the same way
     `sqlite3.Row` does, so dicts are a valid stand-in in tests.
     """
@@ -144,12 +144,12 @@ def test_compute_token_buckets_negative_cached_clamped_at_ingestion():
     assert total == 150
 
 
-# ── convert_row_to_entry: end-to-end token math via a full row ─────────────
+# ── convert_request_details_row: end-to-end token math via a full row ─────────────
 
 
-def test_convert_row_to_entry_computes_non_overlapping_usage():
+def test_convert_request_details_row_computes_non_overlapping_usage():
     row = make_row()
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result is not None
     usage = result["entry"]["message"]["usage"]
     assert usage["input"] == 80
@@ -161,35 +161,35 @@ def test_convert_row_to_entry_computes_non_overlapping_usage():
 # ── malformed / NULL `data` JSON rows are skipped ───────────────────────────
 
 
-def test_convert_row_to_entry_skips_null_data():
+def test_convert_request_details_row_skips_null_data():
     row = make_row(data=None)
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_skips_malformed_json_data():
+def test_convert_request_details_row_skips_malformed_json_data():
     row = make_row(data="{not valid json")
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_skips_non_dict_data():
+def test_convert_request_details_row_skips_non_dict_data():
     row = make_row(data=json.dumps([1, 2, 3]))
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
 # ── non-dict `tokens` field is skipped ──────────────────────────────────────
 
 
-def test_convert_row_to_entry_skips_non_dict_tokens():
+def test_convert_request_details_row_skips_non_dict_tokens():
     row = make_row(data=json.dumps({"model": "gpt-4o", "tokens": [1, 2, 3]}))
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_skips_string_tokens():
+def test_convert_request_details_row_skips_string_tokens():
     row = make_row(data=json.dumps({"model": "gpt-4o", "tokens": "bogus"}))
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_skips_zero_prompt_and_completion():
+def test_convert_request_details_row_skips_zero_prompt_and_completion():
     row = make_row(
         data=json.dumps(
             {
@@ -198,10 +198,10 @@ def test_convert_row_to_entry_skips_zero_prompt_and_completion():
             }
         )
     )
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_handles_string_token_scalars_end_to_end():
+def test_convert_request_details_row_handles_string_token_scalars_end_to_end():
     # A row whose token counts arrived as strings (e.g. `"prompt_tokens":
     # "100"`) must not raise and abort the run — it should convert exactly
     # like the equivalent int-typed row.
@@ -217,7 +217,7 @@ def test_convert_row_to_entry_handles_string_token_scalars_end_to_end():
             }
         )
     )
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result is not None
     usage = result["entry"]["message"]["usage"]
     assert usage["input"] == 80
@@ -228,36 +228,36 @@ def test_convert_row_to_entry_handles_string_token_scalars_end_to_end():
 # ── missing/unparseable timestamps are skipped, never default to now() ─────
 
 
-def test_convert_row_to_entry_skips_missing_timestamp():
+def test_convert_request_details_row_skips_missing_timestamp():
     row = make_row(timestamp=None)
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_skips_empty_timestamp():
+def test_convert_request_details_row_skips_empty_timestamp():
     row = make_row(timestamp="")
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_skips_unparseable_timestamp():
+def test_convert_request_details_row_skips_unparseable_timestamp():
     row = make_row(timestamp="not-a-timestamp")
-    assert bridge.convert_row_to_entry(row) is None
+    assert bridge.convert_request_details_row(row) is None
 
 
-def test_convert_row_to_entry_counts_missing_timestamp_in_stats():
+def test_convert_request_details_row_counts_missing_timestamp_in_stats():
     # The bridge counts skipped-for-timestamp rows and warns once with the
     # aggregate, rather than defaulting to datetime.now() (which would give
     # the same malformed row a new dedup key every day it's re-read from a
     # lingering backup DB, causing perpetual re-duplication).
     stats = {"missing_timestamp": 0}
     row = make_row(timestamp="garbage")
-    assert bridge.convert_row_to_entry(row, stats) is None
+    assert bridge.convert_request_details_row(row, stats) is None
     assert stats["missing_timestamp"] == 1
 
-    assert bridge.convert_row_to_entry(make_row(timestamp=None), stats) is None
+    assert bridge.convert_request_details_row(make_row(timestamp=None), stats) is None
     assert stats["missing_timestamp"] == 2
 
 
-def test_convert_row_to_entry_never_defaults_timestamp_to_now():
+def test_convert_request_details_row_never_defaults_timestamp_to_now():
     # Directly pin down the regression: a malformed timestamp must not
     # silently become datetime.now().
     row = make_row(timestamp="not-a-timestamp")
@@ -267,7 +267,7 @@ def test_convert_row_to_entry_never_defaults_timestamp_to_now():
 # ── model fallback: null data.model falls through to row["model"] ──────────
 
 
-def test_convert_row_to_entry_falls_back_to_row_model_when_data_model_is_null():
+def test_convert_request_details_row_falls_back_to_row_model_when_data_model_is_null():
     # `req_data.get("model")` is explicitly None (not just absent) — must
     # still fall back to row["model"] before giving up on "unknown".
     row = make_row(
@@ -279,12 +279,12 @@ def test_convert_row_to_entry_falls_back_to_row_model_when_data_model_is_null():
             }
         ),
     )
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result is not None
     assert result["entry"]["message"]["model"] == "gpt-4o-from-row"
 
 
-def test_convert_row_to_entry_unknown_when_both_model_sources_missing():
+def test_convert_request_details_row_unknown_when_both_model_sources_missing():
     row = make_row(
         model=None,
         data=json.dumps(
@@ -294,7 +294,7 @@ def test_convert_row_to_entry_unknown_when_both_model_sources_missing():
             }
         ),
     )
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result is not None
     assert result["entry"]["message"]["model"] == "unknown"
 
@@ -302,7 +302,7 @@ def test_convert_row_to_entry_unknown_when_both_model_sources_missing():
 # ── local-date bucketing ────────────────────────────────────────────────────
 
 
-def test_convert_row_to_entry_buckets_by_local_date():
+def test_convert_request_details_row_buckets_by_local_date():
     # ts_ms is derived from the ISO timestamp, then the bucket date is
     # computed via .astimezone() (local time), not UTC. Compare against the
     # same conversion tokscale's bridge performs so the test tracks the
@@ -311,7 +311,7 @@ def test_convert_row_to_entry_buckets_by_local_date():
     from datetime import datetime, timezone
 
     row = make_row(timestamp="2026-01-15T23:30:00Z")
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result is not None
 
     ts_ms = result["entry"]["message"]["timestamp"]
@@ -323,7 +323,7 @@ def test_convert_row_to_entry_buckets_by_local_date():
     assert result["date_str"] == expected_date
 
 
-def test_convert_row_to_entry_groups_same_utc_day_rows_into_one_bucket():
+def test_convert_request_details_row_groups_same_utc_day_rows_into_one_bucket():
     # Pin TZ=UTC so the local-date bucket matches the UTC date exactly.
     # Without pinning, this assumption breaks under some host timezones —
     # e.g. TZ=America/Noronha (UTC-2) shifts 01:00Z to local 2026-01-14
@@ -337,8 +337,8 @@ def test_convert_row_to_entry_groups_same_utc_day_rows_into_one_bucket():
     try:
         row_a = make_row(id="req_a", timestamp="2026-01-15T01:00:00Z")
         row_b = make_row(id="req_b", timestamp="2026-01-15T02:00:00Z")
-        result_a = bridge.convert_row_to_entry(row_a)
-        result_b = bridge.convert_row_to_entry(row_b)
+        result_a = bridge.convert_request_details_row(row_a)
+        result_b = bridge.convert_request_details_row(row_b)
         assert result_a["date_str"] == result_b["date_str"]
     finally:
         if original_tz is None:
@@ -352,9 +352,9 @@ def test_convert_row_to_entry_groups_same_utc_day_rows_into_one_bucket():
 # ── source stamping ─────────────────────────────────────────────────────────
 
 
-def test_convert_row_to_entry_stamps_9router_source():
+def test_convert_request_details_row_stamps_9router_source():
     row = make_row()
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result["entry"]["message"]["source"] == "9router"
 
 
@@ -371,7 +371,7 @@ def test_convert_row_to_entry_stamps_9router_source():
         "gpt-oss-120b:FREE",
     ],
 )
-def test_convert_row_to_entry_free_model_embeds_zero_cost(model):
+def test_convert_request_details_row_free_model_embeds_zero_cost(model):
     # Tokscale's pricing lookup strips the "-free" suffix, so an omitted
     # cost would reprice the free variant at the PAID base-model rate.
     # Free rows must carry an authoritative $0.00 (cost.total present ⇒
@@ -380,7 +380,7 @@ def test_convert_row_to_entry_free_model_embeds_zero_cost(model):
         "model": model,
         "tokens": {"prompt_tokens": 100, "completion_tokens": 50},
     }))
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result is not None
     usage = result["entry"]["message"]["usage"]
     assert usage["cost"] == {"total": 0.0}
@@ -396,14 +396,14 @@ def test_convert_row_to_entry_free_model_embeds_zero_cost(model):
         "gpt-4o-freestyle",
     ],
 )
-def test_convert_row_to_entry_paid_model_omits_cost(model):
+def test_convert_request_details_row_paid_model_omits_cost(model):
     # Paid rows must NOT carry usage.cost — any present cost.total (even
     # 0.0) is authoritative and would block repricing from tokens.
     row = make_row(model=model, data=json.dumps({
         "model": model,
         "tokens": {"prompt_tokens": 100, "completion_tokens": 50},
     }))
-    result = bridge.convert_row_to_entry(row)
+    result = bridge.convert_request_details_row(row)
     assert result is not None
     assert "cost" not in result["entry"]["message"]["usage"]
 
@@ -538,8 +538,330 @@ def test_run_uses_backup_row_when_current_db_row_is_invalid(tmp_path, monkeypatc
     lines = output_file.read_text().splitlines()
     message_lines = [json.loads(line) for line in lines if json.loads(line).get("type") == "message"]
     assert len(message_lines) == 1
-    assert message_lines[0]["id"] == "req_1"
+    assert message_lines[0]["id"] == "rd-req_1"
+
+
+def make_usage_history_row(**overrides):
+    """Build a dict-based fake `usageHistory` DB row with sensible defaults.
+
+    `usageHistory` stores tokens as a direct JSON string and has an
+    optional `cost` REAL column.
+    """
+    row = {
+        "id": "uh_req_1",
+        "timestamp": "2026-06-15T12:00:00Z",
+        "provider": "openai",
+        "model": "gpt-4o",
+        "connectionId": "conn_1",
+        "tokens": json.dumps(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "cached_tokens": 20,
+            }
+        ),
+        "cost": None,
+    }
+    row.update(overrides)
+    return row
+
+
+# ---- convert_usage_history_row: token parsing and bucketing ----------------
+
+
+def test_convert_usage_history_row_parses_tokens_and_buckets():
+    row = make_usage_history_row()
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    usage = result["entry"]["message"]["usage"]
+    assert usage["input"] == 80
+    assert usage["cacheRead"] == 20
+    assert usage["output"] == 50
+    assert usage["totalTokens"] == 150
+    assert result["entry"]["id"] == "uh-uh_req_1"
+
+
+def test_convert_usage_history_row_malformed_tokens():
+    row = make_usage_history_row(tokens="{not valid json")
+    assert bridge.convert_usage_history_row(row) is None
+
+    row = make_usage_history_row(tokens=json.dumps([1, 2, 3]))
+    assert bridge.convert_usage_history_row(row) is None
+
+    row = make_usage_history_row(tokens=json.dumps("string instead of object"))
+    assert bridge.convert_usage_history_row(row) is None
+
+
+def test_convert_usage_history_row_skips_zero_tokens():
+    row = make_usage_history_row(
+        tokens=json.dumps({"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0})
+    )
+    assert bridge.convert_usage_history_row(row) is None
+
+
+def test_convert_usage_history_row_handles_string_token_scalars():
+    row = make_usage_history_row(
+        tokens=json.dumps({"prompt_tokens": "100", "completion_tokens": "50", "cached_tokens": "20"})
+    )
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    usage = result["entry"]["message"]["usage"]
+    assert usage["input"] == 80
+    assert usage["output"] == 50
+
+
+# ---- convert_usage_history_row: cost field mapping -------------------------
+
+
+def test_convert_usage_history_row_positive_cost():
+    row = make_usage_history_row(cost=0.005)
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    usage = result["entry"]["message"]["usage"]
+    assert usage["cost"] == {"total": 0.005}
+
+
+def test_convert_usage_history_row_zero_cost_free_model():
+    row = make_usage_history_row(model="kimi-k2.5-free", cost=0.0)
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    usage = result["entry"]["message"]["usage"]
+    assert usage["cost"] == {"total": 0.0}
+
+
+def test_convert_usage_history_row_zero_cost_paid_model():
+    row = make_usage_history_row(cost=0.0)
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert "cost" not in result["entry"]["message"]["usage"]
+
+
+def test_convert_usage_history_row_missing_cost_free_model():
+    row = make_usage_history_row(model="kimi-k2.5-free", cost=None)
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    usage = result["entry"]["message"]["usage"]
+    assert usage["cost"] == {"total": 0.0}
+
+
+def test_convert_usage_history_row_missing_cost_paid_model():
+    row = make_usage_history_row(cost=None)
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert "cost" not in result["entry"]["message"]["usage"]
+
+
+# ---- convert_usage_history_row: timestamp handling -------------------------
+
+
+def test_convert_usage_history_row_skips_missing_timestamp():
+    assert bridge.convert_usage_history_row(make_usage_history_row(timestamp=None)) is None
+    assert bridge.convert_usage_history_row(make_usage_history_row(timestamp="")) is None
+    assert bridge.convert_usage_history_row(make_usage_history_row(timestamp="not-a-timestamp")) is None
+
+
+def test_convert_usage_history_row_counts_missing_timestamp_in_stats():
+    stats = {"missing_timestamp": 0}
+    assert bridge.convert_usage_history_row(make_usage_history_row(timestamp=None), stats) is None
+    assert stats["missing_timestamp"] == 1
+
+
+def test_convert_usage_history_row_stamps_9router_source():
+    row = make_usage_history_row()
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert result["entry"]["message"]["source"] == "9router"
+
+
+# ---- run(): missing requestDetails table -----------------------------------
+
+
+def _insert_usage_history_row(db_path, **row):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS usageHistory "
+        "(id TEXT, timestamp TEXT, provider TEXT, model TEXT, "
+        "connectionId TEXT, tokens TEXT, cost REAL, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO usageHistory VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            row["id"],
+            row["timestamp"],
+            row.get("provider", "openai"),
+            row.get("model", "gpt-4o"),
+            row.get("connectionId", "conn_1"),
+            row["tokens"],
+            row.get("cost"),
+            row.get("status", "ok"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_run_survives_missing_request_details_table(tmp_path, monkeypatch):
+    # DB with only usageHistory table -- requestDetails is absent
+    # (as happens after v0.5.30 schema migration on backup DBs).
+    db_path = tmp_path / "data.sqlite"
+    _insert_usage_history_row(
+        db_path,
+        id="uh_1",
+        timestamp="2026-06-15T12:00:00Z",
+        tokens=json.dumps({"prompt_tokens": 10, "completion_tokens": 5}),
+    )
+
+    bridge_dir = tmp_path / "sessions"
+    monkeypatch.setattr(bridge, "ROUTER_DB", db_path)
+    monkeypatch.setattr(bridge, "BRIDGE_DIR", bridge_dir)
+
+    bridge.run()
+
+    output_file = bridge_dir / "9router-2026-06-15.jsonl"
+    assert output_file.exists()
+    lines = output_file.read_text().splitlines()
+    message_lines = [json.loads(line) for line in lines if json.loads(line).get("type") == "message"]
+    assert len(message_lines) == 1
+    assert message_lines[0]["id"] == "uh-uh_1"
     assert message_lines[0]["message"]["usage"]["input"] == 10
+
+
+def test_run_reads_from_both_tables(tmp_path, monkeypatch):
+    # DB has both requestDetails and usageHistory -- both should be read.
+    db_path = tmp_path / "data.sqlite"
+
+    # Insert usageHistory row
+    _insert_usage_history_row(
+        db_path,
+        id="uh_1",
+        timestamp="2026-06-15T12:00:00Z",
+        tokens=json.dumps({"prompt_tokens": 20, "completion_tokens": 10}),
+    )
+
+    bridge_dir = tmp_path / "sessions"
+    monkeypatch.setattr(bridge, "ROUTER_DB", db_path)
+    monkeypatch.setattr(bridge, "BRIDGE_DIR", bridge_dir)
+
+    bridge.run()
+
+    output_file = bridge_dir / "9router-2026-06-15.jsonl"
+    assert output_file.exists()
+    lines = output_file.read_text().splitlines()
+    message_lines = [json.loads(line) for line in lines if json.loads(line).get("type") == "message"]
+    assert len(message_lines) == 1
+    assert message_lines[0]["id"] == "uh-uh_1"
+    assert message_lines[0]["message"]["usage"]["input"] == 20
+
+    # Insert a requestDetails row in a backup DB
+    backup_dir = db_path.parent / "backups" / "v1"
+    backup_dir.mkdir(parents=True)
+    backup_db = backup_dir / "data.sqlite"
+    conn = sqlite3.connect(backup_db)
+    conn.execute(
+        "CREATE TABLE requestDetails (id TEXT, timestamp TEXT, provider TEXT, "
+        "model TEXT, connectionId TEXT, data TEXT, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO requestDetails VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            "rd_1",
+            "2026-06-15T12:30:00Z",
+            "openai",
+            "gpt-4o",
+            "conn_1",
+            json.dumps({"model": "gpt-4o", "tokens": {"prompt_tokens": 100, "completion_tokens": 50}}),
+            "success",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    bridge.run()
+
+    lines = output_file.read_text().splitlines()
+    message_lines = [json.loads(line) for line in lines if json.loads(line).get("type") == "message"]
+    assert len(message_lines) == 2
+    ids = {m["id"] for m in message_lines}
+    assert "uh-uh_1" in ids
+    assert "rd-rd_1" in ids
+    ids_map = {m["id"]: m["message"] for m in message_lines}
+    assert ids_map["uh-uh_1"]["usage"]["input"] == 20
+    assert ids_map["rd-rd_1"]["usage"]["input"] == 100
+    assert ids_map["uh-uh_1"]["source"] == "9router"
+    assert ids_map["rd-rd_1"]["source"] == "9router"
+
+
+def test_run_cross_table_dedup_same_raw_id(tmp_path, monkeypatch):
+    """Same raw ID in both tables must produce both rd-X and uh-X entries.
+
+    The prefix scheme (rd- vs uh-) exists specifically to prevent
+    cross-table dedup collisions.  This test inserts a row with the
+    same raw id value into both requestDetails and usageHistory and
+    verifies both appear in the output.
+    """
+    db_path = tmp_path / "data.sqlite"
+
+    # Create requestDetails row with id = "shared_1"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE requestDetails (id TEXT, timestamp TEXT, provider TEXT, "
+        "model TEXT, connectionId TEXT, data TEXT, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO requestDetails VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            "shared_1",
+            "2026-06-15T12:00:00Z",
+            "openai",
+            "gpt-4o",
+            "conn_1",
+            json.dumps({"model": "gpt-4o", "tokens": {"prompt_tokens": 100, "completion_tokens": 50}}),
+            "success",
+        ),
+    )
+    conn.execute(
+        "CREATE TABLE usageHistory (id TEXT, timestamp TEXT, provider TEXT, "
+        "model TEXT, connectionId TEXT, tokens TEXT, cost REAL, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO usageHistory VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("shared_1", "2026-06-15T12:30:00Z", "openai", "gpt-4o", "conn_1",
+         json.dumps({"prompt_tokens": 100, "completion_tokens": 50}), 0.0, "ok"),
+    )
+    conn.commit()
+    conn.close()
+
+    bridge_dir = tmp_path / "sessions"
+    monkeypatch.setattr(bridge, "ROUTER_DB", db_path)
+    monkeypatch.setattr(bridge, "BRIDGE_DIR", bridge_dir)
+
+    bridge.run()
+
+    output_file = bridge_dir / "9router-2026-06-15.jsonl"
+    assert output_file.exists()
+    lines = output_file.read_text().splitlines()
+    message_lines = [json.loads(line) for line in lines if json.loads(line).get("type") == "message"]
+    assert len(message_lines) == 2, f"Expected 2 entries, got {len(message_lines)}"
+    ids = {m["id"] for m in message_lines}
+    assert "rd-shared_1" in ids, "rd-shared_1 missing from output"
+    assert "uh-shared_1" in ids, "uh-shared_1 missing from output"
+
+def test_run_survives_both_tables_missing(tmp_path, monkeypatch):
+    # DB exists but has neither requestDetails nor usageHistory tables.
+    db_path = tmp_path / "data.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE unrelated (id TEXT)")
+    conn.commit()
+    conn.close()
+
+    bridge_dir = tmp_path / "sessions"
+    monkeypatch.setattr(bridge, "ROUTER_DB", db_path)
+    monkeypatch.setattr(bridge, "BRIDGE_DIR", bridge_dir)
+
+    bridge.run()
+
+    # No error, no output files created
+    assert not list(bridge_dir.glob("9router-*.jsonl"))
 
 
 # ── read-only DB access ─────────────────────────────────────────────────────
@@ -572,3 +894,46 @@ def test_open_readonly_db_does_not_write_to_db(tmp_path):
             conn.commit()
     finally:
         conn.close()
+
+
+def test_run_raises_on_corrupt_database(tmp_path, monkeypatch):
+    """A corrupt SQLite file must propagate the error, not silently skip.
+
+    _query_and_convert catches sqlite3.OperationalError and only swallows
+    'no such table'. A corrupt DB raises DatabaseError (a sibling of
+    OperationalError, not a subclass), so it must propagate uncaught.
+    """
+    db_path = tmp_path / "data.sqlite"
+    # Write garbage bytes to simulate a corrupt file
+    db_path.write_bytes(b"\x00" * 4096)
+
+    bridge_dir = tmp_path / "sessions"
+    monkeypatch.setattr(bridge, "ROUTER_DB", db_path)
+    monkeypatch.setattr(bridge, "BRIDGE_DIR", bridge_dir)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        bridge.run()
+
+
+def test_run_raises_on_nonexistent_table_column(tmp_path, monkeypatch):
+    """A column mismatch in a query must propagate, not be silently swallowed.
+
+    If a table exists but a queried column doesn't, sqlite3.OperationalError
+    is raised with a message that does NOT contain 'no such table'. The
+    narrowed catch in _query_and_convert must re-raise it.
+    """
+    db_path = tmp_path / "data.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute("""CREATE TABLE requestDetails (
+        id TEXT, bad_column TEXT, provider TEXT, model TEXT,
+        connectionId TEXT, data TEXT, status TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+    bridge_dir = tmp_path / "sessions"
+    monkeypatch.setattr(bridge, "ROUTER_DB", db_path)
+    monkeypatch.setattr(bridge, "BRIDGE_DIR", bridge_dir)
+
+    with pytest.raises(sqlite3.OperationalError):
+        bridge.run()

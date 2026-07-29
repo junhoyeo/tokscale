@@ -17,6 +17,14 @@ CostSource::ProviderReported, which prevents tokscale from repricing via its
 pricing database. Omitting the cost field lets tokscale reprice from
 tokens + pricing data.
 
+This applies to rows from the `requestDetails` table, where costs must be
+inferred from tokens.  Rows from the `usageHistory` table have a dedicated
+`cost` REAL column with provider-reported values; positive costs from this
+column ARE passed through as authoritative.  Zero or missing costs from
+`usageHistory` follow the same default policy (omit for paid models, $0.00
+for free-tier).
+
+
 For FREE-tier models (ids ending in "-free" or ":free"), the bridge embeds
 "cost": {"total": 0.0} on purpose: tokscale's pricing lookup strips the
 "-free" suffix, so an omitted cost would reprice e.g. kimi-k2.5-free at the
@@ -37,6 +45,7 @@ from urllib.parse import quote
 ROUTER_DB = Path.home() / ".9router" / "db" / "data.sqlite"
 BRIDGE_DIR = Path.home() / ".local" / "share" / "9router-tokscale" / "sessions"
 
+
 def discover_router_dbs() -> list[Path]:
     """Discover the current 9Router DB and all backup DBs.
 
@@ -55,11 +64,13 @@ def discover_router_dbs() -> list[Path]:
         ))
     return [db for db in dbs if db.exists()]
 
+
 def ensure_bridge_dir():
-    """Create output directory. Existing files are NOT deleted — each date's
+    """Create output directory. Existing files are NOT deleted -- each date's
     file is overwritten individually by the write loop, preserving historical
     data from previous bridge runs."""
     BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def open_readonly_db(db_path: Path) -> sqlite3.Connection | None:
     """Open a 9Router DB read-only via a `file:` URI.
@@ -74,6 +85,7 @@ def open_readonly_db(db_path: Path) -> sqlite3.Connection | None:
     conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def parse_iso_timestamp(ts: str) -> int | None:
     """Convert ISO-8601 timestamp to Unix milliseconds.
@@ -106,6 +118,7 @@ def safe_int(value) -> int:
         return 0
     return max(n, 0)
 
+
 def compute_token_buckets(tokens: dict) -> tuple[int, int, int, int]:
     """Split OpenAI-style token counts into non-overlapping buckets.
 
@@ -127,6 +140,7 @@ def compute_token_buckets(tokens: dict) -> tuple[int, int, int, int]:
     total = input_tokens + cached + completion
     return input_tokens, cached, completion, total
 
+
 def is_free_model(model: str) -> bool:
     """Return True for free-tier model ids (ending in "-free" or ":free").
 
@@ -137,7 +151,17 @@ def is_free_model(model: str) -> bool:
     lowered = model.lower()
     return lowered.endswith("-free") or lowered.endswith(":free")
 
-def convert_row_to_entry(row, stats: dict | None = None) -> dict | None:
+
+def _date_str_from_ms(ts_ms: int) -> str:
+    """Convert Unix-millisecond timestamp to local date string for file bucketing.
+
+    Uses local timezone (not UTC) so bridge file dates align with
+    tokscale --today / --since/--until, which use chrono::Local.
+    """
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone().strftime("%Y-%m-%d")
+
+
+def convert_request_details_row(row, stats: dict | None = None) -> dict | None:
     """Convert a single `requestDetails` DB row into a gjc-format entry.
 
     Returns None when the row should be skipped: malformed/NULL `data`
@@ -178,14 +202,12 @@ def convert_row_to_entry(row, stats: dict | None = None) -> dict | None:
     # that case must be handled separately.
     model = req_data.get("model") or row["model"] or "unknown"
     # Derive provider from first path segment for qualified IDs
-    # (e.g. "deepseek-ai/deepseek-v4-flash" → "deepseek-ai"),
+    # (e.g. "deepseek-ai/deepseek-v4-flash" -> "deepseek-ai"),
     # otherwise pass through the DB value.
     provider = row["provider"] or None
     if not provider and "/" in model:
         provider = model.split("/", 1)[0].lstrip("@")
-    # Use local timezone (not UTC) so bridge file dates align with
-    # tokscale --today / --since/--until, which use chrono::Local.
-    date_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone().strftime("%Y-%m-%d")
+    date_str = _date_str_from_ms(ts_ms)
 
     msg = {
         "role": "assistant",
@@ -213,10 +235,132 @@ def convert_row_to_entry(row, stats: dict | None = None) -> dict | None:
         "date_str": date_str,
         "entry": {
             "type": "message",
-            "id": row["id"],
+            "id": f"rd-{row['id']}",
             "message": msg,
         },
     }
+
+
+def convert_usage_history_row(row, stats: dict | None = None) -> dict | None:
+    """Convert a single `usageHistory` DB row into a gjc-format entry.
+
+    `usageHistory` stores tokens as a direct JSON string (unlike
+    `requestDetails` where it was nested in a `data` blob), and has a
+    dedicated `cost` REAL column. Returns None when the row should be
+    skipped: zero tokens, or a missing/unparseable timestamp.
+    """
+    try:
+        tokens = json.loads(row["tokens"])
+        if not isinstance(tokens, dict):
+            print(f"  Skipping usageHistory row {row['id']}: tokens is not an object")
+            return None
+    except (json.JSONDecodeError, TypeError):
+        print(f"  Skipping usageHistory row {row['id']}: malformed tokens column")
+        return None
+
+    input_tokens, cached, completion, total = compute_token_buckets(tokens)
+    prompt = safe_int(tokens.get("prompt_tokens", 0))
+
+    model = row["model"] or "unknown"
+    provider = row["provider"] or None
+    if not provider and "/" in model:
+        provider = model.split("/", 1)[0].lstrip("@")
+
+    if prompt == 0 and completion == 0:
+        return None
+
+    ts_ms = parse_iso_timestamp(row["timestamp"])
+    if ts_ms is None:
+        if stats is not None:
+            stats["missing_timestamp"] = stats.get("missing_timestamp", 0) + 1
+        return None
+
+    date_str = _date_str_from_ms(ts_ms)
+
+    msg = {
+        "role": "assistant",
+        "model": model,
+        "source": "9router",
+        "timestamp": ts_ms,
+        "usage": {
+            "input": input_tokens,
+            "output": completion,
+            "cacheRead": cached,
+            "cacheWrite": 0,
+            "totalTokens": total,
+        },
+    }
+
+    # usageHistory has a dedicated `cost` REAL column.
+    cost = row["cost"]
+    if cost is not None and cost > 0.0:
+        msg["usage"]["cost"] = {"total": float(cost)}
+    elif is_free_model(model):
+        msg["usage"]["cost"] = {"total": 0.0}
+    # Paid models with zero/missing cost omit cost (let tokscale reprice)
+
+    if provider:
+        msg["provider"] = provider
+        msg["api"] = provider
+
+    return {
+        "date_str": date_str,
+        "entry": {
+            "type": "message",
+            "id": f"uh-{row['id']}",
+            "message": msg,
+        },
+    }
+
+
+def _query_and_convert(
+    conn, sql, converter, prefix, seen_ids, messages_by_date, stats
+):
+    """Execute *sql* against *conn*, convert rows via *converter*, collect results.
+
+    *prefix* is the ID namespace (e.g. "rd" or "uh") prepended to disambiguate
+    cross-table IDs in *seen_ids*.
+
+    Rows are only added to *seen_ids* AFTER a successful conversion, so an
+    invalid row in the current DB doesn't suppress a valid copy of the same
+    ID from an older backup (the backup-is-first-path-encountered invariant).
+
+    If the table doesn't exist (sqlite3.OperationalError), the query is
+    silently skipped -- the caller handles absent tables after schema
+    migrations.
+    """
+    try:
+        cursor = conn.execute(sql)
+        for row in cursor:
+            prefixed_id = f"{prefix}-{row['id']}"
+            if prefixed_id in seen_ids:
+                continue
+            result = converter(row, stats)
+            if result is None:
+                continue
+            seen_ids.add(prefixed_id)
+            messages_by_date.setdefault(result["date_str"], []).append(result["entry"])
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            pass  # Expected after schema migration
+        else:
+            raise
+
+
+_REQUEST_DETAILS_SQL = """
+    SELECT id, timestamp, provider, model, connectionId, data
+    FROM requestDetails
+    WHERE status = 'success'
+    ORDER BY timestamp
+"""
+
+_USAGE_HISTORY_SQL = """
+    SELECT id, timestamp, provider, model, connectionId, tokens, cost
+    FROM usageHistory
+    WHERE status = 'ok'
+    ORDER BY timestamp
+"""
+
 
 def run():
     dbs = discover_router_dbs()
@@ -234,25 +378,16 @@ def run():
         conn = open_readonly_db(db_path)
         if conn is None:
             continue
-        cursor = conn.execute(
-            """
-            SELECT id, timestamp, provider, model, connectionId, data
-            FROM requestDetails
-            WHERE status = 'success'
-            ORDER BY timestamp
-            """
+
+        _query_and_convert(
+            conn, _REQUEST_DETAILS_SQL,
+            convert_request_details_row, "rd", seen_ids, messages_by_date, stats,
         )
-        for row in cursor:
-            if row["id"] in seen_ids:
-                continue
-            # Row IDs are only added to seen_ids AFTER a successful
-            # conversion, so an invalid row in the current DB doesn't
-            # suppress a valid copy of the same ID from an older backup.
-            result = convert_row_to_entry(row, stats)
-            if result is None:
-                continue
-            seen_ids.add(row["id"])
-            messages_by_date.setdefault(result["date_str"], []).append(result["entry"])
+        _query_and_convert(
+            conn, _USAGE_HISTORY_SQL,
+            convert_usage_history_row, "uh", seen_ids, messages_by_date, stats,
+        )
+
         conn.close()
 
     if stats["missing_timestamp"]:
@@ -305,6 +440,7 @@ def run():
     )
     print()
     print("Then run: tokscale graph --client 9router")
+
 
 if __name__ == "__main__":
     run()
