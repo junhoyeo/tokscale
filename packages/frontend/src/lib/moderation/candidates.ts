@@ -1,7 +1,12 @@
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
+  DAILY_MISMATCH_THRESHOLD,
+  MAX_IMPLIED_RATE,
+  MEDIAN_RATIO_THRESHOLD,
+  MIN_IMPLIED_RATE,
   rankCandidates,
+  SITE_SHARE_THRESHOLD,
   type CandidateRow,
   type ScoredCandidate,
 } from "./heuristics";
@@ -12,11 +17,6 @@ import {
  * to tolerate rounding, not genuine coincidence.
  */
 const NEAR_DUPLICATE_TOKENS = 10;
-const SITE_SHARE_THRESHOLD = 0.05;
-const MEDIAN_RATIO_THRESHOLD = 500;
-const DAILY_MISMATCH_THRESHOLD = 1.5;
-const MIN_IMPLIED_RATE = 0.0000001;
-const MAX_IMPLIED_RATE = 0.001;
 
 interface CandidateDbRow extends Record<string, unknown> {
   user_id: string;

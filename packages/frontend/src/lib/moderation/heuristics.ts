@@ -56,20 +56,20 @@ export interface ScoredCandidate extends CandidateRow {
 }
 
 /** A user holding more than this share of all tokens is worth a look. */
-const SITE_SHARE_THRESHOLD = 0.05;
+export const SITE_SHARE_THRESHOLD = 0.05;
 /** Multiples of the median that stop being explainable as heavy usage. */
-const MEDIAN_RATIO_THRESHOLD = 500;
+export const MEDIAN_RATIO_THRESHOLD = 500;
 /**
  * Published provider pricing sits well inside this band per token. Outside it,
  * either the cost or the token count is not what it claims to be.
  */
-const MIN_IMPLIED_RATE = 0.0000001;
-const MAX_IMPLIED_RATE = 0.001;
+export const MIN_IMPLIED_RATE = 0.0000001;
+export const MAX_IMPLIED_RATE = 0.001;
 /**
  * Daily rows should sum to roughly the stored total. A large gap is the
  * fingerprint of the ratchet, not of heavy usage.
  */
-const DAILY_MISMATCH_THRESHOLD = 1.5;
+export const DAILY_MISMATCH_THRESHOLD = 1.5;
 
 function formatMultiple(value: number): string {
   return value >= 100 ? `${Math.round(value).toLocaleString("en-US")}x` : `${value.toFixed(1)}x`;
