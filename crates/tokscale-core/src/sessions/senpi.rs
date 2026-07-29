@@ -146,6 +146,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_senpi_provider_inference_wins_over_the_client_fallback() {
+        // given: a provider-less message whose model id carries a recognizable
+        // family token. Inference runs before the `senpi` fallback on purpose --
+        // an id that names a family is better attributed to that vendor than to
+        // the harness that recorded it, because pricing keys off the vendor.
+        let content = r#"{"type":"session","version":3,"id":"senpi_ses_precedence","timestamp":"2026-07-29T15:19:53.436Z","cwd":"/tmp"}
+{"type":"message","id":"b1","parentId":null,"timestamp":"2026-07-29T15:20:01.000Z","message":{"role":"assistant","model":"qwen3-coder","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}}}
+{"type":"message","id":"b2","parentId":"b1","timestamp":"2026-07-29T15:20:02.000Z","message":{"role":"assistant","model":"internal-house-model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_senpi_file(file.path());
+
+        // then: only a genuinely unrecognizable id lands on the client fallback.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].provider_id, "qwen");
+        assert_eq!(messages[1].provider_id, "senpi");
+    }
+
+    #[test]
     fn test_parse_senpi_ignores_custom_and_non_assistant_entries() {
         // given: omo injects `custom` records (e.g. the ultrawork directive)
         // and user turns carry no usage. Neither may produce a message.

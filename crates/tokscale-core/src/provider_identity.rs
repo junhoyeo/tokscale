@@ -332,6 +332,45 @@ mod tests {
         assert_eq!(inferred_provider_from_model("metamorphic-v1"), None);
     }
 
+    /// The families below are matched with plain `contains`, not
+    /// `contains_delimited`, and that asymmetry is load-bearing rather than an
+    /// oversight. Vendors append version digits directly to the family token
+    /// (`qwen3`, `mistral4`) and embed it mid-word (`chatgpt-4o-latest`,
+    /// `codellama`), all of which a delimited match rejects.
+    ///
+    /// Switching these to delimited matching drops the provider on 536 model ids
+    /// in the bundled models.dev/litellm/openrouter catalogs. `contains_delimited`
+    /// stays reserved for short tokens that collide inside ordinary words -- see
+    /// `test_inferred_provider_no_false_positives`.
+    #[test]
+    fn test_inferred_provider_matches_version_suffixed_and_embedded_families() {
+        for model in [
+            "qwen3-coder",
+            "qwen3.7-plus",
+            "qwen2-5-14b-instruct",
+            "qwen3-235b-a22b-instruct-2507",
+        ] {
+            assert_eq!(inferred_provider_from_model(model), Some("qwen"), "{model}");
+        }
+
+        for model in ["chatgpt-4o-latest", "chatgpt-image-latest"] {
+            assert_eq!(
+                inferred_provider_from_model(model),
+                Some("openai"),
+                "{model}"
+            );
+        }
+
+        assert_eq!(
+            inferred_provider_from_model("mistral4-119b"),
+            Some("mistral")
+        );
+        assert_eq!(
+            inferred_provider_from_model("CodeLlama-34b-Instruct-hf"),
+            Some("meta")
+        );
+    }
+
     #[test]
     fn test_inferred_provider_boundary_matches() {
         assert_eq!(inferred_provider_from_model("o1-preview"), Some("openai"));
