@@ -275,7 +275,9 @@ pub fn cursor_state_vscdb_candidates(home_dir: &Path) -> Vec<PathBuf> {
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
             paths.push(
-                PathBuf::from(appdata).join("Cursor").join("User/globalStorage/state.vscdb"),
+                PathBuf::from(appdata)
+                    .join("Cursor")
+                    .join("User/globalStorage/state.vscdb"),
             );
         }
         paths.push(home_dir.join("AppData/Roaming/Cursor/User/globalStorage/state.vscdb"));
@@ -375,9 +377,7 @@ pub fn session_token_from_access_token(access_token: &str) -> Result<String> {
 pub fn read_local_cursor_session_token() -> Result<String> {
     let home = home_dir()?;
     let db_path = find_cursor_state_vscdb(&home).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Cursor desktop state.vscdb not found (install Cursor and sign in first)"
-        )
+        anyhow::anyhow!("Cursor desktop state.vscdb not found (install Cursor and sign in first)")
     })?;
     let access_token = read_access_token_from_state_vscdb(&db_path)?;
     session_token_from_access_token(&access_token)
@@ -1232,7 +1232,10 @@ pub fn run_cursor_login(name: Option<String>) -> Result<()> {
     }
 
     // Prefer the local Cursor desktop accessToken (state.vscdb) when present.
-    println!("{}", "  Checking local Cursor desktop login...".bright_black());
+    println!(
+        "{}",
+        "  Checking local Cursor desktop login...".bright_black()
+    );
     let token = match read_local_cursor_session_token() {
         Ok(token) => {
             if let Some(user_id) = extract_user_id_from_session_token(&token) {
