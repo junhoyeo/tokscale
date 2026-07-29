@@ -35,6 +35,7 @@ See docs/9router-bridge.md for full documentation.
 """
 
 import json
+import math
 import os
 import tempfile
 import sqlite3
@@ -298,6 +299,8 @@ def convert_usage_history_row(row, stats: dict | None = None) -> dict | None:
     if cost is not None:
         try:
             cost = float(cost)
+            if not math.isfinite(cost):
+                cost = None
         except (ValueError, TypeError):
             cost = None
 

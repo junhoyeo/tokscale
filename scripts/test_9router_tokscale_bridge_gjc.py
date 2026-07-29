@@ -665,6 +665,31 @@ def test_convert_usage_history_row_malformed_cost():
     assert result["entry"]["message"]["usage"]["cost"] == {"total": 0.0}
 
 
+
+
+def test_convert_usage_history_row_non_finite_cost():
+    """Non-finite cost (inf, nan) are normalized to None and follow
+    the missing-cost policy: free models get $0.00, paid omit."""
+    row = make_usage_history_row(cost=float('inf'))
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert "cost" not in result["entry"]["message"]["usage"]
+
+    row = make_usage_history_row(model="kimi-k2.5-free", cost=float('inf'))
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert result["entry"]["message"]["usage"]["cost"] == {"total": 0.0}
+
+    row = make_usage_history_row(cost=float('nan'))
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert "cost" not in result["entry"]["message"]["usage"]
+
+    row = make_usage_history_row(cost="1e999")
+    result = bridge.convert_usage_history_row(row)
+    assert result is not None
+    assert "cost" not in result["entry"]["message"]["usage"]
+
 # ---- convert_usage_history_row: timestamp handling -------------------------
 
 
