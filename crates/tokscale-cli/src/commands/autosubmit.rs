@@ -1630,14 +1630,14 @@ fn build_date_filter_for_date(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::env;
     use std::ffi::{OsStr, OsString};
     use tempfile::TempDir;
 
     /// `TOKSCALE_CONFIG_DIR` is process-global while cargo runs tests on
-    /// parallel threads, so every test that redirects it is `#[serial]`.
-    /// Without that they read each other's config directory: one saves
+    /// parallel threads, so every test that redirects it needs
+    /// `#[serial_test::serial]` — the spelling already used throughout this
+    /// module. Without it they read each other's config directory: one saves
     /// settings, another's guard restores the variable underneath it, and the
     /// first then loads from the wrong place.
     ///
@@ -1646,9 +1646,13 @@ mod tests {
     /// it fail differently on every run.
     ///
     /// `serial_test` rather than a mutex local to this module, because
-    /// `device.rs`, `paths.rs` and `auth.rs` redirect the same variable and
-    /// already use `#[serial]`. A module-local lock coordinates none of those,
+    /// `device.rs`, `paths.rs` and `auth.rs` redirect the same variable and are
+    /// serialized the same way. A module-local lock coordinates none of those,
     /// so it would leave exactly the race it appears to fix.
+    ///
+    /// Use one spelling, not both: stacking the bare and qualified forms on the
+    /// same test serializes it twice for no benefit and risks it waiting on a
+    /// lock it already holds.
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -1725,7 +1729,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn launchd_spec_uses_program_arguments_without_shell() {
         let temp = TempDir::new().unwrap();
@@ -1855,7 +1858,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn systemd_spec_honors_xdg_config_home() {
         let temp = TempDir::new().unwrap();
@@ -1927,7 +1929,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn scheduler_specs_use_the_managed_executable() {
         let temp = TempDir::new().unwrap();
@@ -1954,7 +1955,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn managed_executable_refreshes_atomically_with_source_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -1997,7 +1997,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn managed_executable_rejects_nonexecutable_source() {
         use std::os::unix::fs::PermissionsExt;
@@ -2018,7 +2017,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn windows_reenable_renders_a_new_versioned_managed_executable_path() {
         use std::os::unix::fs::PermissionsExt;
@@ -2149,7 +2147,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn windows_reenable_failure_keeps_the_existing_task_intact() {
         use std::cell::Cell;
@@ -2186,7 +2183,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn scheduler_snapshot_preserves_versioned_windows_executable_path() {
         let temp = TempDir::new().unwrap();
@@ -2208,7 +2204,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn disable_persists_settings_after_known_absent_scheduler_cleanup() {
         use std::cell::Cell;
@@ -2247,7 +2242,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn disable_retries_executable_cleanup_after_a_previous_locked_run() {
         use std::cell::Cell;
@@ -2286,7 +2280,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn disable_keeps_settings_enabled_after_scheduler_cleanup_failure() {
         let temp = TempDir::new().unwrap();
@@ -2313,7 +2306,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn enable_persists_settings_before_scheduler_installation() {
         use std::cell::Cell;
@@ -2337,7 +2329,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn enable_rolls_back_settings_and_managed_executable_after_activation_failure() {
         use std::cell::Cell;
@@ -2365,7 +2356,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn enable_rolls_back_after_post_bootstrap_verification_failure() {
         let temp = TempDir::new().unwrap();
@@ -2421,7 +2411,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial_test::serial]
     fn run_lock_blocks_concurrent_holder() {
         let temp = TempDir::new().unwrap();
@@ -2558,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial_test::serial]
     fn enable_withholds_the_version_until_the_scheduler_is_installed() {
         use std::cell::Cell;
 
@@ -2603,7 +2592,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial_test::serial]
     fn enable_records_the_running_version_beside_the_managed_copy() {
         let temp = TempDir::new().unwrap();
         let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
@@ -2625,7 +2614,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial_test::serial]
     fn disable_clears_the_recorded_managed_version() {
         let temp = TempDir::new().unwrap();
         let _guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path());
