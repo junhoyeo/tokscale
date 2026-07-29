@@ -75,29 +75,31 @@ export async function applyModerationAction(params: {
           ne(users.leaderboardHidden, nextHidden)
         )
       )
-      .returning({ id: users.id });
+      .returning({ id: users.id, username: users.username });
 
     if (updated.length === 0) {
       return false;
     }
 
+    const updatedTarget = updated[0];
+
     await tx.insert(moderationActions).values({
       targetUserId: target.id,
-      targetUsername: target.username,
+      targetUsername: updatedTarget.username,
       actorUserId,
       actorUsername,
       action,
       reason,
     });
 
-    return true;
+    return updatedTarget.username;
   });
 
-  if (changed) {
-    await invalidateAfterModeration(target.id, target.username);
+  if (changed !== false) {
+    await invalidateAfterModeration(target.id, changed);
   }
 
-  return { changed, leaderboardHidden: nextHidden };
+  return { changed: changed !== false, leaderboardHidden: nextHidden };
 }
 
 /**
@@ -115,7 +117,11 @@ async function invalidateAfterModeration(userId: string, username: string): Prom
     revalidateTag("leaderboard", "max");
     revalidateTag(`user:${normalizeUsernameCacheKey(username)}`, "max");
     revalidateUsernamePaths(username);
-    await revalidateUserGroupLeaderboards(userId);
+    try {
+      await revalidateUserGroupLeaderboards(userId);
+    } catch (error) {
+      console.error("[moderation] group cache revalidation failed:", error);
+    }
     // The landing page renders its own top-5 outside the leaderboard cache.
     revalidatePath("/");
     revalidatePath("/leaderboard");

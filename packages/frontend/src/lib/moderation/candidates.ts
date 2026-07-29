@@ -12,6 +12,11 @@ import {
  * to tolerate rounding, not genuine coincidence.
  */
 const NEAR_DUPLICATE_TOKENS = 10;
+const SITE_SHARE_THRESHOLD = 0.05;
+const MEDIAN_RATIO_THRESHOLD = 500;
+const DAILY_MISMATCH_THRESHOLD = 1.5;
+const MIN_IMPLIED_RATE = 0.0000001;
+const MAX_IMPLIED_RATE = 0.001;
 
 interface CandidateDbRow extends Record<string, unknown> {
   user_id: string;
@@ -92,12 +97,28 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       FROM per_user p
       LEFT JOIN daily dl ON dl.submission_id = p.submission_id
       CROSS JOIN site
+    ),
+    eligible AS (
+      SELECT *
+      FROM enriched
+      WHERE leaderboard_hidden = true
+        OR (site_tokens > 0 AND total_tokens::numeric / site_tokens >= ${SITE_SHARE_THRESHOLD})
+        OR (median_tokens > 0 AND total_tokens::numeric / median_tokens >= ${MEDIAN_RATIO_THRESHOLD})
+        OR near_duplicate_count > 0
+        OR (daily_tokens > 0 AND total_tokens::numeric / daily_tokens >= ${DAILY_MISMATCH_THRESHOLD})
+        OR (
+          total_tokens > 0
+          AND (
+            total_cost / total_tokens::numeric > ${MAX_IMPLIED_RATE}
+            OR total_cost / total_tokens::numeric < ${MIN_IMPLIED_RATE}
+          )
+        )
     )
     SELECT
       user_id, username, avatar_url, leaderboard_hidden, total_tokens,
       total_cost, submit_count, has_backfill, daily_tokens,
       near_duplicate_count, site_tokens, median_tokens
-    FROM enriched
+    FROM eligible
   `);
 
   const dbRows = (result as unknown as CandidateDbRow[]) ?? [];
