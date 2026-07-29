@@ -1123,6 +1123,7 @@ unsafe extern "C" {
     fn geteuid() -> u32;
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn launchd_service_for_uid(uid: u32) -> LaunchdService {
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{JOB_ID}");
