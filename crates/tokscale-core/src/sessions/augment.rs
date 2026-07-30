@@ -33,6 +33,10 @@ struct AugmentAgentState {
 struct AugmentTurn {
     #[serde(rename = "finishedAt")]
     finished_at: Option<String>,
+    /// Only completed turns are counted. Snapshots may retain in-progress or
+    /// aborted turns that already carry a partial `token_usage` observation.
+    #[serde(default)]
+    completed: Option<bool>,
     exchange: Option<AugmentExchange>,
     #[serde(rename = "sequenceId")]
     sequence_id: Option<serde_json::Value>,
@@ -164,6 +168,11 @@ pub fn parse_augment_file(path: &Path) -> Vec<UnifiedMessage> {
             Ok(t) => t,
             Err(_) => continue,
         };
+
+        // Skip incomplete/aborted turns even if a partial token_usage was streamed.
+        if turn.completed != Some(true) {
+            continue;
+        }
 
         // Incomplete turns may lack usage; skip if no token observation.
         let Some(exchange) = turn.exchange.as_ref() else {
@@ -436,5 +445,52 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 1);
         assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_skips_incomplete_turns_even_with_token_usage() {
+        let json = r#"{
+            "sessionId": "s3",
+            "agentState": { "modelId": "grok-4-5" },
+            "chatHistory": [
+                {
+                    "completed": false,
+                    "finishedAt": "2026-01-15T12:01:00.000Z",
+                    "exchange": {
+                        "model_id": "grok-4-5",
+                        "request_id": "partial",
+                        "response_nodes": [
+                            {
+                                "token_usage": {
+                                    "input_tokens": 999,
+                                    "output_tokens": 50,
+                                    "cache_read_input_tokens": 0,
+                                    "cache_creation_input_tokens": 0
+                                }
+                            }
+                        ]
+                    }
+                },
+                {
+                    "finishedAt": "2026-01-15T12:02:00.000Z",
+                    "exchange": {
+                        "model_id": "grok-4-5",
+                        "request_id": "missing-completed",
+                        "response_nodes": [
+                            {
+                                "token_usage": {
+                                    "input_tokens": 100,
+                                    "output_tokens": 10,
+                                    "cache_read_input_tokens": 0,
+                                    "cache_creation_input_tokens": 0
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }"#;
+        let f = write_temp_json(json);
+        assert!(parse_augment_file(f.path()).is_empty());
     }
 }

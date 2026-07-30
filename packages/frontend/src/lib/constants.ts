@@ -168,7 +168,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   "devin-cli": "#334155",
   "devin-desktop": "#334155",
   senpi: "#2F6F63",
-  augment: "#7C3AED",
+  augment: "#9333EA",
 };
 
 // Derived values
