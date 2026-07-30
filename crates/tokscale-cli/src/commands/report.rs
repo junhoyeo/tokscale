@@ -271,9 +271,10 @@ fn run_summarizer(
         let results = match backend {
             "apple-fm" => run_apple_fm_summarizer(chunk)?,
             "claude" | "codex" | "gemini" | "kiro" => run_cli_summarizer(backend, chunk)?,
+            "minimax" => run_minimax_summarizer(chunk)?,
             other => {
                 return Err(anyhow::anyhow!(
-                    "Unknown summarizer backend: '{}'. Valid options: apple-fm, claude, codex, gemini, kiro",
+                    "Unknown summarizer backend: '{}'. Valid options: apple-fm, claude, codex, gemini, kiro, minimax",
                     other
                 ));
             }
@@ -344,8 +345,9 @@ fn run_task_grouping(db: &WikiDb, entries: &[WikiEntry], backend: &str) -> Resul
         return Ok(());
     }
 
-    // Non-CLI backends (apple-fm and any future on-device backend) have no LLM
-    // grouping path. Rather than skip — which leaves every task_group null and
+    // Non-CLI backends (apple-fm and any backend without a local grouping CLI,
+    // such as minimax) have no LLM grouping path here. Rather than skip — which
+    // leaves every task_group null and
     // makes the report collapse sessions by EXACT title — cluster titles
     // deterministically in Rust. This merges near-duplicate titles ("Enhance API
     // Security" / "Enhance API security with JWT auth middleware") into a single
@@ -892,6 +894,119 @@ fn run_cli_summarizer(
                 backend,
                 e
             );
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Default MiniMax text model used by the `minimax` summarizer backend. Callers
+/// may override it with the `MINIMAX_MODEL` environment variable (for example to
+/// select the smaller `MiniMax-M2.7` model).
+const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3";
+
+/// Global (international) OpenAI-compatible base URL for MiniMax inference.
+const MINIMAX_GLOBAL_BASE_URL: &str = "https://api.minimax.io/v1";
+
+/// Mainland-China OpenAI-compatible base URL for MiniMax inference. Selected by
+/// setting `MINIMAX_API_REGION` to `cn` (aliases: `cn_zh`, `china`, `zh`).
+const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/v1";
+
+/// Resolve the MiniMax OpenAI-compatible base URL for a region string. Defaults
+/// to the global endpoint; any China alias selects the CN endpoint.
+fn minimax_base_url(region: Option<&str>) -> &'static str {
+    match region.map(|r| r.trim().to_ascii_lowercase()).as_deref() {
+        Some("cn") | Some("cn_zh") | Some("china") | Some("zh") => MINIMAX_CN_BASE_URL,
+        _ => MINIMAX_GLOBAL_BASE_URL,
+    }
+}
+
+/// Extract the assistant message text from an OpenAI-compatible chat-completion
+/// response body (`choices[0].message.content`).
+fn parse_openai_content(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value
+        .get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Call the MiniMax OpenAI-compatible chat-completions endpoint with a single
+/// system + user turn and return the assistant text.
+///
+/// The API key is read from `MINIMAX_API_KEY` (falling back to
+/// `MINIMAX_API_TOKEN`), matching the usage-tracking module. `MINIMAX_API_REGION`
+/// picks the global or CN base URL, and `MINIMAX_MODEL` overrides the default
+/// model. Runs on a current-thread Tokio runtime so it fits the otherwise
+/// synchronous summarizer pipeline (`main` is not `#[tokio::main]`).
+fn minimax_chat(system_prompt: &str, user_prompt: &str) -> Result<String> {
+    let api_key = std::env::var("MINIMAX_API_KEY")
+        .or_else(|_| std::env::var("MINIMAX_API_TOKEN"))
+        .map_err(|_| anyhow::anyhow!("No MINIMAX_API_KEY or MINIMAX_API_TOKEN set."))?;
+    let region = std::env::var("MINIMAX_API_REGION").ok();
+    let base_url = minimax_base_url(region.as_deref());
+    let model =
+        std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| MINIMAX_DEFAULT_MODEL.to_string());
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(BACKEND_TIMEOUT)
+            .build()?;
+        let body = serde_json::json!({
+            "model": model,
+            "stream": false,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_prompt },
+            ],
+        });
+        let resp = client
+            .post(format!("{base_url}/chat/completions"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            anyhow::bail!("MiniMax rejected the API key (HTTP {status}).");
+        }
+        if !status.is_success() {
+            anyhow::bail!("MiniMax request failed (HTTP {status}).");
+        }
+
+        let text = resp.text().await?;
+        parse_openai_content(&text)
+            .ok_or_else(|| anyhow::anyhow!("MiniMax response missing choices[0].message.content"))
+    })
+}
+
+/// Summarizer backend that classifies sessions with a MiniMax text model over
+/// the OpenAI-compatible chat-completions endpoint. Mirrors
+/// [`run_cli_summarizer`]: any failure (missing key, network error, unparseable
+/// response) is logged and degrades to an empty batch so the report continues.
+fn run_minimax_summarizer(payloads: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
+    let prompt = build_cli_prompt(payloads);
+
+    let content = match minimax_chat(SUMMARIZER_SYSTEM_PROMPT, &prompt) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("  {} minimax summarizer failed: {}", "⚠".yellow(), e);
+            return Ok(Vec::new());
+        }
+    };
+
+    let json_str = extract_json_array(&content);
+    match serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+        Ok(results) => Ok(results),
+        Err(e) => {
+            eprintln!("  {} Failed to parse minimax response: {}", "⚠".yellow(), e);
             Ok(Vec::new())
         }
     }
@@ -2098,5 +2213,46 @@ mod tests {
         let entry = entry_for(inner_id, "gemini");
         let content = extract_content_for_session(&entry, &index);
         assert_eq!(content.first_user_message.as_deref(), Some("Hello Gemini"));
+    }
+
+    #[test]
+    fn minimax_base_url_defaults_to_global() {
+        assert_eq!(minimax_base_url(None), "https://api.minimax.io/v1");
+        assert_eq!(
+            minimax_base_url(Some("global")),
+            "https://api.minimax.io/v1"
+        );
+        assert_eq!(
+            minimax_base_url(Some("global_en")),
+            "https://api.minimax.io/v1"
+        );
+    }
+
+    #[test]
+    fn minimax_base_url_selects_cn_region() {
+        assert_eq!(minimax_base_url(Some("cn")), "https://api.minimaxi.com/v1");
+        assert_eq!(
+            minimax_base_url(Some(" CN_ZH ")),
+            "https://api.minimaxi.com/v1"
+        );
+        assert_eq!(
+            minimax_base_url(Some("china")),
+            "https://api.minimaxi.com/v1"
+        );
+    }
+
+    #[test]
+    fn parse_openai_content_extracts_assistant_message() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"[{\"session_id\":\"s1\"}]"}}]}"#;
+        assert_eq!(
+            parse_openai_content(body).as_deref(),
+            Some("[{\"session_id\":\"s1\"}]")
+        );
+    }
+
+    #[test]
+    fn parse_openai_content_returns_none_without_choices() {
+        assert_eq!(parse_openai_content(r#"{"error":"nope"}"#), None);
+        assert_eq!(parse_openai_content("not json"), None);
     }
 }

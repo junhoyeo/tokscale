@@ -374,7 +374,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "apple-fm",
-            help = "Summarizer backend: apple-fm, claude, codex, gemini, kiro"
+            help = "Summarizer backend: apple-fm, claude, codex, gemini, kiro, minimax"
         )]
         summarizer: String,
         #[arg(long, help = "Reset all summaries and re-summarize from scratch")]
