@@ -97,6 +97,7 @@
 | <img width="48px" src="https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl` + SQLite fallback |
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin CLI" /> | [Devin CLI](https://devin.ai/) | `~/.local/share/devin/cli/sessions.db` (SQLite) |
 | <img width="48px" src=".github/assets/client-devin.jpg" alt="Devin Desktop" /> | [Devin Desktop](https://devin.ai/) | ACP events: macOS `~/Library/Application Support/Devin/User/acp-events/`; Linux `~/.config/Devin/User/acp-events/`; Windows `%APPDATA%\Devin\User\acp-events\` |
+| <img width="48px" src="https://github.com/augmentcode.png" alt="Augment Code" /> | [Augment Code](https://www.augmentcode.com/) (Auggie CLI) | `~/.augment/sessions/*.json` |
 | <img width="48px" src=".github/assets/client-synthetic.png" alt="Synthetic" /> | [Synthetic](https://synthetic.new/) | Re-attributed from other sources via `hf:` model prefix or `synthetic` provider (+ [Octofriend](https://github.com/synthetic-lab/octofriend): `~/.local/share/octofriend/sqlite.db`) |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
@@ -379,7 +380,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `synthetic`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`.
 
 > **Breaking change (v4.0.0):** The per-client boolean flags (`--opencode`, `--claude`, `--codex`, etc.) have been removed and now error. Use the canonical `--client`/`-c` flag instead — e.g. `tokscale --client opencode,claude`.
 
@@ -1359,6 +1360,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db` | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db` | Parses WorkBuddy token usage, with the aggregate SQLite database as a fallback |
 | Devin CLI | `~/.local/share/devin/cli/sessions.db` | `%USERPROFILE%\.local\share\devin\cli\sessions.db` | Reads the authoritative local SQLite usage database |
 | Devin Desktop | Linux: `~/.config/Devin/User/acp-events/`; macOS: `~/Library/Application Support/Devin/User/acp-events/` | `%APPDATA%\Devin\User\acp-events\` | Parses ACP usage events; the CLI database resolves matching session titles when present |
+| Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | Parses Auggie CLI session JSON snapshots (`*.json`); join key is top-level `sessionId` |
 | Synthetic | Re-attributed from other sources | Re-attributed from other sources | Detects `hf:` model prefix + `synthetic` provider |
 
 > **Devin Desktop agent support**: Local usage parsing works for ACP-connected agents (e.g. Cascade/Windsurf, claude-code, opencode) that emit `usage_update` events in the NDJSON stream. The default **devin-cloud** agent does not emit local `usage_update` events — its usage stays server-side and cannot be tracked by tokscale without an account-level API.
@@ -1613,6 +1615,12 @@ Grok Build data is parsed directly from local session updates. Current logs expo
 Location: `$JCODE_HOME/sessions/session_*.json` (fallback: `~/.jcode/sessions/session_*.json`) plus matching `session_*.journal.jsonl` sidecars.
 
 Jcode data is parsed directly from local session snapshots. Tokscale reads assistant `messages[].token_usage` fields (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, and `reasoning_output_tokens`) without spoofing another client identity. Matching journal sidecars are merged into the same session stream before deduplication so recent appended messages are included until Jcode checkpoints them into the snapshot. Stable message IDs are used for replay dedupe; malformed/custom records without IDs use a scoped fallback key.
+
+### Augment Code (Auggie CLI)
+
+Location: `~/.augment/sessions/<sessionId>.json`
+
+Augment Code / Auggie CLI writes one JSON snapshot per chat session. Tokscale reads each completed turn under `chatHistory[]`, prefers `exchange.model_id` over the session default `agentState.modelId`, and takes the single `token_usage` observation on `exchange.response_nodes[]` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`). The top-level `sessionId` is preserved so external tools can join costs back to the ACP session id.
 
 ### OpenClaw
 

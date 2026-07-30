@@ -1516,6 +1516,32 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let augment_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Augment)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Augment),
+                path,
+                &source_cache,
+                pricing,
+                sessions::augment::parse_augment_file,
+            )
+        })
+        .collect();
+    let mut augment_seen: HashSet<String> = HashSet::new();
+    for outcome in augment_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut augment_seen, message)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     // Command Code does not persist token usage or cost locally, so tokens are
     // estimated and priced. The model id comes from ~/.commandcode/config.json
     // (canonicalized, e.g. "MiniMaxAI/MiniMax-M3-Free" -> "MiniMax-M3"), not the
@@ -3155,6 +3181,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let senpi_count = senpi_msgs.len() as i32;
     counts.set(ClientId::Senpi, senpi_count);
     messages.extend(senpi_msgs);
+
+    let augment_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Augment)
+        .par_iter()
+        .flat_map(|path| sessions::augment::parse_augment_file(path))
+        .collect();
+    let mut augment_seen: HashSet<String> = HashSet::new();
+    let augment_msgs: Vec<ParsedMessage> = augment_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut augment_seen, message))
+        .map(|msg| unified_to_parsed(&msg))
+        .collect();
+    let augment_count = augment_msgs.len() as i32;
+    counts.set(ClientId::Augment, augment_count);
+    messages.extend(augment_msgs);
 
     let commandcode_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::CommandCode)

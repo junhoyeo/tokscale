@@ -170,6 +170,12 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         display_name: "Senpi",
         hotkey: 'S',
     },
+    // Short form: full "Augment Code" fits the client column, but keep parity
+    // with other product-branded names used in capitalize_client.
+    ClientUi {
+        display_name: "Augment",
+        hotkey: 'A',
+    },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {
