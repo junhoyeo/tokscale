@@ -703,10 +703,11 @@ tokscale report --week
 # Use Claude Code as the summarizer backend
 tokscale report --week --summarizer claude
 
-# Use Codex, Gemini, or Kiro
+# Use Codex, Gemini, Kiro, or MiniMax
 tokscale report --summarizer codex
 tokscale report --summarizer gemini
 tokscale report --summarizer kiro
+tokscale report --summarizer minimax
 
 # Skip LLM summarization (show raw data only)
 tokscale report --no-summarize

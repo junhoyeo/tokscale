@@ -700,10 +700,11 @@ tokscale report --week
 # 使用 Claude Code 作为摘要器后端
 tokscale report --week --summarizer claude
 
-# 使用 Codex、Gemini 或 Kiro
+# 使用 Codex、Gemini、Kiro 或 MiniMax
 tokscale report --summarizer codex
 tokscale report --summarizer gemini
 tokscale report --summarizer kiro
+tokscale report --summarizer minimax
 
 # 跳过 LLM 摘要（仅显示原始数据）；这是退出（opt-out）选项
 tokscale report --no-summarize

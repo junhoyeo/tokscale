@@ -696,10 +696,11 @@ tokscale report --week
 # Claude Code를 요약 백엔드로 사용
 tokscale report --week --summarizer claude
 
-# Codex, Gemini 또는 Kiro 사용
+# Codex, Gemini, Kiro 또는 MiniMax 사용
 tokscale report --summarizer codex
 tokscale report --summarizer gemini
 tokscale report --summarizer kiro
+tokscale report --summarizer minimax
 
 # LLM 요약 건너뛰기 (원본 데이터만 표시)
 tokscale report --no-summarize

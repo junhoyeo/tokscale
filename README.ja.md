@@ -699,10 +699,11 @@ tokscale report --week
 # Claude Code をサマライザーバックエンドとして使用
 tokscale report --week --summarizer claude
 
-# Codex、Gemini、Kiro を使用
+# Codex、Gemini、Kiro、MiniMax を使用
 tokscale report --summarizer codex
 tokscale report --summarizer gemini
 tokscale report --summarizer kiro
+tokscale report --summarizer minimax
 
 # LLM 要約をスキップ（生データのみ表示）
 tokscale report --no-summarize
