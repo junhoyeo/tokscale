@@ -191,6 +191,15 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     if contains_delimited(&lower, "kimi") {
         return Some("moonshotai");
     }
+    // Kimi's own coding-plan catalog also serves bare `k2`/`k3`-style ids with
+    // no `kimi` prefix at all (e.g. `k3`, `k3-256k` from the K3 coding-plan
+    // model), so the `kimi` substring check above misses them. No other known
+    // provider uses a bare, delimited `k2`/`k3` model id (checked against the
+    // full litellm/models.dev/openrouter pricing datasets), so this is safe
+    // without the `kimi` prefix.
+    if contains_delimited(&lower, "k2") || contains_delimited(&lower, "k3") {
+        return Some("moonshotai");
+    }
     // MiMo (Xiaomi) — `mimo-v2.5` etc.
     if contains_delimited(&lower, "mimo") {
         return Some("xiaomi");
@@ -316,6 +325,23 @@ mod tests {
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));
         assert_eq!(inferred_provider_from_model("qwen3-coder"), Some("qwen"));
         assert_eq!(inferred_provider_from_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn test_inferred_provider_bare_kimi_k_series_ids() {
+        // Kimi's coding-plan catalog serves these with no `kimi` prefix at all.
+        assert_eq!(inferred_provider_from_model("k3"), Some("moonshotai"));
+        assert_eq!(inferred_provider_from_model("k3-256k"), Some("moonshotai"));
+        assert_eq!(inferred_provider_from_model("K3"), Some("moonshotai"));
+        assert_eq!(inferred_provider_from_model("k2"), Some("moonshotai"));
+        // Already-prefixed forms keep matching via the `kimi` substring check.
+        assert_eq!(
+            inferred_provider_from_model("kimi-k2.5-thinking"),
+            Some("moonshotai")
+        );
+        // A `k2`/`k3` substring that isn't a delimited token must not match.
+        assert_eq!(inferred_provider_from_model("flock3"), None);
+        assert_eq!(inferred_provider_from_model("network2"), None);
     }
 
     #[test]
