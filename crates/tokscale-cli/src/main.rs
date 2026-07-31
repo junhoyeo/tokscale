@@ -997,6 +997,7 @@ pub enum ClientFilter {
     #[value(name = "devin-desktop")]
     DevinDesktop,
     Senpi,
+    #[value(alias = "auggie")]
     Augment,
     Synthetic,
 }
@@ -1161,6 +1162,12 @@ impl ClientFilter {
     /// any unknown id so callers can drop unrecognized settings entries
     /// without erroring.
     pub fn from_filter_str(s: &str) -> Option<Self> {
+        // Canonical ids match as_filter_str. A few product aliases map onto
+        // the same ClientFilter (e.g. "auggie" -> Augment).
+        match s {
+            "auggie" => return Some(Self::Augment),
+            _ => {}
+        }
         Self::value_variants()
             .iter()
             .copied()
