@@ -76,24 +76,6 @@ npm_view_version_status() {
   return "${status}"
 }
 
-npm_view_required_version() {
-  local __result_var="$1"
-  local spec="$2"
-  local package_label="$3"
-  local status
-  npm_view_version_status "${__result_var}" "${spec}"
-  status=$?
-  if [[ ${status} -eq 0 ]]; then
-    return 0
-  fi
-  if [[ ${status} -eq 1 ]]; then
-    errors+=("${package_label}: package is not visible on npm")
-  else
-    errors+=("${package_label}: npm lookup failed")
-  fi
-  return "${status}"
-}
-
 npm_view_optional_version() {
   local __result_var="$1"
   local spec="$2"
@@ -182,10 +164,31 @@ while IFS=$'\t' read -r path package_name manifest_version; do
     errors+=("${path}: expected version ${NEW_VERSION}, found ${manifest_version}")
   fi
 
-  if ! npm_view_required_version current_version "${package_name}" "${package_name}"; then
+  package_is_primary=false
+  for primary in "${primary_packages[@]}"; do
+    if [[ "${package_name}" == "${primary}" ]]; then
+      package_is_primary=true
+      break
+    fi
+  done
+
+  current_version=""
+  if npm_view_optional_version current_version "${package_name}" "${package_name}"; then
+    echo "${package_name}: npm latest ${current_version}"
+  else
+    lookup_status=$?
+    if [[ ${lookup_status} -ne 1 ]]; then
+      continue
+    fi
+    if [[ "${package_is_primary}" == "true" ]]; then
+      errors+=("${package_name}: package is not visible on npm")
+    else
+      # A platform package that has never been published (e.g. a newly added
+      # target) legitimately 404s here; its first release creates it on npm.
+      echo "${package_name}: not published on npm yet; ${NEW_VERSION} will be its first release"
+    fi
     continue
   fi
-  echo "${package_name}: npm latest ${current_version}"
 
   if npm_view_optional_version target_version "${package_name}@${NEW_VERSION}" "${package_name}@${NEW_VERSION}"; then
     existing_targets=$((existing_targets + 1))
@@ -196,13 +199,11 @@ while IFS=$'\t' read -r path package_name manifest_version; do
     fi
   fi
 
-  for primary in "${primary_packages[@]}"; do
-    if [[ "${package_name}" == "${primary}" && -n "${RELEASE_BASE_VERSION}" && "${RELEASE_RECOVERY}" != "true" ]]; then
-      if semver_gt "${RELEASE_BASE_VERSION}" "${current_version}"; then
-        errors+=("Repository version ${RELEASE_BASE_VERSION} is ahead of npm latest ${current_version} for ${package_name}; set RELEASE_RECOVERY=true and target ${RELEASE_BASE_VERSION} when retrying the failed publish")
-      fi
+  if [[ "${package_is_primary}" == "true" && -n "${RELEASE_BASE_VERSION}" && "${RELEASE_RECOVERY}" != "true" ]]; then
+    if semver_gt "${RELEASE_BASE_VERSION}" "${current_version}"; then
+      errors+=("Repository version ${RELEASE_BASE_VERSION} is ahead of npm latest ${current_version} for ${package_name}; set RELEASE_RECOVERY=true and target ${RELEASE_BASE_VERSION} when retrying the failed publish")
     fi
-  done
+  fi
 done < <(release_packages)
 
 if [[ ${checked} -eq 0 ]]; then

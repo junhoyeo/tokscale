@@ -19,6 +19,7 @@ write_release_package_manifests() {
     packages/cli-linux-arm64-musl \
     packages/cli-win32-x64-msvc \
     packages/cli-win32-arm64-msvc \
+    packages/cli-android-arm64 \
     packages/tokscale
 
   cat > packages/cli/package.json <<EOF_MANIFEST
@@ -33,7 +34,8 @@ write_release_package_manifests() {
     "@tokscale/cli-linux-arm64-gnu": "${version}",
     "@tokscale/cli-linux-arm64-musl": "${version}",
     "@tokscale/cli-win32-x64-msvc": "${version}",
-    "@tokscale/cli-win32-arm64-msvc": "${version}"
+    "@tokscale/cli-win32-arm64-msvc": "${version}",
+    "@tokscale/cli-android-arm64": "${version}"
   }
 }
 EOF_MANIFEST
@@ -46,7 +48,8 @@ EOF_MANIFEST
     cli-linux-arm64-gnu \
     cli-linux-arm64-musl \
     cli-win32-x64-msvc \
-    cli-win32-arm64-msvc; do
+    cli-win32-arm64-msvc \
+    cli-android-arm64; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
   "name": "@tokscale/${pkg}",
@@ -107,6 +110,11 @@ if [[ "${1:-}" == "view" ]]; then
       exit 1
       ;;
     *@3.0.1)
+      echo "npm ERR! code E404" >&2
+      exit 1
+      ;;
+    @tokscale/cli-android-arm64)
+      # Never published: simulates a newly added platform package.
       echo "npm ERR! code E404" >&2
       exit 1
       ;;
@@ -197,6 +205,30 @@ test_recovery_requires_base_version() {
     fi
 
     grep -q "Recovery target 3.0.0 requires RELEASE_BASE_VERSION" "${output}"
+  )
+}
+
+test_first_release_of_new_platform_package_is_allowed() {
+  local work="${TMP_DIR}/first-release"
+  mkdir -p "${work}/scripts"
+  cp "${CHECK_SCRIPT}" "${work}/scripts/check-npm-release-state.sh"
+  (
+    cd "${work}"
+    write_release_package_manifests "3.0.1"
+    local fake_npm="${TMP_DIR}/fake-npm-first-release"
+    write_fake_npm "${fake_npm}"
+
+    local output="${TMP_DIR}/first-release-output.txt"
+    FAKE_NPM_LOG="${TMP_DIR}/first-release-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/first-release-publish.log" \
+      NPM_CMD="${fake_npm}" \
+      NPM_CHECK_AUTH=0 \
+      NEW_VERSION="3.0.1" \
+      RELEASE_BASE_VERSION="2.1.3" \
+      bash scripts/check-npm-release-state.sh >"${output}" 2>&1
+
+    grep -q "@tokscale/cli-android-arm64: not published on npm yet; 3.0.1 will be its first release" "${output}"
+    grep -q "npm release-state OK for 3.0.1" "${output}"
   )
 }
 
@@ -445,6 +477,7 @@ EOF_MANIFEST
 test_refuses_repo_version_ahead_of_npm_without_recovery
 test_recovery_allows_existing_target_versions_for_partial_retry
 test_recovery_requires_base_version
+test_first_release_of_new_platform_package_is_allowed
 test_precheck_fails_on_non_404_npm_lookup_errors
 test_publish_skips_existing_target_version_during_recovery
 test_refuses_to_publish_existing_target_without_recovery
