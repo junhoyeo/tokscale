@@ -42,6 +42,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "devin-desktop",
   "senpi",
   "augment",
+  "kimchi",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

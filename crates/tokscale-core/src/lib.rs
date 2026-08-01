@@ -1669,6 +1669,26 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let kimchi_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Kimchi)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(
+                message_cache::CacheIdentity::for_client(ClientId::Kimchi),
+                path,
+                &source_cache,
+                pricing,
+                sessions::kimchi::parse_kimchi_file,
+            )
+        })
+        .collect();
+    for outcome in kimchi_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let senpi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Senpi)
         .par_iter()
@@ -3569,6 +3589,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let pi_count = pi_msgs.len() as i32;
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
+
+    let kimchi_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Kimchi)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::kimchi::parse_kimchi_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let kimchi_count = kimchi_msgs.len() as i32;
+    counts.set(ClientId::Kimchi, kimchi_count);
+    messages.extend(kimchi_msgs);
 
     let senpi_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Senpi)

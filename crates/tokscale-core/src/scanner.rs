@@ -2522,6 +2522,14 @@ mod tests {
         file.write_all(b"{}").unwrap();
     }
 
+    fn setup_mock_kimchi_dir(base: &std::path::Path) {
+        let kimchi_path = base.join(".config/kimchi/harness/sessions/--test--");
+        fs::create_dir_all(&kimchi_path).unwrap();
+        let mut file =
+            File::create(kimchi_path.join("2026-08-01T00-00-00Z_kimchi_ses_001.jsonl")).unwrap();
+        file.write_all(b"{}").unwrap();
+    }
+
     fn setup_mock_kiro_dir(base: &std::path::Path) {
         let kiro_path = base.join(".kiro/sessions/cli");
         fs::create_dir_all(&kiro_path).unwrap();
@@ -3786,6 +3794,24 @@ mod tests {
         assert_eq!(result.get(ClientId::Pi).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_kimchi() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_kimchi_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["kimchi".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Kimchi).len(), 1);
+        assert!(result.get(ClientId::Kimchi)[0]
+            .to_string_lossy()
+            .ends_with(".jsonl"));
+        assert!(result.get(ClientId::Pi).is_empty());
     }
 
     #[test]

@@ -70,6 +70,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   "devin-desktop": "Devin Desktop",
   senpi: "Senpi (OmO Native)",
   augment: "Augment Code",
+  kimchi: "Kimchi",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -123,6 +124,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   "devin-desktop": `${GITHUB_CDN_BASE}/client-devin.jpg`,
   senpi: `${GITHUB_CDN_BASE}/client-senpi.png`,
   augment: "https://github.com/augmentcode.png",
+  kimchi: "https://github.com/getkimchi.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -169,6 +171,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   "devin-desktop": "#334155",
   senpi: "#2F6F63",
   augment: "#9333EA",
+  kimchi: "#F97316",
 };
 
 // Derived values

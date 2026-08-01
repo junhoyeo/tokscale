@@ -1471,6 +1471,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "jcode" => Some("Jcode"),
         "junie" => Some("Junie"),
         "augment" => Some("Augment Code"),
+        "kimchi" => Some("Kimchi"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -1515,6 +1516,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Jcode" => Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),
         "Junie" => Some("https://github.com/JetBrains.png"),
         "Augment Code" => Some("https://github.com/augmentcode.png"),
+        "Kimchi" => Some("https://github.com/getkimchi.png"),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
     }

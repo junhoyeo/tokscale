@@ -1075,6 +1075,7 @@ pub enum ClientFilter {
     Senpi,
     #[value(alias = "auggie")]
     Augment,
+    Kimchi,
     Synthetic,
 }
 
@@ -1126,6 +1127,7 @@ impl ClientFilter {
             Self::DevinDesktop => "devin-desktop",
             Self::Senpi => "senpi",
             Self::Augment => "augment",
+            Self::Kimchi => "kimchi",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1180,6 +1182,7 @@ impl ClientFilter {
             Self::DevinDesktop => Some(ClientId::DevinDesktop),
             Self::Senpi => Some(ClientId::Senpi),
             Self::Augment => Some(ClientId::Augment),
+            Self::Kimchi => Some(ClientId::Kimchi),
             Self::Synthetic => None,
         }
     }
@@ -1230,6 +1233,7 @@ impl ClientFilter {
             ClientId::DevinDesktop => Self::DevinDesktop,
             ClientId::Senpi => Self::Senpi,
             ClientId::Augment => Self::Augment,
+            ClientId::Kimchi => Self::Kimchi,
         }
     }
 
@@ -3906,6 +3910,7 @@ fn capitalize_client(client: &str) -> String {
         "devin-desktop" => "Devin Desktop".to_string(),
         "senpi" => "Senpi (OmO Native)".to_string(),
         "augment" => "Augment Code".to_string(),
+        "kimchi" => "Kimchi".to_string(),
         other => other.to_string(),
     }
 }

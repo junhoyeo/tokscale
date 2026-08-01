@@ -578,6 +578,20 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Kimchi Coding uses the Pi session format under its own agent directory.
+    // The launcher exposes KIMCHI_CODING_AGENT_DIR for relocated installs.
+    Kimchi = 41 => {
+        id: "kimchi",
+        root: PathRoot::EnvVar {
+            var: "KIMCHI_CODING_AGENT_DIR",
+            fallback_relative: ".config/kimchi/harness",
+        },
+        relative: "sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -630,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 41);
+        assert_eq!(ClientId::COUNT, 42);
     }
 
     #[test]
@@ -655,6 +669,46 @@ mod tests {
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
         assert!(!client.data().headless);
+    }
+
+    #[test]
+    fn test_kimchi_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("kimchi").expect("kimchi client should be registered");
+        assert_eq!(client.data().relative_path, "sessions");
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
+    }
+
+    #[test]
+    fn test_kimchi_defaults_to_home_agent_dir_without_env_override() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var("KIMCHI_CODING_AGENT_DIR").ok();
+        unsafe { std::env::remove_var("KIMCHI_CODING_AGENT_DIR") };
+
+        let client = ClientId::from_str("kimchi").expect("kimchi client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/tmp/home/.config/kimchi/harness/sessions"
+        );
+
+        restore_env("KIMCHI_CODING_AGENT_DIR", previous);
+    }
+
+    #[test]
+    fn test_kimchi_honors_agent_dir_env_override() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var("KIMCHI_CODING_AGENT_DIR").ok();
+        unsafe { std::env::set_var("KIMCHI_CODING_AGENT_DIR", "/custom/kimchi-agent") };
+
+        let client = ClientId::from_str("kimchi").expect("kimchi client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/custom/kimchi-agent/sessions"
+        );
+
+        restore_env("KIMCHI_CODING_AGENT_DIR", previous);
     }
 
     #[test]

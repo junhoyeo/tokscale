@@ -1613,6 +1613,7 @@ mod tests {
         assert_eq!(clients[38], ClientId::DevinDesktop);
         assert_eq!(clients[39], ClientId::Senpi);
         assert_eq!(clients[40], ClientId::Augment);
+        assert_eq!(clients[41], ClientId::Kimchi);
     }
 
     #[test]
@@ -1720,6 +1721,10 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Augment),
             "Augment"
         );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Kimchi),
+            "Kimchi"
+        );
     }
 
     #[test]
@@ -1756,6 +1761,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::CodeBuddy), 'C');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::WorkBuddy), 'B');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Augment), 'A');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimchi), 'K');
     }
 
     #[test]
@@ -1867,6 +1873,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('A'),
             Some(ClientId::Augment)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('K'),
+            Some(ClientId::Kimchi)
         );
     }
 

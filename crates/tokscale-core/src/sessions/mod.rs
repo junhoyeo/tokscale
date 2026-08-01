@@ -28,6 +28,7 @@ pub mod jcode;
 pub mod junie;
 pub mod kilo;
 pub mod kilocode;
+pub mod kimchi;
 pub mod kimi;
 pub mod kiro;
 pub mod micode;
