@@ -396,6 +396,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "unified.jsonl" => file_name == "unified.jsonl",
                 "events.jsonl" => file_name == "events.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
+                "cline-cli-messages" => file_name.ends_with(".messages.json"),
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
                 "workbuddy.db" => file_name == "workbuddy.db",
@@ -873,6 +874,19 @@ fn cline_additional_vscode_task_roots(home_dir: &str, use_env_roots: bool) -> Ve
     );
 
     roots
+}
+
+fn cline_cli_session_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let cline_dir = if use_env_roots {
+        std::env::var_os("CLINE_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(home_dir).join(".cline"))
+    } else {
+        PathBuf::from(home_dir).join(".cline")
+    };
+
+    vec![cline_dir.join("data/sessions")]
 }
 
 pub fn devin_desktop_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
@@ -1615,6 +1629,16 @@ fn scan_all_clients_with_env_strategy_inner(
         for root in cline_additional_vscode_task_roots(home_dir, use_env_roots) {
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Cline, root);
         }
+
+        for root in cline_cli_session_roots(home_dir, use_env_roots) {
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Cline,
+                root,
+                "cline-cli-messages",
+            );
+        }
     }
 
     if enabled.contains(&ClientId::DevinDesktop) {
@@ -2209,6 +2233,19 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_directory_cline_cli_messages_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("session.messages.json")).unwrap();
+        File::create(path.join("session.json")).unwrap();
+        File::create(path.join("session.messages.jsonl")).unwrap();
+
+        let files = scan_directory(path.to_str().unwrap(), "cline-cli-messages");
+        assert_eq!(files, vec![path.join("session.messages.json")]);
+    }
+
+    #[test]
     fn test_scan_directory_nested() {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
@@ -2783,6 +2820,12 @@ mod tests {
         File::create(macos.join("ui_messages.json")).unwrap();
         File::create(windows.join("ui_messages.json")).unwrap();
         File::create(server.join("ui_messages.json")).unwrap();
+    }
+
+    fn setup_mock_cline_cli_dir(base: &std::path::Path) {
+        let sessions = base.join(".cline/data/sessions/cli-session");
+        fs::create_dir_all(&sessions).unwrap();
+        File::create(sessions.join("cli-session.messages.json")).unwrap();
     }
 
     fn setup_mock_crush_registry(registry_path: &Path, projects_json: &str) {
@@ -4757,6 +4800,24 @@ mod tests {
             .get(ClientId::Cline)
             .iter()
             .all(|p| p.ends_with("ui_messages.json")));
+    }
+
+    #[test]
+    fn test_scan_all_clients_cline_cli() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_cline_cli_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cline".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Cline).len(), 1);
+        assert!(result.get(ClientId::Cline)[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".messages.json")));
     }
 
     #[test]
