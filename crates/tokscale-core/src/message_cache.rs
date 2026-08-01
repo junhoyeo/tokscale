@@ -886,6 +886,11 @@ fn parser_version(client: ClientId) -> u32 {
         // session_model_usage instead of crediting the whole session to
         // sessions.model, and dedup keys are namespaced per (session, model).
         ClientId::Hermes => 2,
+        // v2 added per-turn usage records. v3 adds the canonical unified log,
+        // non-overlapping output/cache/reasoning buckets, and session metadata.
+        // v4 scopes unified model attribution by PID generation and exact child
+        // session, so the same source can now produce different model IDs.
+        ClientId::Grok => 4,
         // v1 retained MiMo's embedded `cost` value but did not preserve its
         // provider-reported provenance. Reparse cached rows so strict submit
         // validation does not reject valid unknown-model MiMo usage offline.
@@ -2200,6 +2205,11 @@ mod tests {
     #[test]
     fn test_hermes_parser_version_invalidates_v1_entries() {
         assert_eq!(parser_version(ClientId::Hermes), 2);
+    }
+
+    #[test]
+    fn test_grok_scoped_model_attribution_bumps_parser_version() {
+        assert_eq!(parser_version(ClientId::Grok), 4);
     }
 
     #[test]

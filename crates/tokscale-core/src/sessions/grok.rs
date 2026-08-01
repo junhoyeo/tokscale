@@ -3,11 +3,12 @@
 //! Grok Build writes JSON-RPC session updates under
 //! `~/.grok/sessions/<urlencoded-workspace>/<session-id>/updates.jsonl`.
 //! Session rollups also land in sibling `signals.json` (including
-//! `totalTokensBeforeCompaction` and `contextTokensUsed`). Current update
-//! logs expose cumulative `totalTokens` counters without a stable
-//! input/output split, so this parser records per-turn positive total-token
-//! deltas as input tokens and reconciles any remaining `signals.json` total
-//! so compacted sessions are not under-counted.
+//! `totalTokensBeforeCompaction` and `contextTokensUsed`). Legacy update logs
+//! expose cumulative `totalTokens` counters without a stable input/output
+//! split, so this parser records per-turn positive total-token deltas as input
+//! tokens and reconciles any remaining `signals.json` total so compacted
+//! sessions are not under-counted. Recent Grok Build releases additionally
+//! write per-inference token breakdowns to `~/.grok/logs/unified.jsonl`.
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
@@ -16,12 +17,127 @@ use super::utils::{
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CLIENT_ID: &str = "grok";
 const PROVIDER_ID: &str = "xai";
 const UNKNOWN_MODEL: &str = "grok-unknown";
+const UNIFIED_LOG_DEDUP_PREFIX: &str = "grok-unified:";
+
+type UnifiedGeneration = u64;
+type UnifiedProcessKey = (i64, UnifiedGeneration);
+type UnifiedProcessSessionKey = (i64, UnifiedGeneration, String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UnifiedChildScope {
+    pid: i64,
+    generation: UnifiedGeneration,
+    session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UnifiedModelEvidence {
+    Unique(String),
+    Conflict,
+}
+
+#[derive(Debug, Default)]
+struct UnifiedChildEvidence {
+    known_scopes: HashSet<UnifiedChildScope>,
+    child_models: HashMap<UnifiedChildScope, UnifiedModelEvidence>,
+    terminal_scopes: HashSet<UnifiedChildScope>,
+    terminal_models: HashMap<UnifiedChildScope, UnifiedModelEvidence>,
+    child_session_ids: HashSet<String>,
+}
+
+fn authoritative_model(value: Option<&Value>) -> Option<String> {
+    extract_string(value).and_then(|model| {
+        let model = model.trim();
+        (!model.is_empty() && model != UNKNOWN_MODEL).then(|| model.to_string())
+    })
+}
+
+fn record_model_evidence(
+    evidence: &mut HashMap<UnifiedChildScope, UnifiedModelEvidence>,
+    scope: &UnifiedChildScope,
+    model: String,
+) {
+    match evidence.entry(scope.clone()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(UnifiedModelEvidence::Unique(model));
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) => match entry.get() {
+            UnifiedModelEvidence::Unique(existing) if existing == &model => {}
+            UnifiedModelEvidence::Unique(_) | UnifiedModelEvidence::Conflict => {
+                entry.insert(UnifiedModelEvidence::Conflict);
+            }
+        },
+    }
+}
+
+fn current_unified_generation(
+    generations: &mut HashMap<i64, UnifiedGeneration>,
+    pid: i64,
+) -> UnifiedGeneration {
+    *generations.entry(pid).or_insert(0)
+}
+
+fn advance_unified_generation(generations: &mut HashMap<i64, UnifiedGeneration>, pid: i64) {
+    let generation = generations.entry(pid).or_insert(0);
+    *generation = generation.saturating_add(1);
+}
+
+fn unified_subagent_id(value: &Value) -> Option<String> {
+    extract_string(value.get("ctx")?.get("subagent_id")).filter(|id| !id.trim().is_empty())
+}
+
+fn unified_child_scope(
+    value: &Value,
+    generations: &mut HashMap<i64, UnifiedGeneration>,
+) -> Option<UnifiedChildScope> {
+    let pid = required_non_negative_i64(value.get("pid"))?;
+    Some(UnifiedChildScope {
+        pid,
+        generation: current_unified_generation(generations, pid),
+        session_id: unified_subagent_id(value)?,
+    })
+}
+
+fn unified_spawn_model(value: &Value) -> Option<String> {
+    let context = value.get("ctx")?;
+    authoritative_model(context.get("effective_model"))
+        .or_else(|| authoritative_model(context.get("effective_model_raw")))
+}
+
+fn unified_terminal_model(value: &Value) -> Option<String> {
+    authoritative_model(value.get("ctx")?.get("effective_model"))
+}
+
+fn unique_child_model<'a>(
+    evidence: &'a UnifiedChildEvidence,
+    scope: &UnifiedChildScope,
+) -> Option<&'a str> {
+    let UnifiedModelEvidence::Unique(model) = evidence.child_models.get(scope)? else {
+        return None;
+    };
+    Some(model)
+}
+
+fn unique_terminal_model<'a>(
+    evidence: &'a UnifiedChildEvidence,
+    scope: &UnifiedChildScope,
+) -> Option<&'a str> {
+    if !evidence.terminal_scopes.contains(scope) {
+        return None;
+    }
+    let UnifiedModelEvidence::Unique(terminal_model) = evidence.terminal_models.get(scope)? else {
+        return None;
+    };
+    let child_model = unique_child_model(evidence, scope)?;
+    (terminal_model == child_model).then_some(child_model)
+}
 
 #[derive(Debug, Clone)]
 struct GrokMetadata {
@@ -39,6 +155,119 @@ struct ActiveTurn {
     timestamp: i64,
     model_id: String,
     turn_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct GrokUsage {
+    tokens: TokenBreakdown,
+}
+
+impl GrokUsage {
+    fn from_update(value: &Value) -> Option<Self> {
+        let usage = get_path(value, &["params", "update", "usage"])?;
+        let raw_input = usage_value(usage, &["inputTokens", "input_tokens", "promptTokens"]);
+        let raw_output = usage_value(
+            usage,
+            &["outputTokens", "output_tokens", "completionTokens"],
+        );
+        let cache_read = usage_value(
+            usage,
+            &[
+                "cachedReadTokens",
+                "cacheReadTokens",
+                "cache_read_input_tokens",
+            ],
+        );
+        let cache_write = usage_value(
+            usage,
+            &[
+                "cachedWriteTokens",
+                "cacheWriteTokens",
+                "cacheCreationTokens",
+                "cache_creation_input_tokens",
+            ],
+        );
+        let reasoning = usage_value(
+            usage,
+            &["reasoningTokens", "thoughtTokens", "thinkingTokens"],
+        );
+        let reported_total = usage
+            .get("totalTokens")
+            .or_else(|| usage.get("total_tokens"))
+            .and_then(|value| extract_i64(Some(value)))
+            .map(|value| value.max(0));
+
+        if raw_input == 0
+            && raw_output == 0
+            && cache_read == 0
+            && cache_write == 0
+            && reasoning == 0
+        {
+            return None;
+        }
+
+        // Grok's `inputTokens` includes the `cachedReadTokens` subset, and its
+        // `outputTokens` includes the `reasoningTokens` subset. The reported
+        // total is input + output, so split those overlaps before handing the
+        // values to TokenBreakdown, whose buckets are additive.
+        let inclusive_total = raw_input.saturating_add(raw_output);
+        let reported_total_is_inclusive = reported_total == Some(inclusive_total);
+
+        Some(Self {
+            tokens: TokenBreakdown {
+                input: if reported_total_is_inclusive {
+                    raw_input.saturating_sub(cache_read)
+                } else {
+                    raw_input
+                },
+                output: if reported_total_is_inclusive {
+                    raw_output.saturating_sub(reasoning)
+                } else {
+                    raw_output
+                },
+                cache_read,
+                cache_write,
+                reasoning,
+            },
+        })
+    }
+}
+
+fn usage_value(value: &Value, keys: &[&str]) -> i64 {
+    keys.iter()
+        .find_map(|key| extract_i64(value.get(*key)))
+        .unwrap_or(0)
+        .max(0)
+}
+
+fn message_from_tokens(
+    metadata: &GrokMetadata,
+    model_id: String,
+    timestamp: i64,
+    tokens: TokenBreakdown,
+    dedup_key: String,
+    is_turn_start: bool,
+) -> UnifiedMessage {
+    let mut message = UnifiedMessage::new_with_dedup(
+        CLIENT_ID,
+        if model_id.trim().is_empty() {
+            UNKNOWN_MODEL.to_string()
+        } else {
+            model_id
+        },
+        PROVIDER_ID,
+        metadata.session_id.clone(),
+        timestamp,
+        tokens,
+        0.0,
+        Some(dedup_key),
+    );
+    message.set_workspace(
+        metadata.workspace_key.clone(),
+        metadata.workspace_label.clone(),
+    );
+    message.is_turn_start = is_turn_start;
+    message
 }
 
 impl ActiveTurn {
@@ -71,11 +300,9 @@ impl ActiveTurn {
             self.model_id
         };
 
-        let mut message = UnifiedMessage::new_with_dedup(
-            CLIENT_ID,
+        Some(message_from_tokens(
+            metadata,
             model_id,
-            PROVIDER_ID,
-            metadata.session_id.clone(),
             self.timestamp,
             TokenBreakdown {
                 input: token_delta,
@@ -84,15 +311,9 @@ impl ActiveTurn {
                 cache_write: 0,
                 reasoning: 0,
             },
-            0.0,
-            Some(format!("grok:{}:{}", metadata.session_id, self.turn_index)),
-        );
-        message.set_workspace(
-            metadata.workspace_key.clone(),
-            metadata.workspace_label.clone(),
-        );
-        message.is_turn_start = true;
-        Some(message)
+            format!("grok:{}:{}", metadata.session_id, self.turn_index),
+            true,
+        ))
     }
 }
 
@@ -107,7 +328,8 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
-    let mut messages = Vec::new();
+    let mut fallback_messages = Vec::new();
+    let mut usage_messages = Vec::new();
     let mut current_model = metadata
         .model_id
         .clone()
@@ -116,6 +338,7 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut last_total_timestamp = metadata.timestamp;
     let mut active_turn: Option<ActiveTurn> = None;
     let mut turn_index = 0usize;
+    let mut usage_index = 0usize;
 
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -139,7 +362,7 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
         if is_user_message_chunk(&value) {
             if let Some(turn) = active_turn.take() {
                 if let Some(message) = turn.into_message(&metadata) {
-                    messages.push(message);
+                    fallback_messages.push(message);
                 }
             }
 
@@ -150,6 +373,31 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
                 turn_index,
             ));
             turn_index = turn_index.saturating_add(1);
+        }
+
+        if let Some(usage) = GrokUsage::from_update(&value) {
+            let model_id = if current_model != UNKNOWN_MODEL {
+                current_model.clone()
+            } else {
+                get_path(&value, &["params", "update", "usage", "modelUsage"])
+                    .and_then(Value::as_object)
+                    .and_then(|models| (models.len() == 1).then(|| models.keys().next().cloned()))
+                    .flatten()
+                    .or_else(|| metadata.model_id.clone())
+                    .unwrap_or_else(|| UNKNOWN_MODEL.to_string())
+            };
+            let event_id = get_path(&value, &["params", "_meta", "eventId"])
+                .and_then(|value| extract_string(Some(value)))
+                .unwrap_or_else(|| format!("turn-{usage_index}"));
+            usage_messages.push(message_from_tokens(
+                &metadata,
+                model_id,
+                timestamp,
+                usage.tokens,
+                format!("grok:{}:usage:{}", metadata.session_id, event_id),
+                true,
+            ));
+            usage_index = usage_index.saturating_add(1);
         }
 
         let Some(total_tokens) = extract_total_tokens(&value) else {
@@ -196,11 +444,11 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
 
     if let Some(turn) = active_turn {
         if let Some(message) = turn.into_message(&metadata) {
-            messages.push(message);
+            fallback_messages.push(message);
         }
     }
 
-    if messages.is_empty() {
+    if fallback_messages.is_empty() && usage_messages.is_empty() {
         if let Some(total_tokens) = last_total.filter(|tokens| *tokens > 0) {
             let aggregate_turn = ActiveTurn {
                 baseline_total: 0,
@@ -210,13 +458,559 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
                 turn_index: 0,
             };
             if let Some(message) = aggregate_turn.into_message(&metadata) {
-                messages.push(message);
+                fallback_messages.push(message);
             }
         }
     }
 
-    append_signals_reconciliation(path, &metadata, &mut messages, &current_model);
+    if usage_messages.is_empty() {
+        append_signals_reconciliation(path, &metadata, &mut fallback_messages, &current_model);
+        return fallback_messages;
+    }
+
+    // A usage record is emitted when a turn completes. Keep only cumulative
+    // counter activity newer than the latest completed turn as a best-effort
+    // representation of a currently running turn; older fallback messages are
+    // the same work already covered by authoritative usage records.
+    let latest_usage_timestamp = usage_messages
+        .iter()
+        .map(|message| message.timestamp)
+        .max()
+        .unwrap_or(0);
+    usage_messages.extend(
+        fallback_messages
+            .into_iter()
+            .filter(|message| message.timestamp > latest_usage_timestamp),
+    );
+    usage_messages
+}
+
+/// Parse Grok Build's append-only unified log. Each
+/// `shell.turn.inference_done` record reports a prompt total that includes
+/// cached prompt tokens and a completion total that includes reasoning tokens.
+/// Store the non-overlapping component buckets so the breakdown remains
+/// additive and the source totals are preserved.
+pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("unified.jsonl") {
+        return Vec::new();
+    }
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Vec::new(),
+    };
+    let prefix_len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    parse_grok_unified_log_snapshot(path, &mut file, prefix_len)
+}
+
+#[cfg(test)]
+fn parse_grok_unified_log_file_with_prefix(path: &Path, prefix_len: u64) -> Vec<UnifiedMessage> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Vec::new(),
+    };
+    parse_grok_unified_log_snapshot(path, &mut file, prefix_len)
+}
+
+fn parse_grok_unified_log_snapshot(
+    path: &Path,
+    file: &mut std::fs::File,
+    prefix_len: u64,
+) -> Vec<UnifiedMessage> {
+    let fallback_timestamp = file_modified_timestamp_ms(path);
+    let evidence = collect_unified_child_evidence(file, prefix_len);
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return Vec::new();
+    }
+
+    let metadata_by_session = read_unified_session_metadata(path);
+    let mut generations = HashMap::new();
+    let mut fallback_model_by_pid: HashMap<UnifiedProcessKey, String> = HashMap::new();
+    let mut model_by_pid_and_session: HashMap<UnifiedProcessSessionKey, String> = HashMap::new();
+    let mut model_by_session = HashMap::new();
+    let mut seen = HashSet::new();
+    let mut messages = Vec::new();
+
+    for line in BufReader::new(file)
+        .take(prefix_len)
+        .lines()
+        .map_while(Result::ok)
+    {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+
+        if let Some(pid) = unified_log_process_start_pid(&value) {
+            // The unified log survives process restarts, so an OS-reused PID
+            // must not inherit model authority from the previous process.
+            advance_unified_generation(&mut generations, pid);
+            continue;
+        }
+
+        let message_name = value.get("msg").and_then(Value::as_str);
+        match message_name {
+            Some("subagent read parent config (live)") => {
+                if let Some((pid, model_id)) = unified_log_parent_model(&value) {
+                    let generation = current_unified_generation(&mut generations, pid);
+                    fallback_model_by_pid.insert((pid, generation), model_id);
+                }
+                continue;
+            }
+            Some("subagent model resolved") => {
+                if let Some((pid, model_id)) = unified_log_parent_model(&value) {
+                    let generation = current_unified_generation(&mut generations, pid);
+                    fallback_model_by_pid.insert((pid, generation), model_id);
+                    continue;
+                }
+            }
+            Some("subagent spawn credentials") => {
+                if let Some((pid, model_id)) = unified_log_parent_model(&value) {
+                    let generation = current_unified_generation(&mut generations, pid);
+                    fallback_model_by_pid.insert((pid, generation), model_id);
+                }
+                if let Some(scope) = unified_child_scope(&value, &mut generations) {
+                    if let Some(model_id) = unified_spawn_model(&value) {
+                        if unique_child_model(&evidence, &scope) == Some(model_id.as_str()) {
+                            model_by_pid_and_session
+                                .entry((scope.pid, scope.generation, scope.session_id))
+                                .or_insert(model_id);
+                        }
+                    }
+                }
+                continue;
+            }
+            Some("subagent completed") | Some("subagent failed") => {
+                if let Some(scope) = unified_child_scope(&value, &mut generations) {
+                    if let Some(model_id) = unified_terminal_model(&value) {
+                        if unique_terminal_model(&evidence, &scope) == Some(model_id.as_str()) {
+                            // A terminal record is fallback evidence, never a
+                            // rewrite of a model established by an earlier
+                            // exact event.
+                            model_by_pid_and_session
+                                .entry((scope.pid, scope.generation, scope.session_id))
+                                .or_insert(model_id);
+                        }
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        if let Some((pid, session_id, model_id)) = unified_log_model_change(&value) {
+            match (pid, session_id) {
+                (Some(pid), Some(session_id)) => {
+                    let generation = current_unified_generation(&mut generations, pid);
+                    model_by_pid_and_session.insert((pid, generation, session_id), model_id);
+                }
+                (None, Some(session_id)) => {
+                    model_by_pid_and_session.retain(|key, _| {
+                        key.2 != session_id || evidence.child_session_ids.contains(&key.2)
+                    });
+                    model_by_session.insert(session_id, model_id);
+                }
+                (Some(pid), None) => {
+                    let generation = current_unified_generation(&mut generations, pid);
+                    fallback_model_by_pid.insert((pid, generation), model_id);
+                }
+                (None, None) => {}
+            }
+            continue;
+        }
+
+        if message_name != Some("shell.turn.inference_done") {
+            continue;
+        }
+
+        let Some(session_id) =
+            extract_string(value.get("sid")).filter(|session_id| !session_id.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(context) = value.get("ctx") else {
+            continue;
+        };
+        let Some(prompt_tokens) = required_non_negative_i64(context.get("prompt_tokens")) else {
+            continue;
+        };
+        let Some(completion_tokens) = required_non_negative_i64(context.get("completion_tokens"))
+        else {
+            continue;
+        };
+        let Some(mut cached_prompt_tokens) =
+            optional_non_negative_i64(context.get("cached_prompt_tokens"))
+        else {
+            continue;
+        };
+        let Some(reasoning_tokens) = optional_non_negative_i64(context.get("reasoning_tokens"))
+        else {
+            continue;
+        };
+        cached_prompt_tokens = cached_prompt_tokens.min(prompt_tokens);
+
+        let loop_index = match context.get("loop_index") {
+            Some(value) => {
+                let Some(loop_index) = required_non_negative_i64(Some(value)) else {
+                    continue;
+                };
+                loop_index
+            }
+            None => 1,
+        };
+        let Some(pid) = optional_non_negative_i64(value.get("pid")) else {
+            continue;
+        };
+        let timestamp = value
+            .get("ts")
+            .and_then(parse_timestamp_value)
+            .unwrap_or(fallback_timestamp);
+        let reasoning = reasoning_tokens.min(completion_tokens);
+        let dedup_key = format!(
+            "{UNIFIED_LOG_DEDUP_PREFIX}{session_id}:{timestamp}:{pid}:{loop_index}:{prompt_tokens}:{cached_prompt_tokens}:{completion_tokens}:{reasoning_tokens}"
+        );
+        if !seen.insert(dedup_key.clone()) {
+            continue;
+        }
+
+        let metadata = metadata_by_session
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(|| fallback_unified_metadata(&session_id, fallback_timestamp));
+        let generation = current_unified_generation(&mut generations, pid);
+        let child_scope = value.get("pid").map(|_| UnifiedChildScope {
+            pid,
+            generation,
+            session_id: session_id.clone(),
+        });
+        let known_scope = child_scope
+            .as_ref()
+            .is_some_and(|scope| evidence.known_scopes.contains(scope));
+        let known_child_session = evidence.child_session_ids.contains(&session_id);
+        let exact_model = model_by_pid_and_session
+            .get(&(pid, generation, session_id.clone()))
+            .cloned();
+        let model_id = if let Some(model_id) = exact_model {
+            model_id
+        } else if known_scope {
+            child_scope
+                .as_ref()
+                .and_then(|scope| unique_terminal_model(&evidence, scope))
+                .map(str::to_string)
+                .unwrap_or_else(|| UNKNOWN_MODEL.to_string())
+        } else if known_child_session {
+            UNKNOWN_MODEL.to_string()
+        } else {
+            model_by_session
+                .get(&session_id)
+                .or_else(|| fallback_model_by_pid.get(&(pid, generation)))
+                .cloned()
+                .or_else(|| metadata.model_id.clone())
+                .unwrap_or_else(|| UNKNOWN_MODEL.to_string())
+        };
+        let mut message = message_from_tokens(
+            &metadata,
+            model_id,
+            timestamp,
+            TokenBreakdown {
+                input: prompt_tokens.saturating_sub(cached_prompt_tokens),
+                output: completion_tokens.saturating_sub(reasoning),
+                cache_read: cached_prompt_tokens,
+                cache_write: 0,
+                reasoning,
+            },
+            dedup_key,
+            loop_index == 1,
+        );
+        message.session_id = session_id;
+        message.message_count = i32::from(message.is_turn_start);
+        messages.push(message);
+    }
+
     messages
+}
+
+fn collect_unified_child_evidence(
+    file: &mut std::fs::File,
+    prefix_len: u64,
+) -> UnifiedChildEvidence {
+    let mut evidence = UnifiedChildEvidence::default();
+    let mut generations = HashMap::new();
+
+    for line in BufReader::new(file)
+        .take(prefix_len)
+        .lines()
+        .map_while(Result::ok)
+    {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(pid) = unified_log_process_start_pid(&value) {
+            advance_unified_generation(&mut generations, pid);
+            continue;
+        }
+
+        let message_name = value.get("msg").and_then(Value::as_str);
+        let is_spawn = message_name == Some("subagent spawn credentials");
+        let is_terminal = matches!(message_name, Some("subagent completed" | "subagent failed"));
+        if !is_spawn && !is_terminal {
+            continue;
+        }
+        let Some(subagent_id) = unified_subagent_id(&value) else {
+            continue;
+        };
+        evidence.child_session_ids.insert(subagent_id);
+        let Some(scope) = unified_child_scope(&value, &mut generations) else {
+            continue;
+        };
+        evidence.known_scopes.insert(scope.clone());
+        if is_terminal {
+            evidence.terminal_scopes.insert(scope.clone());
+        }
+
+        let model_id = if is_spawn {
+            unified_spawn_model(&value)
+        } else {
+            unified_terminal_model(&value)
+        };
+        let Some(model_id) = model_id else {
+            continue;
+        };
+        record_model_evidence(&mut evidence.child_models, &scope, model_id.clone());
+        if is_terminal {
+            record_model_evidence(&mut evidence.terminal_models, &scope, model_id);
+        }
+    }
+
+    evidence
+}
+
+/// Dispatch between Grok's legacy per-session updates and its newer unified
+/// log without accepting unrelated JSONL files under the Grok home directory.
+pub fn parse_grok_file(path: &Path) -> Vec<UnifiedMessage> {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("updates.jsonl") => parse_grok_updates_file(path),
+        Some("unified.jsonl") => parse_grok_unified_log_file(path),
+        _ => Vec::new(),
+    }
+}
+
+/// Uses the richer, per-inference unified log for sessions it covers. Legacy
+/// updates remain a fallback for sessions absent from that log, avoiding an
+/// additive merge of two representations of the same activity.
+pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    let unified_sessions: HashSet<String> = messages
+        .iter()
+        .filter(|message| is_unified_log_message(message))
+        .map(|message| message.session_id.clone())
+        .collect();
+
+    if unified_sessions.is_empty() {
+        return messages;
+    }
+
+    let mut legacy_models = HashMap::new();
+    let mut legacy_workspaces = HashMap::new();
+    for message in messages
+        .iter()
+        .filter(|message| !is_unified_log_message(message))
+    {
+        if message.model_id != UNKNOWN_MODEL {
+            match legacy_models.entry(message.session_id.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(message.model_id.clone()));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if entry.get().as_ref() != Some(&message.model_id) {
+                        entry.insert(None);
+                    }
+                }
+            }
+        }
+
+        let workspace = (
+            message.workspace_key.clone(),
+            message.workspace_label.clone(),
+        );
+        if workspace == (None, None) {
+            continue;
+        }
+
+        match legacy_workspaces.entry(message.session_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some(workspace));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().as_ref() != Some(&workspace) {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+
+    for message in messages
+        .iter_mut()
+        .filter(|message| is_unified_log_message(message))
+    {
+        if message.model_id == UNKNOWN_MODEL {
+            if let Some(Some(model_id)) = legacy_models.get(&message.session_id) {
+                message.model_id = model_id.clone();
+            }
+        }
+        if message.workspace_key.is_none() && message.workspace_label.is_none() {
+            if let Some(Some((workspace_key, workspace_label))) =
+                legacy_workspaces.get(&message.session_id)
+            {
+                message.set_workspace(workspace_key.clone(), workspace_label.clone());
+            }
+        }
+    }
+
+    messages
+        .into_iter()
+        .filter(|message| {
+            is_unified_log_message(message) || !unified_sessions.contains(&message.session_id)
+        })
+        .collect()
+}
+
+fn is_unified_log_message(message: &UnifiedMessage) -> bool {
+    message
+        .dedup_key
+        .as_deref()
+        .is_some_and(|key| key.starts_with(UNIFIED_LOG_DEDUP_PREFIX))
+}
+
+fn unified_log_process_start_pid(value: &Value) -> Option<i64> {
+    if value.get("msg").and_then(Value::as_str) != Some("AuthManager::new") {
+        return None;
+    }
+    required_non_negative_i64(value.get("pid"))
+}
+
+fn unified_log_parent_model(value: &Value) -> Option<(i64, String)> {
+    let pid = required_non_negative_i64(value.get("pid"))?;
+    let context = value.get("ctx")?;
+    let model_id = match value.get("msg").and_then(Value::as_str)? {
+        "subagent read parent config (live)" => {
+            authoritative_model(context.get("session_model_id"))
+                .or_else(|| authoritative_model(context.get("parent_model")))
+                .or_else(|| authoritative_model(context.get("global_model_id")))
+        }
+        "subagent model resolved" | "subagent spawn credentials" => {
+            authoritative_model(context.get("parent_model"))
+        }
+        _ => None,
+    }?;
+    Some((pid, model_id))
+}
+
+fn unified_log_model_change(value: &Value) -> Option<(Option<i64>, Option<String>, String)> {
+    let pid = match value.get("pid") {
+        Some(value) => Some(required_non_negative_i64(Some(value))?),
+        None => None,
+    };
+    let context = value.get("ctx")?;
+    let model_id = match value.get("msg").and_then(Value::as_str)? {
+        "model changed" => authoritative_model(context.get("model")),
+        "model catalog: notifying clients" => authoritative_model(context.get("current_model_id")),
+        "backend_search: model switch" => authoritative_model(context.get("new_model"))
+            .or_else(|| authoritative_model(context.get("model")))
+            .or_else(|| authoritative_model(context.get("current_model_id"))),
+        "subagent model resolved" => authoritative_model(context.get("model_id"))
+            .or_else(|| authoritative_model(context.get("model"))),
+        _ => None,
+    }?;
+
+    let session_id =
+        extract_string(value.get("sid")).filter(|session_id| !session_id.trim().is_empty());
+    (pid.is_some() || session_id.is_some()).then_some((pid, session_id, model_id))
+}
+
+fn required_non_negative_i64(value: Option<&Value>) -> Option<i64> {
+    extract_i64(value).filter(|value| *value >= 0)
+}
+
+fn optional_non_negative_i64(value: Option<&Value>) -> Option<i64> {
+    match value {
+        Some(value) => required_non_negative_i64(Some(value)),
+        None => Some(0),
+    }
+}
+
+fn fallback_unified_metadata(session_id: &str, timestamp: i64) -> GrokMetadata {
+    GrokMetadata {
+        session_id: session_id.to_string(),
+        model_id: None,
+        timestamp,
+        workspace_key: None,
+        workspace_label: None,
+    }
+}
+
+fn read_unified_session_metadata(path: &Path) -> HashMap<String, GrokMetadata> {
+    let Some(grok_home) = path.parent().and_then(Path::parent) else {
+        return HashMap::new();
+    };
+    let sessions_root = grok_home.join("sessions");
+    let Ok(workspaces) = std::fs::read_dir(sessions_root) else {
+        return HashMap::new();
+    };
+
+    let mut metadata_by_session = HashMap::new();
+    for workspace_entry in workspaces.flatten() {
+        let workspace_dir = workspace_entry.path();
+        if !workspace_dir.is_dir() {
+            continue;
+        }
+
+        let workspace_key = workspace_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(percent_decode_lossy)
+            .and_then(|decoded| normalize_workspace_key(&decoded));
+        let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+        let Ok(sessions) = std::fs::read_dir(&workspace_dir) else {
+            continue;
+        };
+
+        for session_entry in sessions.flatten() {
+            let session_dir = session_entry.path();
+            if !session_dir.is_dir() {
+                continue;
+            }
+            let Some(session_id) = session_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|id| !id.trim().is_empty())
+            else {
+                continue;
+            };
+
+            let updates_path = session_dir.join("updates.jsonl");
+            let metadata = if updates_path.is_file() {
+                read_metadata(&updates_path)
+            } else {
+                let mut metadata =
+                    fallback_unified_metadata(session_id, file_modified_timestamp_ms(&session_dir));
+                metadata.workspace_key = workspace_key.clone();
+                metadata.workspace_label = workspace_label.clone();
+                read_summary_metadata(&session_dir.join("summary.json"), &mut metadata);
+                read_events_metadata(&session_dir.join("events.jsonl"), &mut metadata);
+                read_signals_metadata(&session_dir.join("signals.json"), &mut metadata);
+                metadata
+            };
+            metadata_by_session.insert(session_id.to_string(), metadata);
+        }
+    }
+
+    metadata_by_session
 }
 
 fn non_negative_i64(value: Option<&Value>) -> i64 {
@@ -533,6 +1327,279 @@ mod tests {
             std::fs::write(session_dir.join("signals.json"), signals_json).unwrap();
         }
         (temp, updates_path)
+    }
+
+    fn write_unified_fixture(unified_jsonl: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let logs_dir = temp.path().join(".grok/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let path = logs_dir.join("unified.jsonl");
+        std::fs::write(&path, unified_jsonl).unwrap();
+        (temp, path)
+    }
+
+    fn test_message(session_id: &str, dedup_key: &str) -> UnifiedMessage {
+        UnifiedMessage::new_with_dedup(
+            CLIENT_ID,
+            "grok-build",
+            PROVIDER_ID,
+            session_id,
+            1_700_000_000_000,
+            TokenBreakdown::default(),
+            0.0,
+            Some(dedup_key.to_string()),
+        )
+    }
+
+    #[test]
+    fn parses_unified_log_token_breakdown_without_double_counting_reasoning() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2023-11-14T22:13:19Z","pid":17,"sid":"session-1","msg":"model changed","ctx":{"model":"grok-composer-2.5-fast"}}
+{"ts":"2023-11-14T22:13:19Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-4.5"}}
+{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}
+{"ts":"2023-11-14T22:13:21Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":80,"cached_prompt_tokens":0,"completion_tokens":12,"reasoning_tokens":0}}
+{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}
+{"ts":"2023-11-14T22:13:22Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":3,"prompt_tokens":10,"cached_prompt_tokens":11,"completion_tokens":1,"reasoning_tokens":0}}
+{"ts":"2023-11-14T22:13:23Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":4,"prompt_tokens":10,"cached_prompt_tokens":0,"completion_tokens":1,"reasoning_tokens":2}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].client, CLIENT_ID);
+        assert_eq!(messages[0].model_id, "grok-composer-2.5-fast");
+        assert_eq!(messages[0].session_id, "session-1");
+        assert_eq!(messages[0].tokens.input, 40);
+        assert_eq!(messages[0].tokens.cache_read, 60);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.reasoning, 5);
+        assert_eq!(messages[0].tokens.total(), 125);
+        assert_eq!(messages[0].message_count, 1);
+        assert!(messages[0].is_turn_start);
+        assert_eq!(messages[1].tokens.input, 80);
+        assert_eq!(messages[1].tokens.output, 12);
+        assert_eq!(messages[1].message_count, 0);
+        assert!(!messages[1].is_turn_start);
+        assert_eq!(messages[2].tokens.input, 0);
+        assert_eq!(messages[2].tokens.cache_read, 10);
+        assert_eq!(messages[2].tokens.output, 1);
+        assert_eq!(messages[2].tokens.total(), 11);
+        assert_eq!(messages[2].message_count, 0);
+        assert!(!messages[2].is_turn_start);
+        assert_eq!(messages[3].tokens.input, 10);
+        assert_eq!(messages[3].tokens.output, 0);
+        assert_eq!(messages[3].tokens.reasoning, 1);
+        assert_eq!(messages[3].tokens.total(), 11);
+        assert_eq!(messages[3].message_count, 0);
+        assert!(!messages[3].is_turn_start);
+    }
+
+    #[test]
+    fn unified_log_preserves_session_workspace_metadata() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let logs_dir = temp.path().join("home/.grok/logs");
+        let session_dir = temp
+            .path()
+            .join("home/.grok/sessions/%2Ftmp%2Fproject/session-1");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("summary.json"),
+            r#"{"current_model_id":"grok-4.5","updated_at":"2023-11-14T22:13:20Z"}"#,
+        )
+        .unwrap();
+        let path = logs_dir.join("unified.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"cached_prompt_tokens":2,"completion_tokens":4,"reasoning_tokens":1}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "grok-4.5");
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp/project"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn unified_log_applies_pidless_session_model_switch() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2023-11-14T22:13:18Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-4.5"}}
+{"ts":"2023-11-14T22:13:19Z","pid":17,"sid":"session-with-model-event","msg":"model changed","ctx":{"model":"grok-composer-2.5-fast"}}
+{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-with-model-event","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"completion_tokens":1}}
+{"ts":"2023-11-14T22:13:21Z","sid":"session-with-model-event","msg":"model changed","ctx":{"model":"grok-4.1-fast"}}
+{"ts":"2023-11-14T22:13:22Z","pid":17,"sid":"session-with-model-event","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":15,"completion_tokens":2}}
+{"ts":"2023-11-14T22:13:23Z","pid":17,"sid":"session-without-model-event","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":20,"completion_tokens":2}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].model_id, "grok-composer-2.5-fast");
+        assert_eq!(messages[1].model_id, "grok-4.1-fast");
+        assert_eq!(messages[2].model_id, "grok-4.5");
+    }
+
+    #[test]
+    fn unified_log_expires_pid_scoped_models_on_process_restart() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2023-11-14T22:13:17Z","sid":"session-stable","msg":"model changed","ctx":{"model":"grok-session"}}
+{"ts":"2023-11-14T22:13:18Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-old"}}
+{"ts":"2023-11-14T22:13:19Z","pid":17,"sid":"session-old","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"completion_tokens":1}}
+{"ts":"2023-11-14T22:13:20Z","pid":17,"msg":"AuthManager::new","src":"shell","ctx":{}}
+{"ts":"2023-11-14T22:13:21Z","pid":17,"sid":"session-stable","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":15,"completion_tokens":1}}
+{"ts":"2023-11-14T22:13:22Z","pid":17,"sid":"session-new","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":20,"completion_tokens":2}}
+{"ts":"2023-11-14T22:13:23Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-new"}}
+{"ts":"2023-11-14T22:13:24Z","pid":17,"sid":"session-new","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":30,"completion_tokens":3}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].model_id, "grok-old");
+        assert_eq!(messages[1].model_id, "grok-session");
+        assert_eq!(messages[2].model_id, UNKNOWN_MODEL);
+        assert_eq!(messages[3].model_id, "grok-new");
+    }
+
+    #[test]
+    fn unified_log_attributes_parent_and_child_models_by_exact_scope() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2026-07-31T00:00:00Z","pid":17,"msg":"subagent read parent config (live)","ctx":{"session_model_id":" grok-4.6 ","parent_model":"grok-4.5","global_model_id":"grok-4.4"}}
+{"ts":"2026-07-31T00:00:01Z","pid":17,"sid":"parent","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"completion_tokens":2}}
+{"ts":"2026-07-31T00:00:02Z","pid":17,"msg":"subagent spawn credentials","ctx":{"subagent_id":"child-a","effective_model":" grok-4.7 ","effective_model_raw":"raw-a","parent_model":"grok-4.6"}}
+{"ts":"2026-07-31T00:00:03Z","pid":17,"sid":"child-a","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":11,"completion_tokens":2}}
+{"ts":"2026-07-31T00:00:04Z","pid":17,"msg":"subagent spawn credentials","ctx":{"subagent_id":"child-b","effective_model":"grok-4.8","parent_model":"grok-4.6"}}
+{"ts":"2026-07-31T00:00:05Z","pid":17,"sid":"child-b","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":12,"completion_tokens":2}}
+{"ts":"2026-07-31T00:00:06Z","sid":"child-a","msg":"model changed","ctx":{"model":"grok-global"}}
+{"ts":"2026-07-31T00:00:07Z","pid":17,"sid":"child-a","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":13,"completion_tokens":2}}
+{"ts":"2026-07-31T00:00:08Z","sid":"ordinary","msg":"model changed","ctx":{"model":" grok-ordinary "}}
+{"ts":"2026-07-31T00:00:09Z","pid":17,"sid":"ordinary","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":14,"completion_tokens":2}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.model_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "grok-4.6",
+                "grok-4.7",
+                "grok-4.8",
+                "grok-4.7",
+                "grok-ordinary"
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_log_fails_closed_on_conflicting_child_evidence() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2026-07-31T00:00:00Z","pid":19,"sid":"child","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"completion_tokens":2}}
+{"ts":"2026-07-31T00:00:01Z","pid":19,"msg":"subagent spawn credentials","ctx":{"subagent_id":"child","effective_model":"grok-4.8"}}
+{"ts":"2026-07-31T00:00:02Z","pid":19,"msg":"subagent failed","ctx":{"subagent_id":"child","effective_model":"grok-4.9"}}
+{"ts":"2026-07-31T00:00:03Z","pid":19,"sid":"child","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":11,"completion_tokens":2}}
+{"ts":"2026-07-31T00:00:04Z","pid":19,"msg":"subagent completed","ctx":{"subagent_id":"missing","effective_model":null}}
+{"ts":"2026-07-31T00:00:05Z","pid":19,"sid":"missing","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":12,"completion_tokens":2}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+        assert_eq!(messages.len(), 3);
+        assert!(messages
+            .iter()
+            .all(|message| message.model_id == UNKNOWN_MODEL));
+    }
+
+    #[test]
+    fn unified_log_snapshot_ignores_rows_appended_after_scan_start() {
+        use std::io::Write;
+
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2026-07-31T00:00:00Z","pid":23,"sid":"first","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"completion_tokens":2}}
+"#,
+        );
+        let prefix_len = std::fs::metadata(&path).unwrap().len();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(
+                br#"{"ts":"2026-07-31T00:00:01Z","pid":23,"sid":"second","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":11,"completion_tokens":2}}
+"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            parse_grok_unified_log_file_with_prefix(&path, prefix_len).len(),
+            1
+        );
+        assert_eq!(parse_grok_unified_log_file(&path).len(), 2);
+    }
+
+    #[test]
+    fn selector_recovers_unified_model_and_workspace_from_consistent_legacy_rows() {
+        let mut legacy = test_message("covered", "grok:covered:0");
+        legacy.model_id = "grok-4.5".to_string();
+        legacy.set_workspace(
+            Some("/tmp/project".to_string()),
+            Some("project".to_string()),
+        );
+        let mut unified = test_message("covered", "grok-unified:covered:1:1:1");
+        unified.model_id = UNKNOWN_MODEL.to_string();
+        unified.workspace_key = None;
+        unified.workspace_label = None;
+
+        let messages = prefer_unified_log_messages(vec![legacy, unified]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "grok-4.5");
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp/project"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn prefers_unified_log_messages_only_for_covered_sessions() {
+        let covered_legacy = test_message("covered", "grok:covered:0");
+        let uncovered_legacy = test_message("fallback", "grok:fallback:0");
+        let covered_unified = test_message("covered", "grok-unified:covered:1:1:1");
+
+        let messages =
+            prefer_unified_log_messages(vec![covered_legacy, uncovered_legacy, covered_unified]);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .any(|message| { message.session_id == "covered" && is_unified_log_message(message) }));
+        assert!(messages
+            .iter()
+            .any(|message| message.session_id == "fallback"));
+    }
+
+    #[test]
+    fn prefers_authoritative_usage_breakdown_when_available() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-4.5"}},"_meta":{"agentTimestampMs":1700000001000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":1200,"agentTimestampMs":1700000002000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":1000,"outputTokens":100,"reasoningTokens":20,"cachedReadTokens":400,"totalTokens":1100,"modelUsage":{"grok-4.5-build":{"inputTokens":1000,"outputTokens":100,"reasoningTokens":20,"cachedReadTokens":400,"totalTokens":1100}}}},"_meta":{"eventId":"turn-1","agentTimestampMs":1700000003000}}}"#,
+            None,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "grok-4.5");
+        assert_eq!(messages[0].tokens.input, 600);
+        assert_eq!(messages[0].tokens.output, 80);
+        assert_eq!(messages[0].tokens.cache_read, 400);
+        assert_eq!(messages[0].tokens.reasoning, 20);
+        assert_eq!(messages[0].timestamp, 1700000003000);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("grok:session-1:usage:turn-1")
+        );
     }
 
     #[test]
