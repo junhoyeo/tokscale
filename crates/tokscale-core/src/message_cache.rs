@@ -874,6 +874,9 @@ fn parser_version(client: ClientId) -> u32 {
         // session_model_usage instead of crediting the whole session to
         // sessions.model, and dedup keys are namespaced per (session, model).
         ClientId::Hermes => 2,
+        // v2 added per-turn usage records. v3 adds the canonical unified log,
+        // non-overlapping output/cache/reasoning buckets, and session metadata.
+        ClientId::Grok => 3,
         _ => 1,
     }
 }

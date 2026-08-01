@@ -1357,16 +1357,18 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 &source_cache,
                 pricing,
                 message_cache::SourceFingerprint::check_grok_path_samples_only,
-                sessions::grok::parse_grok_updates_file,
+                sessions::grok::parse_grok_file,
             )
         })
         .collect();
+    let mut grok_messages = Vec::new();
     for outcome in grok_outcomes {
-        all_messages.extend(outcome.messages);
+        grok_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
+    all_messages.extend(sessions::grok::prefer_unified_log_messages(grok_messages));
 
     let jcode_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Jcode)
@@ -3652,15 +3654,14 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::WorkBuddy, workbuddy_count);
     messages.extend(workbuddy_msgs);
 
-    let grok_msgs: Vec<ParsedMessage> = scan_result
+    let grok_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Grok)
         .par_iter()
-        .flat_map(|path| {
-            sessions::grok::parse_grok_updates_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|path| sessions::grok::parse_grok_file(path))
+        .collect();
+    let grok_msgs: Vec<ParsedMessage> = sessions::grok::prefer_unified_log_messages(grok_messages)
+        .into_iter()
+        .map(|msg| unified_to_parsed(&msg))
         .collect();
     let grok_count = summed_parsed_message_count(&grok_msgs);
     counts.set(ClientId::Grok, grok_count);
@@ -5024,6 +5025,53 @@ mod tests {
 {"timestamp": 1770983450.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 8, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}}}}"#,
         )
         .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_prefers_grok_unified_log() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let session_dir = source_home
+                .path()
+                .join(".grok/sessions/%2Ftmp%2Fproject/session-1");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            std::fs::write(
+                session_dir.join("updates.jsonl"),
+                r#"{"method":"session/update","params":{"sessionId":"session-1","_meta":{"totalTokens":999,"agentTimestampMs":1700000000000}}}"#,
+            )
+            .unwrap();
+
+            let logs_dir = source_home.path().join(".grok/logs");
+            std::fs::create_dir_all(&logs_dir).unwrap();
+            std::fs::write(
+                logs_dir.join("unified.jsonl"),
+                r#"{"ts":"2023-11-14T22:13:20Z","pid":7,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}"#,
+            )
+            .unwrap();
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["grok".to_string()],
+                None,
+            );
+
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.input, 40);
+            assert_eq!(messages[0].tokens.cache_read, 60);
+            assert_eq!(messages[0].tokens.output, 20);
+            assert_eq!(messages[0].tokens.reasoning, 5);
+            assert_eq!(messages[0].tokens.total(), 125);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]
