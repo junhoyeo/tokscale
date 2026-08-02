@@ -967,11 +967,6 @@ pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Uni
                 false
             } else {
                 *count -= 1;
-                if let Some(timestamp_count) = covered_fallback_timestamps
-                    .get_mut(&(message.session_id.clone(), message.timestamp))
-                {
-                    *timestamp_count = timestamp_count.saturating_sub(1);
-                }
                 true
             }
         }) || (is_legacy_fallback_message(&message)
@@ -1772,6 +1767,31 @@ mod tests {
             .iter()
             .any(|message| message.dedup_key.as_deref() == Some("grok:covered:older")));
         assert!(messages.iter().any(is_unified_log_message));
+    }
+
+    #[test]
+    fn selector_is_order_invariant_for_activity_and_fallback_rows() {
+        let legacy_activity = test_message("covered", "grok:covered:usage:turn");
+        let mut legacy_fallback = test_message("covered", "grok:covered:fallback");
+        legacy_fallback.tokens.input = 10;
+        let unified = test_message("covered", "grok-unified:covered:event");
+
+        let first_order = prefer_unified_log_messages(vec![
+            legacy_activity.clone(),
+            legacy_fallback.clone(),
+            unified.clone(),
+        ]);
+        let second_order =
+            prefer_unified_log_messages(vec![legacy_fallback, legacy_activity, unified]);
+
+        assert_eq!(first_order, second_order);
+        assert_eq!(
+            first_order
+                .iter()
+                .map(|message| message.dedup_key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("grok-unified:covered:event")]
+        );
     }
 
     #[test]
