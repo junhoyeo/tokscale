@@ -551,6 +551,7 @@ fn map_single_provider(provider: &str, config: &TokscaleConfig) -> String {
         "cohere" => return "Cohere".to_string(),
         "opencode" => return "OpenCode".to_string(),
         "openrouter" => return "OpenRouter".to_string(),
+        "orcarouter" => return "OrcaRouter".to_string(),
         // `canonical_provider` rewrites `google-vertex` → `google_vertex`, so
         // accept both spellings here.
         "google-vertex" | "google_vertex" => return "Google Vertex".to_string(),
@@ -905,6 +906,7 @@ mod tests {
         assert_eq!(get_provider_display_name("mistral"), "Mistral");
         assert_eq!(get_provider_display_name("cohere"), "Cohere");
         assert_eq!(get_provider_display_name("cursor"), "Cursor");
+        assert_eq!(get_provider_display_name("orcarouter"), "OrcaRouter");
         assert_eq!(
             get_provider_display_name("github-copilot"),
             "GitHub Copilot"

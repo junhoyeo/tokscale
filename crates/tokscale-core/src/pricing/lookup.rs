@@ -44,6 +44,7 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
     "fireworks_ai/",
     "groq/",
     "openrouter/",
+    "orcarouter/",
 ];
 
 // Bare brand tokens ("claude", "anthropic") are blocked because they contain
@@ -4703,6 +4704,7 @@ mod tests {
         assert!(is_reseller_provider("vertex_ai/gemini"));
         assert!(is_reseller_provider("together_ai/llama"));
         assert!(is_reseller_provider("groq/llama"));
+        assert!(is_reseller_provider("orcarouter/openai/gpt-4"));
         assert!(!is_reseller_provider("xai/grok"));
         assert!(!is_reseller_provider("anthropic/claude"));
         assert!(!is_reseller_provider("openai/gpt-4"));
