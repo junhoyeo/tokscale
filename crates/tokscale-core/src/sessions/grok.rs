@@ -29,6 +29,7 @@ const UNIFIED_LOG_DEDUP_PREFIX: &str = "grok-unified:";
 type UnifiedGeneration = u64;
 type UnifiedProcessKey = (i64, UnifiedGeneration);
 type UnifiedProcessSessionKey = (i64, UnifiedGeneration, String);
+type UnifiedSessionTree = Vec<(PathBuf, Vec<PathBuf>)>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct UnifiedChildScope {
@@ -211,7 +212,12 @@ impl GrokUsage {
         // total is input + output, so split those overlaps before handing the
         // values to TokenBreakdown, whose buckets are additive.
         let inclusive_total = raw_input.saturating_add(raw_output);
-        let reported_total_is_inclusive = reported_total == Some(inclusive_total);
+        // The surrounding Grok usage contract treats input/output as inclusive
+        // buckets even when the optional aggregate total is absent. Do not
+        // require the redundant total field before removing the nested cache
+        // and reasoning buckets.
+        let reported_total_is_inclusive =
+            reported_total.is_none() || reported_total == Some(inclusive_total);
 
         Some(Self {
             tokens: TokenBreakdown {
@@ -669,9 +675,7 @@ fn parse_grok_unified_log_snapshot(
             .and_then(parse_timestamp_value)
             .unwrap_or(fallback_timestamp);
         let reasoning = reasoning_tokens.min(completion_tokens);
-        let dedup_key = format!(
-            "{UNIFIED_LOG_DEDUP_PREFIX}{session_id}:{timestamp}:{pid}:{loop_index}:{prompt_tokens}:{cached_prompt_tokens}:{completion_tokens}:{reasoning_tokens}"
-        );
+        let dedup_key = unified_log_dedup_key(&session_id, &value);
         if !seen.insert(dedup_key.clone()) {
             continue;
         }
@@ -801,6 +805,58 @@ pub fn parse_grok_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 }
 
+/// Return the files and directories that can affect metadata attached to a
+/// unified-log message. The unified parser reads every session under the Grok
+/// home, so the root, workspace/session directories, and metadata siblings all
+/// participate in its source fingerprint. Legacy update files only need their
+/// own sibling metadata.
+pub(crate) fn grok_related_paths(path: &Path) -> Vec<(String, PathBuf)> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("unified.jsonl") {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        return ["signals.json", "summary.json", "events.jsonl"]
+            .into_iter()
+            .map(|name| (name.to_string(), parent.join(name)))
+            .collect();
+    }
+
+    let Some(grok_home) = path.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let sessions_root = grok_home.join("sessions");
+    let mut related = vec![("sessions-directory".to_string(), sessions_root.clone())];
+
+    let Some((_, workspaces)) = unified_session_tree(path) else {
+        return related;
+    };
+    for (workspace_dir, session_dirs) in workspaces {
+        let workspace_suffix = cache_path_suffix(grok_home, &workspace_dir);
+        related.push((
+            format!("sessions-workspace:{workspace_suffix}"),
+            workspace_dir.clone(),
+        ));
+        for session_dir in session_dirs {
+            let session_suffix = cache_path_suffix(grok_home, &session_dir);
+            related.push((
+                format!("sessions-session:{session_suffix}"),
+                session_dir.clone(),
+            ));
+            for file_name in [
+                "updates.jsonl",
+                "summary.json",
+                "events.jsonl",
+                "signals.json",
+            ] {
+                related.push((
+                    format!("sessions-file:{session_suffix}/{file_name}"),
+                    session_dir.join(file_name),
+                ));
+            }
+        }
+    }
+
+    related
+}
+
 /// Uses the richer, per-inference unified log for sessions it covers. Legacy
 /// updates remain a fallback for sessions absent from that log, avoiding an
 /// additive merge of two representations of the same activity.
@@ -872,12 +928,69 @@ pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Uni
         }
     }
 
-    messages
-        .into_iter()
-        .filter(|message| {
-            is_unified_log_message(message) || !unified_sessions.contains(&message.session_id)
-        })
-        .collect()
+    // A unified row only proves that one legacy activity row is covered when
+    // both representations agree on the session, timestamp, and inclusive
+    // token total. Retain every unmatched legacy row so a partially migrated
+    // session cannot lose its older history.
+    let mut covered_activity = HashMap::new();
+    let mut covered_fallback_timestamps = HashMap::new();
+    for message in messages
+        .iter()
+        .filter(|message| is_unified_log_message(message))
+    {
+        *covered_activity
+            .entry((
+                message.session_id.clone(),
+                message.timestamp,
+                message.tokens.total(),
+            ))
+            .or_insert(0usize) += 1;
+        *covered_fallback_timestamps
+            .entry((message.session_id.clone(), message.timestamp))
+            .or_insert(0usize) += 1;
+    }
+
+    let mut selected = Vec::with_capacity(messages.len());
+    for message in messages {
+        if is_unified_log_message(&message) {
+            selected.push(message);
+            continue;
+        }
+
+        let key = (
+            message.session_id.clone(),
+            message.timestamp,
+            message.tokens.total(),
+        );
+        let covered = covered_activity.get_mut(&key).is_some_and(|count| {
+            if *count == 0 {
+                false
+            } else {
+                *count -= 1;
+                if let Some(timestamp_count) = covered_fallback_timestamps
+                    .get_mut(&(message.session_id.clone(), message.timestamp))
+                {
+                    *timestamp_count = timestamp_count.saturating_sub(1);
+                }
+                true
+            }
+        }) || (is_legacy_fallback_message(&message)
+            && covered_fallback_timestamps
+                .get_mut(&(message.session_id.clone(), message.timestamp))
+                .is_some_and(|count| {
+                    if *count == 0 {
+                        false
+                    } else {
+                        *count -= 1;
+                        true
+                    }
+                }));
+        if !covered {
+            selected.push(message);
+        }
+    }
+
+    selected
 }
 
 fn is_unified_log_message(message: &UnifiedMessage) -> bool {
@@ -885,6 +998,13 @@ fn is_unified_log_message(message: &UnifiedMessage) -> bool {
         .dedup_key
         .as_deref()
         .is_some_and(|key| key.starts_with(UNIFIED_LOG_DEDUP_PREFIX))
+}
+
+fn is_legacy_fallback_message(message: &UnifiedMessage) -> bool {
+    let Some(key) = message.dedup_key.as_deref() else {
+        return false;
+    };
+    key.starts_with("grok:") && !key.contains(":usage:") && !key.ends_with(":signals")
 }
 
 fn unified_log_process_start_pid(value: &Value) -> Option<i64> {
@@ -944,6 +1064,39 @@ fn optional_non_negative_i64(value: Option<&Value>) -> Option<i64> {
     }
 }
 
+fn unified_log_dedup_key(session_id: &str, value: &Value) -> String {
+    let event_id = [
+        &["event_id"][..],
+        &["eventId"][..],
+        &["id"][..],
+        &["uuid"][..],
+        &["ctx", "event_id"][..],
+        &["ctx", "eventId"][..],
+        &["ctx", "id"][..],
+        &["ctx", "uuid"][..],
+    ]
+    .into_iter()
+    .find_map(|path| {
+        get_path(value, path)
+            .and_then(|value| extract_string(Some(value)))
+            .filter(|id| !id.trim().is_empty())
+    });
+
+    let identity = event_id.map_or_else(
+        || {
+            // Without a source event ID, the complete normalized row is the
+            // stable discriminator. Exact duplicate rows still collapse, but
+            // rows that happen to share timestamp and token fields do not.
+            format!(
+                "row:{}",
+                serde_json::to_string(value).unwrap_or_else(|_| String::new())
+            )
+        },
+        |event_id| format!("id:{event_id}"),
+    );
+    format!("{UNIFIED_LOG_DEDUP_PREFIX}{session_id}:{identity}")
+}
+
 fn fallback_unified_metadata(session_id: &str, timestamp: i64) -> GrokMetadata {
     GrokMetadata {
         session_id: session_id.to_string(),
@@ -955,36 +1108,20 @@ fn fallback_unified_metadata(session_id: &str, timestamp: i64) -> GrokMetadata {
 }
 
 fn read_unified_session_metadata(path: &Path) -> HashMap<String, GrokMetadata> {
-    let Some(grok_home) = path.parent().and_then(Path::parent) else {
-        return HashMap::new();
-    };
-    let sessions_root = grok_home.join("sessions");
-    let Ok(workspaces) = std::fs::read_dir(sessions_root) else {
+    let Some((_, workspaces)) = unified_session_tree(path) else {
         return HashMap::new();
     };
 
     let mut metadata_by_session = HashMap::new();
-    for workspace_entry in workspaces.flatten() {
-        let workspace_dir = workspace_entry.path();
-        if !workspace_dir.is_dir() {
-            continue;
-        }
-
+    for (workspace_dir, session_dirs) in workspaces {
         let workspace_key = workspace_dir
             .file_name()
             .and_then(|name| name.to_str())
             .map(percent_decode_lossy)
             .and_then(|decoded| normalize_workspace_key(&decoded));
         let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
-        let Ok(sessions) = std::fs::read_dir(&workspace_dir) else {
-            continue;
-        };
 
-        for session_entry in sessions.flatten() {
-            let session_dir = session_entry.path();
-            if !session_dir.is_dir() {
-                continue;
-            }
+        for session_dir in session_dirs {
             let Some(session_id) = session_dir
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1011,6 +1148,43 @@ fn read_unified_session_metadata(path: &Path) -> HashMap<String, GrokMetadata> {
     }
 
     metadata_by_session
+}
+
+fn unified_session_tree(path: &Path) -> Option<(PathBuf, UnifiedSessionTree)> {
+    let grok_home = path.parent().and_then(Path::parent)?;
+    let sessions_root = grok_home.join("sessions");
+    let mut workspaces = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&sessions_root) else {
+        return Some((sessions_root, workspaces));
+    };
+
+    for entry in entries.flatten() {
+        let workspace_dir = entry.path();
+        if !workspace_dir.is_dir() {
+            continue;
+        }
+        let mut session_dirs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&workspace_dir) {
+            for entry in entries.flatten() {
+                let session_dir = entry.path();
+                if session_dir.is_dir() {
+                    session_dirs.push(session_dir);
+                }
+            }
+        }
+        session_dirs.sort_unstable();
+        workspaces.push((workspace_dir, session_dirs));
+    }
+    workspaces.sort_by(|left, right| left.0.cmp(&right.0));
+
+    Some((sessions_root, workspaces))
+}
+
+fn cache_path_suffix(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn non_negative_i64(value: Option<&Value>) -> i64 {
@@ -1395,6 +1569,22 @@ mod tests {
     }
 
     #[test]
+    fn unified_log_keeps_distinct_rows_when_fallback_timestamp_and_tokens_repeat() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"completion_tokens":25,"request_id":"first"}}
+{"pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"completion_tokens":25,"request_id":"second"}}
+{"pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"completion_tokens":25,"request_id":"first"}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_ne!(messages[0].dedup_key, messages[1].dedup_key);
+        assert_eq!(messages[0].timestamp, messages[1].timestamp);
+        assert_eq!(messages[0].tokens.total(), messages[1].tokens.total());
+    }
+
+    #[test]
     fn unified_log_preserves_session_workspace_metadata() {
         let temp = tempfile::TempDir::new().unwrap();
         let logs_dir = temp.path().join("home/.grok/logs");
@@ -1561,6 +1751,30 @@ mod tests {
     }
 
     #[test]
+    fn selector_retains_uncovered_legacy_history_for_partially_unified_session() {
+        let mut older_legacy = test_message("covered", "grok:covered:older");
+        older_legacy.timestamp = 1_700_000_000_000;
+        older_legacy.tokens.input = 10;
+
+        let mut covered_legacy = test_message("covered", "grok:covered:covered");
+        covered_legacy.timestamp = 1_700_000_001_000;
+        covered_legacy.tokens.input = 20;
+
+        let mut covered_unified = test_message("covered", "grok-unified:covered:event");
+        covered_unified.timestamp = covered_legacy.timestamp;
+        covered_unified.tokens.input = covered_legacy.tokens.input;
+
+        let messages =
+            prefer_unified_log_messages(vec![older_legacy, covered_legacy, covered_unified]);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .any(|message| message.dedup_key.as_deref() == Some("grok:covered:older")));
+        assert!(messages.iter().any(is_unified_log_message));
+    }
+
+    #[test]
     fn prefers_unified_log_messages_only_for_covered_sessions() {
         let covered_legacy = test_message("covered", "grok:covered:0");
         let uncovered_legacy = test_message("fallback", "grok:fallback:0");
@@ -1600,6 +1814,24 @@ mod tests {
             messages[0].dedup_key.as_deref(),
             Some("grok:session-1:usage:turn-1")
         );
+    }
+
+    #[test]
+    fn parses_inclusive_usage_buckets_without_total_tokens() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":100,"outputTokens":25,"reasoningTokens":5,"cachedReadTokens":60}} ,"_meta":{"agentTimestampMs":1700000003000}}}"#,
+            None,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 40);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 60);
+        assert_eq!(messages[0].tokens.reasoning, 5);
+        assert_eq!(messages[0].tokens.total(), 125);
     }
 
     #[test]

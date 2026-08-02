@@ -1502,9 +1502,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Grok)
         .par_iter()
         .map(|path| {
-            // Use a Grok-aware fingerprint: parse output depends on the sibling
-            // signals.json rollup, so that file must participate in the cache key
-            // or a late/updated rollup is ignored forever for cached sessions.
+            // Use a Grok-aware fingerprint: legacy output depends on session
+            // sidecars, while unified output reads metadata across the complete
+            // sessions tree; all of those inputs must invalidate cached output.
             load_or_parse_source_with_fingerprint(
                 message_cache::CacheIdentity::for_client(ClientId::Grok),
                 path,
@@ -1522,7 +1522,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             source_cache.insert(entry);
         }
     }
-    all_messages.extend(sessions::grok::prefer_unified_log_messages(grok_messages));
+    let mut selected_grok_messages = sessions::grok::prefer_unified_log_messages(grok_messages);
+    apply_pricing_to_messages(&mut selected_grok_messages, pricing);
+    all_messages.extend(selected_grok_messages);
 
     let jcode_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Jcode)
@@ -5737,6 +5739,74 @@ mod tests {
             assert_eq!(messages[0].tokens.output, 20);
             assert_eq!(messages[0].tokens.reasoning, 5);
             assert_eq!(messages[0].tokens.total(), 125);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_reprices_grok_after_legacy_model_attribution() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let session_dir = source_home
+                .path()
+                .join(".grok/sessions/%2Ftmp%2Fproject/session-1");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            std::fs::write(
+                session_dir.join("updates.jsonl"),
+                r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-code"}},"_meta":{"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":999,"agentTimestampMs":1700000000000}}}"#,
+            )
+            .unwrap();
+
+            let logs_dir = source_home.path().join(".grok/logs");
+            std::fs::create_dir_all(&logs_dir).unwrap();
+            std::fs::write(
+                logs_dir.join("unified.jsonl"),
+                r#"{"ts":"2023-11-14T22:13:20Z","pid":7,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}"#,
+            )
+            .unwrap();
+
+            let mut litellm = HashMap::new();
+            litellm.insert(
+                "grok-code".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    output_cost_per_token: Some(0.002),
+                    ..Default::default()
+                },
+            );
+            let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+            let first = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["grok".to_string()],
+                Some(&pricing),
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].model_id, "grok-code");
+            assert!(first[0].cost > 0.0);
+
+            let second = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["grok".to_string()],
+                Some(&pricing),
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(second.len(), 1);
+            assert_eq!(second[0].model_id, "grok-code");
+            assert!(second[0].cost > 0.0);
         }
 
         match original_home {
