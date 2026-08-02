@@ -362,6 +362,31 @@ impl SourceFingerprint {
         Self::check_roo_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
     }
 
+    pub(crate) fn check_cline_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        let related_paths = if crate::sessions::cline::is_cline_cli_messages_path(path) {
+            std::iter::once((
+                "manifest.json".to_string(),
+                crate::sessions::cline::cline_cli_manifest_path(path),
+            ))
+            .collect::<Vec<_>>()
+        } else {
+            let history = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("api_conversation_history.json");
+            vec![("api_conversation_history.json".to_string(), history)]
+        };
+        Self::check_path_with_related_mode(
+            path,
+            related_paths,
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
     fn check_roo_path_with_mode(
         path: &Path,
         cached: Option<&Self>,
@@ -878,6 +903,12 @@ fn parser_version(client: ClientId) -> u32 {
         // kimi-code `time`) now fall back to the file mtime instead of
         // anchoring the message in a pre-epoch bucket.
         ClientId::Kimi => 4,
+        // v1->v2: standalone Cline messages subtract cache buckets from gross
+        // input tokens, reject non-finite costs, and preserve zero-cost reports.
+        ClientId::Cline => 2,
+        // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
+        // deduplication keys.
+        ClientId::Kimchi => 2,
         // v1->v2: per-model token attribution now comes from
         // session_model_usage instead of crediting the whole session to
         // sessions.model, and dedup keys are namespaced per (session, model).
@@ -1758,6 +1789,45 @@ mod tests {
             plain_before, plain_after,
             "from_path ignores the history sibling (control)"
         );
+    }
+
+    #[test]
+    fn cline_cli_fingerprint_tracks_manifest_changes() {
+        let dir = TempDir::new().unwrap();
+        let messages = dir.path().join("session.messages.json");
+        let manifest = dir.path().join("session.json");
+        std::fs::write(&messages, br#"{"messages":[]}"#).unwrap();
+
+        let initial = match SourceFingerprint::check_cline_path_samples_only(&messages, None) {
+            Some(FingerprintStatus::Changed(fingerprint)) => fingerprint,
+            other => panic!("expected an initial fingerprint, got {other:?}"),
+        };
+        assert!(initial.related_files.iter().any(|related| {
+            related.suffix == "manifest.json"
+                && related.path.to_path_buf() == manifest
+                && !related.exists
+        }));
+        assert!(matches!(
+            SourceFingerprint::check_cline_path_samples_only(&messages, Some(&initial)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        std::fs::write(&manifest, br#"{"title":"first"}"#).unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_cline_path_samples_only(&messages, Some(&initial)),
+            Some(FingerprintStatus::Changed(_))
+        ));
+
+        let with_manifest =
+            match SourceFingerprint::check_cline_path_samples_only(&messages, Some(&initial)) {
+                Some(FingerprintStatus::Changed(fingerprint)) => fingerprint,
+                other => panic!("expected a refreshed fingerprint, got {other:?}"),
+            };
+        std::fs::write(&manifest, br#"{"title":"second"}"#).unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_cline_path_samples_only(&messages, Some(&with_manifest)),
+            Some(FingerprintStatus::Changed(_))
+        ));
     }
 
     fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {

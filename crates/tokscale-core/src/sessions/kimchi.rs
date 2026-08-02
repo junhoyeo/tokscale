@@ -4,12 +4,12 @@
 //! agent directory. Reuse the shared Pi parser while stamping messages with
 //! the distinct `kimchi` client id.
 
-use super::pi::parse_pi_format_file;
+use super::pi::parse_pi_format_file_with_dedup;
 use super::UnifiedMessage;
 use std::path::Path;
 
 pub fn parse_kimchi_file(path: &Path) -> Vec<UnifiedMessage> {
-    parse_pi_format_file(path, "kimchi", "kimchi")
+    parse_pi_format_file_with_dedup(path, "kimchi", "kimchi")
 }
 
 #[cfg(test)]
@@ -42,6 +42,10 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 9441);
         assert_eq!(messages[0].tokens.output, 131);
         assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("kimchi:kimchi_ses_001:msg_001")
+        );
         assert_eq!(
             messages[0].workspace_label.as_deref(),
             Some("kimchi-project")

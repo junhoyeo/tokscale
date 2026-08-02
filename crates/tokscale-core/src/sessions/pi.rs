@@ -133,6 +133,26 @@ pub(crate) fn parse_pi_format_file(
     client: &str,
     fallback_provider: &'static str,
 ) -> Vec<UnifiedMessage> {
+    parse_pi_format_file_inner(path, client, fallback_provider, None)
+}
+
+/// Parse a Pi-format session and retain message ids in namespaced dedup keys.
+/// Pi-compatible clients that need cross-file deduplication can opt into this
+/// without changing the historical output of the shared Pi and Senpi parsers.
+pub(crate) fn parse_pi_format_file_with_dedup(
+    path: &Path,
+    client: &str,
+    fallback_provider: &'static str,
+) -> Vec<UnifiedMessage> {
+    parse_pi_format_file_inner(path, client, fallback_provider, Some(client))
+}
+
+fn parse_pi_format_file_inner(
+    path: &Path,
+    client: &str,
+    fallback_provider: &'static str,
+    dedup_namespace: Option<&str>,
+) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
@@ -203,6 +223,7 @@ pub(crate) fn parse_pi_format_file(
             continue;
         }
 
+        let message_id = entry.id;
         let message = match entry.message {
             Some(m) => m,
             None => continue,
@@ -261,6 +282,12 @@ pub(crate) fn parse_pi_format_file(
             0.0,
             agent.clone(),
         );
+        if let Some(namespace) = dedup_namespace {
+            if let Some(message_id) = message_id.as_deref().filter(|id| !id.trim().is_empty()) {
+                let session_id = session_id.as_deref().unwrap_or("unknown");
+                unified.dedup_key = Some(format!("{namespace}:{session_id}:{message_id}"));
+            }
+        }
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
     }

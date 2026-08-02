@@ -67,13 +67,13 @@ struct ClineCliManifest {
     metadata: Option<Value>,
 }
 
-fn is_cline_cli_messages_path(path: &Path) -> bool {
+pub(crate) fn is_cline_cli_messages_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".messages.json"))
 }
 
-fn cline_cli_manifest_path(path: &Path) -> PathBuf {
+pub(crate) fn cline_cli_manifest_path(path: &Path) -> PathBuf {
     let stem = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -108,6 +108,10 @@ fn extract_f64(value: Option<&Value>) -> Option<f64> {
             .or_else(|| value.as_u64().map(|value| value as f64))
             .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
     })
+}
+
+fn extract_non_negative_finite_f64(value: Option<&Value>) -> Option<f64> {
+    extract_f64(value).filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 /// Parse Cline CLI's persisted assistant messages from
@@ -175,7 +179,7 @@ pub fn parse_cline_cli_file(path: &Path) -> Vec<UnifiedMessage> {
         let Some(metrics) = entry.metrics else {
             continue;
         };
-        let input = extract_i64(metrics.input_tokens.as_ref())
+        let input_tokens = extract_i64(metrics.input_tokens.as_ref())
             .unwrap_or(0)
             .max(0);
         let output = extract_i64(metrics.output_tokens.as_ref())
@@ -187,9 +191,17 @@ pub fn parse_cline_cli_file(path: &Path) -> Vec<UnifiedMessage> {
         let cache_write = extract_i64(metrics.cache_write_tokens.as_ref())
             .unwrap_or(0)
             .max(0);
-        let cost = extract_f64(metrics.cost.as_ref()).unwrap_or(0.0).max(0.0);
+        let input = input_tokens
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_write);
+        let reported_cost = extract_non_negative_finite_f64(metrics.cost.as_ref());
+        let cost = reported_cost.unwrap_or(0.0);
 
-        if input + output + cache_read + cache_write == 0 && cost == 0.0 {
+        let total_tokens = input
+            .saturating_add(output)
+            .saturating_add(cache_read)
+            .saturating_add(cache_write);
+        if total_tokens == 0 && reported_cost.is_none() {
             continue;
         }
 
@@ -223,7 +235,7 @@ pub fn parse_cline_cli_file(path: &Path) -> Vec<UnifiedMessage> {
         message.is_turn_start = pending_turn_start;
         message.session_title = session_title.clone();
         message.set_workspace(workspace_key.clone(), workspace_label.clone());
-        if cost > 0.0 {
+        if reported_cost.is_some() {
             message.mark_provider_reported_cost();
         }
         messages.push(message);
@@ -353,7 +365,7 @@ mod tests {
         assert_eq!(messages[0].model_id, "cline-free/glm-5.2");
         assert_eq!(messages[0].session_id, "cline-cli-session");
         assert_eq!(messages[0].agent.as_deref(), Some("lead"));
-        assert_eq!(messages[0].tokens.input, 7507);
+        assert_eq!(messages[0].tokens.input, 7457);
         assert_eq!(messages[0].tokens.output, 131);
         assert_eq!(messages[0].tokens.cache_read, 50);
         assert_eq!(messages[0].tokens.cache_write, 0);
@@ -365,5 +377,57 @@ mod tests {
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
         assert_eq!(messages[0].session_title.as_deref(), Some("CLI task"));
         assert!(messages[0].is_turn_start);
+    }
+
+    #[test]
+    fn test_parse_cline_cli_normalizes_cache_tokens_and_preserves_zero_cost() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.messages.json");
+        fs::write(
+            &path,
+            r#"{
+  "sessionId": "session-1",
+  "messages": [
+    {
+      "id": "zero-cost",
+      "role": "assistant",
+      "metrics": {
+        "inputTokens": 12,
+        "outputTokens": 0,
+        "cacheReadTokens": 5,
+        "cacheWriteTokens": 2,
+        "cost": 0
+      }
+    },
+    {
+      "id": "invalid-cost",
+      "role": "assistant",
+      "metrics": {
+        "inputTokens": 1,
+        "outputTokens": 2,
+        "cost": "NaN"
+      }
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let messages = parse_cline_cli_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 5);
+        assert_eq!(messages[0].tokens.cache_read, 5);
+        assert_eq!(messages[0].tokens.cache_write, 2);
+        assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(
+            messages[0].cost_source,
+            crate::sessions::CostSource::ProviderReported
+        );
+        assert_eq!(messages[1].cost, 0.0);
+        assert_eq!(
+            messages[1].cost_source,
+            crate::sessions::CostSource::Unknown
+        );
     }
 }

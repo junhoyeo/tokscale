@@ -171,7 +171,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   "devin-desktop": "#334155",
   senpi: "#2F6F63",
   augment: "#9333EA",
-  kimchi: "#F97316",
+  kimchi: "#14B8A6",
 };
 
 // Derived values
