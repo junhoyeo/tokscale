@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -16,6 +16,26 @@ const DEFAULT_NATIVE_TIMEOUT_MS: u64 = 300_000;
 const MIN_NATIVE_TIMEOUT_MS: u64 = 5_000;
 const MAX_NATIVE_TIMEOUT_MS: u64 = 3_600_000;
 
+pub const DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 24 * 60;
+pub const MIN_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 15;
+pub const MAX_AUTOSUBMIT_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
+
+#[derive(Debug, Clone, Copy)]
+enum ExplicitHomeConfigLayout {
+    UnixDotConfig,
+    WindowsRoaming,
+}
+
+impl ExplicitHomeConfigLayout {
+    fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::WindowsRoaming
+        } else {
+            Self::UnixDotConfig
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LightSettings {
@@ -24,6 +44,81 @@ pub struct LightSettings {
     /// flags `--write-cache` / `--no-write-cache` override this per-invocation.
     #[serde(default)]
     pub write_cache: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutosubmitSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_autosubmit_interval_minutes")]
+    pub interval_minutes: u64,
+    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    pub clients: Vec<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub year: Option<String>,
+    #[serde(default)]
+    pub today: bool,
+    #[serde(default)]
+    pub yesterday: bool,
+    #[serde(default)]
+    pub week: bool,
+    #[serde(default)]
+    pub month: bool,
+    #[serde(default)]
+    pub scheduler: Option<String>,
+    #[serde(default)]
+    pub managed_executable: Option<String>,
+    /// Version of the build that `managed_executable` was copied from.
+    ///
+    /// The copy is written only by `autosubmit enable`, so upgrading the
+    /// installed binary leaves the scheduled job on the old build. Without this
+    /// there is no way to tell a stale scheduled job from a current one, and
+    /// the drift is silent. `None` on configs written before this field
+    /// existed, and on those the version is reported as unknown rather than
+    /// assumed current.
+    #[serde(default)]
+    pub managed_executable_version: Option<String>,
+    #[serde(default)]
+    pub last_run_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for AutosubmitSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_minutes: DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES,
+            clients: Vec::new(),
+            since: None,
+            until: None,
+            year: None,
+            today: false,
+            yesterday: false,
+            week: false,
+            month: false,
+            scheduler: None,
+            managed_executable: None,
+            managed_executable_version: None,
+            last_run_at_ms: None,
+            last_error: None,
+        }
+    }
+}
+
+impl AutosubmitSettings {
+    fn normalize(mut self) -> Self {
+        self.interval_minutes = self.interval_minutes.clamp(
+            MIN_AUTOSUBMIT_INTERVAL_MINUTES,
+            MAX_AUTOSUBMIT_INTERVAL_MINUTES,
+        );
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +163,18 @@ pub struct Settings {
     /// tab and enable its aggregation in subsequent loads.
     #[serde(default)]
     pub minutely_tab_enabled: bool,
+    #[serde(default)]
+    pub autosubmit: AutosubmitSettings,
+    /// User-defined model-name aliases folded at grouping time. Different
+    /// name-strings for one physical model (e.g. `claude-opus-4-8-cc`,
+    /// `anthropic/claude-opus-4-8`) map to a single canonical name so usage
+    /// stats do not split across rows. Keys and values are matched
+    /// case-insensitively against the normalized model name.
+    ///
+    /// `#[serde(default)]` keeps settings.json files written before the field
+    /// existed loading cleanly; an absent or empty map means no folding.
+    #[serde(default)]
+    pub model_aliases: tokscale_core::ModelAliasMap,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -101,6 +208,10 @@ fn default_native_timeout_ms() -> u64 {
     DEFAULT_NATIVE_TIMEOUT_MS
 }
 
+fn default_autosubmit_interval_minutes() -> u64 {
+    DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -113,6 +224,8 @@ impl Default for Settings {
             default_clients: Vec::new(),
             light: LightSettings::default(),
             minutely_tab_enabled: false,
+            autosubmit: AutosubmitSettings::default(),
+            model_aliases: tokscale_core::ModelAliasMap::default(),
         }
     }
 }
@@ -128,6 +241,17 @@ pub fn load_scanner_settings() -> ScannerSettings {
     Settings::load().scanner
 }
 
+pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> ScannerSettings {
+    Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).scanner
+}
+
+/// Loads the user's configured model aliases, honoring a `--home` override the
+/// same way [`load_scanner_settings_for_home`] does. A missing or malformed
+/// settings.json yields an empty map (no folding); this never errors.
+pub fn load_model_aliases_for_home(home_dir: &Option<String>) -> tokscale_core::ModelAliasMap {
+    Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).model_aliases
+}
+
 /// Returns the user's configured `defaultClients` list as raw lowercase
 /// ids. Validation against the live `ClientFilter` enum happens at the
 /// CLI boundary so this module stays independent of the CLI types.
@@ -138,7 +262,22 @@ pub fn load_default_clients() -> Vec<String> {
     Settings::load().default_clients
 }
 
+pub fn load_default_clients_for_home(home_dir: &Option<String>) -> Vec<String> {
+    Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).default_clients
+}
+
 impl Settings {
+    fn normalize(mut self) -> Self {
+        self.auto_refresh_ms = self
+            .auto_refresh_ms
+            .clamp(MIN_AUTO_REFRESH_MS, MAX_AUTO_REFRESH_MS);
+        self.native_timeout_ms = self
+            .native_timeout_ms
+            .clamp(MIN_NATIVE_TIMEOUT_MS, MAX_NATIVE_TIMEOUT_MS);
+        self.autosubmit = self.autosubmit.normalize();
+        self
+    }
+
     fn config_path() -> Result<PathBuf> {
         let config_dir = crate::paths::get_config_dir();
 
@@ -147,6 +286,31 @@ impl Settings {
         }
 
         Ok(config_dir.join("settings.json"))
+    }
+
+    fn explicit_home_config_path_for_layout(
+        home_dir: &Path,
+        layout: ExplicitHomeConfigLayout,
+    ) -> PathBuf {
+        match layout {
+            ExplicitHomeConfigLayout::UnixDotConfig => home_dir
+                .join(".config")
+                .join("tokscale")
+                .join("settings.json"),
+            ExplicitHomeConfigLayout::WindowsRoaming => home_dir
+                .join("AppData")
+                .join("Roaming")
+                .join("tokscale")
+                .join("settings.json"),
+        }
+    }
+
+    fn explicit_home_config_path(home_dir: &Path) -> PathBuf {
+        Self::explicit_home_config_path_for_layout(home_dir, ExplicitHomeConfigLayout::current())
+    }
+
+    fn explicit_home_legacy_macos_path(home_dir: &Path) -> PathBuf {
+        home_dir.join("Library/Application Support/tokscale/settings.json")
     }
 
     /// Returns the legacy `~/Library/Application Support/tokscale/settings.json`
@@ -177,15 +341,21 @@ impl Settings {
         });
 
         raw.and_then(|content| serde_json::from_str(&content).ok())
-            .map(|mut s: Settings| {
-                s.auto_refresh_ms = s
-                    .auto_refresh_ms
-                    .clamp(MIN_AUTO_REFRESH_MS, MAX_AUTO_REFRESH_MS);
-                s.native_timeout_ms = s
-                    .native_timeout_ms
-                    .clamp(MIN_NATIVE_TIMEOUT_MS, MAX_NATIVE_TIMEOUT_MS);
-                s
-            })
+            .map(Settings::normalize)
+            .unwrap_or_default()
+    }
+
+    pub fn load_for_home_override(home_dir: Option<&Path>) -> Self {
+        let Some(home_dir) = home_dir else {
+            return Self::load();
+        };
+
+        let raw = fs::read_to_string(Self::explicit_home_config_path(home_dir))
+            .ok()
+            .or_else(|| fs::read_to_string(Self::explicit_home_legacy_macos_path(home_dir)).ok());
+
+        raw.and_then(|content| serde_json::from_str(&content).ok())
+            .map(Settings::normalize)
             .unwrap_or_default()
     }
 
@@ -253,6 +423,44 @@ impl Settings {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn explicit_home_config_path_uses_unix_dot_config_layout() {
+        assert_eq!(
+            Settings::explicit_home_config_path_for_layout(
+                Path::new("/home/alice"),
+                ExplicitHomeConfigLayout::UnixDotConfig,
+            ),
+            PathBuf::from("/home/alice/.config/tokscale/settings.json")
+        );
+    }
+
+    #[test]
+    fn explicit_home_config_path_uses_windows_roaming_layout() {
+        assert_eq!(
+            Settings::explicit_home_config_path_for_layout(
+                Path::new("C:/Users/Alice"),
+                ExplicitHomeConfigLayout::WindowsRoaming,
+            ),
+            PathBuf::from("C:/Users/Alice/AppData/Roaming/tokscale/settings.json")
+        );
+    }
+
+    #[test]
+    fn load_for_home_override_reads_current_platform_config_path() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"colorPalette":"halloween","defaultClients":["codex"]}"#,
+        )
+        .unwrap();
+
+        let loaded = Settings::load_for_home_override(Some(temp.path()));
+        assert_eq!(loaded.color_palette, "halloween");
+        assert_eq!(loaded.default_clients, vec!["codex".to_string()]);
+    }
 
     #[test]
     #[cfg(target_os = "macos")]
@@ -363,6 +571,57 @@ mod tests {
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert!(parsed.scanner.opencode_db_paths.is_empty());
+    }
+
+    #[test]
+    fn settings_load_backfills_autosubmit_interval_when_missing_from_json() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+
+        assert!(!parsed.autosubmit.enabled);
+        assert_eq!(
+            parsed.autosubmit.interval_minutes,
+            DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+        );
+        assert_eq!(
+            AutosubmitSettings::default().interval_minutes,
+            DEFAULT_AUTOSUBMIT_INTERVAL_MINUTES
+        );
+    }
+
+    #[test]
+    fn settings_backfills_model_aliases_when_missing_from_json() {
+        // Older settings.json files predate the `modelAliases` key; they must
+        // still deserialize cleanly and default to an empty (no-op) alias map.
+        let json = r#"{
+            "colorPalette": "blue",
+            "autoRefreshEnabled": false,
+            "autoRefreshMs": 60000,
+            "includeUnusedModels": false,
+            "nativeTimeoutMs": 300000
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.model_aliases.entries.is_empty());
+    }
+
+    #[test]
+    fn settings_malformed_model_aliases_does_not_wipe_other_fields() {
+        // A malformed `modelAliases` (not an object, or non-string values) must
+        // degrade to an empty map without failing the whole settings load, so
+        // unrelated settings survive.
+        let json = r#"{
+            "colorPalette": "custom",
+            "modelAliases": ["oops", 5]
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.model_aliases.entries.is_empty());
+        assert_eq!(parsed.color_palette, "custom");
     }
 
     #[test]

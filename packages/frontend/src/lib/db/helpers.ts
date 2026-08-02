@@ -13,6 +13,19 @@ export interface ModelBreakdownData {
   messages: number;
 }
 
+export interface ClientBreakdownProvenanceData {
+  schemaVersion: number;
+  messageCount: number;
+  modelCount: number;
+  /**
+   * "backfill" when this client's contribution was written by a
+   * backfill-origin submission (`tokscale import`); absent (or "cli") for
+   * locally-scanned CLI usage. Preserved by deriveClientBreakdownProvenance
+   * so merges do not silently drop the tag.
+   */
+  origin?: "cli" | "backfill";
+}
+
 export interface ClientBreakdownData {
   tokens: number;
   cost: number;
@@ -23,8 +36,23 @@ export interface ClientBreakdownData {
   reasoning: number;
   messages: number;
   models: Record<string, ModelBreakdownData>;
+  provenance?: ClientBreakdownProvenanceData;
   /** @deprecated Legacy field for backward compat - use models instead */
   modelId?: string;
+}
+
+export interface MergeClientBreakdownsResult {
+  merged: Record<string, ClientBreakdownData>;
+  warnings: string[];
+  // Folded clients (had an entry in foldedClientFloors) whose existing value
+  // was PRESERVED — the incoming submission was below the heal floor or
+  // omitted the client entirely. `merged` holds their collapsed folded entry;
+  // the caller must write the ORIGINAL raw alias keys back to storage for
+  // these clients instead, otherwise the fold evidence (and with it the heal
+  // floor) is destroyed by the writeback and the one heal opportunity is
+  // burned by a partial resubmit — permanently re-cementing the double count
+  // this mechanism exists to repair.
+  foldPreservedClients: Set<string>;
 }
 
 export interface DayTotals {
@@ -69,6 +97,42 @@ export function recalculateDayTotals(
   };
 }
 
+function formatTokens(value: number): string {
+  return Math.round(value).toLocaleString("en-US");
+}
+
+export function deriveClientBreakdownProvenance(
+  breakdown: ClientBreakdownData
+): ClientBreakdownProvenanceData {
+  const modelCount = breakdown.models
+    ? Object.keys(breakdown.models).length
+    : breakdown.modelId
+    ? 1
+    : 0;
+
+  const origin = breakdown.provenance?.origin;
+
+  return {
+    schemaVersion: Math.max(1, breakdown.provenance?.schemaVersion ?? 1),
+    messageCount: Math.max(
+      0,
+      breakdown.provenance?.messageCount ?? 0,
+      breakdown.messages ?? 0
+    ),
+    modelCount: Math.max(0, breakdown.provenance?.modelCount ?? 0, modelCount),
+    // Carry the origin tag through re-derivation (merges, alias folding) so
+    // a backfill-tagged client row keeps its tag.
+    ...(origin ? { origin } : {}),
+  };
+}
+
+function withDerivedProvenance(breakdown: ClientBreakdownData): ClientBreakdownData {
+  return {
+    ...breakdown,
+    provenance: deriveClientBreakdownProvenance(breakdown),
+  };
+}
+
 export function mergeClientBreakdowns(
   existing: Record<string, ClientBreakdownData> | null | undefined,
   incoming: Record<string, ClientBreakdownData>,
@@ -87,22 +151,90 @@ export function mergeClientBreakdowns(
   return merged;
 }
 
-export function buildModelBreakdown(
-  clientBreakdown: Record<string, ClientBreakdownData>
-): Record<string, number> {
-  const result: Record<string, number> = {};
+export function mergeClientBreakdownsWithRegressionGuard(
+  existing: Record<string, ClientBreakdownData> | null | undefined,
+  incoming: Record<string, ClientBreakdownData>,
+  incomingClients: Set<string>,
+  // Clients whose `existing` value came from normalizeClientBreakdownAliases
+  // folding TWO source keys together (e.g. a stale legacy "kilocode" key
+  // alongside "kilo" for the same underlying usage) rather than a simple
+  // one-key rename, mapped to the largest token count any single raw key
+  // contributed to the fold. For these, a lower incoming token count is not
+  // automatically a parser regression — it may be the healthy value the
+  // inflated fold should be replaced with. But nothing proves an incoming
+  // submission covers the full day (partial re-parses are the exact case the
+  // guard exists for), so healing only happens when the incoming value is at
+  // least the largest single contribution: any truthful complete-day total
+  // must be >= each of the components that were summed. Below that floor the
+  // normal guard still applies. A pure rename-only fold (only the legacy key
+  // was ever present) is NOT included here and keeps the normal guard
+  // behavior.
+  foldedClientFloors?: Map<string, number>
+): MergeClientBreakdownsResult {
+  const merged: Record<string, ClientBreakdownData> = { ...(existing || {}) };
+  const warnings: string[] = [];
+  // Every folded client starts as "preserved" and is unmarked only when the
+  // incoming submission actually heals or replaces it. This also covers
+  // folded clients the incoming submission never mentions (carried over by
+  // the spread above), whose collapsed entry would otherwise overwrite the
+  // raw alias keys on writeback just the same.
+  const foldPreservedClients = new Set<string>(foldedClientFloors?.keys() ?? []);
 
-  for (const client of Object.values(clientBreakdown)) {
-    if (client.models) {
-      for (const [modelId, modelData] of Object.entries(client.models)) {
-        result[modelId] = (result[modelId] || 0) + modelData.tokens;
+  for (const clientName of incomingClients) {
+    const existingClient = existing?.[clientName];
+    const incomingClient = incoming[clientName];
+
+    if (!incomingClient) {
+      if (existingClient && existingClient.tokens > 0) {
+        merged[clientName] = withDerivedProvenance(existingClient);
+        warnings.push(
+          `Preserved ${clientName} because it disappeared from this same-device resubmit; kept ${formatTokens(existingClient.tokens)} tokens.`
+        );
+      } else {
+        delete merged[clientName];
+        foldPreservedClients.delete(clientName);
       }
-    } else if (client.modelId) {
-      result[client.modelId] = (result[client.modelId] || 0) + client.tokens;
+      continue;
     }
+
+    const nextClient = withDerivedProvenance(incomingClient);
+    if (existingClient && nextClient.tokens < existingClient.tokens) {
+      const healFloor = foldedClientFloors?.get(clientName);
+      if (healFloor !== undefined && nextClient.tokens >= healFloor) {
+        // The existing value is an alias-folded double count (e.g. stale
+        // "kilocode" + "kilo" summed together), not real usage history, and
+        // the incoming value clears the largest single contribution to that
+        // fold — consistent with a complete-day recomputation rather than a
+        // partial re-parse. Let it replace the fold instead of defending it.
+        merged[clientName] = nextClient;
+        foldPreservedClients.delete(clientName);
+        const existingTokens = formatTokens(existingClient.tokens);
+        const nextTokens = formatTokens(nextClient.tokens);
+        warnings.push(
+          `Healed ${clientName} alias-folded double count for this same-device resubmit: replaced ${existingTokens} tokens with ${nextTokens} tokens from the complete incoming day.`
+        );
+        continue;
+      }
+
+      // A token decrease alone signals a parser regression (e.g. the CLI
+      // re-parsed only a subset of history). Preserve the existing row even
+      // when coverage metrics are equal, because equal coverage + fewer tokens
+      // still indicates data loss. The old AND-gate (tokens < existing AND lower
+      // coverage) let equal-coverage regressions slip through undetected.
+      merged[clientName] = withDerivedProvenance(existingClient);
+      const existingTokens = formatTokens(existingClient.tokens);
+      const nextTokens = formatTokens(nextClient.tokens);
+      warnings.push(
+        `Preserved ${clientName} because this same-device resubmit would reduce ${existingTokens} tokens to ${nextTokens}.`
+      );
+      continue;
+    }
+
+    merged[clientName] = nextClient;
+    foldPreservedClients.delete(clientName);
   }
 
-  return result;
+  return { merged, warnings, foldPreservedClients };
 }
 
 export function clientContributionToBreakdownData(

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
+import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { issuePersonalToken, listPersonalTokens } from "@/lib/auth/personalTokens";
 
 const DEFAULT_TOKEN_NAME = "CI token";
@@ -46,7 +47,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const session = await getSession();
+    const session = await getSessionFromRequest(request, {
+      allowAuthorizationHeader: false,
+    });
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }

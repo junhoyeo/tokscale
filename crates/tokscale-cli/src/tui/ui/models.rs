@@ -1,11 +1,12 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
-    get_provider_display_name,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
+    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_text,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -53,6 +54,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
+    let metric_input_style = app.theme.metric_input_style();
+    let metric_output_style = app.theme.metric_output_style();
+    let metric_cache_read_style = app.theme.metric_cache_read_style();
+    let metric_cache_write_style = app.theme.metric_cache_write_style();
+    let striped_row_style = app.theme.striped_row_style();
 
     let models = app.get_sorted_models();
     if models.is_empty() {
@@ -81,12 +87,14 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             "Cache Read",
             "Cache Write",
             "Total",
+            "ms/1K",
             "Cost",
+            "Cost/1M",
         ]
     } else {
         vec![
             "#", "Model", "Provider", "Source", "Input", "Output", "Cache R", "Cache W", "Cache×",
-            "Total", "Cost",
+            "Total", "ms/1K", "Cost", "Cost/1M",
         ]
     };
 
@@ -108,7 +116,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|(i, h)| {
                 let indicator = match i {
                     9 if !is_narrow => sort_indicator(SortField::Tokens),
-                    10 if !is_narrow => sort_indicator(SortField::Cost),
+                    11 if !is_narrow => sort_indicator(SortField::Cost),
                     1 if is_very_narrow => sort_indicator(SortField::Cost),
                     2 if is_narrow && !is_very_narrow => sort_indicator(SortField::Cost),
                     1 if is_narrow && !is_very_narrow => sort_indicator(SortField::Tokens),
@@ -141,29 +149,31 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let model_color = app.model_color_for(&model.provider, &model.model);
+            let model_color = app.model_color_for(&model.provider, &model.color_key);
             let display_name = model_display_name(model, &group_by);
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
-                    Cell::from(truncate(&display_name, 15)).style(Style::default().fg(model_color)),
+                    Cell::from(truncate_text(&display_name, 15))
+                        .style(Style::default().fg(model_color)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if is_narrow {
                 vec![
-                    Cell::from(truncate(&display_name, 25)).style(Style::default().fg(model_color)),
-                    Cell::from(format_tokens(model.tokens.total())),
+                    Cell::from(truncate_text(&display_name, 25))
+                        .style(Style::default().fg(model_color)),
+                    total_tokens_cell(model.tokens.total(), &app.theme),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if group_by == GroupBy::WorkspaceModel {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(workspace_label(model), 18)).style(
+                    Cell::from(truncate_text(workspace_label(model), 18)).style(
                         Style::default()
                             .fg(theme_accent)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(truncate(&model.model, 24)).style(
+                    Cell::from(truncate_text(&model.model, 24)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -171,21 +181,23 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(get_provider_display_name(&model.provider)),
                     Cell::from(get_client_display_name(&model.client))
                         .style(Style::default().fg(theme_muted)),
-                    Cell::from(format_tokens(model.tokens.input))
-                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    Cell::from(format_tokens(model.tokens.output))
-                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    Cell::from(format_tokens(model.tokens.input)).style(metric_input_style),
+                    Cell::from(format_tokens(model.tokens.output)).style(metric_output_style),
                     Cell::from(format_tokens(model.tokens.cache_read))
-                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
+                        .style(metric_cache_read_style),
                     Cell::from(format_tokens(model.tokens.cache_write))
-                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
-                    Cell::from(format_tokens(model.tokens.total())),
+                        .style(metric_cache_write_style),
+                    total_tokens_cell(model.tokens.total(), &app.theme),
+                    Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
+                        .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
+                    Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]
             } else {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(&model.model, 30)).style(
+                    Cell::from(truncate_text(&model.model, 30)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -193,29 +205,31 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(get_provider_display_name(&model.provider)),
                     Cell::from(get_client_display_name(&model.client))
                         .style(Style::default().fg(theme_muted)),
-                    Cell::from(format_tokens(model.tokens.input))
-                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    Cell::from(format_tokens(model.tokens.output))
-                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    Cell::from(format_tokens(model.tokens.input)).style(metric_input_style),
+                    Cell::from(format_tokens(model.tokens.output)).style(metric_output_style),
                     Cell::from(format_tokens(model.tokens.cache_read))
-                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
+                        .style(metric_cache_read_style),
                     Cell::from(format_tokens(model.tokens.cache_write))
-                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
+                        .style(metric_cache_write_style),
                     Cell::from(format_cache_hit_rate(
                         model.tokens.cache_read,
                         model.tokens.input,
                         model.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(model.tokens.total())),
+                    total_tokens_cell(model.tokens.total(), &app.theme),
+                    Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
+                        .style(Style::default().fg(Color::Yellow)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
+                    Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]
             };
 
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
             } else if is_striped {
-                Style::default().bg(Color::Rgb(20, 24, 30))
+                striped_row_style
             } else {
                 Style::default()
             };
@@ -245,6 +259,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
         ]
     } else {
         vec![
@@ -257,6 +273,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
         ]
@@ -273,7 +291,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(models_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(models_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -283,20 +302,5 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             &mut scrollbar_state,
         );
-    }
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 3 {
-        s.chars().take(max_chars).collect()
-    } else {
-        let head: String = s.chars().take(max_chars - 3).collect();
-        format!("{}...", head)
     }
 }

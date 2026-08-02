@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.3"
+version = "4.8.1"
 edition = "2021"
 authors = ["Junho Yeo <hello@junho.io>"]
 license = "MIT"
@@ -60,6 +60,17 @@ clap = { version = "4.5", features = ["derive", "cargo"] }
 ratatui = { version = "0.29", features = ["all-widgets"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 
+# Terminal cell width of a grapheme. ratatui lays tables out in cells and
+# already depends on this crate to do it, so measuring table content with
+# anything else (`chars().count()`) disagrees with the solver on CJK and emoji.
+unicode-width = "0.2"
+
+# Grapheme cluster boundaries. `char_indices()` only respects UTF-8 character
+# boundaries, so truncating on it splits a flag (two regional indicators) or a
+# ZWJ family emoji mid-sequence and renders garbage. Already in the tree
+# transitively, so this adds no new dependency.
+unicode-segmentation = "1.12"
+
 # Async utilities
 tokio-stream = "0.1"
 futures = "0.3"
@@ -78,6 +89,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 fs2 = "0.4"
+
+# Trae iCubeAuthInfo decryption: AES-128-CBC + base64
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+base64 = "0.22"
 
 # Clipboard
 arboard = "3"

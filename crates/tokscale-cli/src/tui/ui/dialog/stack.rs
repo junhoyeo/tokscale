@@ -73,7 +73,7 @@ impl DialogStack {
         };
 
         // Render backdrop
-        overlay::render_backdrop(frame, viewport);
+        overlay::render_backdrop(frame, viewport, &self.theme);
 
         // Calculate centered position
         let (width, height) = top.desired_size(viewport);

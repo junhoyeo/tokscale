@@ -39,12 +39,48 @@ pub struct GeminiMessage {
     pub timestamp: Option<String>,
     #[serde(rename = "type")]
     pub message_type: String,
-    pub tokens: Option<GeminiTokens>,
+    pub tokens: Option<Value>,
     pub model: Option<String>,
 }
 
-/// Gemini token structure
-#[derive(Debug, Deserialize)]
+fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|k| value.get(k).and_then(|v| v.as_i64()))
+}
+
+fn deserialize_tokens(value: &Value) -> Option<GeminiTokens> {
+    Some(GeminiTokens {
+        input: first_i64(
+            value,
+            &[
+                "input",
+                "prompt",
+                "input_tokens",
+                "prompt_tokens",
+                "promptTokenCount",
+            ],
+        ),
+        output: first_i64(
+            value,
+            &[
+                "output",
+                "candidates",
+                "output_tokens",
+                "completion_tokens",
+                "candidatesTokenCount",
+            ],
+        ),
+        cached: first_i64(
+            value,
+            &["cached", "cached_tokens", "cachedContentTokenCount"],
+        ),
+        thoughts: first_i64(value, &["thoughts", "reasoning", "thoughts_tokens"]),
+        tool: first_i64(value, &["tool", "tool_tokens"]),
+        total: first_i64(value, &["total", "totalTokenCount", "total_tokens"]),
+    })
+}
+
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct GeminiTokens {
     pub input: Option<i64>,
@@ -63,6 +99,51 @@ pub(crate) struct GeminiParseResult {
 /// Parse a Gemini session file.
 pub fn parse_gemini_file(path: &Path) -> Vec<UnifiedMessage> {
     parse_gemini_file_with_cache_status(path).messages
+}
+
+/// Returns the canonical Gemini `session_id` for a transcript on disk, matching
+/// how [`parse_gemini_file`] populates wiki entries: for chat recordings and
+/// headless JSONL the id comes from the in-file `sessionId`/`session_id` field
+/// (the `init` line for JSONL), falling back to the file stem when absent.
+///
+/// Callers that index sessions by id (e.g. the report summarizer) must use this
+/// rather than the filename, because the filename stem differs from the wiki id
+/// for these formats.
+pub fn gemini_session_id_for_file(path: &Path) -> Option<String> {
+    let stem = || {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    };
+
+    let content = std::fs::read_to_string(path).ok()?;
+
+    if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+        // Headless JSONL: the `init` line (or any line) carries the real id.
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+                if let Some(id) =
+                    extract_string(value.get("session_id").or_else(|| value.get("sessionId")))
+                {
+                    return Some(id);
+                }
+            }
+        }
+        return stem();
+    }
+
+    // Chat recording: a single JSON document with a top-level `sessionId`.
+    if let Ok(value) = serde_json::from_str::<Value>(&content) {
+        if let Some(id) = extract_string(value.get("sessionId").or_else(|| value.get("session_id")))
+        {
+            return Some(id);
+        }
+    }
+    stem()
 }
 
 pub(crate) fn parse_gemini_file_with_cache_status(path: &Path) -> GeminiParseResult {
@@ -84,14 +165,13 @@ pub(crate) fn parse_gemini_file_with_cache_status(path: &Path) -> GeminiParseRes
         .unwrap_or(false)
     {
         use std::ffi::OsStr;
-        // All scanned paths live under ~/.gemini/tmp (scanner root). Enforce the expected subdirectory pattern.
+        // Enforce the expected subdirectory pattern: tmp/<some_id>/chats/<file>
         let comps: Vec<&OsStr> = path.components().map(|c| c.as_os_str()).collect();
         let mut ok = false;
-        // Look for ".gemini" immediately followed by "tmp" to avoid matching /tmp paths.
-        'outer: for i in 0..comps.len().saturating_sub(2) {
-            if comps[i] == ".gemini" && comps[i + 1] == "tmp" {
+        'outer: for i in 0..comps.len().saturating_sub(1) {
+            if comps[i] == "tmp" {
                 // After "tmp", expect exactly 3 components: <some_id>, "chats", and the filename.
-                let after_tmp = &comps[i + 2..];
+                let after_tmp = &comps[i + 1..];
                 if after_tmp.len() == 3 {
                     let chats_dir = after_tmp[1];
                     let last = after_tmp[2];
@@ -149,12 +229,8 @@ fn parse_gemini_session(session: GeminiSession, fallback_timestamp: i64) -> Vec<
     let session_id = session.session_id.clone();
 
     for msg in session.messages {
-        // Only process gemini messages with token data
-        if msg.message_type != "gemini" {
-            continue;
-        }
-
-        let tokens = match msg.tokens {
+        // Only process messages with token data
+        let tokens = match msg.tokens.as_ref().and_then(deserialize_tokens) {
             Some(t) => t,
             None => continue,
         };
@@ -222,7 +298,7 @@ fn parse_direct_gemini_token_message(
 ) -> Option<UnifiedMessage> {
     let model = extract_string(value.get("model")).or(model_hint)?;
     let tokens_value = value.get("tokens")?;
-    let tokens: GeminiTokens = serde_json::from_value(tokens_value.clone()).ok()?;
+    let tokens = deserialize_tokens(tokens_value)?;
     let timestamp = extract_timestamp_from_value(value).unwrap_or(fallback_timestamp);
 
     Some(build_gemini_token_message(
@@ -300,7 +376,7 @@ fn parse_gemini_headless_jsonl(path: &Path, fallback_timestamp: i64) -> GeminiPa
             session_id = id;
         }
 
-        if event_type == "gemini" {
+        if event_type == "gemini" || value.get("tokens").is_some() {
             if let Some(model) = extract_string(value.get("model")) {
                 current_model = Some(model);
             }
@@ -365,7 +441,9 @@ fn parse_gemini_headless_value(
     session_id: &str,
     fallback_timestamp: i64,
 ) -> Vec<UnifiedMessage> {
-    if value.get("type").and_then(|val| val.as_str()) == Some("gemini") {
+    if value.get("type").and_then(|val| val.as_str()) == Some("gemini")
+        || value.get("tokens").is_some()
+    {
         if let Some(message) =
             parse_direct_gemini_token_message(value, None, session_id, fallback_timestamp)
         {
@@ -1079,5 +1157,242 @@ not-json\n\
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_gemini_tokens_with_camel_case_aliases() {
+        let json = r#"{
+            "sessionId": "ses_alias",
+            "projectHash": "abc123",
+            "startTime": "2025-06-15T12:00:00Z",
+            "lastUpdated": "2025-06-15T12:30:00Z",
+            "messages": [
+                {
+                    "id": "msg_1",
+                    "timestamp": "2025-06-15T12:01:00Z",
+                    "type": "gemini",
+                    "model": "gemini-3-flash-preview",
+                    "tokens": {
+                        "promptTokenCount": 100,
+                        "candidatesTokenCount": 50,
+                        "cachedContentTokenCount": 20,
+                        "totalTokenCount": 150
+                    }
+                }
+            ]
+        }"#;
+        let file = tempfile::Builder::new()
+            .prefix("session-")
+            .suffix(".json")
+            .tempfile()
+            .unwrap();
+        std::fs::write(file.path(), json).unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].tokens.input, 80);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 20);
+        assert_eq!(messages[0].tokens.total(), 150);
+    }
+
+    #[test]
+    fn test_parse_gemini_tokens_with_snake_case_aliases() {
+        let json = r#"{
+            "sessionId": "ses_snake",
+            "projectHash": "abc123",
+            "startTime": "2025-06-15T12:00:00Z",
+            "lastUpdated": "2025-06-15T12:30:00Z",
+            "messages": [
+                {
+                    "id": "msg_1",
+                    "timestamp": "2025-06-15T12:01:00Z",
+                    "type": "gemini",
+                    "model": "gemini-3-flash-preview",
+                    "tokens": {
+                        "prompt": 200,
+                        "candidates": 80,
+                        "cached_tokens": 30,
+                        "reasoning": 10,
+                        "tool_tokens": 5,
+                        "total_tokens": 295
+                    }
+                }
+            ]
+        }"#;
+        let file = tempfile::Builder::new()
+            .prefix("session-")
+            .suffix(".json")
+            .tempfile()
+            .unwrap();
+        std::fs::write(file.path(), json).unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 175);
+        assert_eq!(messages[0].tokens.output, 80);
+        assert_eq!(messages[0].tokens.cache_read, 30);
+        assert_eq!(messages[0].tokens.reasoning, 10);
+        assert_eq!(messages[0].tokens.total(), 295);
+    }
+
+    #[test]
+    fn test_parse_gemini_session_non_gemini_type_with_tokens() {
+        let json = r#"{
+            "sessionId": "ses_nongemini",
+            "projectHash": "abc123",
+            "startTime": "2025-06-15T12:00:00Z",
+            "lastUpdated": "2025-06-15T12:30:00Z",
+            "messages": [
+                {
+                    "id": "msg_1",
+                    "timestamp": "2025-06-15T12:01:00Z",
+                    "type": "assistant",
+                    "model": "gemini-3-flash-preview",
+                    "tokens": {
+                        "input": 150,
+                        "output": 40,
+                        "cached": 10,
+                        "total": 190
+                    }
+                }
+            ]
+        }"#;
+        let file = tempfile::Builder::new()
+            .prefix("session-")
+            .suffix(".json")
+            .tempfile()
+            .unwrap();
+        std::fs::write(file.path(), json).unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].tokens.input, 140);
+        assert_eq!(messages[0].tokens.output, 40);
+        assert_eq!(messages[0].tokens.cache_read, 10);
+        assert_eq!(messages[0].tokens.total(), 190);
+    }
+
+    #[test]
+    fn test_parse_gemini_valid_path_without_gemini_component() {
+        let json = r#"{
+            "sessionId": "ses_custom",
+            "projectHash": "abc123",
+            "startTime": "2025-06-15T12:00:00Z",
+            "lastUpdated": "2025-06-15T12:30:00Z",
+            "messages": [
+                {
+                    "id": "msg_1",
+                    "timestamp": "2025-06-15T12:01:00Z",
+                    "type": "gemini",
+                    "model": "gemini-2.0-flash",
+                    "tokens": {
+                        "input": 10,
+                        "output": 20
+                    }
+                }
+            ]
+        }"#;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let chats_dir = base.join("custom_home/tmp/abc123/chats");
+        std::fs::create_dir_all(&chats_dir).unwrap();
+        let file_path = chats_dir.join("session.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_gemini_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-2.0-flash");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 20);
+    }
+
+    #[test]
+    fn test_parse_gemini_stream_jsonl_direct_tokens_without_gemini_prefix() {
+        let content = r#"{"sessionId":"ses-nogem","projectHash":"abc123","startTime":"2026-05-01T00:00:00.000Z","lastUpdated":"2026-05-01T00:01:00.000Z"}
+{"id":"msg-1","timestamp":"2026-05-01T00:01:00.000Z","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":500,"output":30,"cached":0,"thoughts":100,"tool":5,"total":635}}"#;
+        let dir = TempDir::new().unwrap();
+        let chats_dir = dir.path().join("my_gemini/tmp/456/chats");
+        std::fs::create_dir_all(&chats_dir).unwrap();
+        let file_path = chats_dir.join("session.jsonl");
+        std::fs::write(&file_path, content).unwrap();
+
+        let messages = parse_gemini_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "ses-nogem");
+        assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
+        assert_eq!(messages[0].tokens.input, 505);
+        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+        assert_eq!(messages[0].tokens.reasoning, 100);
+        assert_eq!(messages[0].tokens.total(), 635);
+    }
+
+    #[test]
+    fn test_parse_headless_jsonl_non_gemini_type_with_direct_tokens() {
+        let content = r#"{"type":"init","model":"gemini-3-flash-preview","session_id":"session-tokens"}
+{"type":"result","id":"msg-1","tokens":{"input":100,"output":25,"cached":10,"total":125}}"#;
+        let dir = TempDir::new().unwrap();
+        let chats_dir = dir.path().join("custom_root/tmp/789/chats");
+        std::fs::create_dir_all(&chats_dir).unwrap();
+        let file_path = chats_dir.join("session.jsonl");
+        std::fs::write(&file_path, content).unwrap();
+
+        let messages = parse_gemini_file(&file_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].tokens.input, 90);
+        assert_eq!(messages[0].tokens.output, 25);
+        assert_eq!(messages[0].tokens.cache_read, 10);
+        assert_eq!(messages[0].tokens.total(), 125);
+    }
+
+    #[test]
+    fn test_parse_gemini_tokens_with_mixed_duplicate_fields() {
+        let json = r#"{
+            "sessionId": "ses_dup",
+            "projectHash": "abc123",
+            "startTime": "2025-06-15T12:00:00Z",
+            "lastUpdated": "2025-06-15T12:30:00Z",
+            "messages": [
+                {
+                    "id": "msg_1",
+                    "timestamp": "2025-06-15T12:01:00Z",
+                    "type": "gemini",
+                    "model": "gemini-3-flash-preview",
+                    "tokens": {
+                        "input": 100,
+                        "prompt": 200,
+                        "output": 50,
+                        "candidates": 60,
+                        "cached": 5,
+                        "total": 215
+                    }
+                }
+            ]
+        }"#;
+        let file = tempfile::Builder::new()
+            .prefix("session-")
+            .suffix(".json")
+            .tempfile()
+            .unwrap();
+        std::fs::write(file.path(), json).unwrap();
+
+        let messages = parse_gemini_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 5);
     }
 }

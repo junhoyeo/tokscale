@@ -1,4 +1,51 @@
-export type ClientType = "opencode" | "claude" | "codex" | "copilot" | "gemini" | "cursor" | "amp" | "codebuff" | "droid" | "openclaw" | "hermes" | "pi" | "kimi" | "qwen" | "roocode" | "kilocode" | "kilo" | "mux" | "crush" | "goose" | "antigravity" | "kiro" | "zed" | "synthetic";
+export const SUPPORTED_CLIENT_TYPES = [
+  "opencode",
+  "claude",
+  "codex",
+  "copilot",
+  "gemini",
+  "cursor",
+  "amp",
+  "codebuff",
+  "droid",
+  "openclaw",
+  "hermes",
+  "pi",
+  "kimi",
+  "qwen",
+  "roocode",
+  "kilocode",
+  "kilo",
+  "mux",
+  "crush",
+  "goose",
+  "antigravity",
+  "kiro",
+  "zed",
+  "trae",
+  "warp",
+  "cline",
+  "synthetic",
+  "gjc",
+  "9router",
+  "grok",
+  "jcode",
+  "commandcode",
+  "micode",
+  "antigravity-cli",
+  "junie",
+  "zcode",
+  "opencodereview",
+  "codebuddy",
+  "workbuddy",
+  "devin-cli",
+  "devin-desktop",
+  "senpi",
+  "augment",
+] as const;
+
+export type CcMirrorClientType = `cc-mirror/${string}`;
+export type ClientType = typeof SUPPORTED_CLIENT_TYPES[number] | CcMirrorClientType;
 
 export interface TokenBreakdown {
   input: number;

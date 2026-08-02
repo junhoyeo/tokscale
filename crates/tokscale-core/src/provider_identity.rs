@@ -4,6 +4,9 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         .trim_end_matches('/')
         .to_lowercase()
         .replace('-', "_");
+    if normalized.starts_with('<') && normalized.ends_with('>') {
+        return None;
+    }
 
     let canonical = match normalized.as_str() {
         "" | "unknown" => return None,
@@ -17,6 +20,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "fireworks" | "fireworks_ai" => "fireworks_ai",
         "google" | "gemini" => "google",
         "openai" | "openai_codex" => "openai",
+        "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
         "ai21" => "ai21",
         // For unknown segments, reject if they contain digits — those are
@@ -120,11 +124,20 @@ fn contains_delimited(haystack: &str, needle: &str) -> bool {
 pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     let lower = model.to_lowercase();
 
+    // Ollama is a routing prefix, not part of the upstream model family. In
+    // particular, matching the `llama` in `ollama/...` would label every
+    // otherwise-unknown Ollama model as Meta. Re-run inference on the routed
+    // model so known families retain their actual providers.
+    if let Some(routed_model) = lower.strip_prefix("ollama/") {
+        return inferred_provider_from_model(routed_model);
+    }
+
     if lower.contains("claude")
         || lower.contains("anthropic")
         || contains_delimited(&lower, "opus")
         || contains_delimited(&lower, "sonnet")
         || contains_delimited(&lower, "haiku")
+        || contains_delimited(&lower, "fable")
     {
         return Some("anthropic");
     }
@@ -150,6 +163,10 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("deepseek");
     }
 
+    if lower.contains("minimax") {
+        return Some("minimax");
+    }
+
     if lower.contains("mistral") || lower.contains("mixtral") {
         return Some("mistral");
     }
@@ -160,6 +177,36 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
 
     if lower.contains("qwen") {
         return Some("qwen");
+    }
+
+    // Sakana's `fugu` / `fugu-ultra` model line. Bare `fugu` is intentionally
+    // still mapped to the sakana provider here (provider identity is independent
+    // of whether we can price the model — see build_sakana_overrides, which
+    // deliberately does NOT price bare `fugu`).
+    if lower.contains("fugu") {
+        return Some("sakana");
+    }
+
+    // Kimi (Moonshot AI) — `kimi`, `kimi-k2.5`, `kimi-code` variants
+    if contains_delimited(&lower, "kimi") {
+        return Some("moonshotai");
+    }
+    // Kimi's own coding-plan catalog also serves bare `k2`/`k3`-style ids with
+    // no `kimi` prefix at all (e.g. `k3`, `k3-256k` from the K3 coding-plan
+    // model), so the `kimi` substring check above misses them. No other known
+    // provider uses a bare, delimited `k2`/`k3` model id (checked against the
+    // full litellm/models.dev/openrouter pricing datasets), so this is safe
+    // without the `kimi` prefix.
+    if contains_delimited(&lower, "k2") || contains_delimited(&lower, "k3") {
+        return Some("moonshotai");
+    }
+    // MiMo (Xiaomi) — `mimo-v2.5` etc.
+    if contains_delimited(&lower, "mimo") {
+        return Some("xiaomi");
+    }
+    // GLM (Zhipu AI / Zai) — `glm-4.6`, `glm-5.2` etc.
+    if contains_delimited(&lower, "glm") {
+        return Some("zai");
     }
 
     None
@@ -177,6 +224,7 @@ mod tests {
             ("vertex", vec!["anthropic"]),
             ("azure", vec!["azure_ai"]),
             ("fireworks", vec!["fireworks_ai"]),
+            ("MiniMax", vec!["minimax"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -193,6 +241,7 @@ mod tests {
             canonical_provider("openrouter/google"),
             Some("openrouter".into())
         );
+        assert_eq!(canonical_provider("<synthetic>"), None);
         assert_eq!(canonical_provider("unknown"), None);
     }
 
@@ -227,6 +276,21 @@ mod tests {
     }
 
     #[test]
+    fn fable_models_map_to_anthropic() {
+        // Fable is a Claude model family; the bare, claude-prefixed, and [1m]
+        // context-variant forms must all attribute to Anthropic.
+        assert_eq!(inferred_provider_from_model("fable-5"), Some("anthropic"));
+        assert_eq!(
+            inferred_provider_from_model("claude-fable-5"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            inferred_provider_from_model("claude-fable-5[1m]"),
+            Some("anthropic")
+        );
+    }
+
+    #[test]
     fn test_inferred_provider_from_model() {
         assert_eq!(
             inferred_provider_from_model("claude-sonnet-4"),
@@ -247,6 +311,10 @@ mod tests {
             Some("deepseek")
         );
         assert_eq!(
+            inferred_provider_from_model("MiniMax-M2.1"),
+            Some("minimax")
+        );
+        assert_eq!(
             inferred_provider_from_model("mixtral-8x7b"),
             Some("mistral")
         );
@@ -260,12 +328,94 @@ mod tests {
     }
 
     #[test]
+    fn test_inferred_provider_bare_kimi_k_series_ids() {
+        // Kimi's coding-plan catalog serves these with no `kimi` prefix at all.
+        assert_eq!(inferred_provider_from_model("k3"), Some("moonshotai"));
+        assert_eq!(inferred_provider_from_model("k3-256k"), Some("moonshotai"));
+        assert_eq!(inferred_provider_from_model("K3"), Some("moonshotai"));
+        assert_eq!(inferred_provider_from_model("k2"), Some("moonshotai"));
+        // Already-prefixed forms keep matching via the `kimi` substring check.
+        assert_eq!(
+            inferred_provider_from_model("kimi-k2.5-thinking"),
+            Some("moonshotai")
+        );
+        // A `k2`/`k3` substring that isn't a delimited token must not match.
+        assert_eq!(inferred_provider_from_model("flock3"), None);
+        assert_eq!(inferred_provider_from_model("network2"), None);
+    }
+
+    #[test]
+    fn test_inferred_provider_ignores_ollama_route_prefix() {
+        assert_eq!(inferred_provider_from_model("ollama/orca-mini"), None);
+        assert_eq!(
+            inferred_provider_from_model("ollama/qwen3-coder"),
+            Some("qwen")
+        );
+        assert_eq!(
+            inferred_provider_from_model("ollama/llama-3.3"),
+            Some("meta")
+        );
+    }
+
+    #[test]
+    fn test_inferred_provider_fugu_maps_to_sakana() {
+        assert_eq!(inferred_provider_from_model("fugu"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("fugu-ultra"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("Fugu"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("FUGU-ULTRA"), Some("sakana"));
+    }
+
+    #[test]
+    fn test_provider_tags_preserves_sakana() {
+        assert_eq!(provider_tags("sakana"), vec!["sakana"]);
+    }
+
+    #[test]
     fn test_inferred_provider_no_false_positives() {
         assert_eq!(inferred_provider_from_model("protocol1-fast"), None);
         assert_eq!(inferred_provider_from_model("proto3-server"), None);
         assert_eq!(inferred_provider_from_model("co4pilot-v2"), None);
         assert_eq!(inferred_provider_from_model("metadata-model"), None);
         assert_eq!(inferred_provider_from_model("metamorphic-v1"), None);
+    }
+
+    /// The families below are matched with plain `contains`, not
+    /// `contains_delimited`, and that asymmetry is load-bearing rather than an
+    /// oversight. Vendors append version digits directly to the family token
+    /// (`qwen3`, `mistral4`) and embed it mid-word (`chatgpt-4o-latest`,
+    /// `codellama`), all of which a delimited match rejects.
+    ///
+    /// Switching these to delimited matching drops the provider on 536 model ids
+    /// in the bundled models.dev/litellm/openrouter catalogs. `contains_delimited`
+    /// stays reserved for short tokens that collide inside ordinary words -- see
+    /// `test_inferred_provider_no_false_positives`.
+    #[test]
+    fn test_inferred_provider_matches_version_suffixed_and_embedded_families() {
+        for model in [
+            "qwen3-coder",
+            "qwen3.7-plus",
+            "qwen2-5-14b-instruct",
+            "qwen3-235b-a22b-instruct-2507",
+        ] {
+            assert_eq!(inferred_provider_from_model(model), Some("qwen"), "{model}");
+        }
+
+        for model in ["chatgpt-4o-latest", "chatgpt-image-latest"] {
+            assert_eq!(
+                inferred_provider_from_model(model),
+                Some("openai"),
+                "{model}"
+            );
+        }
+
+        assert_eq!(
+            inferred_provider_from_model("mistral4-119b"),
+            Some("mistral")
+        );
+        assert_eq!(
+            inferred_provider_from_model("CodeLlama-34b-Instruct-hf"),
+            Some("meta")
+        );
     }
 
     #[test]
@@ -304,5 +454,25 @@ mod tests {
         assert!(!matches_provider_hint("openai/gpt-4", None));
         assert!(!matches_provider_hint("openai/gpt-4", Some("")));
         assert!(!matches_provider_hint("openai/gpt-4", Some("unknown")));
+    }
+
+    #[test]
+    fn test_gjc_unknown_provider_passthrough() {
+        // gjc's common providers ARE known and canonicalize as usual.
+        assert_eq!(canonical_provider("anthropic"), Some("anthropic".into()));
+        assert_eq!(canonical_provider("openai"), Some("openai".into()));
+        assert_eq!(canonical_provider("openai-codex"), Some("openai".into()));
+        assert_eq!(canonical_provider("google"), Some("google".into()));
+        assert_eq!(
+            canonical_provider("github-copilot"),
+            Some("github_copilot".into())
+        );
+
+        // A gjc provider value that looks like a model fragment (contains
+        // digits) or a placeholder is NOT treated as a provider: canonical_provider
+        // yields None so the aggregator keeps the raw value verbatim rather than
+        // misattributing it. This guards the unknown-provider passthrough path.
+        assert_eq!(canonical_provider("gjc-model-4o"), None);
+        assert_eq!(canonical_provider("<unset>"), None);
     }
 }

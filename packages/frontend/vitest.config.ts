@@ -12,4 +12,26 @@ export default defineConfig({
       "@": resolve(__dirname, "./src"),
     },
   },
+  test: {
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "html"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.d.ts",
+        "src/**/*.test.{ts,tsx}",
+        "src/**/__tests__/**",
+        "src/**/migrations/**",
+        "src/**/*.stories.{ts,tsx}",
+      ],
+      // Thresholds intentionally set to a conservative floor; raise as the
+      // suite grows. CI fails when any metric drops below these.
+      thresholds: {
+        lines: 40,
+        functions: 40,
+        branches: 40,
+        statements: 40,
+      },
+    },
+  },
 });

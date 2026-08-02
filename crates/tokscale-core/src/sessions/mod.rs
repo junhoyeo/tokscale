@@ -4,31 +4,60 @@
 
 pub mod amp;
 pub mod antigravity;
+pub mod antigravity_cli;
+pub mod augment;
 pub mod claudecode;
+pub mod cline;
+pub mod codebuddy;
 pub mod codebuff;
 pub mod codex;
+pub mod commandcode;
 pub mod copilot;
+pub mod copilot_desktop;
+pub mod copilot_vscode;
 pub mod crush;
 pub mod cursor;
+pub mod devin;
 pub mod droid;
 pub mod gemini;
+pub mod gjc;
 pub mod goose;
+pub mod grok;
 pub mod hermes;
+pub mod jcode;
+pub mod junie;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
 pub mod kiro;
+pub mod micode;
 pub mod mux;
 pub mod openclaw;
 pub mod opencode;
+pub mod opencodereview;
 pub mod pi;
 pub mod qwen;
 pub mod roocode;
+pub mod senpi;
 pub mod synthetic;
+pub(crate) mod tencent_buddy;
+pub mod trae;
 pub(crate) mod utils;
+pub mod warp;
+pub mod workbuddy;
+pub mod zcode;
 pub mod zed;
 
 use crate::TokenBreakdown;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CostSource {
+    #[default]
+    Unknown,
+    ProviderReported,
+    Estimated,
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
@@ -42,10 +71,20 @@ pub struct UnifiedMessage {
     pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    #[serde(default)]
+    pub cost_source: CostSource,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
     #[serde(default = "default_message_count")]
     pub message_count: i32,
     pub agent: Option<String>,
     pub dedup_key: Option<String>,
+    /// Human-readable session title/name when the source client stores one
+    /// (e.g. OpenCode's `session.title` column). `None` for clients that
+    /// don't record a title; the Sessions tab falls back to showing just
+    /// the session ID in that case.
+    #[serde(default)]
+    pub session_title: Option<String>,
     /// True if this message is the first assistant response after a user turn.
     /// Used to count user interaction turns (as opposed to API message count).
     #[serde(default)]
@@ -93,6 +132,42 @@ pub fn normalize_opencode_agent_name(agent: &str) -> String {
     }
 
     normalize_agent_name(&canonical)
+}
+
+pub fn normalize_copilot_agent_name(agent: &str) -> String {
+    // Hardcoded brand name for the default native agent
+    if agent.eq_ignore_ascii_case("github.copilot.default") {
+        return "GitHub Copilot".to_string();
+    }
+
+    // Native github.copilot.* agents: strip prefix, titlecase remainder
+    const GITHUB_COPILOT_PREFIX: &str = "github.copilot.";
+    if agent
+        .get(..GITHUB_COPILOT_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(GITHUB_COPILOT_PREFIX))
+    {
+        let remainder = &agent[GITHUB_COPILOT_PREFIX.len()..];
+        let hyphenated = remainder.replace('.', "-");
+        return titlecase_agent(&hyphenated);
+    }
+
+    // Plugin:team:slug format — titlecase each colon-separated part, join with ": "
+    const PLUGIN_PREFIX: &str = "Plugin:";
+    if agent
+        .get(..PLUGIN_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(PLUGIN_PREFIX))
+    {
+        let rest = &agent[PLUGIN_PREFIX.len()..];
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let team = titlecase_agent(parts[0]);
+            let slug = titlecase_agent(parts[1]);
+            return format!("{}: {}", team, slug);
+        }
+        return titlecase_agent(rest);
+    }
+
+    normalize_agent_name(agent)
 }
 
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
@@ -284,9 +359,12 @@ impl UnifiedMessage {
             date,
             tokens,
             cost,
+            cost_source: CostSource::Unknown,
+            duration_ms: None,
             message_count: default_message_count(),
             agent,
             dedup_key,
+            session_title: None,
             is_turn_start: false,
         }
     }
@@ -307,6 +385,18 @@ impl UnifiedMessage {
     pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
         self.timestamp = timestamp;
         self.refresh_derived_fields();
+    }
+
+    pub fn mark_provider_reported_cost(&mut self) {
+        self.cost_source = CostSource::ProviderReported;
+    }
+
+    pub(crate) fn mark_estimated_cost(&mut self) {
+        self.cost_source = CostSource::Estimated;
+    }
+
+    pub(crate) fn has_authoritative_cost(&self) -> bool {
+        self.cost_source == CostSource::ProviderReported
     }
 }
 
@@ -370,6 +460,72 @@ where
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn warp_cache_parser_preserves_requests_and_spend_without_tokens() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{
+  "version": 1,
+  "syncedAt": "2026-05-29T12:00:00Z",
+  "usage": {
+    "requestsUsed": 42,
+    "requestLimit": 100,
+    "spendCents": 1234,
+    "nextRefreshTime": "2026-06-01T00:00:00Z"
+  },
+  "workspaces": [
+    {
+      "id": "workspace-1",
+      "name": "Personal",
+      "requestsUsed": 12,
+      "spendCents": 345
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let messages = crate::sessions::warp::parse_warp_file(file.path());
+        assert_eq!(messages.len(), 1);
+
+        let workspace = messages
+            .iter()
+            .find(|message| message.session_id == "warp-aggregate-workspace-1")
+            .unwrap();
+        assert_eq!(workspace.client, "warp");
+        assert_eq!(workspace.model_id, "aggregate-requests");
+        assert_eq!(workspace.provider_id, "warp");
+        assert_eq!(workspace.workspace_label.as_deref(), Some("Personal"));
+        assert_eq!(workspace.message_count, 12);
+        assert_eq!(workspace.tokens, TokenBreakdown::default());
+        assert!((workspace.cost - 3.45).abs() < 1e-9);
+
+        std::fs::write(
+            file.path(),
+            r#"{
+  "version": 1,
+  "syncedAt": "2026-05-29T12:00:00Z",
+  "usage": {
+    "requestsUsed": 42,
+    "requestLimit": 100,
+    "spendCents": 1234,
+    "nextRefreshTime": "2026-06-01T00:00:00Z"
+  },
+  "workspaces": []
+}"#,
+        )
+        .unwrap();
+
+        let messages = crate::sessions::warp::parse_warp_file(file.path());
+        assert_eq!(messages.len(), 1);
+        let account = &messages[0];
+        assert_eq!(account.session_id, "warp-aggregate-account");
+        assert_eq!(account.message_count, 42);
+        assert_eq!(account.tokens, TokenBreakdown::default());
+        assert!((account.cost - 12.34).abs() < 1e-9);
+    }
 
     #[test]
     fn test_timestamp_to_date_with_positive_offset() {
@@ -547,6 +703,35 @@ mod tests {
         assert_eq!(
             normalize_agent_name("oh-my-claudecode:code-reviewer"),
             "Code Reviewer"
+        );
+    }
+
+    #[test]
+    fn test_normalize_copilot_agent_name() {
+        assert_eq!(
+            normalize_copilot_agent_name("github.copilot.default"),
+            "GitHub Copilot"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("GITHUB.COPILOT.DEFAULT"),
+            "GitHub Copilot"
+        );
+        assert_eq!(normalize_copilot_agent_name("github.copilot.chat"), "Chat");
+        assert_eq!(
+            normalize_copilot_agent_name("Plugin:software-engineering-team:se-ux-ui-designer"),
+            "Software Engineering Team: Se UX UI Designer"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("plugin:my-team:my-agent"),
+            "My Team: My Agent"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("Plugin:code-review-team:api-reviewer"),
+            "Code Review Team: API Reviewer"
+        );
+        assert_eq!(
+            normalize_copilot_agent_name("some-custom-agent"),
+            "Some Custom Agent"
         );
         assert_eq!(normalize_agent_name("oh-my-codex:librarian"), "Librarian");
         assert_eq!(normalize_agent_name("astrape:executor"), "Executor");

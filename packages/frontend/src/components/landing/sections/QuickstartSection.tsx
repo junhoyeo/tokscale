@@ -59,7 +59,7 @@ export function QuickstartSection() {
             <CardPatternOverlay $position="left" />
             <CardScreenshot>
               <Image
-                src="/assets/landing/screenshot-tui-4d3240.png"
+                src="/assets/landing/screenshot-tui-4d3240.webp"
                 alt="TUI Screenshot"
                 width={171}
                 height={168}
@@ -89,7 +89,7 @@ export function QuickstartSection() {
             <CardPatternOverlay $position="right" />
             <CardScreenshot>
               <Image
-                src="/assets/landing/screenshot-leaderboard-75a76a.png"
+                src="/assets/landing/screenshot-leaderboard-75a76a.webp"
                 alt="Leaderboard Screenshot"
                 width={152}
                 height={180}

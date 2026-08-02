@@ -454,6 +454,88 @@ pub fn whoami() -> Result<()> {
     Ok(())
 }
 
+/// Build the JSON payload encoded into the login QR code.
+///
+/// Uses `serde_json` so that usernames or tokens containing `"` / `\` cannot
+/// break the payload structure or inject extra fields. Exposed for tests.
+pub(crate) fn qr_login_payload(token: &str, username: &str) -> Result<String> {
+    serde_json::to_string(&serde_json::json!({
+        "token": token,
+        "username": username,
+    }))
+    .context("Failed to encode QR payload")
+}
+
+pub fn show_qr(yes: bool) -> Result<()> {
+    use colored::Colorize;
+    use qrcode::render::unicode;
+    use qrcode::QrCode;
+
+    let Some(creds) = load_credentials() else {
+        println!("\n  {}", "Not logged in.".yellow());
+        println!(
+            "{}",
+            "  Run 'bunx tokscale@latest login' to authenticate.\n".bright_black()
+        );
+        return Ok(());
+    };
+
+    // Anyone who can see the terminal can scan and replay the token: screen
+    // shares, recorded demos, office cameras, shoulder surfing. Block unless
+    // the user explicitly confirms (or passes --yes for scripted use).
+    println!();
+    println!(
+        "  {}",
+        "⚠  This will render your API token as a QR code on screen.".yellow()
+    );
+    println!(
+        "  {}",
+        "Anyone who can see your terminal (screen share, recording, camera)".bright_black()
+    );
+    println!(
+        "  {}",
+        "can scan it and gain full access to your tokscale account.".bright_black()
+    );
+    println!();
+
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("Refusing to render token QR: stdin is not a TTY. Pass --yes to bypass.");
+        }
+        print!("  Continue? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .context("Failed to read confirmation")?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("\n  {}\n", "Aborted.".bright_black());
+            return Ok(());
+        }
+    }
+
+    let payload = qr_login_payload(&creds.token, &creds.username)?;
+    let code = QrCode::new(payload.as_bytes()).context("Failed to generate QR code")?;
+
+    let image = code
+        .render::<unicode::Dense1x2>()
+        .dark_color(unicode::Dense1x2::Light)
+        .light_color(unicode::Dense1x2::Dark)
+        .quiet_zone(true)
+        .build();
+
+    println!("\n  {}\n", "Tokscale - API Token QR Code".cyan());
+    println!("  {}\n", "Scan to get your API token:".bright_black());
+
+    for line in image.lines() {
+        println!("  {}", line);
+    }
+
+    println!("\n  {}: {}\n", "User".bright_black(), creds.username.bold());
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,5 +936,42 @@ mod tests {
         assert_eq!(auth.token, "tt_env_token");
         assert_eq!(auth.username.as_deref(), None);
         assert_eq!(auth.source, ApiTokenSource::Environment);
+    }
+
+    #[test]
+    fn qr_login_payload_round_trips_through_json() {
+        let payload = qr_login_payload("tok_abc123", "alice").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["token"], "tok_abc123");
+        assert_eq!(parsed["username"], "alice");
+    }
+
+    #[test]
+    fn qr_login_payload_escapes_dangerous_username_chars() {
+        // The old hand-rolled format!() would have produced invalid JSON for
+        // any of these inputs; serde_json must escape them safely.
+        for bad in [
+            "alice\"; DROP TABLE users;--",
+            "alice\\",
+            "with\nnewline",
+            "tab\there",
+            r#"quote"and\backslash"#,
+        ] {
+            let payload = qr_login_payload("tok", bad).unwrap();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).expect("must remain valid JSON");
+            assert_eq!(
+                parsed["username"], bad,
+                "round-trip must preserve the original username"
+            );
+        }
+    }
+
+    #[test]
+    fn qr_login_payload_escapes_dangerous_token_chars() {
+        let payload = qr_login_payload(r#"tok"with"quotes"#, "bob").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["token"], r#"tok"with"quotes"#);
+        assert_eq!(parsed["username"], "bob");
     }
 }

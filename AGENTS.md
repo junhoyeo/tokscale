@@ -32,6 +32,13 @@ Why: inline `--body "$(cat <<'EOF' ... EOF)"` patterns lead to recurring mistake
 
 This applies to all GitHub-content authoring through the CLI — PR bodies, issue bodies, comments, edits. Commit message bodies should also follow this rule: write prose paragraphs as continuous lines, not hard-wrapped at 80 columns.
 
+## Git Identity & Merge Discipline
+
+- Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
+- Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
+- When merging pull requests through `gh`, use merge commits (`gh pr merge --merge ...`) unless the user explicitly requests another merge strategy.
+- Before merging, verify the merge commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
+
 ## Commit Message Convention
 
 ```
@@ -95,10 +102,42 @@ fix(tui): harden unreleased changes — P0-P3    ❌  (PR title)
 fix: hardening wave 1 compliance fixes         ❌  (PR title)
 ```
 
+## Migration journal hygiene
+
+Never hand-edit `drizzle/meta/_journal.json` timestamps or sequence numbers. Always run `drizzle-kit generate` to claim a migration slot — the tool assigns the correct monotonic index and timestamp atomically.
+
+Migrations 0010 and 0011 have round-number hand-edited timestamps (`"when": 1780000000000` and `"when": 1780086400000`) as a one-time historical exception made during the 2026-05-25 schema audit. No future migration should follow this pattern; use `drizzle-kit generate` exclusively.
+
+
+If two branches generate migrations with the same index, resolve the conflict by re-running `drizzle-kit generate` on the branch that was merged later — do not manually renumber files or edit `_journal.json`.
+
+**Never edit the SQL of a migration file after it has been applied to any database.** drizzle stores the SHA256 of the migration content in `drizzle.__drizzle_migrations` on first apply. If the local file content changes (even just a comment), the local hash diverges from the stored hash and drizzle-kit migrate will treat the migration as missing and attempt to re-apply it — which fails on idempotent-unsafe DDL. If you need to document a migration after the fact (lock-window risk, rollback notes, anything), put the commentary in a sidecar `0NNN_*.md` next to the .sql, in `schema.ts`, or in this file — never as comments inside the applied .sql.
+
 ## Agent Command Execution
 
 - When running `tokscale` CLI commands from an automated agent (tests, CI, or tool-driven shells), always pass `--no-spinner` unless spinner behavior is the thing being tested.
 - This avoids non-interactive terminal issues and keeps command output stable for assertions and logs.
+
+### Searching the codebase with `rg`
+
+**An empty `rg` result and a malformed `rg` command look identical.** Both print nothing. This is the failure that matters: a broken search reads as "I verified this does not exist," and that conclusion then gets stated as fact. Before concluding something is absent, run a control pattern you *know* matches the same file and confirm it does:
+
+```sh
+rg -c "fn parse_opencodereview_file" "$F"   # control: must print 1
+rg -c "cost" "$F"                           # only now is 0 meaningful
+```
+
+`rg` is not `grep`, and the differences are silent rather than loud:
+
+- **`-r` is `--replace`, not `--recursive`.** `rg -rn 'pattern' path` parses as "replace matches with `n`" and prints plausible-looking transformed output. `rg` recurses by default; there is no `-r` to add.
+- **`--include` does not exist.** That is a `grep` flag. Use `-g/--glob` (`rg -g '*.ts' pattern`).
+- **The pattern is a regex, so shell/template syntax breaks it.** `${` is a repetition quantifier and `(` opens a group, so searching for `SUM(${submittedDevices.totalActiveTimeMs})` or `for (const day of` is a parse error — or worse, matches the wrong thing. Use `-F` for literal searches:
+
+```sh
+rg -nF 'GREATEST(${submittedDevices.totalActiveTimeMs}' "$R"
+```
+
+Default to `-F` when the pattern contains any of `$ { } ( ) [ ] | * + ? . \` and you mean them literally — which, in this codebase, is most searches for drizzle `sql` template fragments or Rust macro bodies.
 
 ## Release & Deployment
 
@@ -115,17 +154,19 @@ Releases are published to npm via a GitHub Actions `workflow_dispatch` pipeline,
 **Inputs:**
 - `bump`: Version bump type — `patch (x.x.X)` | `minor (x.X.0)` | `major (X.0.0)`
 - `version` (optional): Override string (e.g., `2.0.0-beta.1`), takes precedence over bump
+- `recovery` (optional): Retry an already committed release version. Requires `version` and reuses the current release commit when the manifests already match.
 
 **Stages (sequential):**
 
-| # | Job | Description |
-|---|-----|-------------|
-| 1 | `bump-versions` | Reads current version from `packages/cli/package.json`, calculates new version, updates the Rust workspace version plus the CLI, wrapper, and platform package manifests, then uploads the bumped manifests as an artifact |
-| 2 | `build-cli-binary` | 8-target parallel native Rust builds (macOS x86/arm64, Linux glibc/musl x86/arm64, Windows x86/arm64) |
-| 3 | `publish-platform-packages` | Publishes platform-specific packages (`@tokscale/cli-darwin-arm64`, etc.) containing native binaries to npm |
-| 4 | `publish-cli` | Publishes `@tokscale/cli` to npm (binary dispatcher + optionalDependencies) |
-| 5 | `publish-alias` | Publishes `tokscale` wrapper package to npm |
-| 6 | `finalize` | Commits the bumped release manifests back to repo as `chore: bump version to X.Y.Z` (authored by `github-actions[bot]`) |
+| Job | Description |
+|-----|-------------|
+| `bump-versions` | Reads current version from `packages/cli/package.json`, calculates new version, updates the Rust workspace version plus `Cargo.lock`, the CLI, wrapper, and platform package manifests, then uploads the bumped release files as an artifact |
+| `build-cli-binary` | Builds the native Rust binaries defined by the workflow matrix |
+| `prepare-release-provenance` | Checks npm auth/release state, then commits and pushes the release provenance files as `chore: bump version to X.Y.Z`. In recovery mode, reuses the already committed release SHA when there are no manifest diffs. |
+| `publish-platform-packages` | Publishes platform-specific packages (`@tokscale/cli-darwin-arm64`, etc.) containing native binaries to npm, skipping package versions that already exist only during recovery |
+| `publish-cli` | Publishes `@tokscale/cli` to npm (binary dispatcher + optionalDependencies) |
+| `publish-alias` | Publishes `tokscale` wrapper package to npm |
+| `finalize` | Creates or updates tag `vX.Y.Z` and the GitHub Release after npm publishing succeeds |
 
 **Duration:** ~15-20 minutes end-to-end.
 
@@ -133,15 +174,11 @@ Releases are published to npm via a GitHub Actions `workflow_dispatch` pipeline,
 
 ### Post-Pipeline: Git Tag & GitHub Release
 
-The CI pipeline does **NOT** create the git tag or GitHub Release. After the workflow completes successfully:
+The CI pipeline creates or updates the git tag and GitHub Release after npm publishing succeeds. After the workflow completes successfully:
 
-1. Verify the `chore: bump version to X.Y.Z` commit was pushed by CI
-2. Create a GitHub Release manually:
-   - **Tag:** `vX.Y.Z` (e.g., `v1.2.1`)
-   - **Target:** The `chore: bump version to X.Y.Z` commit
-   - **Title:** See [Release Notes Style](#release-notes-style) below
-   - **Body:** See [Release Notes Template](#release-notes-template) below
-3. Publish the release (not as draft, not as prerelease)
+1. Verify the `chore: bump version to X.Y.Z` commit was pushed by CI or reused by recovery
+2. Verify tag `vX.Y.Z` targets the release provenance commit
+3. Verify the GitHub Release exists and follows the release notes style below
 
 ### Versioning Conventions
 
@@ -153,6 +190,7 @@ The CI pipeline does **NOT** create the git tag or GitHub Release. After the wor
 
 Release version is stored in the Rust workspace and the npm package manifests, and CI updates them together:
 - `Cargo.toml` (`[workspace.package].version`) — Rust binary and exported metadata version
+- `Cargo.lock` — local workspace package versions for `tokscale-cli` and `tokscale-core`
 - `packages/cli/package.json` — CLI package version and platform optional dependency versions
 - Platform packages (`packages/cli-*/package.json`) — native package versions
 - `packages/tokscale/package.json` — wrapper version plus `@tokscale/cli` dependency version
@@ -233,12 +271,12 @@ Add a short bullet list summary (before "What's Changed") when:
 3. [ ] No open blocker bugs (regressions from changes being released)
 4. [ ] Run "Publish" workflow via GitHub Actions UI
    - Select bump type (patch/minor/major)
-   - Wait for all 6 stages to complete
+   - For a failed publish retry, set `version` to the already committed release version and enable `recovery`
+   - Wait for all stages to complete
 5. [ ] Verify `chore: bump version to X.Y.Z` commit was pushed
 6. [ ] Verify packages on npm: @tokscale/cli, tokscale
-7. [ ] Create GitHub Release
+7. [ ] Verify GitHub Release
    - Tag: vX.Y.Z targeting the bump commit
-   - Write release notes following the template above
-   - Publish (not draft, not prerelease)
+   - Release notes follow the template above
 8. [ ] Smoke test: `bunx tokscale@latest --version`
 ```

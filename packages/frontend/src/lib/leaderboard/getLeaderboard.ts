@@ -6,11 +6,29 @@ import {
   normalizeUsernameCacheKey,
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
-import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
-import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+import { eq, desc, sql, and, or, gte, lte } from "drizzle-orm";
 import type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
+import {
+  escapeLikePattern,
+  hasDirectives,
+  parseSearchDirectives,
+} from "@/lib/leaderboard/searchDirectives";
+import {
+  scopeBreakdownToDirectives,
+  type PeriodSourceBreakdown,
+} from "@/lib/leaderboard/sourceBreakdown";
 
 export type { LeaderboardData, LeaderboardUser, Period, SortBy } from "@/lib/leaderboard/types";
+
+/**
+ * Restricts a query to users eligible for a leaderboard position.
+ *
+ * Applies to RANKINGS ONLY. The site-wide totals queries deliberately omit it,
+ * so a hidden user still contributes to total tokens, total cost and unique
+ * user counts — hiding withdraws someone from the competition, it does not
+ * erase their usage. Their profile, badge and embeds are likewise unaffected.
+ */
+const RANKABLE_USER = eq(users.leaderboardHidden, false);
 
 interface LeaderboardPeriodRow {
   userId: string;
@@ -19,9 +37,13 @@ interface LeaderboardPeriodRow {
   avatarUrl: string | null;
   tokens: number;
   cost: number;
-  updatedAt: string;
-  cliVersion: string | null;
-  schemaVersion: number;
+  sourceBreakdown: PeriodSourceBreakdown | null;
+  /**
+   * Carried through so the period path can drop the user from the rankings
+   * while still counting them in the period totals. Internal only — it must
+   * never reach LeaderboardUser, which is serialized to the public API.
+   */
+  leaderboardHidden: boolean;
 }
 
 interface PeriodDateRange {
@@ -36,9 +58,8 @@ interface PeriodLeaderboardDbRow {
   avatarUrl: string | null;
   tokens: number | string | null;
   cost: number | string | null;
-  updatedAt: Date | string;
-  cliVersion: string | null;
-  schemaVersion: number | null;
+  sourceBreakdown: PeriodSourceBreakdown | null;
+  leaderboardHidden: boolean;
 }
 
 interface AllTimeLeaderboardDbRow {
@@ -48,10 +69,6 @@ interface AllTimeLeaderboardDbRow {
   avatarUrl: string | null;
   totalTokens: number | string | null;
   totalCost: number | string | null;
-  submissionCount: number | string | null;
-  lastSubmission: string;
-  cliVersion: string | null;
-  schemaVersion: number | null;
 }
 
 interface RankedLeaderboardDbRow extends AllTimeLeaderboardDbRow {
@@ -64,10 +81,19 @@ function toUtcDateString(date: Date): string {
 
 function getPeriodDateRange(
   period: Period,
-  now: Date = new Date()
+  now: Date = new Date(),
+  customFrom?: string,
+  customTo?: string
 ): PeriodDateRange | null {
   if (period === "all") {
     return null;
+  }
+
+  if (period === "custom") {
+    if (!customFrom || !customTo) {
+      return null;
+    }
+    return { start: customFrom, end: customTo };
   }
 
   const end = new Date(
@@ -80,6 +106,15 @@ function getPeriodDateRange(
     return {
       start: toUtcDateString(start),
       end: toUtcDateString(end),
+    };
+  }
+
+  if (period === "last-month") {
+    const lastMonthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+    const lastMonthStart = new Date(Date.UTC(lastMonthEnd.getUTCFullYear(), lastMonthEnd.getUTCMonth(), 1));
+    return {
+      start: toUtcDateString(lastMonthStart),
+      end: toUtcDateString(lastMonthEnd),
     };
   }
 
@@ -126,14 +161,6 @@ function aggregatePeriodRows(
     if (existing) {
       existing.totalTokens += row.tokens;
       existing.totalCost += row.cost;
-      if (row.updatedAt > existing.lastSubmission) {
-        existing.lastSubmission = row.updatedAt;
-        existing.submissionFreshness = buildSubmissionFreshness({
-          updatedAt: row.updatedAt,
-          cliVersion: row.cliVersion,
-          schemaVersion: row.schemaVersion,
-        });
-      }
       continue;
     }
 
@@ -144,13 +171,6 @@ function aggregatePeriodRows(
       avatarUrl: row.avatarUrl,
       totalTokens: row.tokens,
       totalCost: row.cost,
-      submissionCount: null,
-      lastSubmission: row.updatedAt,
-      submissionFreshness: buildSubmissionFreshness({
-        updatedAt: row.updatedAt,
-        cliVersion: row.cliVersion,
-        schemaVersion: row.schemaVersion,
-      }),
     });
   }
 
@@ -160,14 +180,21 @@ function aggregatePeriodRows(
 }
 
 function matchesLeaderboardSearch(
-  user: Pick<LeaderboardUser, "username">,
-  search: string
+  user: Pick<LeaderboardUser, "username" | "displayName">,
+  textSearch: string
 ): boolean {
-  if (!search) {
+  if (!textSearch) {
     return true;
   }
 
-  return user.username.toLowerCase().includes(search.toLowerCase());
+  const lowerSearch = textSearch.toLowerCase();
+  if (user.username.toLowerCase().includes(lowerSearch)) {
+    return true;
+  }
+  if (user.displayName && user.displayName.toLowerCase().includes(lowerSearch)) {
+    return true;
+  }
+  return false;
 }
 
 function buildPeriodLeaderboardData(
@@ -179,31 +206,50 @@ function buildPeriodLeaderboardData(
   search: string = ""
 ): LeaderboardData {
   const offset = (page - 1) * limit;
-  const aggregatedUsers = aggregatePeriodRows(rows, sortBy);
-  const rankedUsers = aggregatedUsers.map((user, index) => ({
+  const parsed = parseSearchDirectives(search);
+
+  let filteredRows = rows;
+  if (hasDirectives(parsed)) {
+    filteredRows = rows.flatMap((row) => {
+      const scoped = scopeBreakdownToDirectives(row.sourceBreakdown, parsed);
+      return scoped ? [{ ...row, tokens: scoped.tokens, cost: scoped.cost }] : [];
+    });
+  }
+
+  // Aggregated twice on purpose. `aggregatedUsers` includes hidden users and
+  // is what the period totals are computed from; `visibleUsers` excludes them
+  // and is what gets ranked. Filtering once, before the totals, would silently
+  // shrink the headline numbers — the opposite of the intended behaviour.
+  const aggregatedUsers = aggregatePeriodRows(filteredRows, sortBy);
+  const visibleUsers = aggregatePeriodRows(
+    filteredRows.filter((row) => !row.leaderboardHidden),
+    sortBy
+  );
+
+  // Ranked over the visible set, so ranks stay dense (1,2,3…) instead of
+  // leaving a gap where the hidden user used to sit.
+  const rankedUsers = visibleUsers.map((user, index) => ({
     ...user,
     rank: index + 1,
   }));
-  const filteredUsers = rankedUsers.filter((user) =>
-    matchesLeaderboardSearch(user, search)
+  const textFilteredUsers = rankedUsers.filter((user) =>
+    matchesLeaderboardSearch(user, parsed.text)
   );
-  const pagedUsers = filteredUsers.slice(offset, offset + limit);
+  const pagedUsers = textFilteredUsers.slice(offset, offset + limit);
 
   return {
     users: pagedUsers,
     pagination: {
       page,
       limit,
-      totalUsers: filteredUsers.length,
-      totalPages: Math.ceil(filteredUsers.length / limit),
-      hasNext: offset + limit < filteredUsers.length,
+      totalUsers: textFilteredUsers.length,
+      totalPages: Math.ceil(textFilteredUsers.length / limit),
+      hasNext: offset + limit < textFilteredUsers.length,
       hasPrev: page > 1,
     },
     stats: {
       totalTokens: aggregatedUsers.reduce((sum, user) => sum + user.totalTokens, 0),
       totalCost: aggregatedUsers.reduce((sum, user) => sum + user.totalCost, 0),
-      // submitCount lives on the all-time submission row, so period-scoped submit totals are unavailable here.
-      totalSubmissions: null,
       uniqueUsers: aggregatedUsers.length,
     },
     period,
@@ -216,7 +262,13 @@ function buildPeriodUserRank(
   username: string,
   sortBy: SortBy = "tokens"
 ): LeaderboardUser | null {
-  const aggregatedUsers = aggregatePeriodRows(rows, sortBy);
+  // Ranked against the visible set only. A hidden user is therefore absent
+  // here and reports no rank at all, rather than a rank that does not
+  // correspond to any position on the leaderboard.
+  const aggregatedUsers = aggregatePeriodRows(
+    rows.filter((row) => !row.leaderboardHidden),
+    sortBy
+  );
   const usernameCacheKey = normalizeUsernameCacheKey(username);
   const matchingUsers = aggregatedUsers.filter(
     (user) => normalizeUsernameCacheKey(user.username) === usernameCacheKey
@@ -234,9 +286,11 @@ function buildPeriodUserRank(
 }
 
 async function fetchPeriodLeaderboardRows(
-  period: Exclude<Period, "all">
+  period: Exclude<Period, "all">,
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardPeriodRow[]> {
-  const dateRange = getPeriodDateRange(period);
+  const dateRange = getPeriodDateRange(period, new Date(), customFrom, customTo);
 
   if (!dateRange) {
     return [];
@@ -250,9 +304,8 @@ async function fetchPeriodLeaderboardRows(
       avatarUrl: users.avatarUrl,
       tokens: dailyBreakdown.tokens,
       cost: dailyBreakdown.cost,
-      updatedAt: submissions.updatedAt,
-      cliVersion: submissions.cliVersion,
-      schemaVersion: submissions.schemaVersion,
+      sourceBreakdown: dailyBreakdown.sourceBreakdown,
+      leaderboardHidden: users.leaderboardHidden,
     })
     .from(dailyBreakdown)
     .innerJoin(submissions, eq(dailyBreakdown.submissionId, submissions.id))
@@ -271,11 +324,10 @@ async function fetchPeriodLeaderboardRows(
     avatarUrl: row.avatarUrl,
     tokens: Number(row.tokens) || 0,
     cost: Number(row.cost) || 0,
-    updatedAt: row.updatedAt instanceof Date
-      ? row.updatedAt.toISOString()
-      : new Date(row.updatedAt).toISOString(),
-    cliVersion: row.cliVersion,
-    schemaVersion: Number(row.schemaVersion) || 0,
+    sourceBreakdown: row.sourceBreakdown ?? null,
+    // Deliberately NOT filtered in SQL: the period totals are derived from
+    // these same rows, and hidden users still count toward totals.
+    leaderboardHidden: row.leaderboardHidden === true,
   }));
 }
 
@@ -284,74 +336,96 @@ async function fetchLeaderboardData(
   page: number,
   limit: number,
   sortBy: SortBy = "tokens",
-  search: string = ""
+  search: string = "",
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardData> {
   if (period !== "all") {
-    const rows = await fetchPeriodLeaderboardRows(period);
+    const rows = await fetchPeriodLeaderboardRows(period, customFrom, customTo);
     return buildPeriodLeaderboardData(rows, page, limit, period, sortBy, search);
   }
 
   const offset = (page - 1) * limit;
+  const parsed = parseSearchDirectives(search);
 
   const orderByColumn = sortBy === "cost"
-    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`
     : sql`SUM(${submissions.totalTokens})`;
+  const secondaryOrderByColumn = sortBy === "cost"
+    ? sql`SUM(${submissions.totalTokens})`
+    : sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`;
 
-  if (search) {
-    // When searching, use a subquery to compute global ranks for ALL users,
-    // then filter by username. This preserves each user's true rank.
+  const clientConditions = parsed.clients.map((client) =>
+    sql`EXISTS (SELECT 1 FROM unnest(${submissions.sourcesUsed}) AS s WHERE LOWER(s) LIKE ${`%${escapeLikePattern(client)}%`})`
+  );
+  const modelConditions = parsed.models.map((model) =>
+    sql`EXISTS (SELECT 1 FROM unnest(${submissions.modelsUsed}) AS m WHERE LOWER(m) LIKE ${`%${escapeLikePattern(model)}%`})`
+  );
+  const directiveConditions = [
+    clientConditions.length > 0 ? or(...clientConditions) : undefined,
+    modelConditions.length > 0 ? or(...modelConditions) : undefined,
+  ].filter((condition): condition is ReturnType<typeof sql> => condition !== undefined);
+
+  const hasTextSearch = parsed.text.length > 0;
+  const hasDirectiveFilters = directiveConditions.length > 0;
+
+  if (hasTextSearch || hasDirectiveFilters) {
     const rankedSubquery = db
       .select({
-        rank: sql<number>`ROW_NUMBER() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
+        rank: sql<number>`RANK() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
         userId: users.id,
         username: users.username,
         displayName: users.displayName,
         avatarUrl: users.avatarUrl,
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
-        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
-        submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
-        lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
-        cliVersion: sql<string | null>`(
-          SELECT s2.cli_version FROM submissions s2
-          WHERE s2.user_id = ${users.id}
-          ORDER BY s2.updated_at DESC LIMIT 1
-        )`.as("cli_version"),
-        schemaVersion: sql<number>`COALESCE((
-          SELECT s2.schema_version FROM submissions s2
-          WHERE s2.user_id = ${users.id}
-          ORDER BY s2.updated_at DESC LIMIT 1
-        ), 0)`.as("schema_version"),
+        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
       })
       .from(submissions)
       .innerJoin(users, eq(submissions.userId, users.id))
+      // Inside the ranked subquery, so RANK() renumbers densely rather than
+      // leaving a hole where a hidden user was.
+      .where(
+        hasDirectiveFilters
+          ? and(RANKABLE_USER, ...directiveConditions)
+          : RANKABLE_USER
+      )
       .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
       .as("ranked");
+    const rankedSecondaryOrderByColumn = sortBy === "cost"
+      ? rankedSubquery.totalTokens
+      : rankedSubquery.totalCost;
 
-    const escapedSearch = search.toLowerCase().replace(/[%_\\]/g, "\\$&");
-    const searchPattern = `%${escapedSearch}%`;
+    let textFilter: ReturnType<typeof sql> | undefined;
+    if (hasTextSearch) {
+      const escapedSearch = escapeLikePattern(parsed.text.toLowerCase());
+      const searchPattern = `%${escapedSearch}%`;
+      textFilter = sql`(LOWER(${rankedSubquery.username}) LIKE ${searchPattern} OR LOWER(COALESCE(${rankedSubquery.displayName}, '')) LIKE ${searchPattern})`;
+    }
+
     const results = await db
       .select()
       .from(rankedSubquery)
-      .where(sql`LOWER(${rankedSubquery.username}) LIKE ${searchPattern}`)
-      .orderBy(sql`${rankedSubquery.rank} ASC`)
+      .where(textFilter)
+      .orderBy(
+        sql`${rankedSubquery.rank} ASC`,
+        sql`${rankedSecondaryOrderByColumn} DESC`,
+        sql`LOWER(${rankedSubquery.username}) ASC`
+      )
       .limit(limit)
       .offset(offset);
 
-    // Count total matching users for pagination
     const countResult = await db
       .select({ count: sql<number>`COUNT(*)`.as("count") })
       .from(rankedSubquery)
-      .where(sql`LOWER(${rankedSubquery.username}) LIKE ${searchPattern}`);
+      .where(textFilter);
 
     const totalUsers = Number(countResult[0]?.count) || 0;
     const totalPages = Math.ceil(totalUsers / limit);
 
-    // Global stats remain unfiltered
     const globalStats = await db
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
-        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`,
-        totalSubmissions: sql<number>`COUNT(${submissions.id})`,
+        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`,
         uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
       .from(submissions);
@@ -365,13 +439,6 @@ async function fetchLeaderboardData(
         avatarUrl: row.avatarUrl,
         totalTokens: Number(row.totalTokens) || 0,
         totalCost: Number(row.totalCost) || 0,
-        submissionCount: Number(row.submissionCount) || 0,
-        lastSubmission: row.lastSubmission,
-        submissionFreshness: buildSubmissionFreshness({
-          updatedAt: row.lastSubmission,
-          cliVersion: row.cliVersion,
-          schemaVersion: row.schemaVersion,
-        }),
       })),
       pagination: {
         page,
@@ -384,7 +451,6 @@ async function fetchLeaderboardData(
       stats: {
         totalTokens: Number(globalStats[0]?.totalTokens) || 0,
         totalCost: Number(globalStats[0]?.totalCost) || 0,
-        totalSubmissions: Number(globalStats[0]?.totalSubmissions) || 0,
         uniqueUsers: Number(globalStats[0]?.uniqueUsers) || 0,
       },
       period,
@@ -392,67 +458,61 @@ async function fetchLeaderboardData(
     };
   }
 
-  // Non-search path: original query with sequential rank
+  // Non-search path: competition rank with deterministic row ordering for ties.
   const leaderboardQuery = db
     .select({
-      rank: sql<number>`ROW_NUMBER() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
+      rank: sql<number>`RANK() OVER (ORDER BY ${orderByColumn} DESC)`.as("rank"),
       userId: users.id,
       username: users.username,
       displayName: users.displayName,
       avatarUrl: users.avatarUrl,
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
-      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
-      submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
-      lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
-      cliVersion: sql<string | null>`(
-        SELECT s2.cli_version FROM submissions s2
-        WHERE s2.user_id = ${users.id}
-        ORDER BY s2.updated_at DESC LIMIT 1
-      )`.as("cli_version"),
-      schemaVersion: sql<number>`COALESCE((
-        SELECT s2.schema_version FROM submissions s2
-        WHERE s2.user_id = ${users.id}
-        ORDER BY s2.updated_at DESC LIMIT 1
-      ), 0)`.as("schema_version"),
+      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
     })
     .from(submissions)
     .innerJoin(users, eq(submissions.userId, users.id))
+    .where(RANKABLE_USER)
     .groupBy(users.id, users.username, users.displayName, users.avatarUrl)
-    .orderBy(desc(orderByColumn))
+    .orderBy(
+      desc(orderByColumn),
+      desc(secondaryOrderByColumn),
+      sql`LOWER(${users.username}) ASC`
+    )
     .limit(limit)
     .offset(offset);
 
-  const [results, globalStats] = await Promise.all([
+  const [results, globalStats, rankableCount] = await Promise.all([
     leaderboardQuery,
+    // Unfiltered: site-wide totals count every submission, hidden or not.
     db
       .select({
         totalTokens: sql<number>`SUM(${submissions.totalTokens})`,
-        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`,
-        totalSubmissions: sql<number>`COUNT(${submissions.id})`,
+        totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`,
         uniqueUsers: sql<number>`COUNT(DISTINCT ${submissions.userId})`,
       })
       .from(submissions),
+    // Pagination must count only the rows this query can actually return.
+    // Reusing globalStats.uniqueUsers here would over-report by the number of
+    // hidden users and leave a trailing page that renders empty.
+    db
+      .select({ count: sql<number>`COUNT(DISTINCT ${submissions.userId})`.as("count") })
+      .from(submissions)
+      .innerJoin(users, eq(submissions.userId, users.id))
+      .where(RANKABLE_USER),
   ]);
 
-  const totalUsers = Number(globalStats[0]?.uniqueUsers) || 0;
+  const totalUsers = Number(rankableCount[0]?.count) || 0;
   const totalPages = Math.ceil(totalUsers / limit);
 
   return {
-    users: (results as AllTimeLeaderboardDbRow[]).map((row, index) => ({
-      rank: offset + index + 1,
+    users: (results as RankedLeaderboardDbRow[]).map((row) => ({
+      rank: Number(row.rank),
       userId: row.userId,
       username: row.username,
       displayName: row.displayName,
       avatarUrl: row.avatarUrl,
       totalTokens: Number(row.totalTokens) || 0,
       totalCost: Number(row.totalCost) || 0,
-      submissionCount: Number(row.submissionCount) || 0,
-      lastSubmission: row.lastSubmission,
-      submissionFreshness: buildSubmissionFreshness({
-        updatedAt: row.lastSubmission,
-        cliVersion: row.cliVersion,
-        schemaVersion: row.schemaVersion,
-      }),
     })),
     pagination: {
       page,
@@ -465,7 +525,6 @@ async function fetchLeaderboardData(
     stats: {
       totalTokens: Number(globalStats[0]?.totalTokens) || 0,
       totalCost: Number(globalStats[0]?.totalCost) || 0,
-      totalSubmissions: Number(globalStats[0]?.totalSubmissions) || 0,
       uniqueUsers: Number(globalStats[0]?.uniqueUsers) || 0,
     },
     period,
@@ -478,11 +537,17 @@ export function getLeaderboardData(
   page: number = 1,
   limit: number = 50,
   sortBy: SortBy = "tokens",
-  search: string = ""
+  search: string = "",
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardData> {
+  const cacheKey = period === "custom"
+    ? `leaderboard:custom:${customFrom}:${customTo}:${page}:${limit}:${sortBy}:${search}`
+    : `leaderboard:${period}:${page}:${limit}:${sortBy}:${search}`;
+
   return unstable_cache(
-    () => fetchLeaderboardData(period, page, limit, sortBy, search),
-    [`leaderboard:${period}:${page}:${limit}:${sortBy}:${search}`],
+    () => fetchLeaderboardData(period, page, limit, sortBy, search, customFrom, customTo),
+    [cacheKey],
     {
       tags: ["leaderboard", `leaderboard:${period}`],
       revalidate: 60,
@@ -497,15 +562,23 @@ export function getLeaderboardData(
 async function fetchUserRank(
   username: string,
   period: Period,
-  sortBy: SortBy
+  sortBy: SortBy,
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardUser | null> {
   if (period !== "all") {
-    const rows = await fetchPeriodLeaderboardRows(period);
+    const rows = await fetchPeriodLeaderboardRows(period, customFrom, customTo);
     return buildPeriodUserRank(rows, username, sortBy);
   }
 
   const userResult = await db
-    .select({ id: users.id, username: users.username, displayName: users.displayName, avatarUrl: users.avatarUrl })
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      avatarUrl: users.avatarUrl,
+      leaderboardHidden: users.leaderboardHidden,
+    })
     .from(users)
     .where(usernameEqualsIgnoreCase(username))
     .limit(USERNAME_LOOKUP_LIMIT);
@@ -516,22 +589,16 @@ async function fetchUserRank(
     return null;
   }
 
+  // A hidden user holds no leaderboard position, so they report no rank at all
+  // rather than a number that matches nothing on the board.
+  if (user.leaderboardHidden) {
+    return null;
+  }
+
   const userStatsResult = await db
     .select({
       totalTokens: sql<number>`SUM(${submissions.totalTokens})`.as("total_tokens"),
-      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`.as("total_cost"),
-      submissionCount: sql<number>`COALESCE(SUM(${submissions.submitCount}), 0)`.as("submission_count"),
-      lastSubmission: sql<string>`MAX(${submissions.updatedAt})`.as("last_submission"),
-      cliVersion: sql<string | null>`(
-        SELECT s2.cli_version FROM submissions s2
-        WHERE s2.user_id = ${user.id}
-        ORDER BY s2.updated_at DESC LIMIT 1
-      )`.as("cli_version"),
-      schemaVersion: sql<number>`COALESCE((
-        SELECT s2.schema_version FROM submissions s2
-        WHERE s2.user_id = ${user.id}
-        ORDER BY s2.updated_at DESC LIMIT 1
-      ), 0)`.as("schema_version"),
+      totalCost: sql<number>`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`.as("total_cost"),
     })
     .from(submissions)
     .where(eq(submissions.userId, user.id));
@@ -544,9 +611,11 @@ async function fetchUserRank(
   const userTotalTokens = Number(userStats.totalTokens);
   const userTotalCost = userStats.totalCost != null ? Number(userStats.totalCost) : 0;
 
-  const userCompareValue = sortBy === "cost" ? userTotalCost : userTotalTokens;
+  const userCompareValue = sortBy === "cost"
+    ? userTotalCost
+    : userTotalTokens;
   const compareColumn = sortBy === "cost"
-    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(12,4)))`
+    ? sql`SUM(CAST(${submissions.totalCost} AS DECIMAL(18,4)))`
     : sql`SUM(${submissions.totalTokens})`;
 
   const higherRankedResult = await db
@@ -560,6 +629,11 @@ async function fetchUserRank(
           total: compareColumn.as("total"),
         })
         .from(submissions)
+        // Hidden users hold no position, so they must not be counted as being
+        // "above" anyone — otherwise every visible user's rank is inflated by
+        // however many hidden accounts outrank them.
+        .innerJoin(users, eq(submissions.userId, users.id))
+        .where(RANKABLE_USER)
         .groupBy(submissions.userId)
         .having(sql`${compareColumn} > ${userCompareValue}`)
         .as("higher_ranked")
@@ -575,26 +649,22 @@ async function fetchUserRank(
     avatarUrl: user.avatarUrl,
     totalTokens: userTotalTokens,
     totalCost: userTotalCost,
-    submissionCount: Number(userStats.submissionCount) || 0,
-    lastSubmission: userStats.lastSubmission,
-    submissionFreshness: buildSubmissionFreshness({
-      updatedAt: userStats.lastSubmission,
-      cliVersion: userStats.cliVersion,
-      schemaVersion: userStats.schemaVersion,
-    }),
   };
 }
 
 export function getUserRank(
   username: string,
   period: Period = "all",
-  sortBy: SortBy = "tokens"
+  sortBy: SortBy = "tokens",
+  customFrom?: string,
+  customTo?: string
 ): Promise<LeaderboardUser | null> {
   const usernameCacheKey = normalizeUsernameCacheKey(username);
+  const periodKey = period === "custom" ? `custom:${customFrom}:${customTo}` : period;
 
   return unstable_cache(
-    () => fetchUserRank(username, period, sortBy),
-    [`user-rank:${usernameCacheKey}:${period}:${sortBy}`],
+    () => fetchUserRank(username, period, sortBy, customFrom, customTo),
+    [`user-rank:${usernameCacheKey}:${periodKey}:${sortBy}`],
     {
       tags: ["leaderboard", "user-rank", `user-rank:${usernameCacheKey}`],
       revalidate: 60,

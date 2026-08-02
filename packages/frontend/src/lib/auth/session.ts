@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { db, sessions, users } from "@/lib/db";
 import { eq, and, gt } from "drizzle-orm";
-import { generateRandomString } from "./utils";
+import { generateRandomString, hashToken } from "./utils";
 import { authenticatePersonalToken } from "./personalTokens";
 
 const SESSION_COOKIE_NAME = "tt_session";
@@ -12,7 +12,16 @@ export interface SessionUser {
   username: string;
   displayName: string | null;
   avatarUrl: string | null;
-  isAdmin: boolean;
+  /**
+   * GitHub's immutable numeric account id, used for admin gating — usernames
+   * can be renamed and released, so they are not a safe identity to authorize
+   * against.
+   *
+   * Null for sessions established with a personal API token, which does not
+   * carry it. That is deliberate: it makes admin checks fail closed for token
+   * auth rather than depending on every admin route remembering to opt out.
+   */
+  githubId: number | null;
 }
 
 /**
@@ -27,6 +36,8 @@ export async function getSession(): Promise<SessionUser | null> {
     return null;
   }
 
+  const sessionTokenHash = hashToken(sessionToken);
+
   const result = await db
     .select({
       session: sessions,
@@ -34,7 +45,9 @@ export async function getSession(): Promise<SessionUser | null> {
     })
     .from(sessions)
     .innerJoin(users, eq(sessions.userId, users.id))
-    .where(and(eq(sessions.token, sessionToken), gt(sessions.expiresAt, new Date())))
+    .where(
+      and(eq(sessions.tokenHash, sessionTokenHash), gt(sessions.expiresAt, new Date()))
+    )
     .limit(1);
 
   if (result.length === 0) {
@@ -48,7 +61,7 @@ export async function getSession(): Promise<SessionUser | null> {
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
-    isAdmin: user.isAdmin,
+    githubId: user.githubId,
   };
 }
 
@@ -60,11 +73,12 @@ export async function createSession(
   options: { source?: "web" | "cli"; userAgent?: string } = {}
 ): Promise<string> {
   const token = generateRandomString(64);
+  const tokenHash = hashToken(token);
   const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
   await db.insert(sessions).values({
     userId,
-    token,
+    tokenHash,
     expiresAt,
     source: options.source ?? "web",
     userAgent: options.userAgent,
@@ -96,7 +110,7 @@ export async function clearSession(): Promise<void> {
   const sessionToken = cookieStore.get(SESSION_COOKIE_NAME)?.value;
 
   if (sessionToken) {
-    await db.delete(sessions).where(eq(sessions.token, sessionToken));
+    await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(sessionToken)));
   }
 
   cookieStore.delete(SESSION_COOKIE_NAME);
@@ -120,7 +134,10 @@ export async function validateApiToken(
     username: result.username,
     displayName: result.displayName,
     avatarUrl: result.avatarUrl,
-    isAdmin: result.isAdmin,
+    // authenticatePersonalToken does not select github_id. Left null rather
+    // than widening that query: admin actions should not be reachable with a
+    // long-lived CLI token in the first place.
+    githubId: null,
   };
 }
 
@@ -141,33 +158,9 @@ export async function getSessionFromHeader(
     ? authHeader.slice(7)
     : authHeader;
 
-  // Check if it's an API token (CLI)
   if (token.startsWith("tt_")) {
     return validateApiToken(token);
   }
 
-  // Otherwise treat as session token (web)
-  const result = await db
-    .select({
-      session: sessions,
-      user: users,
-    })
-    .from(sessions)
-    .innerJoin(users, eq(sessions.userId, users.id))
-    .where(and(eq(sessions.token, token), gt(sessions.expiresAt, new Date())))
-    .limit(1);
-
-  if (result.length === 0) {
-    return null;
-  }
-
-  const { user } = result[0];
-
-  return {
-    id: user.id,
-    username: user.username,
-    displayName: user.displayName,
-    avatarUrl: user.avatarUrl,
-    isAdmin: user.isAdmin,
-  };
+  return null;
 }

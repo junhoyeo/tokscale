@@ -9,10 +9,10 @@ use super::utils::{
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
-use crate::TokenBreakdown;
+use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -37,6 +37,9 @@ pub struct ClaudeEntry {
     /// Parent session UUID (present on every sidechain line)
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
+    /// Optional billing or routing provider emitted by wrappers around Claude Code.
+    #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
+    pub provider_id: Option<String>,
 }
 
 /// Meta sidecar written next to nested-layout sidechain transcripts.
@@ -47,12 +50,27 @@ struct AgentMetaFile {
     agent_type: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CcMirrorVariantMetadata {
+    name: String,
+    provider_id: Option<String>,
+}
+
+impl CcMirrorVariantMetadata {
+    fn client_id(&self) -> String {
+        format!("cc-mirror/{}", sanitize_cc_mirror_segment(&self.name))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ClaudeMessage {
     pub model: Option<String>,
     pub usage: Option<ClaudeUsage>,
     /// Message ID for deduplication (used with requestId)
     pub id: Option<String>,
+    /// Optional billing or routing provider emitted by wrappers around Claude Code.
+    #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
+    pub provider_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,36 +128,143 @@ fn resolve_subagent_name(
     normalize_agent_name("claude-code-subagent")
 }
 
+/// True for nested-layout workflow orchestration journals
+/// (`.../<session>/subagents/**/journal.jsonl`).
+///
+/// Claude Code writes a `journal.jsonl` alongside `agent-*.jsonl` transcripts to
+/// record subagent workflow orchestration (spawn/verdict/result events). It shares
+/// the `.jsonl` extension and lives under the recursively-scanned project dir, so
+/// the dir-walk discovers it — but it is metadata, NOT a message transcript, and
+/// must never be ingested as usage. Its lines carry `type: "started"`/`"result"`
+/// (not `user`/`assistant`) so they currently parse to zero usage, but we drop it
+/// explicitly so a future journal schema can't silently leak token-like fields.
+fn is_workflow_journal(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) != Some("journal.jsonl") {
+        return false;
+    }
+    path.ancestors()
+        .any(|ancestor| ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents"))
+}
+
+fn is_in_transcripts_dir(path: &Path) -> bool {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("transcripts")
+}
+
 /// Locate the parent main-session JSONL for a sidechain transcript.
 ///
 /// Nested layout: `.../projects/<key>/<session>/subagents/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session>.jsonl`
+/// Deep nested layout (workflows): `.../projects/<key>/<session>/subagents/workflows/<wf>/agent-X.jsonl`
+///   → parent at `.../projects/<key>/<session>.jsonl`
 /// Flat layout: `.../projects/<key>/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session-id>.jsonl`
-fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+fn parent_session_paths(sidechain_path: &Path, parent_session_id: &str) -> Vec<PathBuf> {
     let parent_filename = format!("{}.jsonl", parent_session_id);
+    let mut candidates = Vec::with_capacity(2);
 
-    // Nested layout: parent dir is 3 levels up (file → subagents → session-dir → project-dir)
-    if let Some(dir) = sidechain_path.parent() {
-        if dir.file_name().and_then(|n| n.to_str()) == Some("subagents") {
-            if let Some(project_dir) = dir.parent().and_then(|d| d.parent()) {
-                let candidate = project_dir.join(&parent_filename);
-                if candidate.exists() {
-                    return Some(candidate);
+    // Nested layout: locate the `subagents` directory anywhere in the ancestry.
+    // The session dir is its parent and the project dir its grandparent, so the
+    // parent session file sits at `<project>/<session>.jsonl`. Anchoring on the
+    // `subagents` marker (rather than a fixed depth) handles both the shallow
+    // `subagents/agent-X.jsonl` and the deeper `subagents/workflows/<wf>/agent-X.jsonl`.
+    for ancestor in sidechain_path.ancestors() {
+        if ancestor.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+            if let Some(project_dir) = ancestor.parent().and_then(|d| d.parent()) {
+                candidates.push(project_dir.join(&parent_filename));
+            }
+            break;
+        }
+    }
+
+    // Flat layout, and the existing nested-layout fallback: parent dir is one
+    // level up. Preserve this as the lower-priority candidate when nested.
+    if let Some(parent_dir) = sidechain_path.parent() {
+        let candidate = parent_dir.join(parent_filename);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+    parent_session_paths(sidechain_path, parent_session_id)
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+/// How far the parent probe reads before giving up. A sidechain transcript's
+/// first row is already a sidechain row in practice, so the probe stops almost
+/// immediately; this cap only prevents a mislabeled or corrupt file that
+/// matches the `agent-*` / `subagents/` layout but carries no sidechain row
+/// from triggering a whole-file read on every warm cache validation.
+const PARENT_PROBE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Resolve the parent transcript that can influence a sidechain's cached agent
+/// attribution. The probe follows the parser until its first parseable
+/// sidechain row, then returns every candidate in parser precedence order.
+/// Missing candidates are retained so their later appearance invalidates the
+/// cache.
+pub(crate) fn parent_session_paths_for_cache(sidechain_path: &Path) -> Vec<PathBuf> {
+    parent_session_paths_for_cache_bounded(sidechain_path, PARENT_PROBE_MAX_BYTES)
+}
+
+/// Cap-parameterized core of [`parent_session_paths_for_cache`]. The current
+/// line is always read and parsed in full, so a marker on the first row is
+/// found regardless of `max_probe_bytes`; the cap only bounds how many *later*
+/// rows a marker-less file is scanned for before the probe gives up.
+fn parent_session_paths_for_cache_bounded(
+    sidechain_path: &Path,
+    max_probe_bytes: u64,
+) -> Vec<PathBuf> {
+    if is_workflow_journal(sidechain_path) {
+        return Vec::new();
+    }
+    let likely_nested = sidechain_path
+        .ancestors()
+        .any(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents"));
+    let likely_flat = sidechain_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.starts_with("agent-"));
+    if !likely_nested && !likely_flat {
+        return Vec::new();
+    }
+
+    let Ok(file) = std::fs::File::open(sidechain_path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    let mut consumed: u64 = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        consumed = consumed.saturating_add(read as u64);
+        if let Ok(entry) = serde_json::from_str::<ClaudeEntry>(line.trim_end()) {
+            if entry.is_sidechain {
+                if let Some(parent_session_id) = entry
+                    .session_id
+                    .as_deref()
+                    .filter(|session_id| !session_id.trim().is_empty())
+                {
+                    return parent_session_paths(sidechain_path, parent_session_id);
                 }
             }
         }
-    }
-
-    // Flat layout: parent dir is 1 level up
-    if let Some(project_dir) = sidechain_path.parent() {
-        let candidate = project_dir.join(&parent_filename);
-        if candidate.exists() {
-            return Some(candidate);
+        if consumed >= max_probe_bytes {
+            break;
         }
     }
 
-    None
+    Vec::new()
 }
 
 /// Scan a parent session JSONL to recover `subagent_type` for a given `agent_id`.
@@ -288,20 +413,56 @@ fn extract_agent_id_from_text(text: &str) -> Option<String> {
 
 /// Parse a Claude Code JSONL file
 pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
+    let home_dir = dirs::home_dir();
+    parse_claude_file_with_home(path, home_dir.as_deref())
+}
+
+pub fn parse_claude_file_with_home(path: &Path, home_dir: Option<&Path>) -> Vec<UnifiedMessage> {
     let mut parent_cache = ParentSubagentTypeCache::new();
-    parse_claude_file_with_cache(path, &mut parent_cache)
+    parse_claude_file_with_cache_and_home(path, &mut parent_cache, home_dir)
 }
 
 pub fn parse_claude_file_with_cache(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
 ) -> Vec<UnifiedMessage> {
+    let home_dir = dirs::home_dir();
+    parse_claude_file_with_cache_and_home(path, parent_cache, home_dir.as_deref())
+}
+
+pub fn parse_claude_file_with_cache_and_home(
+    path: &Path,
+    parent_cache: &mut ParentSubagentTypeCache,
+    home_dir: Option<&Path>,
+) -> Vec<UnifiedMessage> {
+    // Workflow orchestration journals are metadata, not transcripts — never ingest.
+    if is_workflow_journal(path) {
+        return Vec::new();
+    }
+
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
+    let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir);
+    let client_id = cc_mirror_metadata
+        .as_ref()
+        .map(CcMirrorVariantMetadata::client_id)
+        .unwrap_or_else(|| "claude".to_string());
+    let metadata_provider_hint = cc_mirror_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.provider_id.as_deref());
     let mut session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
+
+    // Bare transcripts (files under ~/.claude/transcripts/ with no workspace/project
+    // context) must not use char-based token estimation. These files may be written by
+    // third-party tools (e.g. OpenCode) that log tool outputs without Claude API usage
+    // metadata. Estimating tokens from their content would double-count usage already
+    // tracked by the originating client's own parser. Explicit tool-result token counts
+    // are still honored — only the char-based fallback estimate is suppressed.
+    let is_bare_transcript =
+        is_in_transcripts_dir(path) && cc_mirror_metadata.is_none() && workspace_key.is_none();
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
@@ -312,6 +473,8 @@ pub fn parse_claude_file_with_cache(
             fallback_timestamp,
             workspace_key.clone(),
             workspace_label.clone(),
+            &client_id,
+            metadata_provider_hint,
         );
         if !json_messages.is_empty() {
             return json_messages;
@@ -325,6 +488,7 @@ pub fn parse_claude_file_with_cache(
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
+    let mut provider_confidences: Vec<u8> = Vec::with_capacity(64);
     // Maps dedup_key to the index in `messages` of the first occurrence.
     // CC's streaming API writes the same messageId:requestId multiple times as the
     // response streams in; later entries often carry more complete token counts.
@@ -336,6 +500,9 @@ pub fn parse_claude_file_with_cache(
     // Tracks whether the previous entry was a user message,
     // so the next assistant message can be marked as a turn start.
     let mut pending_turn_start = false;
+    let mut pending_request_start_timestamp_ms: Option<i64> = None;
+    let mut last_model: Option<String> = None;
+    let mut last_provider_hint: Option<String> = None;
     // Sidechain detection state (resolved lazily on first parseable entry)
     let mut sidechain_agent: Option<String> = None;
     let mut sidechain_detected = false;
@@ -373,13 +540,49 @@ pub fn parse_claude_file_with_cache(
                 }
             }
 
-            if entry.entry_type == "user" {
-                // Distinguish real human input from tool results / system messages.
-                // Tool results have content as a JSON array (e.g. [{"type":"tool_result",...}]).
-                // System messages have XML-tagged content (e.g. <local-command-stdout>).
-                // Only plain text without XML tags counts as a genuine user turn.
-                if is_human_turn(trimmed) {
+            if entry.entry_type == "user" || entry.entry_type == "tool_result" {
+                let tool_result_message = extract_claude_tool_result_message(
+                    trimmed,
+                    ClaudeToolResultContext {
+                        entry: &entry,
+                        last_model: last_model.as_deref(),
+                        last_provider_hint: last_provider_hint.as_deref(),
+                        client_id: &client_id,
+                        default_provider_hint: metadata_provider_hint,
+                        session_id: &session_id,
+                        fallback_timestamp,
+                        workspace_key: workspace_key.clone(),
+                        workspace_label: workspace_label.clone(),
+                        sidechain_agent: sidechain_agent.clone(),
+                        allow_char_estimate: !is_bare_transcript,
+                    },
+                );
+
+                if let Some(timestamp_ms) = parse_claude_entry_timestamp(entry.timestamp.as_deref())
+                {
+                    pending_request_start_timestamp_ms = Some(timestamp_ms);
+                }
+
+                if entry.entry_type == "user" && is_human_turn(trimmed) {
                     pending_turn_start = true;
+                }
+
+                if let Some(tool_message) = tool_result_message {
+                    if let Some(ref dedup_key) = tool_message.dedup_key {
+                        if let Some(&existing_idx) = processed_hashes.get(dedup_key) {
+                            merge_claude_tool_result_duplicate(
+                                &mut messages[existing_idx],
+                                tool_message.tokens.input,
+                                tool_message.timestamp,
+                            );
+                            continue;
+                        }
+                        processed_hashes.insert(dedup_key.clone(), messages.len());
+                    }
+                    let provider_confidence =
+                        stored_claude_provider_confidence(&tool_message.provider_id);
+                    messages.push(tool_message);
+                    provider_confidences.push(provider_confidence);
                 }
                 continue;
             }
@@ -391,10 +594,28 @@ pub fn parse_claude_file_with_cache(
                     None => continue,
                 };
 
+                if let Some(model) = message.model.as_deref() {
+                    last_model = Some(model.to_string());
+                    last_provider_hint = message
+                        .provider_id
+                        .as_deref()
+                        .or(entry.provider_id.as_deref())
+                        .map(str::to_string);
+                }
+
                 let usage = match message.usage {
                     Some(u) => u,
                     None => continue,
                 };
+
+                let duplicate_provider_choice = claude_provider_choice_from_parts(
+                    message.model.as_deref(),
+                    message
+                        .provider_id
+                        .as_deref()
+                        .or(entry.provider_id.as_deref())
+                        .or(metadata_provider_hint),
+                );
 
                 // Build dedup key for global deduplication (messageId:requestId composite).
                 // For streaming responses, merge using per-field max to capture the most
@@ -403,16 +624,37 @@ pub fn parse_claude_file_with_cache(
                     (Some(msg_id), Some(req_id)) => {
                         let hash = format!("{}:{}", msg_id, req_id);
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
-                            // Per-field max merge: each token field is updated independently
-                            let t = &mut messages[existing_idx].tokens;
-                            t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
-                            t.output = t.output.max(usage.output_tokens.unwrap_or(0).max(0));
-                            t.cache_read = t
-                                .cache_read
-                                .max(usage.cache_read_input_tokens.unwrap_or(0).max(0));
-                            t.cache_write = t
-                                .cache_write
-                                .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
+                            merge_claude_duplicate(
+                                &mut messages[existing_idx],
+                                &usage,
+                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                            );
+                            if let Some(choice) = duplicate_provider_choice {
+                                update_claude_provider_id(
+                                    &mut messages[existing_idx].provider_id,
+                                    &mut provider_confidences[existing_idx],
+                                    choice,
+                                );
+                            }
+                            continue;
+                        }
+                        Some(hash)
+                    }
+                    (Some(msg_id), None) => {
+                        let hash = format!("message:{}", msg_id);
+                        if let Some(&existing_idx) = processed_hashes.get(&hash) {
+                            merge_claude_duplicate(
+                                &mut messages[existing_idx],
+                                &usage,
+                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                            );
+                            if let Some(choice) = duplicate_provider_choice {
+                                update_claude_provider_id(
+                                    &mut messages[existing_idx].provider_id,
+                                    &mut provider_confidences[existing_idx],
+                                    choice,
+                                );
+                            }
                             continue;
                         }
                         Some(hash)
@@ -420,16 +662,26 @@ pub fn parse_claude_file_with_cache(
                     _ => None,
                 };
 
-                let model = match message.model {
+                let raw_model = match message.model {
                     Some(m) => m,
                     None => continue,
                 };
+                let provider_choice = claude_provider_choice(
+                    &raw_model,
+                    message
+                        .provider_id
+                        .as_deref()
+                        .or(entry.provider_id.as_deref())
+                        .or(metadata_provider_hint),
+                );
+                let provider_confidence = provider_choice.confidence;
+                let model = canonicalize_claude_model(&raw_model);
 
-                let timestamp = entry
-                    .timestamp
-                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or(fallback_timestamp);
+                let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
+                let timestamp = pending_request_start_timestamp_ms
+                    .unwrap_or_else(|| parsed_timestamp.unwrap_or(fallback_timestamp));
+                let duration_ms =
+                    duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
 
                 // Insert dedup index only after all checks pass, right before push
                 let dedup_key = pending_hash.inspect(|hash| {
@@ -437,9 +689,9 @@ pub fn parse_claude_file_with_cache(
                 });
 
                 let mut unified = UnifiedMessage::new_with_dedup(
-                    "claude",
+                    client_id.clone(),
                     model,
-                    "anthropic",
+                    provider_choice.id,
                     session_id.clone(),
                     timestamp,
                     TokenBreakdown {
@@ -452,6 +704,7 @@ pub fn parse_claude_file_with_cache(
                     0.0,
                     dedup_key,
                 );
+                unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent.clone();
                 unified.set_workspace(workspace_key.clone(), workspace_label.clone());
                 // Mark the first assistant response after a user message as a turn start
@@ -460,6 +713,14 @@ pub fn parse_claude_file_with_cache(
                     pending_turn_start = false;
                 }
                 messages.push(unified);
+                provider_confidences.push(provider_confidence);
+                // Consume the pending request-start timestamp so a back-to-back
+                // assistant message with no intervening user entry doesn't reuse
+                // it and report an inflated duration. Streaming duplicates of
+                // this same message have already been captured in the dedup map
+                // above, so they merge via merge_claude_duplicate without needing
+                // the global pending value again.
+                pending_request_start_timestamp_ms = None;
                 handled = true;
             }
         }
@@ -473,19 +734,29 @@ pub fn parse_claude_file_with_cache(
             &session_id,
             &mut headless_state,
             fallback_timestamp,
+            &client_id,
+            metadata_provider_hint,
         ) {
             let mut message = message;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
+            let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
             messages.push(message);
+            provider_confidences.push(provider_confidence);
         }
     }
 
-    if let Some(message) =
-        finalize_headless_state(&mut headless_state, &session_id, fallback_timestamp)
-    {
+    if let Some(message) = finalize_headless_state(
+        &mut headless_state,
+        &session_id,
+        fallback_timestamp,
+        &client_id,
+        metadata_provider_hint,
+    ) {
         let mut message = message;
         message.set_workspace(workspace_key, workspace_label);
+        let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
         messages.push(message);
+        provider_confidences.push(provider_confidence);
     }
 
     messages
@@ -505,12 +776,423 @@ fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
         }
     }
 
+    for window in components.windows(5) {
+        if window[0] == ".cc-mirror" && window[2] == "config" && window[3] == "projects" {
+            let key = normalize_workspace_key(&window[4]);
+            let label = key.as_deref().and_then(workspace_label_from_key);
+            return (key, label);
+        }
+    }
+
+    for window in components.windows(2).rev() {
+        if window[0] == "projects" {
+            let key = normalize_workspace_key(&window[1]);
+            let label = key.as_deref().and_then(workspace_label_from_key);
+            return (key, label);
+        }
+    }
+
     (None, None)
+}
+
+fn sanitize_cc_mirror_segment(raw: &str) -> String {
+    let mut segment: String = raw
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    while segment.contains("--") {
+        segment = segment.replace("--", "-");
+    }
+    let mut segment = segment
+        .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
+        .to_string();
+    if segment.len() > 96 {
+        segment.truncate(96);
+        segment = segment
+            .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
+            .to_string();
+    }
+    if segment.is_empty() {
+        "variant".to_string()
+    } else {
+        segment
+    }
+}
+
+fn cc_mirror_provider_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case("mirror") {
+        return Some("anthropic".to_string());
+    }
+    provider_identity::canonical_provider(trimmed)
+}
+
+fn cc_mirror_variant_metadata_from_path(
+    path: &Path,
+    home_dir: Option<&Path>,
+) -> Option<CcMirrorVariantMetadata> {
+    let variant_dir = crate::cc_mirror::variant_dir_from_session_path(path, home_dir)?;
+    let variant_name = variant_dir.file_name()?.to_string_lossy().to_string();
+    let variant_path = crate::cc_mirror::variant_file_path(&variant_dir);
+    let metadata = crate::cc_mirror::read_variant_file(&variant_path);
+
+    let name = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.name.as_deref())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&variant_name)
+        .to_string();
+    let provider_id = metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata
+                .provider_id
+                .as_deref()
+                .or(metadata.provider.as_deref())
+        })
+        .and_then(cc_mirror_provider_id);
+
+    Some(CcMirrorVariantMetadata { name, provider_id })
+}
+
+fn parse_claude_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
+    timestamp
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
+    let duration = end_ms?.saturating_sub(start_ms?);
+    (duration > 0).then_some(duration)
+}
+
+fn merge_claude_duplicate(
+    existing: &mut UnifiedMessage,
+    usage: &ClaudeUsage,
+    parsed_timestamp: Option<i64>,
+) {
+    // Per-field max merge: each token field is updated independently.
+    let t = &mut existing.tokens;
+    t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
+    t.output = t.output.max(usage.output_tokens.unwrap_or(0).max(0));
+    t.cache_read = t
+        .cache_read
+        .max(usage.cache_read_input_tokens.unwrap_or(0).max(0));
+    t.cache_write = t
+        .cache_write
+        .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
+
+    if let Some(timestamp_ms) = parsed_timestamp {
+        if timestamp_ms >= existing.timestamp {
+            let new_duration = timestamp_ms.saturating_sub(existing.timestamp);
+            if new_duration > 0 {
+                // Duplicates can arrive out of order (e.g. late-processed
+                // streaming chunks), so never let a later-processed duplicate
+                // with an earlier completion timestamp shrink a duration
+                // already established by another duplicate.
+                existing.duration_ms = Some(existing.duration_ms.unwrap_or(0).max(new_duration));
+            }
+        }
+    }
+}
+
+fn merge_claude_tool_result_duplicate(
+    existing: &mut UnifiedMessage,
+    input_tokens: i64,
+    timestamp_ms: i64,
+) {
+    existing.tokens.input = existing.tokens.input.max(input_tokens.max(0));
+    if timestamp_ms >= existing.timestamp {
+        existing.set_timestamp(timestamp_ms);
+    }
+}
+
+struct ClaudeToolResultUsage {
+    input_tokens: i64,
+    dedup_key: Option<String>,
+}
+
+struct ClaudeToolResultContext<'a> {
+    entry: &'a ClaudeEntry,
+    last_model: Option<&'a str>,
+    last_provider_hint: Option<&'a str>,
+    client_id: &'a str,
+    default_provider_hint: Option<&'a str>,
+    session_id: &'a str,
+    fallback_timestamp: i64,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+    sidechain_agent: Option<String>,
+    /// Whether char-based token estimation may be used as a fallback when no
+    /// explicit tool-result token count is present. Bare transcripts (see
+    /// `is_bare_transcript`) set this to `false` to avoid double-counting
+    /// usage already tracked by the originating client's own parser, while
+    /// still honoring any explicit tool-result token counts.
+    allow_char_estimate: bool,
+}
+
+fn extract_claude_tool_result_message(
+    line: &str,
+    context: ClaudeToolResultContext<'_>,
+) -> Option<UnifiedMessage> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let usage = extract_claude_tool_result_usage(&value, context.allow_char_estimate)?;
+
+    let raw_model = extract_claude_model(&value)
+        .or_else(|| {
+            context
+                .entry
+                .message
+                .as_ref()
+                .and_then(|message| message.model.clone())
+        })
+        .or_else(|| context.last_model.map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let provider_hint = extract_claude_provider(&value)
+        .or_else(|| {
+            context
+                .entry
+                .message
+                .as_ref()
+                .and_then(|message| message.provider_id.clone())
+        })
+        .or_else(|| context.entry.provider_id.clone())
+        .or_else(|| context.last_provider_hint.map(str::to_string))
+        .or_else(|| context.default_provider_hint.map(str::to_string));
+
+    let provider_choice = claude_provider_choice(&raw_model, provider_hint.as_deref());
+    let model = canonicalize_claude_model(&raw_model);
+    let timestamp = parse_claude_entry_timestamp(context.entry.timestamp.as_deref())
+        .or_else(|| extract_claude_timestamp(&value))
+        .unwrap_or(context.fallback_timestamp);
+
+    let mut message = UnifiedMessage::new_with_dedup(
+        context.client_id,
+        model,
+        provider_choice.id,
+        context.session_id.to_string(),
+        timestamp,
+        TokenBreakdown {
+            input: usage.input_tokens,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        usage.dedup_key.map(|key| {
+            format!(
+                "{}:tool_result:{}:{key}",
+                context.client_id, context.session_id
+            )
+        }),
+    );
+    message.message_count = 0;
+    message.agent = context.sidechain_agent;
+    message.set_workspace(context.workspace_key, context.workspace_label);
+    Some(message)
+}
+
+fn extract_claude_tool_result_usage(
+    value: &Value,
+    allow_char_estimate: bool,
+) -> Option<ClaudeToolResultUsage> {
+    let mut total_tokens = 0;
+    let mut first_dedup_id: Option<String> = None;
+    let mut seen_ids = HashSet::new();
+
+    for tool_result in claude_tool_result_values(value) {
+        let tool_result_id = extract_tool_result_id(tool_result);
+        if let Some(id) = tool_result_id.as_ref() {
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
+        }
+        if first_dedup_id.is_none() {
+            first_dedup_id = tool_result_id;
+        }
+        total_tokens +=
+            extract_tool_result_input_tokens(tool_result, allow_char_estimate).unwrap_or(0);
+    }
+
+    if total_tokens <= 0 {
+        return None;
+    }
+
+    Some(ClaudeToolResultUsage {
+        input_tokens: total_tokens,
+        dedup_key: first_dedup_id.map(|id| format!("tool_result:{id}")),
+    })
+}
+
+fn claude_tool_result_values(value: &Value) -> Vec<&Value> {
+    let mut results = Vec::new();
+
+    if value
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .is_some_and(|kind| kind == "tool_result")
+    {
+        results.push(value);
+    }
+
+    if let Some(tool_result) = value.get("tool_result") {
+        results.push(tool_result);
+    }
+
+    if let Some(message_tool_result) = value
+        .get("message")
+        .and_then(|message| message.get("tool_result"))
+    {
+        results.push(message_tool_result);
+    }
+
+    if let Some(content) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .or_else(|| value.get("content"))
+    {
+        collect_tool_result_blocks(content, &mut results);
+    }
+
+    results
+}
+
+fn collect_tool_result_blocks<'a>(value: &'a Value, results: &mut Vec<&'a Value>) {
+    if let Some(blocks) = value.as_array() {
+        for block in blocks {
+            if block
+                .get("type")
+                .and_then(|kind| kind.as_str())
+                .is_some_and(|kind| kind == "tool_result")
+            {
+                results.push(block);
+            }
+        }
+    }
+}
+
+fn extract_tool_result_id(tool_result: &Value) -> Option<String> {
+    extract_string(tool_result.get("tool_use_id"))
+        .or_else(|| extract_string(tool_result.get("id")))
+        .or_else(|| extract_string(tool_result.get("tool_result_id")))
+}
+
+fn extract_tool_result_input_tokens(tool_result: &Value, allow_char_estimate: bool) -> Option<i64> {
+    explicit_tool_result_input_tokens(tool_result).or_else(|| {
+        if !allow_char_estimate {
+            return None;
+        }
+        let chars = tool_result_output_char_count(tool_result);
+        (chars > 0).then(|| estimate_tokens_from_chars(chars))
+    })
+}
+
+fn explicit_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
+    for candidate in [
+        tool_result.get("input_tokens"),
+        tool_result.get("token_count"),
+        tool_result.get("tokens"),
+        tool_result
+            .get("usage")
+            .and_then(|usage| usage.get("input_tokens")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("input_tokens")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("token_count")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("tokens")),
+        tool_result
+            .get("tool_output")
+            .and_then(|tool_output| tool_output.get("usage"))
+            .and_then(|usage| usage.get("input_tokens")),
+    ] {
+        if let Some(tokens) = extract_i64(candidate) {
+            return Some(tokens.max(0));
+        }
+    }
+    None
+}
+
+fn tool_result_output_char_count(tool_result: &Value) -> usize {
+    let mut chars = 0;
+
+    if let Some(output) = tool_result
+        .get("tool_output")
+        .and_then(|tool_output| tool_output.get("output"))
+        .and_then(|output| output.as_str())
+    {
+        chars += output.chars().count();
+    }
+
+    match tool_result.get("content") {
+        Some(content) if content.is_string() => {
+            chars += content
+                .as_str()
+                .map(str::chars)
+                .map(Iterator::count)
+                .unwrap_or(0);
+        }
+        Some(content) => {
+            chars += tool_result_content_output_chars(content);
+        }
+        None => {}
+    }
+
+    chars
+}
+
+fn tool_result_content_output_chars(content: &Value) -> usize {
+    content
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .get("tool_output")
+                        .and_then(|tool_output| tool_output.get("output"))
+                        .and_then(|output| output.as_str())
+                        .or_else(|| block.get("text").and_then(|text| text.as_str()))
+                        .map(str::chars)
+                        .map(Iterator::count)
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn estimate_tokens_from_chars(chars: usize) -> i64 {
+    // Claude Code tool outputs may not include token metadata. Match the
+    // existing Kiro fallback of one token per four characters, rounded up.
+    chars.div_ceil(4) as i64
+}
+
+fn canonicalize_claude_model(model: &str) -> String {
+    pricing::aliases::resolve_alias(model)
+        .unwrap_or(model)
+        .to_string()
 }
 
 #[derive(Default)]
 struct ClaudeHeadlessState {
     model: Option<String>,
+    provider_id: Option<String>,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -524,6 +1206,8 @@ fn parse_claude_headless_json(
     fallback_timestamp: i64,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Vec<UnifiedMessage> {
     let Some(data) = read_file_or_none(path) else {
         return Vec::new();
@@ -536,7 +1220,13 @@ fn parse_claude_headless_json(
     };
 
     let mut messages = Vec::with_capacity(1);
-    if let Some(message) = extract_claude_headless_message(&value, session_id, fallback_timestamp) {
+    if let Some(message) = extract_claude_headless_message(
+        &value,
+        session_id,
+        fallback_timestamp,
+        client_id,
+        default_provider_hint,
+    ) {
         let mut message = message;
         message.set_workspace(workspace_key, workspace_label);
         messages.push(message);
@@ -550,6 +1240,8 @@ fn process_claude_headless_line(
     session_id: &str,
     state: &mut ClaudeHeadlessState,
     fallback_timestamp: i64,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
     let mut bytes = line.as_bytes().to_vec();
     let value: Value = simd_json::from_slice(&mut bytes).ok()?;
@@ -559,9 +1251,16 @@ fn process_claude_headless_line(
 
     match event_type {
         "message_start" => {
-            completed_message = finalize_headless_state(state, session_id, fallback_timestamp);
+            completed_message = finalize_headless_state(
+                state,
+                session_id,
+                fallback_timestamp,
+                client_id,
+                default_provider_hint,
+            );
 
             state.model = extract_claude_model(&value);
+            state.provider_id = extract_claude_provider(&value);
             state.timestamp_ms = extract_claude_timestamp(&value).or(state.timestamp_ms);
             if let Some(usage) = value
                 .get("message")
@@ -580,12 +1279,22 @@ fn process_claude_headless_line(
             }
         }
         "message_stop" => {
-            completed_message = finalize_headless_state(state, session_id, fallback_timestamp);
+            completed_message = finalize_headless_state(
+                state,
+                session_id,
+                fallback_timestamp,
+                client_id,
+                default_provider_hint,
+            );
         }
         _ => {
-            if let Some(message) =
-                extract_claude_headless_message(&value, session_id, fallback_timestamp)
-            {
+            if let Some(message) = extract_claude_headless_message(
+                &value,
+                session_id,
+                fallback_timestamp,
+                client_id,
+                default_provider_hint,
+            ) {
                 completed_message = Some(message);
             }
         }
@@ -598,17 +1307,25 @@ fn extract_claude_headless_message(
     value: &Value,
     session_id: &str,
     fallback_timestamp: i64,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
     let usage = value
         .get("usage")
         .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))?;
-    let model = extract_claude_model(value)?;
+    let raw_model = extract_claude_model(value)?;
+    let provider_hint = extract_claude_provider(value);
+    let provider_id = claude_provider_id(
+        &raw_model,
+        provider_hint.as_deref().or(default_provider_hint),
+    );
+    let model = canonicalize_claude_model(&raw_model);
     let timestamp = extract_claude_timestamp(value).unwrap_or(fallback_timestamp);
 
     Some(UnifiedMessage::new(
-        "claude",
+        client_id,
         model,
-        "anthropic",
+        provider_id,
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
@@ -671,6 +1388,126 @@ fn extract_claude_model(value: &Value) -> Option<String> {
     })
 }
 
+fn extract_claude_provider(value: &Value) -> Option<String> {
+    extract_string(value.get("providerId"))
+        .or_else(|| extract_string(value.get("provider_id")))
+        .or_else(|| extract_string(value.get("provider")))
+        .or_else(|| {
+            value.get("message").and_then(|msg| {
+                extract_string(msg.get("providerId"))
+                    .or_else(|| extract_string(msg.get("provider_id")))
+                    .or_else(|| extract_string(msg.get("provider")))
+            })
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeProviderChoice {
+    id: String,
+    confidence: u8,
+}
+
+impl ClaudeProviderChoice {
+    fn new(id: impl Into<String>, confidence: u8) -> Self {
+        Self {
+            id: id.into(),
+            confidence,
+        }
+    }
+}
+
+const CLAUDE_PROVIDER_DEFAULT_CONFIDENCE: u8 = 1;
+const CLAUDE_PROVIDER_INFERRED_CONFIDENCE: u8 = 2;
+const CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE: u8 = 3;
+
+fn claude_provider_id(model: &str, provider_hint: Option<&str>) -> String {
+    claude_provider_choice(model, provider_hint).id
+}
+
+fn claude_provider_choice_from_parts(
+    model: Option<&str>,
+    provider_hint: Option<&str>,
+) -> Option<ClaudeProviderChoice> {
+    match model {
+        Some(model) => Some(claude_provider_choice(model, provider_hint)),
+        None => claude_provider_choice_from_hint(None, provider_hint),
+    }
+}
+
+fn claude_provider_choice(model: &str, provider_hint: Option<&str>) -> ClaudeProviderChoice {
+    if let Some(choice) = claude_provider_choice_from_hint(Some(model), provider_hint) {
+        return choice;
+    }
+
+    let inferred = provider_identity::inferred_provider_from_model(model);
+
+    if let Some(provider) = provider_from_model_prefix(model) {
+        return ClaudeProviderChoice::new(provider, CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE);
+    }
+
+    if let Some(provider) = inferred {
+        return ClaudeProviderChoice::new(provider, CLAUDE_PROVIDER_INFERRED_CONFIDENCE);
+    }
+
+    ClaudeProviderChoice::new("unknown", 0)
+}
+
+fn claude_provider_choice_from_hint(
+    model: Option<&str>,
+    provider_hint: Option<&str>,
+) -> Option<ClaudeProviderChoice> {
+    let hint = provider_hint.and_then(provider_identity::canonical_provider)?;
+
+    if hint == "anthropic" {
+        if let Some(inferred_provider) =
+            model.and_then(provider_identity::inferred_provider_from_model)
+        {
+            if inferred_provider != "anthropic" {
+                return Some(ClaudeProviderChoice::new(
+                    inferred_provider,
+                    CLAUDE_PROVIDER_INFERRED_CONFIDENCE,
+                ));
+            }
+        }
+        return Some(ClaudeProviderChoice::new(
+            hint,
+            CLAUDE_PROVIDER_DEFAULT_CONFIDENCE,
+        ));
+    }
+
+    Some(ClaudeProviderChoice::new(
+        hint,
+        CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE,
+    ))
+}
+
+fn update_claude_provider_id(
+    existing: &mut String,
+    existing_confidence: &mut u8,
+    candidate: ClaudeProviderChoice,
+) {
+    if candidate.confidence > *existing_confidence {
+        *existing_confidence = candidate.confidence;
+        *existing = candidate.id;
+    }
+}
+
+fn stored_claude_provider_confidence(provider_id: &str) -> u8 {
+    match provider_identity::canonical_provider(provider_id) {
+        None => 0,
+        Some(provider) if provider == "anthropic" => CLAUDE_PROVIDER_DEFAULT_CONFIDENCE,
+        Some(_) => CLAUDE_PROVIDER_INFERRED_CONFIDENCE,
+    }
+}
+
+fn provider_from_model_prefix(model: &str) -> Option<String> {
+    if model.trim().contains('/') {
+        provider_identity::canonical_provider(model)
+    } else {
+        None
+    }
+}
+
 fn extract_claude_timestamp(value: &Value) -> Option<i64> {
     value
         .get("timestamp")
@@ -698,8 +1535,15 @@ fn finalize_headless_state(
     state: &mut ClaudeHeadlessState,
     session_id: &str,
     fallback_timestamp: i64,
+    client_id: &str,
+    default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
-    let model = state.model.clone()?;
+    let raw_model = state.model.clone()?;
+    let provider_id = claude_provider_id(
+        &raw_model,
+        state.provider_id.as_deref().or(default_provider_hint),
+    );
+    let model = canonicalize_claude_model(&raw_model);
     let timestamp = state.timestamp_ms.unwrap_or(fallback_timestamp);
     if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
         *state = ClaudeHeadlessState::default();
@@ -707,9 +1551,9 @@ fn finalize_headless_state(
     }
 
     let message = UnifiedMessage::new(
-        "claude",
+        client_id,
         model,
-        "anthropic",
+        provider_id,
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
@@ -756,6 +1600,40 @@ mod tests {
         assert!(!is_human_turn(line));
     }
 
+    #[test]
+    fn parent_probe_resolves_first_row_marker_under_tiny_budget() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let content =
+            format!("{{\"isSidechain\":true,\"sessionId\":\"{session_id}\",\"type\":\"user\"}}\n");
+        let (_dir, path) = create_project_file(&content, "proj", "agent-abc.jsonl");
+
+        // The current row is always parsed in full, so a first-row marker is
+        // found even with a probe budget smaller than the row itself.
+        let candidates = parent_session_paths_for_cache_bounded(&path, 8);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.file_name().and_then(|name| name.to_str())
+                == Some("11111111-2222-3333-4444-555555555555.jsonl")
+        }));
+    }
+
+    #[test]
+    fn parent_probe_stops_at_byte_cap_for_late_marker() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let mut content = String::new();
+        while content.len() < 4096 {
+            content.push_str("{\"type\":\"summary\",\"isSidechain\":false}\n");
+        }
+        content.push_str(&format!(
+            "{{\"isSidechain\":true,\"sessionId\":\"{session_id}\",\"type\":\"user\"}}\n"
+        ));
+        let (_dir, path) = create_project_file(&content, "proj", "agent-late.jsonl");
+
+        // A budget smaller than the marker's offset gives up before reaching it.
+        assert!(parent_session_paths_for_cache_bounded(&path, 1024).is_empty());
+        // An ample budget still finds it — the cap only bounds marker-less scans.
+        assert!(!parent_session_paths_for_cache_bounded(&path, 1024 * 1024).is_empty());
+    }
+
     fn create_test_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
@@ -776,6 +1654,30 @@ mod tests {
             .join(project)
             .join(filename);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        (temp_dir, path)
+    }
+
+    fn create_cc_mirror_project_file(
+        content: &str,
+        variant: &str,
+        provider: &str,
+        project: &str,
+        filename: &str,
+    ) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let variant_dir = temp_dir.path().join(".cc-mirror").join(variant);
+        let config_dir = variant_dir.join("config");
+        let path = config_dir.join("projects").join(project).join(filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            variant_dir.join("variant.json"),
+            format!(
+                r#"{{"name":"{variant}","provider":"{provider}","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
+        )
+        .unwrap();
         std::fs::write(&path, content).unwrap();
         (temp_dir, path)
     }
@@ -808,6 +1710,46 @@ mod tests {
         );
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[1].tokens.input, 200);
+    }
+
+    #[test]
+    fn test_parse_cc_mirror_claude_variant_attributes_client_provider_and_workspace() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
+
+        let (_temp_dir, path) = create_cc_mirror_project_file(
+            content,
+            "zai-worker",
+            "zai",
+            "-Users-example-work",
+            "session.jsonl",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "cc-mirror/zai-worker");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].model_id, "claude-3-5-sonnet");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 10);
+        assert_eq!(messages[0].tokens.cache_write, 5);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("-Users-example-work")
+        );
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("-Users-example-work")
+        );
+    }
+
+    #[test]
+    fn test_cc_mirror_variant_client_segment_is_submit_safe() {
+        assert_eq!(sanitize_cc_mirror_segment(" zaicc "), "zaicc");
+        assert_eq!(sanitize_cc_mirror_segment("../Zai CC!"), "zai-cc");
+        assert_eq!(sanitize_cc_mirror_segment("..."), "variant");
+        assert_eq!(sanitize_cc_mirror_segment(&"a".repeat(120)).len(), 96);
     }
 
     #[test]
@@ -877,6 +1819,48 @@ mod tests {
     }
 
     #[test]
+    fn test_deduplication_promotes_provider_hint_from_later_duplicate() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 75);
+    }
+
+    #[test]
+    fn test_deduplication_promotes_provider_hint_without_later_model() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","provider":"openrouter/anthropic","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 75);
+    }
+
+    #[test]
+    fn test_deduplication_preserves_explicit_provider_against_later_inference() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 75);
+    }
+
+    #[test]
     fn test_deduplication_skips_model_none_without_stale_index() {
         // First entry has id+requestId+usage but model=null → skipped, no push.
         // Second entry is a valid duplicate. Must not panic on stale index.
@@ -906,6 +1890,89 @@ mod tests {
             messages.len(),
             2,
             "Different requestId should not be deduplicated"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_uses_message_id_without_request_id_and_keeps_final_duration() {
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"id":"msg_stream","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":25}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:03.500Z","message":{"id":"msg_stream","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":250}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 250);
+        assert_eq!(messages[0].timestamp, 1_733_047_200_000);
+        assert_eq!(messages[0].duration_ms, Some(3500));
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
+    }
+
+    #[test]
+    fn test_dedup_merge_duration_is_monotonic_across_out_of_order_duplicates() {
+        // Regression: several streaming duplicates of one message can be
+        // processed out of order (e.g. a late-arriving chunk carrying an
+        // earlier completion timestamp than one already merged). The start
+        // anchor (existing.timestamp) must survive every merge, and
+        // duration_ms must never shrink below a value already established by
+        // an earlier-processed duplicate — it must track the latest
+        // (largest) end timestamp seen so far.
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":30}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:05.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:07.000Z","requestId":"req_multi","message":{"id":"msg_multi","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":200}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "all streaming duplicates should collapse to one message"
+        );
+        assert_eq!(
+            messages[0].timestamp, 1_733_047_200_000,
+            "the start anchor must survive every merge (the user entry's timestamp)"
+        );
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(7_000),
+            "duration_ms must equal the latest end timestamp minus the start \
+             anchor (7s), not shrink when an out-of-order duplicate with an \
+             earlier timestamp is merged"
+        );
+        assert_eq!(
+            messages[0].tokens.output, 200,
+            "token fields keep the per-field max across all duplicates"
+        );
+    }
+
+    #[test]
+    fn test_pending_request_start_is_cleared_between_assistant_messages() {
+        // Regression: previously, the user-entry timestamp was set into
+        // `pending_request_start_timestamp_ms` and never cleared after the
+        // first assistant message consumed it. A subsequent assistant message
+        // with no intervening user entry would then reuse the stale start
+        // timestamp and report a wildly inflated duration.
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:01:30.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(1_000),
+            "first assistant should report duration vs the user entry (1s)"
+        );
+        assert_eq!(
+            messages[1].duration_ms, None,
+            "second assistant has no preceding user entry; duration must NOT \
+             reuse the stale pending_request_start_timestamp_ms"
         );
     }
 
@@ -951,21 +2018,34 @@ mod tests {
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
-        assert_eq!(messages.len(), 3, "Should have 3 assistant messages");
+        assert_eq!(
+            messages.len(),
+            4,
+            "Should include 3 assistant messages plus 1 tool-result input message"
+        );
+        let assistant_messages: Vec<_> = messages
+            .iter()
+            .filter(|message| message.tokens.output > 0)
+            .collect();
+        assert_eq!(
+            assistant_messages.len(),
+            3,
+            "Should have 3 assistant usage messages"
+        );
 
         // First assistant after first human user → turn start
         assert!(
-            messages[0].is_turn_start,
+            assistant_messages[0].is_turn_start,
             "First response should be turn start"
         );
         // Assistant after tool_result → NOT a new turn
         assert!(
-            !messages[1].is_turn_start,
+            !assistant_messages[1].is_turn_start,
             "Response after tool_result should NOT be turn start"
         );
         // First assistant after second human user → turn start
         assert!(
-            messages[2].is_turn_start,
+            assistant_messages[2].is_turn_start,
             "Response after real user input should be turn start"
         );
 
@@ -1028,6 +2108,171 @@ mod tests {
     }
 
     #[test]
+    fn test_opus_4_7_usage_is_parsed_when_usage_metadata_exists() {
+        let content = r#"{"type":"assistant","timestamp":"2026-04-16T10:00:00.000Z","requestId":"req_opus47","message":{"id":"msg_opus47","model":"claude-opus-4-7","usage":{"input_tokens":321,"output_tokens":654,"cache_read_input_tokens":987,"cache_creation_input_tokens":111}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-7");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 321);
+        assert_eq!(messages[0].tokens.output, 654);
+        assert_eq!(messages[0].tokens.cache_read, 987);
+        assert_eq!(messages[0].tokens.cache_write, 111);
+    }
+
+    #[test]
+    fn test_tool_result_output_counts_as_input() {
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_input","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.input, 4);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.cache_read, 0);
+        assert_eq!(messages[0].tokens.cache_write, 0);
+        let expected_dedup_key = format!(
+            "claude:tool_result:{}:tool_result:toolu_input",
+            messages[0].session_id
+        );
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some(expected_dedup_key.as_str())
+        );
+        assert_eq!(messages[0].message_count, 0);
+    }
+
+    #[test]
+    fn test_cc_mirror_tool_result_keeps_variant_client_and_provider() {
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_cc_mirror","tool_output":{"input_tokens":7,"output":"tool output"}}]}}"#;
+
+        let (_temp_dir, path) = create_cc_mirror_project_file(
+            content,
+            "zai-worker",
+            "zai",
+            "project-one",
+            "session.jsonl",
+        );
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "cc-mirror/zai-worker");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].model_id, "sonnet");
+        assert_eq!(messages[0].tokens.input, 7);
+        assert_eq!(messages[0].message_count, 0);
+    }
+
+    #[test]
+    fn test_tool_result_duplicate_uses_max_input_tokens() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnop"}}}
+{"type":"tool_result","timestamp":"2026-05-27T10:00:00.100Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd"}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(messages[0].timestamp, 1_779_876_000_100);
+    }
+
+    #[test]
+    fn test_tool_result_repeated_in_same_record_is_not_counted_twice() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 4);
+    }
+
+    #[test]
+    fn test_tool_result_prefers_input_token_metadata_over_char_estimate() {
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"claude-sonnet-4-6","content":[{"type":"tool_result","tool_use_id":"toolu_metadata","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd","input_tokens":3}}]}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 3);
+    }
+
+    #[test]
+    fn test_assistant_usage_with_tool_use_is_not_estimated_from_prompt_text() {
+        let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"id":"msg_tool_use","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/tmp/large.txt"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+    }
+
+    #[test]
+    fn test_anthropic_prefixed_claude_model_is_canonicalized() {
+        let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+    }
+
+    #[test]
+    fn test_multi_provider_models_infer_provider_from_model() {
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"gemini-3-flash-preview","usage":{"input_tokens":300,"output_tokens":30}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:03.000Z","message":{"model":"MiniMax-M2.1","usage":{"input_tokens":400,"output_tokens":40}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:04.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":500,"output_tokens":50}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[1].provider_id, "openai");
+        assert_eq!(messages[2].provider_id, "google");
+        assert_eq!(messages[3].provider_id, "minimax");
+        assert_eq!(messages[4].provider_id, "unknown");
+    }
+
+    #[test]
+    fn test_multi_provider_models_prefer_specific_model_over_default_anthropic_hint() {
+        let content = r#"{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
+        assert_eq!(messages[0].provider_id, "openai");
+    }
+
+    #[test]
+    fn test_multi_provider_models_preserve_reseller_provider_hint() {
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"provider":"openrouter/anthropic","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":10}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id, "openrouter");
+    }
+
+    #[test]
     fn test_headless_json_output() {
         let content = r#"{"type":"message","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
         let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
@@ -1040,6 +2285,19 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 60);
         assert_eq!(messages[0].tokens.cache_read, 10);
+    }
+
+    #[test]
+    fn test_headless_json_output_infers_subprovider() {
+        let content = r#"{"type":"message","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        std::fs::write(file.path(), content).unwrap();
+
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
+        assert_eq!(messages[0].provider_id, "openai");
     }
 
     #[test]
@@ -1068,6 +2326,21 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 80);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 5);
+    }
+
+    #[test]
+    fn test_headless_stream_output_infers_subprovider() {
+        let content = r#"{"type":"message_start","timestamp":"2026-02-18T10:00:00Z","message":{"id":"msg_1","model":"gemini-3-pro-preview","usage":{"input_tokens":200,"cache_read_input_tokens":20}}}
+{"type":"message_delta","usage":{"output_tokens":80}}
+{"type":"message_stop"}"#;
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-pro-preview");
+        assert_eq!(messages[0].provider_id, "google");
+        assert_eq!(messages[0].tokens.input, 200);
+        assert_eq!(messages[0].tokens.output, 80);
     }
 
     #[test]
@@ -1114,6 +2387,85 @@ mod tests {
             messages.is_empty(),
             "wrapper transcripts without usage metadata must not be estimated"
         );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_tool_outputs_is_not_estimated() {
+        let content = r#"{"type":"tool_use","timestamp":"2026-04-01T10:00:00.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","tool_input":{"filePath":"/src/main.rs"},"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:02.000Z","tool_name":"bash","tool_input":{"command":"cargo build"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:03.000Z","tool_name":"bash","tool_input":{"command":"cargo build"},"tool_output":{"output":"   Compiling myproject v0.1.0\n    Finished dev [unoptimized + debuginfo] target(s) in 2.34s\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_aabbccdd11223344556677889.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "bare transcripts with only tool outputs must not produce estimated token messages"
+        );
+    }
+
+    #[test]
+    fn test_project_transcript_with_tool_outputs_is_estimated() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","content":[{"type":"text","text":"fn main() { println!(\"hello\"); }"}]}]}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject")
+            .join("ses_project123.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            !messages.is_empty(),
+            "project transcripts with tool results should still estimate tokens"
+        );
+    }
+
+    #[test]
+    fn test_bare_transcript_with_explicit_tool_result_tokens_is_counted() {
+        // Bare transcripts must not char-estimate tokens, but explicit tool-result
+        // token counts (e.g. reported by the originating client) should still be honored.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","input_tokens":42,"tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}"#;
+        let (_dir, path) = create_transcript_file(content, "ses_explicit112233445566778899.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "bare transcripts must still count explicit tool-result token usage"
+        );
+        assert_eq!(messages[0].tokens.input, 42);
+    }
+
+    #[test]
+    fn test_transcripts_dir_under_project_is_not_treated_as_bare() {
+        // A `transcripts/` directory nested under a resolvable `projects/<key>/` path
+        // must not be treated as a bare transcript, since its workspace can still be
+        // attributed. Char-based estimation should proceed normally.
+        let content = r#"{"type":"tool_result","timestamp":"2026-04-01T10:00:01.000Z","tool_name":"read","tool_output":{"output":"fn main() {\n    println!(\"Hello, world!\");\n}\n"}}"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("projects")
+            .join("myproject")
+            .join("transcripts")
+            .join("ses_scoped112233445566778899.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            !messages.is_empty(),
+            "transcripts nested under a resolvable projects/<key>/ path should still be estimated"
+        );
+        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
     }
 
     // --- Sidechain / Agent tracking tests ---
@@ -1193,6 +2545,145 @@ mod tests {
             "Without meta sidecar, should fall back to generic label"
         );
         assert_eq!(messages[0].session_id, "parent-uuid-002");
+    }
+
+    /// Helper: create a deep nested-layout workflow transcript
+    /// `.../projects/<project>/<parent_session>/subagents/workflows/<wf>/<agent_stem>.jsonl`.
+    fn create_workflow_files(
+        project: &str,
+        parent_session: &str,
+        workflow: &str,
+        file_stem: &str,
+        jsonl_content: &str,
+        meta_content: Option<&str>,
+    ) -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflow_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join(project)
+            .join(parent_session)
+            .join("subagents")
+            .join("workflows")
+            .join(workflow);
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+
+        let jsonl_path = workflow_dir.join(format!("{}.jsonl", file_stem));
+        std::fs::write(&jsonl_path, jsonl_content).unwrap();
+
+        if let Some(meta) = meta_content {
+            let meta_path = workflow_dir.join(format!("{}.meta.json", file_stem));
+            std::fs::write(&meta_path, meta).unwrap();
+        }
+
+        (temp_dir, jsonl_path)
+    }
+
+    #[test]
+    fn test_workflow_agent_transcript_counts_tokens() {
+        // #815: agent-*.jsonl nested under subagents/workflows/<wf>/ is a real
+        // transcript and its usage must be counted, keyed to the parent session.
+        let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"wf-parent-001","agentId":"wfa1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"do work"}}
+{"type":"assistant","isSidechain":true,"sessionId":"wf-parent-001","agentId":"wfa1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_wf1","message":{"id":"msg_wf1","model":"claude-3-5-sonnet","usage":{"input_tokens":500,"output_tokens":200,"cache_read_input_tokens":100,"cache_creation_input_tokens":40}}}"#;
+        let meta = r#"{"agentType":"workflow-subagent","spawnDepth":1}"#;
+
+        let (_dir, path) = create_workflow_files(
+            "myproject",
+            "wf-parent-001",
+            "wf_de048031",
+            "agent-wfa1",
+            jsonl,
+            Some(meta),
+        );
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].session_id, "wf-parent-001",
+            "deep nested transcript must key to the parent session, not the file/workflow"
+        );
+        assert_eq!(messages[0].tokens.input, 500);
+        assert_eq!(messages[0].tokens.output, 200);
+        assert_eq!(messages[0].tokens.cache_read, 100);
+        assert_eq!(messages[0].tokens.cache_write, 40);
+        assert_eq!(
+            messages[0].agent,
+            Some("Workflow Subagent".to_string()),
+            "Tier 1 meta sidecar next to the deep nested transcript should resolve the name"
+        );
+    }
+
+    #[test]
+    fn test_workflow_journal_not_ingested() {
+        // #815 CRITICAL: journal.jsonl is workflow orchestration metadata, not a
+        // transcript. Even if it grows lines that superficially resemble usage, the
+        // parser must drop the whole file.
+        let journal = r#"{"type":"started","key":"v2:abc","agentId":"wfa1"}
+{"type":"result","key":"v2:abc","agentId":"wfa1","result":{"verdict":"needs_fixes","summary":"Input tokens are estimated"}}
+{"type":"assistant","isSidechain":true,"sessionId":"wf-parent-002","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_j","message":{"id":"msg_j","model":"claude-3-5-sonnet","usage":{"input_tokens":9999,"output_tokens":9999}}}"#;
+
+        let (_dir, path) = create_workflow_files(
+            "myproject",
+            "wf-parent-002",
+            "wf_journal",
+            "journal",
+            journal,
+            None,
+        );
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "journal.jsonl");
+        let messages = parse_claude_file(&path);
+
+        assert!(
+            messages.is_empty(),
+            "journal.jsonl must never be ingested, even with usage-shaped lines; got {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_tier2_deep_nested_workflow_recovers_agent() {
+        // Deep nested layout without a meta sidecar: agent name must be recovered
+        // from the parent session tool_use, proving find_parent_session_path walks
+        // up past the extra workflows/<wf>/ levels.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let parent_session_id = "deep-parent-uuid";
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_dp","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_deep","name":"Agent","input":{"subagent_type":"code-reviewer","prompt":"review"}}],"usage":{"input_tokens":80,"output_tokens":40}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_deep","type":"tool_result","content":[{"type":"text","text":"agentId: deepagent1 (use SendMessage)"}]}]}}"#;
+        std::fs::write(
+            project_dir.join(format!("{}.jsonl", parent_session_id)),
+            parent_content,
+        )
+        .unwrap();
+
+        let workflow_dir = project_dir
+            .join(parent_session_id)
+            .join("subagents")
+            .join("workflows")
+            .join("wf_deep");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"deep-parent-uuid","agentId":"deepagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"deep-parent-uuid","agentId":"deepagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_deep","message":{"id":"msg_deep","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":120}}}"#;
+        let sidechain_path = workflow_dir.join("agent-deepagent1.jsonl");
+        std::fs::write(&sidechain_path, sidechain_content).unwrap();
+
+        let messages = parse_claude_file(&sidechain_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent,
+            Some("Code Reviewer".to_string()),
+            "Tier 2 must resolve the agent name across the deep workflows/<wf>/ nesting"
+        );
+        assert_eq!(messages[0].session_id, parent_session_id);
+        assert_eq!(messages[0].tokens.input, 300);
     }
 
     #[test]

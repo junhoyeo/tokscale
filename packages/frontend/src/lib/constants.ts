@@ -1,3 +1,5 @@
+import type { ClientType } from "./types";
+
 // 2D Canvas
 export const BOX_WIDTH = 10;
 export const BOX_MARGIN = 2;
@@ -24,7 +26,7 @@ export const DAY_LABELS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 export const MONTH_LABELS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // Source configuration
-export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
+export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   opencode: "OpenCode",
   claude: "Claude Code",
   codex: "Codex CLI",
@@ -47,13 +49,32 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   crush: "Crush",
   goose: "Goose",
   antigravity: "Antigravity",
+  "antigravity-cli": "Antigravity CLI",
   zed: "Zed Agent",
+  trae: "Trae",
+  warp: "Warp",
+  cline: "Cline",
   synthetic: "Synthetic",
+  gjc: "Gajae Code",
+  "9router": "9Router",
+  grok: "Grok Build",
+  jcode: "Jcode",
+  commandcode: "Command Code",
+  micode: "MiMo Code",
+  junie: "Junie",
+  zcode: "ZCode",
+  opencodereview: "OpenCodeReview",
+  codebuddy: "CodeBuddy",
+  workbuddy: "WorkBuddy",
+  "devin-cli": "Devin CLI",
+  "devin-desktop": "Devin Desktop",
+  senpi: "Senpi (OmO Native)",
+  augment: "Augment Code",
 };
 
 // Client logos from GitHub CDN (public repo)
 const GITHUB_CDN_BASE = "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets";
-export const SOURCE_LOGOS: Record<string, string> = {
+export const SOURCE_LOGOS: Record<ClientType, string> = {
   opencode: `${GITHUB_CDN_BASE}/client-opencode.png`,
   claude: `${GITHUB_CDN_BASE}/client-claude.jpg`,
   codex: `${GITHUB_CDN_BASE}/client-openai.jpg`,
@@ -72,18 +93,42 @@ export const SOURCE_LOGOS: Record<string, string> = {
   kilocode: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   kilo: `${GITHUB_CDN_BASE}/client-kilocode.png`,
   mux: `${GITHUB_CDN_BASE}/client-mux.png`,
-  kiro: "/assets/logos/kiro.ico",
+  kiro: "https://github.com/kirodotdev.png",
   crush: `${GITHUB_CDN_BASE}/client-crush.png`,
   goose: `${GITHUB_CDN_BASE}/client-goose.png`,
   antigravity: `${GITHUB_CDN_BASE}/client-antigravity.png`,
+  "antigravity-cli": `${GITHUB_CDN_BASE}/client-antigravity.png`,
   zed: `${GITHUB_CDN_BASE}/client-zed.webp`,
+  trae: `${GITHUB_CDN_BASE}/client-trae.png`,
+  warp: "https://github.com/warpdotdev.png",
+  cline: "https://github.com/cline.png",
   synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
+  gjc: "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
+  // 9Router data flows through the gjc-format bridge; reuse the gjc mark
+  // until 9Router ships a dedicated asset.
+  "9router": "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
+  grok: "https://github.com/xai-org.png",
+  jcode: `${GITHUB_CDN_BASE}/client-jcode.png`,
+  commandcode:
+    "https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png",
+  micode: "https://github.com/XiaomiMiMo.png",
+  junie: "https://github.com/JetBrains.png",
+  zcode: "https://github.com/zai-org.png",
+  opencodereview: "https://github.com/alibaba.png",
+  codebuddy:
+    "https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png",
+  workbuddy:
+    "https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png",
+  "devin-cli": `${GITHUB_CDN_BASE}/client-devin.jpg`,
+  "devin-desktop": `${GITHUB_CDN_BASE}/client-devin.jpg`,
+  senpi: `${GITHUB_CDN_BASE}/client-senpi.png`,
+  augment: "https://github.com/augmentcode.png",
 };
 
-export const SOURCE_COLORS: Record<string, string> = {
+export const SOURCE_COLORS: Record<ClientType, string> = {
   opencode: "#00A8E8",
   claude: "#f97316",
-  codex: "#3b82f6",
+  codex: "#10B981",
   copilot: "#24292F",
   gemini: "#8b5cf6",
   cursor: "#22c55e",
@@ -103,12 +148,27 @@ export const SOURCE_COLORS: Record<string, string> = {
   crush: "#DC2626",
   goose: "#64B4DC",
   antigravity: "#6366F1",
+  "antigravity-cli": "#6366F1",
   zed: "#084CCF",
+  trae: "#00BFA5",
+  warp: "#01A4A4",
+  cline: "#5B8DEF",
   synthetic: "#4ADE80",
-};
-
-export const SOURCE_TEXT_COLORS: Record<string, string> = {
-  droid: "#FFFFFF",
+  gjc: "#FF6B6B",
+  "9router": "#0EA5E9",
+  grok: "#171717",
+  jcode: "#F59E0B",
+  commandcode: "#A855F7",
+  micode: "#FF6900",
+  junie: "#7B61FF",
+  zcode: "#3B5BDB",
+  opencodereview: "#FF6A00",
+  codebuddy: "#00A4FF",
+  workbuddy: "#2563EB",
+  "devin-cli": "#334155",
+  "devin-desktop": "#334155",
+  senpi: "#2F6F63",
+  augment: "#9333EA",
 };
 
 // Derived values

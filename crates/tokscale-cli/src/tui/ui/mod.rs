@@ -8,9 +8,12 @@ mod hourly;
 mod hourly_profile;
 mod minutely;
 mod models;
+mod monthly;
 mod overview;
+mod sessions;
 pub mod spinner;
 mod stats;
+mod usage;
 pub(crate) mod widgets;
 
 use ratatui::prelude::*;
@@ -50,7 +53,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Tab::Daily => daily::render(frame, app, chunks[1]),
             Tab::Hourly => hourly::render(frame, app, chunks[1]),
             Tab::Minutely => minutely::render(frame, app, chunks[1]),
+            Tab::Monthly => monthly::render(frame, app, chunks[1]),
+            Tab::Sessions => sessions::render(frame, app, chunks[1]),
             Tab::Stats => stats::render(frame, app, chunks[1]),
+            Tab::Usage => usage::render(frame, app, chunks[1]),
         }
     }
 
@@ -79,7 +85,7 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner)[1];
 
-    let mut spans = spinner::get_scanner_spans(app.spinner_frame);
+    let mut spans = spinner::get_scanner_spans(app.spinner_frame, &app.theme);
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
         spinner::get_phase_message("parsing-sources"),

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,9 +25,16 @@ const workspaceRoot = resolve(scopeDir, "..");
 type LibcKind = "gnu" | "musl";
 
 function detectLibcKind(): LibcKind {
+  const override = process.env.TOKSCALE_LIBC?.trim().toLowerCase();
+  if (override === "musl") return "musl";
+  if (override === "gnu" || override === "glibc") return "gnu";
+
   const report = process.report?.getReport?.() as
     | {
-        header?: { glibcVersionRuntime?: string };
+        header?: {
+          glibcVersionRuntime?: string;
+          release?: { sourceUrl?: string };
+        };
         sharedObjects?: string[];
       }
     | undefined;
@@ -43,15 +50,55 @@ function detectLibcKind(): LibcKind {
     return "musl";
   }
 
+  // Bun reports neither glibcVersionRuntime nor sharedObjects, but its
+  // release.sourceUrl names the build flavor (e.g. bun-linux-x64-musl-baseline.zip).
+  if (report?.header?.release?.sourceUrl?.toLowerCase().includes("musl")) {
+    return "musl";
+  }
+
   try {
     const output = execSync("ldd --version", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).toLowerCase();
-    return output.includes("musl") ? "musl" : "gnu";
-  } catch {
-    return "gnu";
+    if (output.includes("musl")) return "musl";
+    if (output.includes("glibc") || output.includes("gnu")) return "gnu";
+  } catch (error) {
+    // musl's ldd rejects --version: it prints "musl libc" to stderr and
+    // exits non-zero, so the answer is in the error, not the output.
+    const { stdout, stderr } = (error ?? {}) as { stdout?: unknown; stderr?: unknown };
+    const combined = `${stdout ?? ""}\n${stderr ?? ""}`.toLowerCase();
+    if (combined.includes("musl")) return "musl";
+    if (combined.includes("glibc") || combined.includes("gnu")) return "gnu";
   }
+
+  // ldd missing or inconclusive: look for dynamic loaders. Either loader
+  // can coexist with the other's libc (Debian's musl package installs
+  // ld-musl-*; Alpine's gcompat installs ld-linux-*), so when both are
+  // present, let the distro break the tie.
+  const hasGnuLoader = loaderPresent("ld-linux-");
+  const hasMuslLoader = loaderPresent("ld-musl-");
+  if (hasGnuLoader !== hasMuslLoader) return hasMuslLoader ? "musl" : "gnu";
+  if (hasGnuLoader && hasMuslLoader) {
+    return existsSync("/etc/alpine-release") ? "musl" : "gnu";
+  }
+
+  return "gnu";
+}
+
+// Glibc ships ld-linux-*.so.* in /lib64 (or /lib on some arches); musl
+// distros (Alpine, Void-musl, ...) ship /lib/ld-musl-<arch>.so.1.
+function loaderPresent(prefix: string): boolean {
+  for (const dir of ["/lib", "/lib64"]) {
+    try {
+      if (readdirSync(dir).some((entry) => entry.startsWith(prefix))) {
+        return true;
+      }
+    } catch {
+      // Directory unreadable or missing; try the next one.
+    }
+  }
+  return false;
 }
 
 function resolveTargetPackageName(): string | null {
@@ -71,6 +118,11 @@ function resolveTargetPackageName(): string | null {
     if (arch === "x64") {
       return libc === "musl" ? "cli-linux-x64-musl" : "cli-linux-x64-gnu";
     }
+    return null;
+  }
+
+  if (process.platform === "android") {
+    if (arch === "arm64") return "cli-android-arm64";
     return null;
   }
 
@@ -104,6 +156,11 @@ function resolveRustTargetTriple(): string | null {
         ? "x86_64-unknown-linux-musl"
         : "x86_64-unknown-linux-gnu";
     }
+    return null;
+  }
+
+  if (process.platform === "android") {
+    if (arch === "arm64") return "aarch64-linux-android";
     return null;
   }
 
@@ -143,22 +200,30 @@ searchPaths.push(
   join(cliDir, "bin", binaryName),
 );
 
-let binary = searchPaths.find((p) => existsSync(p));
-
-if (!binary) {
+function tryRealpath(p: string): string {
   try {
-    const whichCmd = process.platform === "win32" ? "where" : "which";
-    const found = execSync(`${whichCmd} ${binaryName}`, {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-      .trim()
-      .split("\n")[0];
-    if (found && existsSync(found)) {
-      binary = found;
-    }
-  } catch {}
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
 }
+
+// Paths that would re-enter this wrapper if executed - using any of these as
+// the "real" binary causes infinite recursion (a fork bomb). We compare by
+// realpath so symlinks (e.g. npm/bun bin shims) are dereferenced.
+const selfPaths = new Set<string>([
+  tryRealpath(fileURLToPath(import.meta.url)),
+  tryRealpath(join(cliDir, "bin.js")),
+]);
+if (process.argv[1]) {
+  selfPaths.add(tryRealpath(process.argv[1]));
+}
+
+function isSelfReference(p: string): boolean {
+  return selfPaths.has(tryRealpath(p));
+}
+
+let binary = searchPaths.find((p) => existsSync(p) && !isSelfReference(p));
 
 if (!binary) {
   console.error("Error: tokscale binary not found");

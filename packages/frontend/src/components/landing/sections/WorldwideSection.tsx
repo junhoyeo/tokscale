@@ -23,6 +23,10 @@ function formatCompactNumber(n: number): string {
 }
 
 function formatCompactCurrency(n: number): string {
+  if (n >= 1_000_000_000)
+    return "$" + (n / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "B";
+  if (n >= 1_000_000)
+    return "$" + (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
   if (n >= 1_000)
     return "$" + (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
   if (n >= 1) return "$" + n.toFixed(2);
@@ -108,8 +112,10 @@ export function WorldwideSection({
             loop
             muted
             playsInline
-            src="/assets/landing/trophy-cup-transparent.webm"
-          />
+          >
+            <source src="/assets/landing/trophy-cup-transparent.webm" type="video/webm" />
+            <source src="/assets/landing/trophy-cup-transparent.mp4" type="video/mp4" />
+          </TrophyVideo>
         </GlobeImageWrapper>
         <GlobeContentStack>
           <GlobeBlueHeader ref={blueHeaderRef}>

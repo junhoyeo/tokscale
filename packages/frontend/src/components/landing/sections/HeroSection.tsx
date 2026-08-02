@@ -33,18 +33,20 @@ export function HeroSection({ stargazersCount }: HeroSectionProps) {
       <HeroRow>
         <HeroLeft>
           <HeroBgStarfield
-            src="/assets/landing/hero-bg-starfield.png"
+            src="/assets/landing/hero-bg-starfield.webp"
             alt=""
             width={1076}
             height={536}
           />
           <HeroVideo
-            src="/assets/landing/hero-video-transparent.webm"
             autoPlay
             loop
             muted
             playsInline
-          />
+          >
+            <source src="/assets/landing/hero-video-transparent.webm" type="video/webm" />
+            <source src="/assets/landing/hero-video-transparent.mp4" type="video/mp4" />
+          </HeroVideo>
         </HeroLeft>
 
         <HeroRight>
@@ -252,7 +254,7 @@ const HeroTopSection = styled.div`
   justify-content: flex-end;
   gap: 17px;
   padding: 97px 40px 33px;
-  background-image: url("/assets/landing/hero-trusted-bg.png");
+  background-image: url("/assets/landing/hero-trusted-bg.webp");
   background-size: cover;
   background-position: center;
   border-bottom: 1px solid #10233e;

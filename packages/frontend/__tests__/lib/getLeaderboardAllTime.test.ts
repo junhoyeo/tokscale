@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expectNoNarrowedCostCast } from "../support/costCastWidths";
+
 const mockState = vi.hoisted(() => {
   const awaitedResults: unknown[] = [];
   const limitCalls: unknown[] = [];
@@ -14,12 +16,8 @@ const mockState = vi.hoisted(() => {
     submissions: {
       id: "submissions.id",
       userId: "submissions.userId",
-      submitCount: "submissions.submitCount",
-      updatedAt: "submissions.updatedAt",
       totalTokens: "submissions.totalTokens",
       totalCost: "submissions.totalCost",
-      cliVersion: "submissions.cliVersion",
-      schemaVersion: "submissions.schemaVersion",
     },
     dailyBreakdown: {
       submissionId: "dailyBreakdown.submissionId",
@@ -32,6 +30,7 @@ const mockState = vi.hoisted(() => {
   const eq = vi.fn(() => "eq");
   const desc = vi.fn(() => "desc");
   const and = vi.fn(() => "and");
+  const or = vi.fn(() => "or");
   const gte = vi.fn(() => "gte");
   const lte = vi.fn(() => "lte");
   const sql = Object.assign(
@@ -74,6 +73,7 @@ const mockState = vi.hoisted(() => {
     eq,
     desc,
     and,
+    or,
     gte,
     lte,
     sql,
@@ -84,6 +84,7 @@ const mockState = vi.hoisted(() => {
       eq.mockClear();
       desc.mockClear();
       and.mockClear();
+      or.mockClear();
       gte.mockClear();
       lte.mockClear();
       sql.mockClear();
@@ -125,14 +126,11 @@ vi.mock("@/lib/db/usernameLookup", () => {
   };
 });
 
-vi.mock("@/lib/submissionFreshness", async () =>
-  import("../../src/lib/submissionFreshness")
-);
-
 vi.mock("drizzle-orm", () => ({
   eq: mockState.eq,
   desc: mockState.desc,
   and: mockState.and,
+  or: mockState.or,
   gte: mockState.gte,
   lte: mockState.lte,
   sql: mockState.sql,
@@ -142,6 +140,13 @@ type ModuleExports = typeof import("../../src/lib/leaderboard/getLeaderboard");
 
 let getLeaderboardData: ModuleExports["getLeaderboardData"];
 let getUserRank: ModuleExports["getUserRank"];
+
+function selectedKeys(callIndex: number): string[] {
+  const calls = mockState.db.select.mock.calls as unknown as Array<
+    [Record<string, unknown> | undefined]
+  >;
+  return Object.keys(calls[callIndex]?.[0] ?? {});
+}
 
 function serializeSqlCalls(): string[] {
   return mockState.sql.mock.calls.map((call) => {
@@ -169,11 +174,163 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("all-time leaderboard freshness queries", () => {
-  it("uses latest-row scalar subqueries instead of MAX(cliVersion/schemaVersion)", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-12T18:45:00Z"));
+describe("all-time leaderboard queries", () => {
+  it("uses competition-rank SQL for all-time list and search ranks", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 0 }]);
 
+    await getLeaderboardData("all", 1, 50, "tokens");
+    const listSqlTexts = serializeSqlCalls();
+
+    expect(listSqlTexts.some((text) => text.includes("RANK() OVER (ORDER BY"))).toBe(true);
+    expect(listSqlTexts.some((text) => text.includes("ROW_NUMBER() OVER"))).toBe(false);
+
+    mockState.reset();
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 0 }]);
+
+    await getLeaderboardData("all", 1, 50, "tokens", "ali");
+    const searchSqlTexts = serializeSqlCalls();
+
+    expect(searchSqlTexts.some((text) => text.includes("RANK() OVER (ORDER BY"))).toBe(true);
+    expect(searchSqlTexts.some((text) => text.includes("ROW_NUMBER() OVER"))).toBe(false);
+  });
+
+  it("counts distinct users for all-time pagination and global stats", async () => {
+    mockState.pushAwaitedResult([]);
+    // Site-wide stats: every submitting user, hidden ones included.
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 3 }]);
+    // Pagination: only users the ranked query can actually return.
+    mockState.pushAwaitedResult([{ count: 2 }]);
+
+    const list = await getLeaderboardData("all", 1, 50, "tokens");
+
+    // The two counts are deliberately different sources. Pagination must track
+    // the rankable set, or hiding a user leaves a trailing page that renders
+    // empty; stats must track everyone, because hiding withdraws someone from
+    // the competition without erasing their usage from the totals.
+    expect(list.pagination.totalUsers).toBe(2);
+    expect(list.stats.uniqueUsers).toBe(3);
+    expect(serializeSqlCalls().some((text) =>
+      text.includes("COUNT(DISTINCT submissions.userId)")
+    )).toBe(true);
+
+    mockState.reset();
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([{ totalTokens: 0, totalCost: 0, uniqueUsers: 2 }]);
+
+    const search = await getLeaderboardData("all", 1, 50, "tokens", "ali");
+    expect(search.stats.uniqueUsers).toBe(2);
+    expect(serializeSqlCalls().some((text) =>
+      text.includes("COUNT(DISTINCT submissions.userId)")
+    )).toBe(true);
+  });
+
+  it("keeps tied all-time users at the same rank across list, search, and user rank", async () => {
+    mockState.pushAwaitedResult([
+      {
+        rank: 1,
+        userId: "user-bob",
+        username: "bob",
+        displayName: "Bob",
+        avatarUrl: null,
+        totalTokens: 5000,
+        totalCost: 50,
+      },
+      {
+        rank: 2,
+        userId: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+      },
+      {
+        rank: 2,
+        userId: "user-alicia",
+        username: "alicia",
+        displayName: "Alicia",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 30,
+      },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 11000,
+        totalCost: 120,
+        uniqueUsers: 3,
+      },
+    ]);
+
+    const leaderboard = await getLeaderboardData("all", 1, 50, "tokens");
+    const aliceListRank = leaderboard.users.find((user) => user.username === "alice")?.rank;
+    const aliciaListRank = leaderboard.users.find((user) => user.username === "alicia")?.rank;
+
+    mockState.reset();
+    mockState.pushAwaitedResult([
+      {
+        rank: 2,
+        userId: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 40,
+      },
+      {
+        rank: 2,
+        userId: "user-alicia",
+        username: "alicia",
+        displayName: "Alicia",
+        avatarUrl: null,
+        totalTokens: 3000,
+        totalCost: 30,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 2 }]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 11000,
+        totalCost: 120,
+        uniqueUsers: 3,
+      },
+    ]);
+
+    const searchLeaderboard = await getLeaderboardData("all", 1, 50, "tokens", "ali");
+    const aliceSearchRank = searchLeaderboard.users.find((user) => user.username === "alice")?.rank;
+    const aliciaSearchRank = searchLeaderboard.users.find((user) => user.username === "alicia")?.rank;
+
+    mockState.reset();
+    mockState.pushAwaitedResult([
+      {
+        id: "user-alice",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+      },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 3000,
+        totalCost: 40,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 1 }]);
+
+    const aliceUserRank = await getUserRank("alice", "all", "tokens");
+
+    expect(aliceListRank).toBe(2);
+    expect(aliciaListRank).toBe(2);
+    expect(aliceSearchRank).toBe(2);
+    expect(aliciaSearchRank).toBe(2);
+    expect(aliceUserRank?.rank).toBe(2);
+  });
+
+  it("selects and returns only fields consumed by leaderboard surfaces", async () => {
     mockState.pushAwaitedResult([
       {
         rank: 1,
@@ -183,54 +340,47 @@ describe("all-time leaderboard freshness queries", () => {
         avatarUrl: null,
         totalTokens: 3000,
         totalCost: 30,
-        submissionCount: 2,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([
       {
         totalTokens: 3000,
         totalCost: 30,
-        totalSubmissions: 2,
         uniqueUsers: 1,
       },
     ]);
 
     const leaderboard = await getLeaderboardData("all", 1, 50, "tokens");
-    const sqlTexts = serializeSqlCalls();
-
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.cli_version FROM submissions s2")
-        && text.includes("ORDER BY s2.updated_at DESC LIMIT 1")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.schema_version FROM submissions s2")
-        && text.includes("ORDER BY s2.updated_at DESC LIMIT 1")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.cliVersion")
-    )).toBe(false);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.schemaVersion")
-    )).toBe(false);
-    expect(leaderboard.users[0]).toMatchObject({
-      rank: 1,
-      username: "alice",
-      lastSubmission: "2026-03-12T09:00:00.000Z",
-      submissionFreshness: {
-        lastUpdated: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
-        isStale: false,
-      },
+    expect(selectedKeys(0)).toEqual([
+      "rank",
+      "userId",
+      "username",
+      "displayName",
+      "avatarUrl",
+      "totalTokens",
+      "totalCost",
+    ]);
+    expect(selectedKeys(1)).toEqual([
+      "totalTokens",
+      "totalCost",
+      "uniqueUsers",
+    ]);
+    expect(Object.keys(leaderboard.users[0]).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
+    expect(leaderboard.stats).toEqual({
+      totalTokens: 3000,
+      totalCost: 30,
+      uniqueUsers: 1,
     });
-  });
 
-  it("uses latest-row scalar subqueries for all-time user rank metadata", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-12T18:45:00Z"));
+    mockState.reset();
 
     mockState.pushAwaitedResult([
       {
@@ -244,10 +394,6 @@ describe("all-time leaderboard freshness queries", () => {
       {
         totalTokens: 3000,
         totalCost: 30,
-        submissionCount: 2,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([
@@ -257,36 +403,20 @@ describe("all-time leaderboard freshness queries", () => {
     ]);
 
     const rank = await getUserRank("alice", "all", "tokens");
-    const sqlTexts = serializeSqlCalls();
 
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.cli_version FROM submissions s2")
-        && text.includes("WHERE s2.user_id = user-alice")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("SELECT s2.schema_version FROM submissions s2")
-        && text.includes("WHERE s2.user_id = user-alice")
-    )).toBe(true);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.cliVersion")
-    )).toBe(false);
-    expect(sqlTexts.some((text) =>
-      text.includes("MAX(") && text.includes("submissions.schemaVersion")
-    )).toBe(false);
-    expect(rank).toMatchObject({
-      rank: 1,
-      username: "alice",
-      totalTokens: 3000,
-      totalCost: 30,
-      submissionCount: 2,
-      lastSubmission: "2026-03-12T09:00:00.000Z",
-      submissionFreshness: {
-        lastUpdated: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
-        isStale: false,
-      },
-    });
+    expect(selectedKeys(1)).toEqual([
+      "totalTokens",
+      "totalCost",
+    ]);
+    expect(Object.keys(rank || {}).sort()).toEqual([
+      "avatarUrl",
+      "displayName",
+      "rank",
+      "totalCost",
+      "totalTokens",
+      "userId",
+      "username",
+    ]);
   });
 
   it("looks up all-time user rank usernames case-insensitively", async () => {
@@ -302,10 +432,6 @@ describe("all-time leaderboard freshness queries", () => {
       {
         totalTokens: 1200,
         totalCost: 12,
-        submissionCount: 1,
-        lastSubmission: "2026-03-12T09:00:00.000Z",
-        cliVersion: "1.9.0",
-        schemaVersion: 1,
       },
     ]);
     mockState.pushAwaitedResult([{ count: 0 }]);
@@ -344,5 +470,48 @@ describe("all-time leaderboard freshness queries", () => {
       "Multiple users match username imlunahey case-insensitively"
     );
     expect(mockState.limitCalls[0]).toBe(2);
+  });
+
+  it("casts all-time cost at the full numeric(18,4) column precision so large totals don't overflow", async () => {
+    // Regression: total_cost is numeric(18,4) (migration 0014); every cost cast must stay >= 18 wide or costs >= 1e8 overflow.
+    // Width-based (not literal) so it also catches a re-narrowing to any precision below the column, e.g. DECIMAL(15,4).
+    await getLeaderboardData("all", 1, 50, "cost");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+});
+
+describe("all-time cost aggregation precision across query shapes (numeric overflow regression)", () => {
+  // Complements the all-time-list check above with the search and user-rank
+  // shapes that also cast submissions.total_cost (decimal(18,4)). Any cast
+  // narrower than 18 overflows on costs >= the narrowed ceiling and 500s the
+  // query; width-based so a re-narrowing to e.g. DECIMAL(15,4) is still caught.
+  it("casts total_cost at full column precision in the all-time search list", async () => {
+    mockState.pushAwaitedResult([]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+    mockState.pushAwaitedResult([
+      { totalTokens: 0, totalCost: 0, uniqueUsers: 0 },
+    ]);
+
+    await getLeaderboardData("all", 1, 50, "cost", "ali");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
+  });
+
+  it("casts total_cost at full column precision for all-time user rank", async () => {
+    mockState.pushAwaitedResult([
+      { id: "user-alice", username: "alice", displayName: "Alice", avatarUrl: null },
+    ]);
+    mockState.pushAwaitedResult([
+      {
+        totalTokens: 3000,
+        totalCost: 40,
+      },
+    ]);
+    mockState.pushAwaitedResult([{ count: 0 }]);
+
+    await getUserRank("alice", "all", "cost");
+
+    expectNoNarrowedCostCast(serializeSqlCalls());
   });
 });

@@ -5,8 +5,17 @@ import { isValidGitHubUsername } from "@/lib/validation/username";
 
 export const revalidate = 60;
 
-const VALID_PERIODS: Period[] = ["all", "month", "week"];
+const VALID_PERIODS: Period[] = ["all", "month", "last-month", "week", "custom"];
 const VALID_SORT_BY: SortBy[] = ["tokens", "cost"];
+
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidDateString(value: string | null): value is string {
+  if (!value || !DATE_REGEX.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
 
 export async function GET(
   request: NextRequest,
@@ -24,7 +33,7 @@ export async function GET(
 
     const { searchParams } = new URL(request.url);
     const periodParam = searchParams.get("period") || "all";
-    const period: Period = VALID_PERIODS.includes(periodParam as Period)
+    let period: Period = VALID_PERIODS.includes(periodParam as Period)
       ? (periodParam as Period)
       : "all";
 
@@ -33,7 +42,21 @@ export async function GET(
       ? (sortByParam as SortBy)
       : "tokens";
 
-    const userRank = await getUserRank(username, period, sortBy);
+    const fromParam = searchParams.get("from");
+    const toParam = searchParams.get("to");
+    let customFrom: string | undefined;
+    let customTo: string | undefined;
+
+    if (period === "custom") {
+      if (isValidDateString(fromParam) && isValidDateString(toParam)) {
+        customFrom = fromParam;
+        customTo = toParam;
+      } else {
+        period = "all";
+      }
+    }
+
+    const userRank = await getUserRank(username, period, sortBy, customFrom, customTo);
 
     if (!userRank) {
       return NextResponse.json({ error: "User not found or has no submissions" }, { status: 404 });

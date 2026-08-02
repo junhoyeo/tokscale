@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -14,9 +15,23 @@ const MAX_IDENTITY_PROBE_BYTES: usize = 4096;
 const ANTIGRAVITY_MANIFEST_VERSION: i32 = 1;
 #[cfg(test)]
 const SYNC_LOCK_STALE_SECS: u64 = 600;
+static HTTPS_RPC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static HTTPS_RPC_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
+}
+
+fn antigravity_data_roots() -> Result<Vec<PathBuf>> {
+    let gemini_dir = home_dir()?.join(".gemini");
+    let mut roots = Vec::new();
+    for name in ["antigravity-ide", "antigravity", "antigravity-backup"] {
+        let root = gemini_dir.join(name);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
 }
 
 pub fn get_antigravity_cache_dir() -> Result<PathBuf> {
@@ -147,11 +162,6 @@ struct SessionCandidate {
 pub fn run_antigravity_sync() -> Result<()> {
     use colored::Colorize;
 
-    #[cfg(target_os = "windows")]
-    anyhow::bail!(
-        "Antigravity sync is not supported on Windows yet. Use macOS or Linux for `tokscale antigravity sync`, or remove Antigravity from your release notes for Windows."
-    );
-
     let cache_dir = get_antigravity_cache_dir()?;
     let sessions_dir = get_antigravity_sessions_dir()?;
     ensure_config_dir()?;
@@ -265,11 +275,6 @@ pub fn run_antigravity_sync() -> Result<()> {
 
 pub fn run_antigravity_status(json: bool) -> Result<()> {
     use colored::Colorize;
-
-    #[cfg(target_os = "windows")]
-    anyhow::bail!(
-        "Antigravity status is not supported on Windows yet because local language-server discovery is not implemented there. Use macOS or Linux for `tokscale antigravity status`."
-    );
 
     let cache_dir = get_antigravity_cache_dir()?;
     let sessions_dir = get_antigravity_sessions_dir()?;
@@ -690,12 +695,6 @@ fn bool_label(value: bool) -> &'static str {
 }
 
 pub fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
-    if cfg!(target_os = "windows") {
-        anyhow::bail!(
-            "Antigravity connection discovery is not supported on Windows yet. Use macOS or Linux, or sync from another machine and copy artifacts manually."
-        );
-    }
-
     let candidates = detect_process_candidates()?;
     let mut connections = Vec::new();
 
@@ -738,6 +737,19 @@ fn candidate_probe_ports(candidate: &ProcessCandidate, mut ports: Vec<u16>) -> V
 }
 
 fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
+    #[cfg(target_os = "windows")]
+    {
+        return detect_windows_process_candidates();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        detect_unix_process_candidates()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_unix_process_candidates() -> Result<Vec<ProcessCandidate>> {
     let output = run_command("ps", &["-ww", "-eo", "pid,ppid,args"])?;
     let mut candidates = Vec::new();
 
@@ -807,6 +819,107 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
     Ok(candidates)
 }
 
+#[cfg(target_os = "windows")]
+fn detect_windows_process_candidates() -> Result<Vec<ProcessCandidate>> {
+    let script = "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress";
+    let output = run_windows_powershell(script)?;
+    if output.trim().is_empty() {
+        anyhow::bail!(
+            "Windows process discovery returned no data; cannot discover Antigravity language servers"
+        );
+    }
+    parse_windows_process_candidates(&output)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn parse_windows_process_candidates(output: &str) -> Result<Vec<ProcessCandidate>> {
+    let value: Value = serde_json::from_str(output.trim())
+        .context("Failed to parse Windows process discovery JSON")?;
+    let items: Vec<&Value> = match &value {
+        Value::Array(values) => values.iter().collect(),
+        Value::Object(_) => vec![&value],
+        Value::Null => Vec::new(),
+        _ => {
+            anyhow::bail!("Windows process discovery JSON must be an object or array");
+        }
+    };
+    let mut candidates = Vec::new();
+
+    for item in items {
+        let Some(pid) = item
+            .get("ProcessId")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            continue;
+        };
+        let ppid = item
+            .get("ParentProcessId")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0);
+        let command = item
+            .get("CommandLine")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !is_antigravity_process(command) {
+            continue;
+        }
+
+        let executable_path = item.get("ExecutablePath").and_then(Value::as_str);
+        if !windows_candidate_executable_ok(executable_path, command) {
+            continue;
+        }
+
+        let Some(csrf_token) = extract_csrf_token(command) else {
+            continue;
+        };
+        let declared_port = extract_declared_port(command);
+
+        candidates.push(ProcessCandidate {
+            pid,
+            ppid,
+            declared_port,
+            csrf_token,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .pid
+            .cmp(&left.pid)
+            .then_with(|| right.ppid.cmp(&left.ppid))
+            .then_with(|| right.declared_port.cmp(&left.declared_port))
+    });
+    candidates.dedup_by(|left, right| left.pid == right.pid);
+
+    Ok(candidates)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_candidate_executable_ok(executable_path: Option<&str>, command: &str) -> bool {
+    executable_path
+        .filter(|path| !path.trim().is_empty())
+        .map(executable_path_looks_antigravity)
+        .unwrap_or_else(|| command_line_executable_looks_antigravity(command))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn executable_path_looks_antigravity(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("antigravity") || lower.contains("language_server")
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn command_line_executable_looks_antigravity(command: &str) -> bool {
+    let first = command
+        .trim_start()
+        .strip_prefix('"')
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| command.split_whitespace().next().unwrap_or_default());
+    executable_path_looks_antigravity(first)
+}
+
 fn is_antigravity_process(command: &str) -> bool {
     let lower = command.to_lowercase();
     (lower.contains("language_server")
@@ -874,6 +987,19 @@ fn extract_flag_value(command: &str, flag: &str) -> Option<String> {
 }
 
 fn find_listening_ports(pid: u32) -> Result<Vec<u16>> {
+    #[cfg(target_os = "windows")]
+    {
+        return find_windows_listening_ports(pid);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        find_unix_listening_ports(pid)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_unix_listening_ports(pid: u32) -> Result<Vec<u16>> {
     let pid_str = pid.to_string();
     let mut ports = run_port_query(
         "lsof",
@@ -888,6 +1014,45 @@ fn find_listening_ports(pid: u32) -> Result<Vec<u16>> {
     ports.sort_unstable();
     ports.dedup();
     Ok(ports)
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_listening_ports(pid: u32) -> Result<Vec<u16>> {
+    let output = run_command_required("netstat", &["-ano", "-p", "TCP"])
+        .context("Failed to discover Windows TCP listeners with netstat")?;
+    Ok(parse_windows_netstat_ports(&output, pid))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn parse_windows_netstat_ports(output: &str, pid: u32) -> Vec<u16> {
+    let mut ports = Vec::new();
+    let pid_text = pid.to_string();
+
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        if !parts[0].eq_ignore_ascii_case("TCP") {
+            continue;
+        }
+        if !parts[3].eq_ignore_ascii_case("LISTENING") || parts[4] != pid_text {
+            continue;
+        }
+        if let Some(port) = parse_port_from_windows_address(parts[1]) {
+            ports.push(port);
+        }
+    }
+
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn parse_port_from_windows_address(address: &str) -> Option<u16> {
+    let (_, port) = address.rsplit_once(':')?;
+    port.parse::<u16>().ok()
 }
 
 fn run_port_query(program: &str, warning_label: &str, args: &[&str]) -> Result<Vec<u16>> {
@@ -949,6 +1114,32 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
 }
 
 fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
+    if probe_plain_http_heartbeat(port, csrf_token) {
+        return true;
+    }
+
+    probe_https_heartbeat(port, csrf_token)
+}
+
+fn probe_https_heartbeat(port: u16, csrf_token: &str) -> bool {
+    let connection = AntigravityConnection {
+        pid: 0,
+        port,
+        csrf_token: csrf_token.to_string(),
+        fingerprint: format!("port:{port}"),
+    };
+    let body = serde_json::json!({ "uuid": "00000000-0000-0000-0000-000000000000" });
+    let Ok(response) = https_rpc_request(&connection, "Heartbeat", &body) else {
+        return false;
+    };
+    if !heartbeat_value_looks_well_formed(&response) {
+        return false;
+    }
+
+    true
+}
+
+fn probe_plain_http_heartbeat(port: u16, csrf_token: &str) -> bool {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;
     };
@@ -1007,6 +1198,10 @@ fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
     probe_endpoint_identity(port, csrf_token)
 }
 
+fn heartbeat_value_looks_well_formed(value: &Value) -> bool {
+    value.is_object() || value.is_array()
+}
+
 fn heartbeat_response_looks_well_formed(body: &str) -> bool {
     let trimmed = body.trim_start();
     let json_start = trimmed.find(['{', '[']).map(|idx| &trimmed[idx..]);
@@ -1031,6 +1226,25 @@ fn probe_endpoint_identity(port: u16, csrf_token: &str) -> bool {
 }
 
 fn identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
+    if let Some(body) = plain_http_identity_probe_request(port, csrf_token, method) {
+        return Some(body);
+    }
+
+    https_identity_probe_request(port, csrf_token, method)
+}
+
+fn https_identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
+    let connection = AntigravityConnection {
+        pid: 0,
+        port,
+        csrf_token: csrf_token.to_string(),
+        fingerprint: format!("port:{port}"),
+    };
+    let response = https_rpc_request(&connection, method, &serde_json::json!({})).ok()?;
+    serde_json::to_string(&response).ok()
+}
+
+fn plain_http_identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -1171,10 +1385,7 @@ fn contains_antigravity_marker(value: &Value) -> bool {
 }
 
 fn run_command(program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .with_context(|| format!("Failed to run {} {}", program, args.join(" ")))?;
+    let output = run_command_output(program, args)?;
 
     if !output.status.success() && output.stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1193,6 +1404,52 @@ fn run_command(program: &str, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn run_command_required(program: &str, args: &[&str]) -> Result<String> {
+    let output = run_command_output(program, args)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "{} {} exited with status {}{}",
+            program,
+            args.join(" "),
+            output.status,
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_powershell(script: &str) -> Result<String> {
+    let args = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ];
+    match run_command_required("powershell", &args) {
+        Ok(output) => Ok(output),
+        Err(err) if is_command_not_found(&err) => run_command_required("powershell.exe", &args),
+        Err(err) => Err(err),
+    }
+}
+
+fn run_command_output(program: &str, args: &[&str]) -> Result<std::process::Output> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("Failed to run {} {}", program, args.join(" ")))?;
+    Ok(output)
 }
 
 pub fn list_trajectory_summaries(
@@ -1248,57 +1505,59 @@ fn merge_summary(merged: &mut HashMap<String, TrajectorySummary>, summary: Traje
 }
 
 fn scan_filesystem_session_candidates() -> Result<Vec<SessionCandidate>> {
-    let root = home_dir()?.join(".gemini/antigravity");
-    let brain_dir = root.join("brain");
-    let conversations_dir = root.join("conversations");
     let mut candidates: HashMap<String, SessionCandidate> = HashMap::new();
 
-    if brain_dir.exists() {
-        for entry in fs::read_dir(&brain_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
+    for root in antigravity_data_roots()? {
+        let brain_dir = root.join("brain");
+        let conversations_dir = root.join("conversations");
 
-            let session_id = entry.file_name().to_string_lossy().to_string();
-            if session_id.trim().is_empty() {
-                continue;
-            }
+        if brain_dir.exists() {
+            for entry in fs::read_dir(&brain_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
 
-            let modified = latest_modified_in_dir(&path)?;
-            merge_candidate(
-                &mut candidates,
-                SessionCandidate {
-                    session_id,
-                    last_modified_ms: modified,
-                    artifact_path: None,
-                },
-            );
+                let session_id = entry.file_name().to_string_lossy().to_string();
+                if session_id.trim().is_empty() {
+                    continue;
+                }
+
+                let modified = latest_modified_in_dir(&path)?;
+                merge_candidate(
+                    &mut candidates,
+                    SessionCandidate {
+                        session_id,
+                        last_modified_ms: modified,
+                        artifact_path: None,
+                    },
+                );
+            }
         }
-    }
 
-    if conversations_dir.exists() {
-        for entry in fs::read_dir(&conversations_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("pb") {
-                continue;
+        if conversations_dir.exists() {
+            for entry in fs::read_dir(&conversations_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("pb") {
+                    continue;
+                }
+
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+
+                let modified = file_modified_ms(&path)?;
+                merge_candidate(
+                    &mut candidates,
+                    SessionCandidate {
+                        session_id: stem.to_string(),
+                        last_modified_ms: modified,
+                        artifact_path: None,
+                    },
+                );
             }
-
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-
-            let modified = file_modified_ms(&path)?;
-            merge_candidate(
-                &mut candidates,
-                SessionCandidate {
-                    session_id: stem.to_string(),
-                    last_modified_ms: modified,
-                    artifact_path: None,
-                },
-            );
         }
     }
 
@@ -1434,6 +1693,98 @@ fn fetch_historical_session_artifact(
 }
 
 fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
+    match rpc_request_plain_http(connection, method, body) {
+        Ok(value) => Ok(value),
+        Err(http_err) => https_rpc_request(connection, method, body).with_context(|| {
+            format!(
+                "HTTP RPC failed ({http_err:#}); HTTPS fallback also failed for Antigravity RPC {method}"
+            )
+        }),
+    }
+}
+
+fn https_rpc_request(
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+) -> Result<Value> {
+    antigravity_https_runtime().block_on(async {
+        let url = format!(
+            "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/{}",
+            connection.port, method
+        );
+        let response = antigravity_https_client()
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Connect-Protocol-Version", "1")
+            .header("X-Codeium-Csrf-Token", &connection.csrf_token)
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        let response_body = read_reqwest_response_with_cap(response, MAX_RPC_BODY_BYTES).await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Antigravity HTTPS RPC {} failed with status {}: {}",
+                method,
+                status,
+                response_body
+            );
+        }
+        Ok(serde_json::from_str(&response_body)?)
+    })
+}
+
+fn antigravity_https_runtime() -> &'static tokio::runtime::Runtime {
+    HTTPS_RPC_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create Antigravity HTTPS RPC runtime")
+    })
+}
+
+fn antigravity_https_client() -> &'static reqwest::Client {
+    HTTPS_RPC_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("failed to create Antigravity HTTPS RPC client")
+    })
+}
+
+async fn read_reqwest_response_with_cap(
+    mut response: reqwest::Response,
+    max_body_bytes: usize,
+) -> Result<String> {
+    if let Some(length) = response.content_length() {
+        if length > max_body_bytes as u64 {
+            anyhow::bail!("Antigravity RPC body of {length} bytes exceeds {max_body_bytes} cap");
+        }
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > max_body_bytes {
+            anyhow::bail!(
+                "Antigravity RPC body of {} bytes exceeds {} cap",
+                body.len().saturating_add(chunk.len()),
+                max_body_bytes
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(String::from_utf8(body)?)
+}
+
+fn rpc_request_plain_http(
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+) -> Result<Value> {
     let mut stream = TcpStream::connect(("127.0.0.1", connection.port)).with_context(|| {
         format!(
             "Failed to connect to Antigravity RPC on port {}",
@@ -1990,6 +2341,194 @@ mod tests {
     }
 
     #[test]
+    fn windows_process_candidates_parse_powershell_json() {
+        let output = r#"[
+            {
+                "ProcessId": 4242,
+                "ParentProcessId": 100,
+                "ExecutablePath": "C:\\Users\\me\\AppData\\Local\\Programs\\Antigravity\\language_server.exe",
+                "CommandLine": "\"C:\\Users\\me\\AppData\\Local\\Programs\\Antigravity\\language_server.exe\" --app_data_dir antigravity --extension_server_port=49321 --csrf_token=abcdef0123456789abcdef0123456789"
+            },
+            {
+                "ProcessId": 5000,
+                "ParentProcessId": 100,
+                "ExecutablePath": "C:\\Windows\\System32\\notepad.exe",
+                "CommandLine": "notepad.exe --app_data_dir antigravity --extension_server_port=49322 --csrf_token=abcdef0123456789abcdef0123456789"
+            }
+        ]"#;
+
+        let candidates = parse_windows_process_candidates(output).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].pid, 4242);
+        assert_eq!(candidates[0].ppid, 100);
+        assert_eq!(candidates[0].declared_port, Some(49321));
+        assert_eq!(candidates[0].csrf_token, "abcdef0123456789abcdef0123456789");
+    }
+
+    #[test]
+    fn windows_process_candidates_accept_single_json_object() {
+        let output = r#"{
+            "ProcessId": 4243,
+            "ParentProcessId": 101,
+            "ExecutablePath": null,
+            "CommandLine": "\"C:\\Antigravity\\language_server.exe\" --extension_server_port 49323 --csrf_token abcdef0123456789abcdef0123456789"
+        }"#;
+
+        let candidates = parse_windows_process_candidates(output).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].pid, 4243);
+        assert_eq!(candidates[0].declared_port, Some(49323));
+    }
+
+    #[test]
+    fn windows_netstat_ports_filter_listeners_by_pid() {
+        let output = r#"
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    127.0.0.1:49321        0.0.0.0:0              LISTENING       4242
+  TCP    [::1]:49322            [::]:0                 LISTENING       4242
+  TCP    127.0.0.1:49323        0.0.0.0:0              ESTABLISHED     4242
+  TCP    127.0.0.1:49324        0.0.0.0:0              LISTENING       5000
+"#;
+
+        assert_eq!(
+            parse_windows_netstat_ports(output, 4242),
+            vec![49321, 49322]
+        );
+    }
+
+    #[test]
+    fn windows_parse_port_from_address_ipv4() {
+        assert_eq!(
+            parse_port_from_windows_address("127.0.0.1:49321"),
+            Some(49321)
+        );
+        assert_eq!(parse_port_from_windows_address("0.0.0.0:8080"), Some(8080));
+    }
+
+    #[test]
+    fn windows_parse_port_from_address_ipv6() {
+        assert_eq!(parse_port_from_windows_address("[::1]:49322"), Some(49322));
+        assert_eq!(parse_port_from_windows_address("[::]:0"), Some(0));
+    }
+
+    #[test]
+    fn windows_parse_port_from_address_invalid() {
+        assert_eq!(parse_port_from_windows_address("no-colon"), None);
+        assert_eq!(parse_port_from_windows_address("127.0.0.1:notaport"), None);
+        assert_eq!(parse_port_from_windows_address(""), None);
+    }
+
+    #[test]
+    fn windows_executable_path_looks_antigravity_matches_case_insensitively() {
+        assert!(executable_path_looks_antigravity(
+            r"C:\Users\me\AppData\Local\Programs\Antigravity\language_server.exe"
+        ));
+        assert!(executable_path_looks_antigravity(
+            r"C:\ANTIGRAVITY\LANGUAGE_SERVER.EXE"
+        ));
+        assert!(executable_path_looks_antigravity(
+            r"D:\tools\antigravity\app.exe"
+        ));
+        assert!(executable_path_looks_antigravity(
+            r"C:\path\to\language_server.exe"
+        ));
+    }
+
+    #[test]
+    fn windows_executable_path_rejects_unrelated_programs() {
+        assert!(!executable_path_looks_antigravity(
+            r"C:\Windows\System32\notepad.exe"
+        ));
+        assert!(!executable_path_looks_antigravity(
+            r"C:\Program Files\SomeApp\app.exe"
+        ));
+        assert!(!executable_path_looks_antigravity(""));
+    }
+
+    #[test]
+    fn windows_command_line_executable_extracts_quoted_path() {
+        assert!(command_line_executable_looks_antigravity(
+            r#""C:\Antigravity\language_server.exe" --port=1234"#
+        ));
+        assert!(!command_line_executable_looks_antigravity(
+            r#""C:\Windows\System32\notepad.exe" somefile.txt"#
+        ));
+    }
+
+    #[test]
+    fn windows_command_line_executable_extracts_unquoted_path() {
+        assert!(command_line_executable_looks_antigravity(
+            r"C:\Antigravity\language_server.exe --flag"
+        ));
+        assert!(!command_line_executable_looks_antigravity(
+            r"notepad.exe file.txt"
+        ));
+    }
+
+    #[test]
+    fn windows_candidate_executable_ok_prefers_path_when_available() {
+        assert!(windows_candidate_executable_ok(
+            Some(r"C:\Programs\Antigravity\language_server.exe"),
+            r#"notepad.exe --csrf_token=abc"#
+        ));
+        assert!(!windows_candidate_executable_ok(
+            Some(r"C:\Windows\notepad.exe"),
+            r#""C:\Antigravity\language_server.exe" --flag"#
+        ));
+    }
+
+    #[test]
+    fn windows_candidate_executable_ok_falls_back_to_command_line() {
+        assert!(windows_candidate_executable_ok(
+            None,
+            r#""C:\Antigravity\language_server.exe" --csrf_token=abc"#
+        ));
+        assert!(windows_candidate_executable_ok(
+            Some(""),
+            r#""C:\path\language_server.exe" --flag"#
+        ));
+        assert!(windows_candidate_executable_ok(
+            Some("   "),
+            r#"C:\antigravity\app.exe"#
+        ));
+        assert!(!windows_candidate_executable_ok(
+            None,
+            r"notepad.exe file.txt"
+        ));
+    }
+
+    #[test]
+    fn is_antigravity_process_matches_language_server_variants() {
+        assert!(is_antigravity_process(
+            "language_server.exe --app_data_dir antigravity --port=1234"
+        ));
+        assert!(is_antigravity_process(
+            "/Applications/Antigravity.app/Contents/MacOS/language_server --flag"
+        ));
+        assert!(is_antigravity_process(
+            r"C:\Users\me\AppData\Local\Antigravity\language_server.exe --flag"
+        ));
+    }
+
+    #[test]
+    fn is_antigravity_process_matches_directory_patterns() {
+        assert!(is_antigravity_process(
+            "/home/user/.config/antigravity/server"
+        ));
+        assert!(is_antigravity_process(
+            r"C:\Programs\antigravity\server.exe"
+        ));
+    }
+
+    #[test]
+    fn is_antigravity_process_rejects_unrelated_commands() {
+        assert!(!is_antigravity_process("notepad.exe somefile.txt"));
+        assert!(!is_antigravity_process("language_server --other_app"));
+        assert!(!is_antigravity_process("some_other_gravity_app"));
+        assert!(!is_antigravity_process(""));
+    }
+
+    #[test]
     fn normalize_trajectory_summary_prefers_expected_fields() {
         let value = serde_json::json!({
             "cascadeId": "session-123",
@@ -2080,6 +2619,13 @@ mod tests {
             candidate_probe_ports(&candidate, vec![5555]),
             vec![4242, 5555]
         );
+    }
+
+    #[test]
+    fn antigravity_process_detection_accepts_antigravity_ide_language_server() {
+        assert!(is_antigravity_process(
+            "/opt/antigravity-ide/resources/app/extensions/antigravity/bin/language_server_linux_x64 --csrf_token abc --app_data_dir antigravity-ide"
+        ));
     }
 
     #[test]
@@ -2237,11 +2783,20 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let _env = TestEnvGuard::redirect_to(temp_dir.path());
 
-        let root = temp_dir.path().join(".gemini/antigravity");
-        std::fs::create_dir_all(root.join("brain/session-a")).unwrap();
-        std::fs::create_dir_all(root.join("brain/session-b")).unwrap();
-        std::fs::create_dir_all(root.join("conversations")).unwrap();
-        std::fs::write(root.join("conversations/session-c.pb"), b"pb").unwrap();
+        let legacy_root = temp_dir.path().join(".gemini/antigravity");
+        std::fs::create_dir_all(legacy_root.join("brain/session-a")).unwrap();
+        std::fs::create_dir_all(legacy_root.join("brain/session-b")).unwrap();
+        std::fs::create_dir_all(legacy_root.join("conversations")).unwrap();
+        std::fs::write(legacy_root.join("conversations/session-c.pb"), b"pb").unwrap();
+
+        let ide_root = temp_dir.path().join(".gemini/antigravity-ide");
+        std::fs::create_dir_all(ide_root.join("brain/session-d")).unwrap();
+        std::fs::create_dir_all(ide_root.join("conversations")).unwrap();
+        std::fs::write(ide_root.join("conversations/session-e.pb"), b"pb").unwrap();
+
+        let backup_root = temp_dir.path().join(".gemini/antigravity-backup");
+        std::fs::create_dir_all(backup_root.join("conversations")).unwrap();
+        std::fs::write(backup_root.join("conversations/session-f.pb"), b"pb").unwrap();
 
         let candidates = scan_filesystem_session_candidates().unwrap();
         let ids: Vec<String> = candidates
@@ -2251,6 +2806,9 @@ mod tests {
         assert!(ids.contains(&"session-a".to_string()));
         assert!(ids.contains(&"session-b".to_string()));
         assert!(ids.contains(&"session-c".to_string()));
+        assert!(ids.contains(&"session-d".to_string()));
+        assert!(ids.contains(&"session-e".to_string()));
+        assert!(ids.contains(&"session-f".to_string()));
     }
 
     #[test]

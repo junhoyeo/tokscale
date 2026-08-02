@@ -1,0 +1,11 @@
+[Unit]
+Description=9Router → tokscale gjc bridge (materialize today's usage)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/share/9router-tokscale/9router_tokscale_bridge_gjc.py
+# The bridge script is read-only against the 9Router DB and only writes
+# its own JSONL dir (~/.local/share/9router-tokscale/sessions), so it is
+# safe to run without elevated privileges or network access.
+StandardOutput=journal
+StandardError=journal

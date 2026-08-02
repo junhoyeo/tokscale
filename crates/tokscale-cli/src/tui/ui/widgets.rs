@@ -1,8 +1,12 @@
 use ratatui::prelude::*;
+use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::ClientId;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
+use crate::tui::themes::Theme;
 
 pub fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000_000 {
@@ -18,6 +22,10 @@ pub fn format_tokens_compact(tokens: u64) -> String {
 
 pub fn format_tokens(tokens: u64) -> String {
     format_tokens_compact(tokens)
+}
+
+pub(crate) fn total_tokens_cell(total_tokens: u64, theme: &Theme) -> Cell<'static> {
+    Cell::from(format_tokens(total_tokens)).style(theme.metric_total_style())
 }
 
 pub fn format_tokens_with_commas(n: u64) -> String {
@@ -43,6 +51,16 @@ pub fn format_cost(cost: f64) -> String {
     }
 }
 
+/// Cost per million tokens: useful for comparing model efficiency across sessions.
+/// Returns "—" when there are no tokens to avoid division by zero.
+pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
+    if total_tokens == 0 || !cost.is_finite() || cost < 0.0 {
+        return "\u{2014}".to_string(); // —
+    }
+    let per_m = cost / (total_tokens as f64) * 1_000_000.0;
+    format!("${:.2}", per_m)
+}
+
 /// Cache reuse multiplier: cached reads per full-price input token.
 /// `cache_read / (input + cache_write)` — how many low-cost reads you
 /// got for every token you paid full price (fresh input or cache write).
@@ -59,8 +77,192 @@ pub fn format_cache_hit_rate(cache_read: u64, input: u64, cache_write: u64) -> S
     format!("{:.1}x", ratio)
 }
 
+pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
+    let Some(value) = ms_per_1k_tokens else {
+        return "—".to_string();
+    };
+    if !value.is_finite() || value <= 0.0 {
+        "—".to_string()
+    } else if value >= 1000.0 {
+        format!("{:.1}s", value / 1000.0)
+    } else {
+        format!("{:.0}ms", value)
+    }
+}
+
+pub fn viewport_scrollbar_state(
+    content_len: usize,
+    scroll_offset: usize,
+    viewport_len: usize,
+) -> ScrollbarState {
+    let viewport_len = viewport_len.max(1);
+    ScrollbarState::new(content_len)
+        .position(scrollbar_position(scroll_offset, content_len, viewport_len))
+        .viewport_content_length(viewport_len)
+}
+
+/// Truncate a string to `max_chars` Unicode code points, appending "..." when
+/// truncation occurs. Returns the original string when it fits, and an empty
+/// string when `max_chars` is 0. Shared across all table-style tabs (Daily,
+/// Monthly, Sessions, Models, Agents) so ellipsis behavior stays consistent.
+///
+/// Counts code points, not terminal cells, so a CJK or emoji string it calls
+/// short is twice as wide as the column that asked for it and gets clipped by
+/// the solver with no marker. Every caller passes a column width, so cells are
+/// the unit they all actually want: prefer [`truncate_to_width`] for anything
+/// that can hold a non-ASCII name. Kept as-is only because the Daily, Models
+/// and Agents tables are pinned by golden renders that this commit does not
+/// touch.
+pub fn truncate_text(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else if max_chars <= 3 {
+        s.chars().take(max_chars).collect()
+    } else {
+        let head: String = s.chars().take(max_chars - 3).collect();
+        format!("{}...", head)
+    }
+}
+
+/// Terminal cells `s` occupies, which is the unit ratatui lays tables out in.
+pub fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Longest prefix of `s` that fits in `max_cells` terminal cells. Never splits
+/// a grapheme, so the result can come in one cell short of the budget rather
+/// than one over it.
+pub fn prefix_to_width(s: &str, max_cells: usize) -> &str {
+    let mut used = 0usize;
+    // Grapheme clusters, not chars. A flag is two regional indicators and a
+    // family emoji is a ZWJ sequence, so cutting on a char boundary can leave
+    // half a flag or a dangling ZWJ -- and the width of the pieces does not
+    // add up to the width of the whole, so the cut would not even respect the
+    // budget it was measuring against.
+    for (offset, cluster) in s.grapheme_indices(true) {
+        let w = UnicodeWidthStr::width(cluster);
+        if used + w > max_cells {
+            return &s[..offset];
+        }
+        used += w;
+    }
+    s
+}
+
+/// [`truncate_text`] measured in terminal cells instead of code points: the
+/// result never occupies more than `max_cells`, and carries a "..." whenever
+/// anything was dropped. Use this wherever the text can hold a full-width
+/// grapheme — a session title, a client display name — because those are the
+/// cases where a code-point count and the ratatui solver disagree.
+pub fn truncate_to_width(s: &str, max_cells: usize) -> String {
+    if max_cells == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max_cells {
+        return s.to_string();
+    }
+    if max_cells <= 3 {
+        return prefix_to_width(s, max_cells).to_string();
+    }
+    format!("{}...", prefix_to_width(s, max_cells - 3))
+}
+
+fn scrollbar_position(scroll_offset: usize, content_len: usize, viewport_len: usize) -> usize {
+    let max_scroll = content_len.saturating_sub(viewport_len);
+    if max_scroll == 0 {
+        0
+    } else {
+        ((scroll_offset.min(max_scroll) as u128) * (content_len.saturating_sub(1) as u128)
+            / (max_scroll as u128)) as usize
+    }
+}
+
+pub(crate) fn light_ratio_bar_spans(
+    ratio: f64,
+    width: usize,
+    fill_style: Style,
+    empty_style: Style,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let ratio = ratio.clamp(0.0, 1.0);
+    let scaled = ratio * width as f64;
+    let trace = ratio > 0.0 && ratio < 0.01 && scaled < 1.0;
+    let filled = if ratio > 0.0 && !trace {
+        (scaled.round() as usize).clamp(1, width)
+    } else {
+        0
+    };
+    let empty = width.saturating_sub(filled + usize::from(trace));
+
+    let mut spans = Vec::with_capacity(3);
+    if filled > 0 {
+        spans.push(Span::styled("█".repeat(filled), fill_style));
+    }
+    if trace {
+        spans.push(Span::styled("▏", fill_style));
+    }
+    if empty > 0 {
+        spans.push(Span::styled("·".repeat(empty), empty_style));
+    }
+    spans
+}
+
+pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else if max_chars == 1 {
+        "…".to_string()
+    } else {
+        let head: String = s.chars().take(max_chars - 1).collect();
+        format!("{head}…")
+    }
+}
+
 pub fn get_model_color(model: &str) -> Color {
     get_provider_shade(get_provider_from_model(model), 0)
+}
+
+/// Maps a lowercased provider id to its built-in vendor shade ramp, or `None`
+/// when the provider has no known vendor palette. Kept as the single source of
+/// truth so [`get_provider_shade`] and [`provider_has_palette`] never drift.
+fn known_provider_palette(provider_lower: &str) -> Option<&'static [(u8, u8, u8)]> {
+    let palette: &[(u8, u8, u8)] = match provider_lower {
+        s if s.contains("anthropic") => &ANTHROPIC_SHADES,
+        s if s.contains("openai") => &OPENAI_SHADES,
+        s if s.contains("google") || s.contains("gemini") => &GOOGLE_SHADES,
+        s if s.contains("deepseek") => &DEEPSEEK_SHADES,
+        s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
+        s if s.contains("zai") || s.contains("z_ai") || s.contains("zhipu") => &ZAI_SHADES,
+        s if s.contains("moonshot") || s.contains("kimi") => &MOONSHOT_SHADES,
+        s if s.contains("meta") || s.contains("llama") => &META_SHADES,
+        s if s.contains("cursor") => &CURSOR_SHADES,
+        s if s.contains("sakana") || s.contains("fugu") => &SAKANA_SHADES,
+        _ => return None,
+    };
+    Some(palette)
+}
+
+/// Whether `provider` resolves to a known vendor color — either a built-in
+/// shade ramp or a user `[colors.providers]` override. Gateway providers that
+/// resell other vendors' models (e.g. `github-copilot`, `openrouter`) have no
+/// vendor palette of their own and return `false`, so callers can color by the
+/// model's own vendor instead of the neutral "unknown" gray.
+pub fn provider_has_palette(provider: &str) -> bool {
+    TokscaleConfig::load()
+        .get_provider_color(provider)
+        .is_some()
+        || known_provider_palette(&provider.to_lowercase()).is_some()
 }
 
 /// Returns the shade for a given `(provider, rank)` pair.
@@ -72,16 +274,7 @@ pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
     }
 
     let p = provider.to_lowercase();
-    let palette: &[(u8, u8, u8)] = match p.as_str() {
-        s if s.contains("anthropic") => &ANTHROPIC_SHADES,
-        s if s.contains("openai") => &OPENAI_SHADES,
-        s if s.contains("google") || s.contains("gemini") => &GOOGLE_SHADES,
-        s if s.contains("deepseek") => &DEEPSEEK_SHADES,
-        s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
-        s if s.contains("meta") || s.contains("llama") => &META_SHADES,
-        s if s.contains("cursor") => &CURSOR_SHADES,
-        _ => &UNKNOWN_SHADES,
-    };
+    let palette = known_provider_palette(&p).unwrap_or(&UNKNOWN_SHADES);
 
     let idx = rank.min(palette.len() - 1);
     let (r, g, b) = palette[idx];
@@ -155,6 +348,26 @@ const XAI_SHADES: [(u8, u8, u8); 7] = [
     (251, 221, 129), // #FBDD81
 ];
 
+const ZAI_SHADES: [(u8, u8, u8); 7] = [
+    (168, 85, 247),  // #A855F7
+    (181, 110, 249), // #B56EF9
+    (193, 132, 250), // #C184FA
+    (204, 153, 251), // #CC99FB
+    (214, 172, 252), // #D6ACFC
+    (224, 192, 253), // #E0C0FD
+    (235, 213, 254), // #EBD5FE
+];
+
+const MOONSHOT_SHADES: [(u8, u8, u8); 7] = [
+    (20, 184, 166),  // #14B8A6
+    (35, 197, 178),  // #23C5B2
+    (58, 207, 190),  // #3ACFBE
+    (85, 216, 202),  // #55D8CA
+    (112, 224, 212), // #70E0D4
+    (143, 232, 222), // #8FE8DE
+    (174, 240, 232), // #AEF0E8
+];
+
 const META_SHADES: [(u8, u8, u8); 7] = [
     (99, 102, 241),  // #6366F1
     (122, 125, 243), // #7A7DF3
@@ -175,6 +388,17 @@ const CURSOR_SHADES: [(u8, u8, u8); 7] = [
     (230, 220, 253), // #E6DCFD
 ];
 
+/// Sakana (Fugu) red — the brand's "one red fish leading the school" accent.
+const SAKANA_SHADES: [(u8, u8, u8); 7] = [
+    (219, 43, 31),   // #DB2B1F
+    (223, 66, 56),   // #DF4238
+    (227, 90, 80),   // #E35A50
+    (231, 113, 105), // #E77169
+    (235, 136, 130), // #EB8882
+    (239, 162, 156), // #EFA29C
+    (243, 185, 181), // #F3B9B5
+];
+
 /// Neutral gray ramp for providers that don't match any known palette.
 /// Still produces distinct shades per rank instead of collapsing to white.
 const UNKNOWN_SHADES: [(u8, u8, u8); 7] = [
@@ -187,6 +411,18 @@ const UNKNOWN_SHADES: [(u8, u8, u8); 7] = [
     (244, 244, 244), // #F4F4F4
 ];
 
+fn is_delimited_model_family(model_lower: &str, family: &str) -> bool {
+    model_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| {
+            token == family
+                || token
+                    .strip_prefix(family)
+                    .and_then(|suffix| suffix.chars().next())
+                    .is_some_and(|c| c.is_ascii_digit())
+        })
+}
+
 pub fn get_provider_from_model(model: &str) -> &'static str {
     let model_lower = model.to_lowercase();
 
@@ -194,6 +430,12 @@ pub fn get_provider_from_model(model: &str) -> &'static str {
         || model_lower.contains("sonnet")
         || model_lower.contains("opus")
         || model_lower.contains("haiku")
+        // Match "fable" only as a delimited token (mirrors core's
+        // provider_identity::contains_delimited) so unrelated names like
+        // "unfabled-x" don't get misattributed to Anthropic.
+        || model_lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == "fable")
     {
         "anthropic"
     } else if model_lower.contains("gpt")
@@ -212,6 +454,10 @@ pub fn get_provider_from_model(model: &str) -> &'static str {
         "deepseek"
     } else if model_lower.contains("grok") {
         "xai"
+    } else if is_delimited_model_family(&model_lower, "glm") {
+        "zai"
+    } else if is_delimited_model_family(&model_lower, "kimi") {
+        "moonshotai"
     } else if model_lower.contains("llama") {
         "meta"
     } else if model_lower.contains("mixtral") {
@@ -242,6 +488,10 @@ pub fn get_client_color(client: &str) -> Color {
         "codebuff" => Color::Rgb(124, 58, 237),    // #7C3AED Codebuff brand purple
         "antigravity" => Color::Rgb(99, 102, 241), // #6366F1 Antigravity indigo
         "zed" => Color::Rgb(8, 76, 207),           // #084CCF Zed blue
+        "warp" => Color::Rgb(1, 155, 150),         // #019B96 Warp teal
+        "gjc" => Color::Rgb(220, 38, 38),          // #DC2626 gajae-code red-claw
+        "jcode" => Color::Rgb(245, 158, 11),       // #F59E0B Jcode amber
+        "junie" => Color::Rgb(123, 97, 255),       // #7B61FF Junie violet
         _ => Color::Rgb(136, 136, 136),            // #888888
     }
 }
@@ -266,19 +516,90 @@ pub fn get_provider_display_name(provider: &str) -> String {
     if let Some(name) = config.get_provider_display_name(provider) {
         return name.to_string();
     }
-    match provider.to_lowercase().as_str() {
-        "anthropic" => "Anthropic".to_string(),
+
+    // Merged Models rows store multiple providers as a ", "-joined string
+    // (aggregate_model_usage_entries sorts + dedups + joins). Map EACH segment
+    // independently and rejoin, otherwise a prefix/brand branch below would
+    // match the whole string and silently drop the rest — e.g.
+    // "openai, openrouter" must render "OpenAI, OpenRouter", not just "OpenAI".
+    if provider.contains(", ") {
+        return provider
+            .split(", ")
+            .map(|segment| map_single_provider(segment, config))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+
+    map_single_provider(provider, config)
+}
+
+/// Display name for a SINGLE provider id (no comma-joined lists — the public
+/// `get_provider_display_name` splits those first).
+fn map_single_provider(provider: &str, config: &TokscaleConfig) -> String {
+    if let Some(name) = config.get_provider_display_name(provider) {
+        return name.to_string();
+    }
+    let lower = provider.to_lowercase();
+    match lower.as_str() {
+        "anthropic" => return "Anthropic".to_string(),
+        "google" => return "Google".to_string(),
+        "cursor" => return "Cursor".to_string(),
+        "deepseek" => return "DeepSeek".to_string(),
+        "xai" => return "xAI".to_string(),
+        "meta" => return "Meta".to_string(),
+        "mistral" => return "Mistral".to_string(),
+        "cohere" => return "Cohere".to_string(),
+        "opencode" => return "OpenCode".to_string(),
+        "openrouter" => return "OpenRouter".to_string(),
+        "orcarouter" => return "OrcaRouter".to_string(),
+        // `canonical_provider` rewrites `google-vertex` → `google_vertex`, so
+        // accept both spellings here.
+        "google-vertex" | "google_vertex" => return "Google Vertex".to_string(),
+        _ => {}
+    }
+
+    // Brand families: any provider id that starts with these stems collapses to
+    // the brand name. Covers `openai`, `openai-codex`, `kimi`, `kimi-code`,
+    // `kimi-for-coding`, etc. without enumerating every variant.
+    if lower.starts_with("openai") {
+        return "OpenAI".to_string();
+    }
+    if lower.starts_with("kimi") {
+        return "Kimi".to_string();
+    }
+    if lower.starts_with("github-cop") || lower.contains("copilot") {
+        return "GitHub Copilot".to_string();
+    }
+
+    // Smart fallback: split on `-`, `_`, and whitespace, title-case each word,
+    // and map known acronyms/brands per word. So unknown multi-word providers
+    // like `google-vertex` → "Google Vertex" and `some-new-provider` →
+    // "Some New Provider".
+    smart_titlecase(provider)
+}
+
+/// Title-cases a provider/brand identifier word-by-word, splitting on `-`, `_`,
+/// and whitespace. Per-word acronym/brand overrides (e.g. `ai` → "AI",
+/// `gpt` → "GPT") win over plain capitalization. Empty input yields an empty
+/// string; runs of separators are collapsed.
+fn smart_titlecase(s: &str) -> String {
+    s.split(['-', '_', ' '])
+        .filter(|word| !word.is_empty())
+        .map(titlecase_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn titlecase_word(word: &str) -> String {
+    match word.to_lowercase().as_str() {
+        "ai" => "AI".to_string(),
+        "gpt" => "GPT".to_string(),
         "openai" => "OpenAI".to_string(),
-        "google" => "Google".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "deepseek" => "DeepSeek".to_string(),
         "xai" => "xAI".to_string(),
-        "meta" => "Meta".to_string(),
-        "mistral" => "Mistral".to_string(),
-        "cohere" => "Cohere".to_string(),
-        "opencode" => "OpenCode".to_string(),
-        s if s.starts_with("github-cop") || s.contains("copilot") => "GitHub Copilot".to_string(),
-        _ => capitalize_first(provider),
+        "vertex" => "Vertex".to_string(),
+        "llm" => "LLM".to_string(),
+        "api" => "API".to_string(),
+        _ => capitalize_first(word),
     }
 }
 
@@ -293,6 +614,133 @@ fn capitalize_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_to_width_never_exceeds_its_budget() {
+        // The case `truncate_text` gets wrong: 8 code points, 16 cells.
+        let cjk = "세션제목한글로";
+        assert_eq!(truncate_text(cjk, 10), cjk, "code points say it fits");
+        assert!(
+            display_width(&truncate_to_width(cjk, 10)) <= 10,
+            "cells say it does not"
+        );
+        for budget in 0..=20 {
+            for s in [cjk, "ascii-session-title", "🦞 OpenClaw", ""] {
+                assert!(
+                    display_width(&truncate_to_width(s, budget)) <= budget,
+                    "{s:?} overflowed a {budget}-cell budget"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_to_width_marks_what_it_dropped() {
+        assert_eq!(truncate_to_width("abcdefghij", 10), "abcdefghij");
+        assert_eq!(truncate_to_width("abcdefghijk", 10), "abcdefg...");
+        assert_eq!(truncate_to_width("abcdefghijk", 3), "abc");
+        assert_eq!(truncate_to_width("abcdefghijk", 0), "");
+        // 7 cells of budget, 3 for the marker: two syllables (4 cells) fit and
+        // the third would overshoot, so the result is one cell short, not one
+        // cell over.
+        assert_eq!(truncate_to_width("세션제목", 7), "세션...");
+    }
+
+    #[test]
+    fn prefix_to_width_never_splits_a_grapheme() {
+        assert_eq!(prefix_to_width("세션제목", 5), "세션");
+        assert_eq!(prefix_to_width("세션제목", 6), "세션제");
+        assert_eq!(prefix_to_width("abc", 10), "abc");
+        assert_eq!(prefix_to_width("abc", 0), "");
+
+        // The cases the name actually promises. Hangul is one char per
+        // grapheme, so the assertions above hold under char iteration too and
+        // never exercised the claim. These are multi-char graphemes: a flag is
+        // two regional indicators and a family is a ZWJ sequence, so char-wise
+        // truncation yields half a flag or a dangling ZWJ.
+        let flag = "\u{1F1F0}\u{1F1F7}"; // KR
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+
+        for (label, s) in [("flag", flag), ("family", family)] {
+            assert_eq!(
+                prefix_to_width(s, 1),
+                "",
+                "{label}: a 2-cell grapheme must not be halved to fit 1 cell"
+            );
+            assert_eq!(prefix_to_width(s, 2), s, "{label}: fits whole at 2 cells");
+            // 'a' and 'b' take 2 of the 3 cells, leaving 1 — not enough for the
+            // 2-cell cluster, which must therefore be dropped whole rather than
+            // contributing a leading component.
+            assert_eq!(
+                prefix_to_width(&format!("ab{s}"), 3),
+                "ab",
+                "{label}: a cluster that does not fit is dropped, not split"
+            );
+        }
+    }
+
+    #[test]
+    fn display_width_counts_cells_not_code_points() {
+        assert_eq!(display_width("OpenCode"), 8);
+        assert_eq!(display_width("🦞 OpenClaw"), 11);
+        assert_eq!("🦞 OpenClaw".chars().count(), 10, "the disagreement");
+    }
+
+    #[test]
+    fn scrollbar_position_maps_bottom_offset_to_last_position() {
+        assert_eq!(scrollbar_position(15, 20, 5), 19);
+    }
+
+    #[test]
+    fn scrollbar_position_keeps_top_at_zero() {
+        assert_eq!(scrollbar_position(0, 20, 5), 0);
+    }
+
+    #[test]
+    fn scrollbar_position_clamps_overscroll_to_bottom() {
+        assert_eq!(scrollbar_position(999, 20, 5), 19);
+    }
+
+    #[test]
+    fn scrollbar_position_single_page_stays_at_zero() {
+        assert_eq!(scrollbar_position(0, 5, 10), 0);
+    }
+
+    #[test]
+    fn scrollbar_position_uses_wide_math_for_large_lengths() {
+        // With usize math, max_scroll * (content_len - 1) would overflow and
+        // panic (debug) or wrap (release). These would fail either way.
+        let content_len = usize::MAX;
+        let viewport_len = 2;
+        let max_scroll = content_len - viewport_len; // usize::MAX - 2
+
+        // Top of the scroll range maps to position 0.
+        assert_eq!(scrollbar_position(0, content_len, viewport_len), 0);
+        // Bottom of the scroll range maps to the last position:
+        // max_scroll * (content_len - 1) / max_scroll == content_len - 1.
+        assert_eq!(
+            scrollbar_position(max_scroll, content_len, viewport_len),
+            usize::MAX - 1
+        );
+        // Overscroll past max_scroll clamps to the same last position.
+        assert_eq!(
+            scrollbar_position(usize::MAX, content_len, viewport_len),
+            usize::MAX - 1
+        );
+    }
+
+    #[test]
+    fn viewport_scrollbar_state_handles_zero_viewport() {
+        // The helper clamps viewport_len to 1, so a zero-height viewport must
+        // not panic and must still produce a usable state.
+        let state = viewport_scrollbar_state(20, 5, 0);
+        assert_eq!(
+            state,
+            ScrollbarState::new(20)
+                .position(5)
+                .viewport_content_length(1)
+        );
+    }
 
     #[test]
     fn shade_from_base_rank_0_equals_base() {
@@ -359,6 +807,154 @@ mod tests {
     }
 
     #[test]
+    fn fable_is_recognized_as_anthropic() {
+        assert_eq!(get_provider_from_model("fable-5"), "anthropic");
+        assert_eq!(get_provider_from_model("claude-fable-5"), "anthropic");
+        assert_eq!(get_provider_from_model("claude-fable-5[1m]"), "anthropic");
+    }
+
+    #[test]
+    fn glm_and_kimi_use_their_vendor_color_ramps() {
+        assert_eq!(get_provider_from_model("glm-5.2"), "zai");
+        assert_eq!(get_provider_from_model("kimi-k2.7-code"), "moonshotai");
+        assert!(provider_has_palette("zai"));
+        assert!(provider_has_palette("moonshotai"));
+        assert_eq!(get_provider_from_model("glmish-1"), "unknown");
+        assert_eq!(get_provider_from_model("kimiko-1"), "unknown");
+    }
+
+    #[test]
+    fn fable_gets_same_base_color_as_opus() {
+        // Fable is a flagship Claude model and must render in the Anthropic
+        // palette at the same base level as Opus — not the gray UNKNOWN shade.
+        let fable = get_model_color("fable-5");
+        let opus = get_model_color("claude-opus-4-1");
+        assert_eq!(fable, opus);
+        assert_eq!(fable, get_model_color("claude-fable-5"));
+        // Don't assert default-palette inequality against an unknown model:
+        // user color overrides from ~/.tokscale could make the two colors
+        // equal at runtime, which would flake this test. Assert provider
+        // classification instead, which is independent of config palettes.
+        assert_eq!(get_provider_from_model("some-unknown-model"), "unknown");
+    }
+
+    #[test]
+    fn fable_substring_does_not_misattribute_to_anthropic() {
+        // Regression: raw substring matching for "fable" would misclassify
+        // unrelated model names. Matching must be on delimited tokens only,
+        // consistent with core provider_identity inference.
+        assert_eq!(get_provider_from_model("unfabled-model"), "unknown");
+        assert_eq!(get_provider_from_model("fableton-1"), "unknown");
+        // But genuine fable tokens still resolve to Anthropic.
+        assert_eq!(get_provider_from_model("fable-5"), "anthropic");
+        assert_eq!(get_provider_from_model("claude-fable-5[1m]"), "anthropic");
+    }
+
+    #[test]
+    fn provider_display_name_target_cases() {
+        // The four cases the user reported as rendering wrong.
+        assert_eq!(get_provider_display_name("openai"), "OpenAI");
+        assert_eq!(get_provider_display_name("kimi-for-coding"), "Kimi");
+        assert_eq!(get_provider_display_name("google-vertex"), "Google Vertex");
+        assert_eq!(get_provider_display_name("opencode"), "OpenCode");
+    }
+
+    #[test]
+    fn provider_display_name_openai_family() {
+        // Any openai* id collapses to the brand name.
+        assert_eq!(get_provider_display_name("openai"), "OpenAI");
+        assert_eq!(get_provider_display_name("openai-codex"), "OpenAI");
+        assert_eq!(get_provider_display_name("OpenAI"), "OpenAI");
+    }
+
+    #[test]
+    fn provider_display_name_kimi_family() {
+        assert_eq!(get_provider_display_name("kimi"), "Kimi");
+        assert_eq!(get_provider_display_name("kimi-code"), "Kimi");
+        assert_eq!(get_provider_display_name("kimi-for-coding"), "Kimi");
+    }
+
+    #[test]
+    fn provider_display_name_google_vertex_both_spellings() {
+        // `canonical_provider` rewrites the hyphen to an underscore, so both
+        // spellings must map to the same clean label.
+        assert_eq!(get_provider_display_name("google-vertex"), "Google Vertex");
+        assert_eq!(get_provider_display_name("google_vertex"), "Google Vertex");
+    }
+
+    #[test]
+    fn provider_display_name_smart_fallback_multiword() {
+        // Unknown multi-word providers get split + title-cased instead of the
+        // old naive capitalize-first ("Some-new-provider").
+        assert_eq!(
+            get_provider_display_name("some-new-provider"),
+            "Some New Provider"
+        );
+        assert_eq!(
+            get_provider_display_name("some_new_provider"),
+            "Some New Provider"
+        );
+    }
+
+    #[test]
+    fn provider_display_name_known_regressions() {
+        assert_eq!(get_provider_display_name("anthropic"), "Anthropic");
+        assert_eq!(get_provider_display_name("google"), "Google");
+        assert_eq!(get_provider_display_name("xai"), "xAI");
+        assert_eq!(get_provider_display_name("deepseek"), "DeepSeek");
+        assert_eq!(get_provider_display_name("meta"), "Meta");
+        assert_eq!(get_provider_display_name("mistral"), "Mistral");
+        assert_eq!(get_provider_display_name("cohere"), "Cohere");
+        assert_eq!(get_provider_display_name("cursor"), "Cursor");
+        assert_eq!(get_provider_display_name("orcarouter"), "OrcaRouter");
+        assert_eq!(
+            get_provider_display_name("github-copilot"),
+            "GitHub Copilot"
+        );
+        assert_eq!(get_provider_display_name("copilot"), "GitHub Copilot");
+    }
+
+    #[test]
+    fn provider_display_name_acronym_words_in_fallback() {
+        // Per-word acronym map applies inside the smart fallback.
+        assert_eq!(get_provider_display_name("acme-ai"), "Acme AI");
+        assert_eq!(get_provider_display_name("foo-api"), "Foo API");
+    }
+
+    #[test]
+    fn provider_display_name_merged_list_maps_each_segment() {
+        // Merged Models rows store providers as a ", "-joined string
+        // (aggregate_model_usage_entries). Each segment must be mapped
+        // independently — a prefix/contains-family branch on the whole string
+        // would otherwise silently drop the rest. Regression guard for that.
+        assert_eq!(
+            get_provider_display_name("openai, openrouter"),
+            "OpenAI, OpenRouter"
+        );
+        assert_eq!(
+            get_provider_display_name("kimi, anthropic"),
+            "Kimi, Anthropic"
+        );
+        // A `copilot` segment must not swallow its siblings via the contains()
+        // branch.
+        assert_eq!(
+            get_provider_display_name("anthropic, copilot"),
+            "Anthropic, GitHub Copilot"
+        );
+        assert_eq!(
+            get_provider_display_name("anthropic, openai"),
+            "Anthropic, OpenAI"
+        );
+    }
+
+    #[test]
+    fn provider_display_name_empty_is_empty() {
+        assert_eq!(get_provider_display_name(""), "");
+        // A string of only separators collapses to empty rather than panicking.
+        assert_eq!(get_provider_display_name("--_-"), "");
+    }
+
+    #[test]
     fn get_provider_shade_fuzzy_matching() {
         assert_eq!(
             get_provider_shade("test-anthropic", 0),
@@ -380,5 +976,21 @@ mod tests {
             get_provider_shade("meta-llama-endpoint", 0),
             get_provider_shade("meta", 0)
         );
+    }
+
+    #[test]
+    fn provider_has_palette_flags_only_known_vendors() {
+        // Known vendors (and fuzzy substrings of them) have their own ramp.
+        assert!(provider_has_palette("anthropic"));
+        assert!(provider_has_palette("openai"));
+        assert!(provider_has_palette("openrouter-gemini-prod"));
+        assert!(provider_has_palette("zai"));
+        assert!(provider_has_palette("moonshotai"));
+        // Gateway/reseller providers do not — callers must color by the
+        // model's own vendor instead of the neutral "unknown" gray.
+        assert!(!provider_has_palette("github-copilot"));
+        assert!(!provider_has_palette("openrouter"));
+        assert!(!provider_has_palette("unknown"));
+        assert!(!provider_has_palette(""));
     }
 }

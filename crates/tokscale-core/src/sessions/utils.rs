@@ -31,13 +31,31 @@ pub(crate) fn parse_timestamp_value(value: &Value) -> Option<i64> {
     if numeric >= 1_000_000_000_000 {
         Some(numeric)
     } else {
-        Some(numeric * 1000)
+        // Seconds -> milliseconds: saturating so a garbage/huge timestamp
+        // cannot overflow i64 during the conversion.
+        Some(numeric.saturating_mul(1000))
     }
 }
 
 pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
         return Some(dt.timestamp_millis());
+    }
+
+    // Timezone-less ISO-8601 datetimes (e.g. "2026-06-16T12:00:00",
+    // "2026-06-16 12:00:00", optional fractional seconds) carry no offset, so
+    // `parse_from_rfc3339` rejects them. Interpret them as UTC rather than
+    // collapsing to the file mtime, which would scatter the message into the
+    // wrong day/month bucket.
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return Some(naive.and_utc().timestamp_millis());
+        }
     }
 
     if let Ok(numeric) = value.parse::<i64>() {
@@ -47,7 +65,9 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
         if numeric >= 1_000_000_000_000 {
             return Some(numeric);
         }
-        return Some(numeric * 1000);
+        // Seconds -> milliseconds: saturating so a garbage/huge timestamp
+        // cannot overflow i64 during the conversion.
+        return Some(numeric.saturating_mul(1000));
     }
 
     None
@@ -78,6 +98,26 @@ pub(crate) fn read_file_or_none(path: &Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
+/// Back-calculate a start anchor from a recorded end timestamp and an elapsed
+/// duration: `end - duration`.
+///
+/// Several session sources only record the timestamp at which a call/turn
+/// *finished*, plus its elapsed duration. Anchoring the message at that end
+/// timestamp directly would make `sessionize()`'s
+/// `[timestamp, timestamp + duration_ms]` span project forward past the
+/// actual completion into phantom idle time (see #890), so callers
+/// back-calculate the start instead. That subtraction can itself produce a
+/// non-positive result when `duration` exceeds `end` (e.g. a corrupt or
+/// clock-skewed duration value) — `sessionize()` silently drops any message
+/// with `timestamp <= 0`, so this guards against that by falling back to the
+/// unadjusted `end` timestamp when the back-calculated candidate would not
+/// be positive.
+pub(crate) fn back_anchor_timestamp(end: i64, duration: i64) -> i64 {
+    end.checked_sub(duration)
+        .filter(|candidate| *candidate > 0)
+        .unwrap_or(end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +145,28 @@ mod tests {
     fn parse_timestamp_str_rejects_zero_and_negative_strings() {
         assert!(parse_timestamp_str("0").is_none());
         assert!(parse_timestamp_str("-5").is_none());
+    }
+
+    #[test]
+    fn parse_timestamp_str_accepts_timezone_less_datetimes_as_utc() {
+        // "2026-06-16T12:00:00" UTC == 1781611200000 ms.
+        assert_eq!(
+            parse_timestamp_str("2026-06-16T12:00:00"),
+            Some(1_781_611_200_000)
+        );
+        // Space separator and fractional seconds variants.
+        assert_eq!(
+            parse_timestamp_str("2026-06-16 12:00:00"),
+            Some(1_781_611_200_000)
+        );
+        assert_eq!(
+            parse_timestamp_str("2026-06-16T12:00:00.500"),
+            Some(1_781_611_200_500)
+        );
+        // Offset-bearing input still goes through the rfc3339 path unchanged.
+        assert_eq!(
+            parse_timestamp_str("2026-06-16T12:00:00Z"),
+            Some(1_781_611_200_000)
+        );
     }
 }

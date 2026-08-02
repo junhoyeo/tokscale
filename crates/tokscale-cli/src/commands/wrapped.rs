@@ -169,14 +169,19 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .cloned()
         .collect();
     let include_cursor = clients.iter().any(|src| src == ClientId::Cursor.as_str());
+    let explicit_cursor = options
+        .clients
+        .as_ref()
+        .is_some_and(|sources| sources.iter().any(|src| src == ClientId::Cursor.as_str()));
 
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
 
     let has_cursor_cache = cursor::has_cursor_usage_cache();
+    let cursor_logged_in = cursor::is_cursor_logged_in();
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
-    if include_cursor && cursor::is_cursor_logged_in() {
+    if include_cursor && cursor_logged_in {
         cursor_sync_result = Some(cursor::sync_cursor_cache().await);
     }
 
@@ -202,6 +207,11 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     } else {
         false
     };
+    if let Some(warning) =
+        cursor_setup_warning_for_wrapped(explicit_cursor, include_cursor_in_graph, cursor_logged_in)
+    {
+        eprintln!("{}", format!("  Warning: {warning}").yellow());
+    }
 
     let graph_clients = if include_cursor && !include_cursor_in_graph {
         clients
@@ -261,10 +271,14 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                         tokens: 0,
                     });
             model_entry.cost += client_contrib.cost;
-            model_entry.tokens += client_contrib.tokens.input
-                + client_contrib.tokens.output
-                + client_contrib.tokens.cache_read
-                + client_contrib.tokens.cache_write;
+            model_entry.tokens = model_entry
+                .tokens
+                .saturating_add(crate::saturating_token_total(
+                    client_contrib.tokens.input,
+                    client_contrib.tokens.output,
+                    client_contrib.tokens.cache_read,
+                    client_contrib.tokens.cache_write,
+                ));
 
             let client_name = client_display_name(&client_contrib.client)
                 .unwrap_or(client_contrib.client.as_str())
@@ -278,10 +292,15 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                         tokens: 0,
                     });
             client_entry.cost += client_contrib.cost;
-            client_entry.tokens += client_contrib.tokens.input
-                + client_contrib.tokens.output
-                + client_contrib.tokens.cache_read
-                + client_contrib.tokens.cache_write;
+            client_entry.tokens =
+                client_entry
+                    .tokens
+                    .saturating_add(crate::saturating_token_total(
+                        client_contrib.tokens.input,
+                        client_contrib.tokens.output,
+                        client_contrib.tokens.cache_read,
+                        client_contrib.tokens.cache_write,
+                    ));
         }
     }
 
@@ -356,11 +375,14 @@ fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentE
         };
 
         let normalized = tokscale_core::sessions::normalize_opencode_agent_name(agent);
-        let tokens = message.input
-            + message.output
-            + message.cache_read
-            + message.cache_write
-            + message.reasoning;
+        // saturating: per-message token fields from a corrupt source can be
+        // clamped to i64::MAX (see tokscale-core), so plain `+` can overflow.
+        let tokens = message
+            .input
+            .saturating_add(message.output)
+            .saturating_add(message.cache_read)
+            .saturating_add(message.cache_write)
+            .saturating_add(message.reasoning);
 
         let entry = agent_map
             .entry(normalized.clone())
@@ -369,7 +391,7 @@ fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentE
                 tokens: 0,
                 messages: 0,
             });
-        entry.tokens += tokens;
+        entry.tokens = entry.tokens.saturating_add(tokens);
         entry.messages += 1;
     }
 
@@ -1441,7 +1463,14 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "crush" => Some("Crush"),
         "goose" => Some("Goose"),
         "antigravity" => Some("Antigravity"),
+        "antigravity-cli" => Some("Antigravity CLI"),
         "zed" => Some("Zed Agent"),
+        "warp" => Some("Warp"),
+        "cline" => Some("Cline"),
+        "gjc" => Some("Gajae-Code"),
+        "jcode" => Some("Jcode"),
+        "junie" => Some("Junie"),
+        "augment" => Some("Augment Code"),
         "synthetic" => Some("Synthetic"),
         _ => None,
     }
@@ -1477,12 +1506,15 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Goose" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
         ),
-        "Antigravity" => Some(
+        "Antigravity" | "Antigravity CLI" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
         ),
         "Zed Agent" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
         ),
+        "Jcode" => Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png"),
+        "Junie" => Some("https://github.com/JetBrains.png"),
+        "Augment Code" => Some("https://github.com/augmentcode.png"),
         "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
     }
@@ -2435,6 +2467,16 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_jcode() {
+        assert_eq!(client_display_name("jcode"), Some("Jcode"));
+    }
+
+    #[test]
+    fn test_client_display_name_junie() {
+        assert_eq!(client_display_name("junie"), Some("Junie"));
+    }
+
+    #[test]
     fn test_client_display_name_unknown() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
@@ -2606,6 +2648,22 @@ mod tests {
             Some(
                 "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp"
             )
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_jcode() {
+        assert_eq!(
+            client_logo_url("Jcode"),
+            Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-jcode.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_junie() {
+        assert_eq!(
+            client_logo_url("Junie"),
+            Some("https://github.com/JetBrains.png")
         );
     }
 
@@ -2979,5 +3037,50 @@ mod tests {
         ];
         let (_current, longest) = calculate_streaks(&dates);
         assert_eq!(longest, 4);
+    }
+}
+
+fn cursor_setup_warning_for_wrapped(
+    explicit_cursor: bool,
+    include_cursor_in_graph: bool,
+    cursor_logged_in: bool,
+) -> Option<String> {
+    if !explicit_cursor || include_cursor_in_graph {
+        return None;
+    }
+
+    let action = if cursor_logged_in {
+        "run `tokscale cursor sync --json`"
+    } else {
+        "run `tokscale cursor login` (auto-detects Cursor desktop when signed in) and `tokscale cursor sync --json`"
+    };
+
+    Some(format!(
+        "Cursor usage requires Tokscale's Cursor API cache at `~/.config/tokscale/cursor-cache/usage*.csv`; {action}. Tokscale does not parse local `~/.cursor` session data."
+    ))
+}
+
+#[cfg(test)]
+mod cursor_setup_warning_tests {
+    use super::cursor_setup_warning_for_wrapped;
+
+    #[test]
+    fn wrapped_cursor_warning_suggests_login_when_not_authenticated() {
+        let warning = cursor_setup_warning_for_wrapped(true, false, false).unwrap();
+        assert!(warning.contains("tokscale cursor login"));
+        assert!(warning.contains("tokscale cursor sync --json"));
+    }
+
+    #[test]
+    fn wrapped_cursor_warning_suggests_sync_only_when_authenticated() {
+        let warning = cursor_setup_warning_for_wrapped(true, false, true).unwrap();
+        assert!(!warning.contains("tokscale cursor login"));
+        assert!(warning.contains("tokscale cursor sync --json"));
+    }
+
+    #[test]
+    fn wrapped_cursor_warning_is_suppressed_without_explicit_missing_cursor() {
+        assert!(cursor_setup_warning_for_wrapped(false, false, false).is_none());
+        assert!(cursor_setup_warning_for_wrapped(true, true, false).is_none());
     }
 }

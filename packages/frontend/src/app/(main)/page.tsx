@@ -1,7 +1,18 @@
+import type { Metadata } from "next";
 import { Navigation } from "@/components/layout/Navigation";
 import { LandingPage } from "@/components/landing/LandingPage";
 import { getStargazersCount } from "@/lib/github";
 import { getLeaderboardData, type LeaderboardData } from "@/lib/leaderboard/getLeaderboard";
+import { homeUrl } from "@/lib/seo/urls";
+
+// Declared per-page rather than on the root layout: `alternates.canonical` is
+// inherited by every nested route, so putting it in app/layout.tsx would point
+// every page on the site at the home page.
+export const metadata: Metadata = {
+  alternates: {
+    canonical: homeUrl(),
+  },
+};
 
 function createEmptyLeaderboardData(sortBy: "tokens" | "cost"): LeaderboardData {
   return {
@@ -17,7 +28,6 @@ function createEmptyLeaderboardData(sortBy: "tokens" | "cost"): LeaderboardData 
     stats: {
       totalTokens: 0,
       totalCost: 0,
-      totalSubmissions: null,
       uniqueUsers: 0,
     },
     period: "all",

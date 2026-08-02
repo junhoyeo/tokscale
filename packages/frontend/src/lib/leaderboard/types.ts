@@ -1,6 +1,4 @@
-import type { SubmissionFreshness } from "@/lib/submissionFreshness";
-
-export type Period = "all" | "month" | "week";
+export type Period = "all" | "month" | "last-month" | "week" | "custom";
 export type SortBy = "tokens" | "cost";
 
 export interface LeaderboardUser {
@@ -11,9 +9,6 @@ export interface LeaderboardUser {
   avatarUrl: string | null;
   totalTokens: number;
   totalCost: number;
-  submissionCount: number | null;
-  lastSubmission: string;
-  submissionFreshness: SubmissionFreshness | null;
 }
 
 export interface LeaderboardData {
@@ -29,7 +24,6 @@ export interface LeaderboardData {
   stats: {
     totalTokens: number;
     totalCost: number;
-    totalSubmissions: number | null;
     uniqueUsers: number;
   };
   period: Period;

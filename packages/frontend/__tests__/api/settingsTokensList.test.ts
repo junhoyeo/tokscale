@@ -2,15 +2,18 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
+  const getSessionFromHeader = vi.fn();
   const listPersonalTokens = vi.fn();
   const issuePersonalToken = vi.fn();
 
   return {
     getSession,
+    getSessionFromHeader,
     listPersonalTokens,
     issuePersonalToken,
     reset() {
       getSession.mockReset();
+      getSessionFromHeader.mockReset();
       listPersonalTokens.mockReset();
       issuePersonalToken.mockReset();
     },
@@ -19,6 +22,7 @@ const mockState = vi.hoisted(() => {
 
 vi.mock("@/lib/auth/session", () => ({
   getSession: mockState.getSession,
+  getSessionFromHeader: mockState.getSessionFromHeader,
 }));
 
 vi.mock("@/lib/auth/personalTokens", () => ({
@@ -41,6 +45,17 @@ beforeEach(() => {
   mockState.reset();
 });
 
+function createPostRequest(
+  body: unknown,
+  headers: Record<string, string> = { Origin: "http://localhost:3000" }
+) {
+  return new Request("http://localhost:3000/api/settings/tokens", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
 describe("GET /api/settings/tokens", () => {
   it("returns 401 when user is not authenticated", async () => {
     mockState.getSession.mockResolvedValue(null);
@@ -57,7 +72,6 @@ describe("GET /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.listPersonalTokens.mockResolvedValue([]);
 
@@ -74,7 +88,6 @@ describe("GET /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.listPersonalTokens.mockResolvedValue([
       {
@@ -130,7 +143,6 @@ describe("GET /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.listPersonalTokens.mockRejectedValue(
       new Error("Database error")
@@ -147,15 +159,44 @@ describe("POST /api/settings/tokens", () => {
   it("returns 401 when user is not authenticated", async () => {
     mockState.getSession.mockResolvedValue(null);
 
+    const response = await POST(createPostRequest({ name: "CI" }));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for cookie auth when Origin is missing", async () => {
+    mockState.getSession.mockResolvedValue({
+      id: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+    });
+
+    const response = await POST(createPostRequest({ name: "CI" }, {}));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getSession).not.toHaveBeenCalled();
+    expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for cookie auth when Origin is not allowed", async () => {
+    mockState.getSession.mockResolvedValue({
+      id: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+    });
+
     const response = await POST(
-      new Request("http://localhost:3000/api/settings/tokens", {
-        method: "POST",
-        body: JSON.stringify({ name: "CI" }),
-      })
+      createPostRequest({ name: "CI" }, { Origin: "https://attacker.example" })
     );
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getSession).not.toHaveBeenCalled();
     expect(mockState.issuePersonalToken).not.toHaveBeenCalled();
   });
 
@@ -165,7 +206,6 @@ describe("POST /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.issuePersonalToken.mockResolvedValue({
       id: "token-1",
@@ -177,12 +217,7 @@ describe("POST /api/settings/tokens", () => {
       expiresAt: null,
     });
 
-    const response = await POST(
-      new Request("http://localhost:3000/api/settings/tokens", {
-        method: "POST",
-        body: JSON.stringify({ name: "  GitHub Actions  " }),
-      })
-    );
+    const response = await POST(createPostRequest({ name: "  GitHub Actions  " }));
 
     expect(response.status).toBe(201);
     expect(mockState.issuePersonalToken).toHaveBeenCalledWith({
@@ -207,7 +242,6 @@ describe("POST /api/settings/tokens", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: null,
-      isAdmin: false,
     });
     mockState.issuePersonalToken.mockResolvedValue({
       id: "token-1",
@@ -219,12 +253,7 @@ describe("POST /api/settings/tokens", () => {
       expiresAt: null,
     });
 
-    const response = await POST(
-      new Request("http://localhost:3000/api/settings/tokens", {
-        method: "POST",
-        body: JSON.stringify({ name: "   " }),
-      })
-    );
+    const response = await POST(createPostRequest({ name: "   " }));
 
     expect(response.status).toBe(201);
     expect(mockState.issuePersonalToken).toHaveBeenCalledWith({

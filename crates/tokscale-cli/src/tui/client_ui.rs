@@ -98,6 +98,84 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         display_name: "Kiro",
         hotkey: 'i',
     },
+    ClientUi {
+        display_name: "Trae",
+        hotkey: 'y',
+    },
+    ClientUi {
+        display_name: "Warp",
+        hotkey: 'v',
+    },
+    ClientUi {
+        display_name: "Cline",
+        hotkey: 'n',
+    },
+    ClientUi {
+        display_name: "Gajae-Code",
+        hotkey: 'g',
+    },
+    ClientUi {
+        display_name: "Grok Build",
+        hotkey: 'u',
+    },
+    ClientUi {
+        display_name: "Jcode",
+        hotkey: 'j',
+    },
+    ClientUi {
+        display_name: "Command Code",
+        hotkey: 'd',
+    },
+    ClientUi {
+        display_name: "MiMo Code",
+        hotkey: 'm',
+    },
+    ClientUi {
+        display_name: "Antigravity CLI",
+        hotkey: 'f',
+    },
+    ClientUi {
+        display_name: "Junie",
+        hotkey: 'p',
+    },
+    ClientUi {
+        display_name: "ZCode",
+        hotkey: 'q',
+    },
+    ClientUi {
+        display_name: "OpenCodeReview",
+        hotkey: 'O',
+    },
+    ClientUi {
+        display_name: "CodeBuddy",
+        hotkey: 'C',
+    },
+    ClientUi {
+        display_name: "WorkBuddy",
+        hotkey: 'B',
+    },
+    ClientUi {
+        display_name: "Devin CLI",
+        hotkey: 'D',
+    },
+    ClientUi {
+        display_name: "Devin Desktop",
+        hotkey: 'E',
+    },
+    // Short form on purpose: these names feed the sessions view's Client column
+    // through `get_client_display_name`, and the full "Senpi (OmO Native)" used
+    // in the README, the frontend, and `capitalize_client` is 18 cells against a
+    // 15-cell budget. See `client_column_fits_every_registered_client`.
+    ClientUi {
+        display_name: "Senpi",
+        hotkey: 'S',
+    },
+    // Short form: full "Augment Code" fits the client column, but keep parity
+    // with other product-branded names used in capitalize_client.
+    ClientUi {
+        display_name: "Augment",
+        hotkey: 'A',
+    },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

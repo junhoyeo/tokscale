@@ -1,78 +1,58 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo, memo, useCallback } from "react";
+import Link from "next/link";
 import { useRouter } from "nextjs-toploader/app";
+import { useSearchParams, usePathname } from "next/navigation";
 import styled from "styled-components";
 import { CopyIcon, CheckIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
-import { TabBar } from "@/components/TabBar";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
+import {
+  MetricItem,
+  MetricLabel,
+  MetricStrip,
+  MetricValue,
+  MobileRankingList,
+  MobileRankingRow,
+  SegmentedControl,
+} from "@/components/leaderboard/RankingUI";
+import { getLeaderboardPeriodLabel } from "@/components/leaderboard/presentation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { useSettings } from "@/lib/useSettings";
-import { Switch } from "@/components/Switch";
+import {
+  resolveSortByParam,
+  type LeaderboardSortBy,
+} from "@/lib/leaderboard/constants";
+import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
+import type { LeaderboardData, LeaderboardUser, Period } from "@/lib/leaderboard/types";
 
 const Section = styled.div`
-  margin-bottom: 40px;
-`;
-
-const Title = styled.h1`
-  font-size: 30px;
-  font-weight: bold;
-  margin-bottom: 8px;
-  color: var(--color-fg-default);
-`;
-
-const Description = styled.p`
-  margin-bottom: 24px;
-  color: var(--color-fg-muted);
-`;
-
-const StatsGrid = styled.div`
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  
-  @media (min-width: 480px) {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
+  gap: 10px;
+  margin-bottom: 24px;
+`;
+
+const ScopeLabel = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
   }
-  
-  @media (min-width: 768px) {
-    display: flex;
-  }
-`;
-
-const StatCard = styled.div`
-  flex: 1;
-  border-radius: 12px;
-  border: 1px solid var(--color-border-default);
-  padding: 12px;
-  background-color: var(--color-bg-default);
-`;
-
-const StatLabel = styled.p`
-  font-size: 12px;
-  color: var(--color-fg-muted);
-`;
-
-const StatValue = styled.p`
-  font-size: 16px;
-  font-weight: bold;
-  color: var(--color-fg-default);
-`;
-
-const StatValuePrimary = styled(StatValue)`
-  color: var(--color-primary);
 `;
 
 const TabSection = styled.div`
-  margin-bottom: 24px;
+  width: 100%;
+  max-width: 100%;
+  margin-bottom: 14px;
+  overflow: hidden;
 `;
 
 const TableContainer = styled.div`
-  border-radius: 16px;
-  border: 1px solid var(--color-border-default);
-  overflow: hidden;
-  background-color: var(--color-bg-default);
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
 `;
 
 const EmptyState = styled.div`
@@ -110,21 +90,19 @@ const CodeSnippet = styled.code`
 `;
 
 const TableWrapper = styled.div`
-  overflow-x: auto;
+  display: none;
+
+  @media (min-width: 720px) {
+    display: block;
+  }
 `;
 
 const Table = styled.table`
   width: 100%;
-  min-width: 500px;
-  
-  @media (max-width: 560px) {
-    min-width: unset;
-  }
 `;
 
 const TableHead = styled.thead`
-  border-bottom: 1px solid var(--color-border-default);
-  background-color: var(--color-bg-elevated);
+  border-bottom: 1px solid var(--service-border);
 `;
 
 const TableHeaderCell = styled.th`
@@ -135,16 +113,8 @@ const TableHeaderCell = styled.th`
   text-align: left;
   font-size: 12px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-fg-muted);
-  
-  @media (max-width: 480px) {
-    padding-left: 8px;
-    padding-right: 8px;
-    padding-top: 8px;
-    padding-bottom: 8px;
-  }
+  color: var(--service-text-muted);
+  white-space: nowrap;
   
   @media (min-width: 640px) {
     padding-left: 24px;
@@ -163,12 +133,6 @@ const TableHeaderCell = styled.th`
     }
   }
   
-  &.hidden-cost-mobile {
-    @media (max-width: 560px) {
-      display: none;
-    }
-  }
-  
   &.w-24 {
     width: 96px;
   }
@@ -177,10 +141,6 @@ const TableHeaderCell = styled.th`
     width: 1%;
     white-space: nowrap;
     
-    @media (max-width: 560px) {
-      padding-left: 8px;
-      padding-right: 4px;
-    }
   }
 `;
 
@@ -188,20 +148,22 @@ const TableBody = styled.tbody``;
 
 const TableRow = styled.tr`
   cursor: pointer;
-  transition: all 0.2s;
   position: relative;
   
   &:hover {
-    background-color: rgba(20, 26, 33, 0.6);
+    background: var(--service-surface);
+  }
+
+  &:not(:last-child) td {
+    border-bottom: 1px solid var(--service-border);
   }
 
   &[data-current-user="true"] {
-    background: rgba(0, 115, 255, 0.05);
-    box-shadow: inset 4px 0 0 #0073FF, inset 0 0 0 2px #0073FF;
-    border-radius: 4px;
+    background: var(--service-accent-soft);
+    box-shadow: inset 2px 0 0 var(--service-accent);
     
     &:hover {
-      background-color: rgba(0, 115, 255, 0.12);
+      background: var(--service-accent-soft);
     }
   }
 `;
@@ -214,16 +176,9 @@ const TableCell = styled.td`
   white-space: nowrap;
   vertical-align: middle;
   
-  @media (max-width: 480px) {
-    padding-left: 8px;
-    padding-right: 8px;
-    padding-top: 8px;
-    padding-bottom: 8px;
-  }
-  
   @media (min-width: 640px) {
-    padding-left: 24px;
-    padding-right: 24px;
+    padding-left: 18px;
+    padding-right: 18px;
   }
   
   &.text-right {
@@ -238,12 +193,6 @@ const TableCell = styled.td`
     }
   }
   
-  &.hidden-cost-mobile {
-    @media (max-width: 560px) {
-      display: none;
-    }
-  }
-  
   &.w-24 {
     width: 96px;
   }
@@ -252,48 +201,42 @@ const TableCell = styled.td`
     width: 1%;
     white-space: nowrap;
     
-    @media (max-width: 560px) {
-      padding-left: 8px;
-      padding-right: 4px;
-    }
   }
 `;
 
 const RankBadge = styled.span`
-  font-size: 16px;
-  font-weight: bold;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   
-  &[data-rank="1"] { color: #EAB308; }
-  &[data-rank="2"] { color: #9CA3AF; }
-  &[data-rank="3"] { color: #D97706; }
-  
-  @media (max-width: 480px) {
-    font-size: 14px;
-  }
-  
-  @media (min-width: 640px) {
-    font-size: 18px;
-  }
+  &[data-rank="1"] { color: #f4c95d; }
+  &[data-rank="2"] { color: #c4ccda; }
+  &[data-rank="3"] { color: #d99a68; }
 `;
 
-const UserContainer = styled.div`
+const UserContainer = styled(Link)`
   display: flex;
   align-items: center;
   gap: 8px;
-  
-  @media (max-width: 480px) {
-    gap: 6px;
-    
-    img {
-      width: 32px !important;
-      height: 32px !important;
-    }
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 3px;
   }
-  
-  @media (min-width: 640px) {
-    gap: 12px;
-  }
+`;
+
+const DesktopAvatar = styled.img`
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  object-fit: cover;
+  outline: 1px solid var(--service-border);
+  outline-offset: -1px;
 `;
 
 const UserInfo = styled.div`
@@ -302,67 +245,50 @@ const UserInfo = styled.div`
 
 const UserDisplayName = styled.p`
   font-weight: 500;
-  font-size: 14px;
+  font-size: 0.875rem;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 120px;
-  color: var(--color-fg-default);
-  
-  @media (max-width: 480px) {
-    max-width: 80px;
-    font-size: 13px;
-  }
+  color: var(--service-text);
   
   @media (min-width: 640px) {
-    font-size: 16px;
+    font-size: 0.9375rem;
     max-width: none;
   }
 `;
 
 const Username = styled.p`
-  font-size: 12px;
+  font-size: 0.75rem;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 120px;
-  color: var(--color-fg-muted);
-  
-  @media (max-width: 480px) {
-    max-width: 80px;
-    font-size: 11px;
-  }
+  color: var(--service-text-muted);
   
   @media (min-width: 640px) {
-    font-size: 14px;
+    font-size: 0.8125rem;
     max-width: none;
   }
 `;
 
 const StatSpan = styled.span`
   font-weight: 500;
-  font-size: 14px;
-  color: var(--color-fg-default);
+  font-size: 0.875rem;
+  color: var(--service-text);
+  font-variant-numeric: tabular-nums;
   
   @media (min-width: 640px) {
-    font-size: 16px;
+    font-size: 0.9375rem;
   }
 `;
 
 const TokenValue = styled.span`
   font-weight: 500;
-  font-size: 14px;
-  color: var(--color-primary);
-  transition: color 0.12s ease;
-  
-  @media (max-width: 480px) {
-    font-size: 13px;
-  }
+  font-size: 0.875rem;
+  color: var(--service-accent-hover);
+  font-variant-numeric: tabular-nums;
   
   @media (min-width: 640px) {
-    font-size: 16px;
-  }
-  
-  ${TableRow}:hover & {
-    color: #0073FF;
+    font-size: 0.9375rem;
   }
 `;
 
@@ -397,14 +323,11 @@ const CostValue = styled.span`
   font-weight: 400;
   font-size: 12px;
   color: var(--color-fg-muted);
+  font-variant-numeric: tabular-nums;
   
   @media (min-width: 561px) {
     display: none;
   }
-`;
-
-const SubmitCount = styled.span`
-  color: var(--color-fg-muted);
 `;
 
 const PaginationContainer = styled.div`
@@ -441,26 +364,25 @@ const PaginationText = styled.p`
 
 const CTASection = styled.div`
   margin-top: 32px;
-  padding: 24px;
-  border-radius: 16px;
-  border: 1px solid var(--color-border-default);
-  background-color: var(--color-bg-default);
+  padding-top: 24px;
+  border-top: 1px solid var(--service-border);
 `;
 
 const CTATitle = styled.h2`
   font-size: 18px;
   font-weight: 600;
   margin-bottom: 12px;
-  color: var(--color-fg-default);
+  color: var(--service-text);
 `;
 
 const CTADescription = styled.p`
   margin-bottom: 16px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const CodeBlock = styled.div`
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 8px;
   font-family: monospace;
@@ -468,6 +390,8 @@ const CodeBlock = styled.div`
 `;
 
 const CodeLine = styled.div`
+  width: 100%;
+  min-width: 0;
   padding: 12px;
   border-radius: 8px;
   display: flex;
@@ -475,7 +399,9 @@ const CodeLine = styled.div`
   font-size: 16px;
   font-weight: 500;
   letter-spacing: -0.8px;
-  background-color: var(--color-bg-subtle);
+  border: 1px solid var(--service-border);
+  background: var(--service-surface);
+  overflow: hidden;
 
   * {
     font-family: "Inconsolata", monospace !important;
@@ -483,11 +409,13 @@ const CodeLine = styled.div`
 `;
 
 const CommandPrompt = styled.span`
+  flex: 0 0 auto;
   color: #4B6486;
   margin-right: 8px;
 `;
 
 const CommandPrefix = styled.span`
+  flex: 0 0 auto;
   color: #FFF;
   &::after {
     content: " ";
@@ -496,6 +424,7 @@ const CommandPrefix = styled.span`
 `;
 
 const CommandName = styled.span`
+  flex: 0 0 auto;
   background: linear-gradient(90deg, #0CF 0%, #0073FF 100%);
   background-clip: text;
   -webkit-background-clip: text;
@@ -503,7 +432,12 @@ const CommandName = styled.span`
 `;
 
 const CommandArg = styled.span`
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
   color: #FFF;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   &::before {
     content: " ";
     white-space: pre;
@@ -538,12 +472,19 @@ const CurrentUserCard = styled.div`
   margin-bottom: 24px;
   padding: 16px;
   border-radius: 12px;
-  border: 2px solid #0073FF;
-  background: rgba(0, 115, 255, 0.05);
+  border: 1px solid var(--service-accent);
+  background: var(--service-accent-soft);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--service-accent-soft);
+    border-color: var(--service-accent);
+    opacity: 0.9;
+  }
 
   @media (max-width: 640px) {
     flex-direction: column;
@@ -560,6 +501,16 @@ const CurrentUserInfo = styled.div`
   min-width: 0;
 `;
 
+const CurrentUserAvatar = styled.img`
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  object-fit: cover;
+  outline: 1px solid var(--service-border);
+  outline-offset: -1px;
+`;
+
 const CurrentUserDetails = styled.div`
   min-width: 0;
   flex: 1;
@@ -568,7 +519,7 @@ const CurrentUserDetails = styled.div`
 const CurrentUserName = styled.p`
   font-weight: 600;
   font-size: 16px;
-  color: var(--color-fg-default);
+  color: var(--service-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -576,7 +527,7 @@ const CurrentUserName = styled.p`
 
 const CurrentUserUsername = styled.p`
   font-size: 14px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -602,23 +553,23 @@ const CurrentUserStat = styled.div`
 
 const CurrentUserStatLabel = styled.p`
   font-size: 12px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
   margin-bottom: 4px;
 `;
 
 const CurrentUserStatValue = styled.p`
   font-size: 16px;
   font-weight: 600;
-  color: #0073FF;
+  color: var(--service-accent-hover);
 `;
 
 const ErrorBanner = styled.div`
   margin-bottom: 24px;
   padding: 12px 16px;
   border-radius: 8px;
-  border: 1px solid #F85149;
+  border: 1px solid rgba(248, 81, 73, 0.55);
   background: rgba(248, 81, 73, 0.1);
-  color: #F85149;
+  color: #ff8c85;
   font-size: 14px;
   display: flex;
   align-items: center;
@@ -626,9 +577,13 @@ const ErrorBanner = styled.div`
 `;
 
 const SortLabel = styled.span`
-  font-size: 12px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
   font-weight: 500;
+
+  @media (max-width: 640px) {
+    font-size: 1rem;
+  }
 `;
 
 const SearchSortRow = styled.div`
@@ -636,7 +591,7 @@ const SearchSortRow = styled.div`
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 
   @media (max-width: 560px) {
     flex-direction: column;
@@ -647,7 +602,7 @@ const SearchSortRow = styled.div`
 const SearchInputWrapper = styled.div`
   position: relative;
   flex: 1;
-  max-width: 320px;
+  max-width: 360px;
 
   @media (max-width: 560px) {
     max-width: none;
@@ -659,7 +614,7 @@ const SearchInputIcon = styled.span`
   left: 12px;
   top: 50%;
   transform: translateY(-50%);
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
   pointer-events: none;
   display: flex;
   align-items: center;
@@ -667,22 +622,28 @@ const SearchInputIcon = styled.span`
 
 const SearchInput = styled.input`
   width: 100%;
-  padding: 8px 36px 8px 36px;
+  min-height: 36px;
+  padding: 0 36px;
   border-radius: 8px;
-  border: 1px solid var(--color-border-default);
-  background-color: var(--color-bg-subtle);
-  color: var(--color-fg-default);
-  font-size: 14px;
+  border: 1px solid var(--service-border-strong);
+  background: var(--service-surface);
+  color: var(--service-text);
+  font-size: 0.875rem;
   outline: none;
-  transition: border-color 0.15s ease;
 
   &::placeholder {
-    color: var(--color-fg-muted);
+    color: var(--service-text-muted);
   }
 
-  &:focus {
-    border-color: #0073FF;
-    box-shadow: 0 0 0 3px rgba(0, 115, 255, 0.15);
+  &:focus-visible {
+    border-color: var(--service-focus);
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
   }
 `;
 
@@ -697,13 +658,11 @@ const ClearSearchButton = styled.button`
   padding: 4px;
   border: none;
   background: transparent;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
   cursor: pointer;
   border-radius: 4px;
-  transition: color 0.15s ease;
-
   &:hover {
-    color: var(--color-fg-default);
+    color: var(--service-text);
   }
 `;
 
@@ -711,7 +670,83 @@ const SortToggleInner = styled.div`
   display: flex;
   align-items: center;
   gap: 12px;
-  flex-shrink: 0;
+  flex: 0 0 auto;
+
+  @media (max-width: 560px) {
+    justify-content: space-between;
+  }
+`;
+
+const DateRangeRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+`;
+
+const DateInput = styled.input`
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--service-border-strong);
+  background: var(--service-surface);
+  color: var(--service-text);
+  font-size: 0.875rem;
+  outline: none;
+  min-width: 140px;
+
+  &:focus-visible {
+    border-color: var(--service-focus);
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  &::-webkit-calendar-picker-indicator {
+    filter: invert(0.7);
+    cursor: pointer;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
+`;
+
+const DateSeparator = styled.span`
+  font-size: 14px;
+  color: var(--service-text-muted);
+`;
+
+const DateApplyButton = styled.button`
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--service-accent);
+  background: var(--service-accent);
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 500;
+
+  &:hover {
+    border-color: var(--service-accent-hover);
+    background: var(--service-accent-hover);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+    font-size: 1rem;
+  }
 `;
 
 const HoverTooltip = styled.span`
@@ -796,44 +831,10 @@ const PaginationPages = styled.div`
   }
 `;
 
-export type Period = "all" | "month" | "week";
-
-export interface LeaderboardUser {
-  rank: number;
-  userId: string;
-  username: string;
-  displayName: string | null;
-  avatarUrl: string | null;
-  totalTokens: number;
-  totalCost: number;
-  submissionCount: number | null;
-  lastSubmission: string;
-}
-
-export interface LeaderboardData {
-  users: LeaderboardUser[];
-  pagination: {
-    page: number;
-    limit: number;
-    totalUsers: number;
-    totalPages: number;
-    hasNext: boolean;
-    hasPrev: boolean;
-  };
-  stats: {
-    totalTokens: number;
-    totalCost: number;
-    totalSubmissions: number | null;
-    uniqueUsers: number;
-  };
-  period: Period;
-  sortBy?: 'tokens' | 'cost';
-}
-
 interface LeaderboardClientProps {
   initialData: LeaderboardData;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
-  initialSortBy: 'tokens' | 'cost';
+  initialSortBy: LeaderboardSortBy;
   initialUserRank: LeaderboardUser | null;
 }
 
@@ -851,16 +852,12 @@ function isValidLeaderboardData(data: unknown): data is LeaderboardData {
 interface LeaderboardRowProps {
   user: LeaderboardUser;
   isCurrentUser: boolean;
-  isLastRow: boolean;
-  showSubmissionCount: boolean;
   onRowClick: (username: string) => void;
 }
 
 const LeaderboardRow = memo(function LeaderboardRow({
   user,
   isCurrentUser,
-  isLastRow,
-  showSubmissionCount,
   onRowClick,
 }: LeaderboardRowProps) {
   const formattedTokens = useMemo(() => user.totalTokens.toLocaleString('en-US'), [user.totalTokens]);
@@ -870,7 +867,6 @@ const LeaderboardRow = memo(function LeaderboardRow({
     <TableRow
       onClick={() => onRowClick(user.username)}
       data-current-user={isCurrentUser}
-      style={isLastRow ? undefined : { borderBottom: "1px solid var(--color-border-default)" }}
     >
       <TableCell className="rank-cell">
         <RankBadge data-rank={user.rank <= 3 ? user.rank : undefined}>
@@ -878,13 +874,14 @@ const LeaderboardRow = memo(function LeaderboardRow({
         </RankBadge>
       </TableCell>
       <TableCell>
-        <UserContainer>
-          <img
+        <UserContainer
+          href={`/u/${user.username}`}
+          onClick={(event) => event.stopPropagation()}
+          aria-current={isCurrentUser ? "true" : undefined}
+        >
+          <DesktopAvatar
             src={user.avatarUrl || `https://github.com/${user.username}.png`}
-            alt={user.username}
-            width={40}
-            height={40}
-            style={{ borderRadius: "50%", objectFit: "cover", flexShrink: 0, boxShadow: "0 0 0 1px rgba(255, 255, 255, 0.1)" }}
+            alt=""
           />
           <UserInfo>
             <UserDisplayName>
@@ -912,56 +909,146 @@ const LeaderboardRow = memo(function LeaderboardRow({
           </CostValue>
         </CombinedValueContainer>
       </TableCell>
-      {showSubmissionCount && (
-        <TableCell className="text-right hidden-mobile w-24">
-          <SubmitCount>{user.submissionCount ?? "—"}</SubmitCount>
-        </TableCell>
-      )}
     </TableRow>
   );
 });
 
+function LeaderboardMobileRow({
+  user,
+  isCurrentUser,
+  sortBy,
+}: {
+  user: LeaderboardUser;
+  isCurrentUser: boolean;
+  sortBy: LeaderboardSortBy;
+}) {
+  const primary = sortBy === "cost"
+    ? { label: "Cost", value: formatCurrency(user.totalCost) }
+    : { label: "Tokens", value: formatNumber(user.totalTokens) };
+  const secondary = sortBy === "cost"
+    ? `${formatNumber(user.totalTokens)} tokens`
+    : formatCurrency(user.totalCost);
+
+  return (
+    <MobileRankingRow
+      rank={user.rank}
+      href={`/u/${user.username}`}
+      avatarUrl={user.avatarUrl}
+      username={user.username}
+      displayName={user.displayName || user.username}
+      primaryLabel={primary.label}
+      primaryValue={primary.value}
+      meta={secondary}
+      isCurrentUser={isCurrentUser}
+    />
+  );
+}
+
+const VALID_PERIODS: Period[] = ["all", "month", "last-month", "week", "custom"];
+
+function parsePeriodParam(value: string | null): Period | null {
+  if (!value) return null;
+  return VALID_PERIODS.includes(value as Period) ? (value as Period) : null;
+}
+
 export default function LeaderboardClient({ initialData, currentUser, initialSortBy, initialUserRank }: LeaderboardClientProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+
+  const urlPeriod = parsePeriodParam(searchParams.get("period"));
+  const urlPage = searchParams.get("page") ? Math.max(1, Number(searchParams.get("page")) || 1) : null;
+  const sortByParam = searchParams.get("sortBy");
+  const urlSortBy = resolveSortByParam(sortByParam);
+  const urlFrom = searchParams.get("from") || "";
+  const urlTo = searchParams.get("to") || "";
+  const urlSearch = searchParams.get("search")?.trim() || "";
+  const initialCustomDateRange = parseCustomDateRange(urlPeriod === "custom" ? urlFrom : null, urlPeriod === "custom" ? urlTo : null);
+
   const [data, setData] = useState<LeaderboardData>(initialData);
   const [error, setError] = useState<string | null>(null);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  // Server/client divergence note: when ?period=custom&from=BAD&to=BAD is
+  // requested, the server falls back to period="all" (see page.tsx) while the
+  // client keeps period="custom" from the URL. This is intentionally safe
+  // because the client will not fire a fetch until the user applies a valid
+  // date range (isCustomWithoutDates guard), so no mismatched data is shown.
   const [period, setPeriod] = useState<Period>(initialData.period);
-  const [page, setPage] = useState(initialData.pagination.page);
+  const [page, setPage] = useState(urlPage || initialData.pagination.page);
   const [currentUserRank, setCurrentUserRank] = useState<LeaderboardUser | null>(initialUserRank);
   const [currentUserRankError, setCurrentUserRankError] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [searchQuery, setSearchQuery] = useState(urlSearch);
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch);
   const [retryToken, setRetryToken] = useState(0);
+  const [customFrom, setCustomFrom] = useState(initialCustomDateRange?.from || "");
+  const [customTo, setCustomTo] = useState(initialCustomDateRange?.to || "");
+  const [appliedFrom, setAppliedFrom] = useState(initialCustomDateRange?.from || "");
+  const [appliedTo, setAppliedTo] = useState(initialCustomDateRange?.to || "");
   const [resolvedRequest, setResolvedRequest] = useState({
     period: initialData.period,
     page: initialData.pagination.page,
     sortBy: initialSortBy,
-    search: "",
+    search: urlSearch,
     retryToken: 0,
+    customFrom: initialCustomDateRange?.from || "",
+    customTo: initialCustomDateRange?.to || "",
   });
 
   const { leaderboardSortBy, setLeaderboardSort, mounted } = useSettings();
 
-  const effectiveSortBy = mounted ? leaderboardSortBy : initialSortBy;
+  // Precedence for the active sort column:
+  //   1. URL `?sortBy=` on first paint wins (preserves shareable links), but
+  //   2. the moment the user clicks a SortOption, their choice takes over and
+  //      stays sticky from the persisted setting (`leaderboardSortBy`).
+  // `urlSortOverride` is cleared on user clicks; do not remove that state reset
+  // when refactoring or the URL param will silently override every click.
+  const [urlSortOverride, setUrlSortOverride] = useState<LeaderboardSortBy | null>(urlSortBy);
+  const effectiveSortBy = urlSortOverride
+    ? urlSortOverride
+    : (mounted ? leaderboardSortBy : initialSortBy);
   const requestedPage = data.pagination.totalPages > 0
     ? Math.min(page, data.pagination.totalPages)
     : page;
-  const isLoading =
+  const isCustomWithoutDates = period === "custom" && (!appliedFrom || !appliedTo);
+  const isLoading = !isCustomWithoutDates && (
     period !== resolvedRequest.period
     || requestedPage !== resolvedRequest.page
     || effectiveSortBy !== resolvedRequest.sortBy
     || debouncedSearch !== resolvedRequest.search
-    || retryToken !== resolvedRequest.retryToken;
+    || retryToken !== resolvedRequest.retryToken
+    || (period === "custom" && (appliedFrom !== resolvedRequest.customFrom || appliedTo !== resolvedRequest.customTo))
+  );
 
   const isFirstRankFetch = useRef(true);
+  const isFirstUrlSync = useRef(true);
 
-  // Debounce search input — skip setPage(1) on initial mount with empty query
+  useEffect(() => {
+    if (isFirstUrlSync.current) {
+      isFirstUrlSync.current = false;
+      return;
+    }
+    const params = new URLSearchParams();
+    // Preserve ?view= when it's present (e.g. view=users navigated explicitly)
+    const currentView = searchParams.get("view");
+    if (currentView) params.set("view", currentView);
+    if (period !== "all") params.set("period", period);
+    if (requestedPage > 1) params.set("page", String(requestedPage));
+    if (effectiveSortBy !== "tokens") params.set("sortBy", effectiveSortBy);
+    if (period === "custom" && appliedFrom) params.set("from", appliedFrom);
+    if (period === "custom" && appliedTo) params.set("to", appliedTo);
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    const qs = params.toString();
+    const url = qs ? `${pathname}?${qs}` : pathname;
+    window.history.replaceState(null, "", url);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period, requestedPage, effectiveSortBy, appliedFrom, appliedTo, pathname, debouncedSearch]);
+
+  // Debounce search input so URL/search sync updates after typing stops.
   const isSearchMounted = useRef(false);
   useEffect(() => {
     if (!isSearchMounted.current) {
       isSearchMounted.current = true;
-      if (!searchQuery) return;
+      return;
     }
     const timer = setTimeout(() => {
       setDebouncedSearch(searchQuery);
@@ -982,7 +1069,8 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
     const abortController = new AbortController();
 
-    fetch(`/api/leaderboard/user/${currentUser.username}?period=${period}&sortBy=${effectiveSortBy}`, {
+    const customParams = period === "custom" ? `&from=${appliedFrom}&to=${appliedTo}` : "";
+    fetch(`/api/leaderboard/user/${currentUser.username}?period=${period}&sortBy=${effectiveSortBy}${customParams}`, {
       signal: abortController.signal,
     })
       .then((res) => {
@@ -1001,18 +1089,23 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       });
 
     return () => abortController.abort();
-  }, [currentUser, period, effectiveSortBy]);
+  }, [currentUser, period, effectiveSortBy, appliedFrom, appliedTo]);
 
   const fetchData = useCallback((
     targetPeriod: Period,
     targetPage: number,
-    targetSortBy: "tokens" | "cost",
+    targetSortBy: LeaderboardSortBy,
     targetSearch: string,
     targetRetryToken: number,
     signal?: AbortSignal,
+    targetCustomFrom?: string,
+    targetCustomTo?: string,
   ) => {
     const searchParam = targetSearch ? `&search=${encodeURIComponent(targetSearch)}` : "";
-    fetch(`/api/leaderboard?period=${targetPeriod}&page=${targetPage}&limit=50&sortBy=${targetSortBy}${searchParam}`, { signal })
+    const customParams = targetPeriod === "custom" && targetCustomFrom && targetCustomTo
+      ? `&from=${targetCustomFrom}&to=${targetCustomTo}`
+      : "";
+    fetch(`/api/leaderboard?period=${targetPeriod}&page=${targetPage}&limit=50&sortBy=${targetSortBy}${searchParam}${customParams}`, { signal })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -1029,6 +1122,8 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           sortBy: targetSortBy,
           search: targetSearch,
           retryToken: targetRetryToken,
+          customFrom: targetCustomFrom || "",
+          customTo: targetCustomTo || "",
         });
       })
       .catch((err) => {
@@ -1040,6 +1135,8 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             sortBy: targetSortBy,
             search: targetSearch,
             retryToken: targetRetryToken,
+            customFrom: targetCustomFrom || "",
+            customTo: targetCustomTo || "",
           });
         }
       });
@@ -1050,13 +1147,16 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       return;
     }
 
+    if (period === "custom" && (!appliedFrom || !appliedTo)) {
+      return;
+    }
+
     const abortController = new AbortController();
-    fetchData(period, requestedPage, effectiveSortBy, debouncedSearch, retryToken, abortController.signal);
+    fetchData(period, requestedPage, effectiveSortBy, debouncedSearch, retryToken, abortController.signal, appliedFrom, appliedTo);
     return () => abortController.abort();
-  }, [debouncedSearch, effectiveSortBy, fetchData, isLoading, period, requestedPage, retryToken]);
+  }, [appliedFrom, appliedTo, debouncedSearch, effectiveSortBy, fetchData, isLoading, period, requestedPage, retryToken]);
 
   const sortedUsers = data.users || [];
-  const showSubmissionCount = period === "all";
 
   const handleCopyCommand = (command: string) => {
     navigator.clipboard.writeText(command);
@@ -1071,49 +1171,63 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   return (
     <>
       <Section>
-        <Title>Leaderboard</Title>
-        <Description>See who&apos;s using the most tokens</Description>
+        <ScopeLabel>
+          {getLeaderboardPeriodLabel(period, appliedFrom, appliedTo)} aggregate
+        </ScopeLabel>
 
-        <StatsGrid>
-          <StatCard>
-            <StatLabel>Users</StatLabel>
-            <StatValue>{data.stats.uniqueUsers}</StatValue>
-          </StatCard>
-          <StatCard>
-            <StatLabel>Total Tokens</StatLabel>
-            <StatValuePrimary>
+        <MetricStrip>
+          <MetricItem>
+            <MetricLabel>Ranked users</MetricLabel>
+            <MetricValue>{data.stats.uniqueUsers.toLocaleString("en-US")}</MetricValue>
+          </MetricItem>
+          <MetricItem>
+            <MetricLabel>Tokens</MetricLabel>
+            <MetricValue
+              $accent
+              aria-label={`Tokens ${data.stats.totalTokens.toLocaleString("en-US")}`}
+              title={data.stats.totalTokens.toLocaleString("en-US")}
+            >
               <HoverTooltip data-tooltip={data.stats.totalTokens.toLocaleString('en-US')}>
                 {formatNumber(data.stats.totalTokens)}
               </HoverTooltip>
-            </StatValuePrimary>
-          </StatCard>
-          <StatCard>
-            <StatLabel>Total Cost</StatLabel>
-            <StatValue>
+            </MetricValue>
+          </MetricItem>
+          <MetricItem>
+            <MetricLabel>Cost</MetricLabel>
+            <MetricValue
+              aria-label={`Cost ${data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}`}
+              title={data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}
+            >
               <HoverTooltip data-tooltip={data.stats.totalCost.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })}>
                 {formatCurrency(data.stats.totalCost)}
               </HoverTooltip>
-            </StatValue>
-          </StatCard>
-        </StatsGrid>
+            </MetricValue>
+          </MetricItem>
+        </MetricStrip>
       </Section>
 
       {currentUser && currentUserRankError && (
         <ErrorBanner>
-          <span>⚠️</span>
           <span>Unable to load your ranking. Please refresh the page.</span>
         </ErrorBanner>
       )}
 
       {currentUser && currentUserRank && (
-        <CurrentUserCard>
+        <CurrentUserCard
+          role="link"
+          tabIndex={0}
+          onClick={() => handleRowClick(currentUser.username)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              handleRowClick(currentUser.username);
+            }
+          }}
+        >
           <CurrentUserInfo>
-            <img
+            <CurrentUserAvatar
               src={currentUser.avatarUrl || `https://github.com/${currentUser.username}.png`}
-              alt={currentUser.username}
-              width={48}
-              height={48}
-              style={{ borderRadius: "50%", objectFit: "cover", flexShrink: 0, boxShadow: "0 0 0 1px rgba(255, 255, 255, 0.1)" }}
+              alt=""
             />
             <CurrentUserDetails>
               <CurrentUserName>
@@ -1150,50 +1264,98 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       )}
 
       <TabSection>
-        <TabBar
-          tabs={[
-            { id: "all" as Period, label: "All Time" },
-            { id: "month" as Period, label: "This Month" },
-            { id: "week" as Period, label: "This Week" },
+        <SegmentedControl
+          label="Leaderboard period"
+          options={[
+            { value: "all" as Period, label: "All time" },
+            { value: "last-month" as Period, label: "Last month" },
+            { value: "month" as Period, label: "This month" },
+            { value: "week" as Period, label: "This week" },
+            { value: "custom" as Period, label: "Custom" },
           ]}
-          activeTab={period}
-          onTabChange={(tab) => {
-            setPeriod(tab);
+          value={period}
+          onChange={(value) => {
+            setPeriod(value);
             setPage(1);
-            if (tab !== "all") {
-              setSearchQuery("");
-              setDebouncedSearch("");
+            if (value !== "custom") {
+              setAppliedFrom("");
+              setAppliedTo("");
+              setCustomFrom("");
+              setCustomTo("");
             }
           }}
         />
       </TabSection>
 
+      {period === "custom" && (
+        <DateRangeRow>
+          <DateInput
+            type="date"
+            name="leaderboard-from"
+            aria-label="Leaderboard start date"
+            value={customFrom}
+            onChange={(e) => setCustomFrom(e.target.value)}
+            max={customTo || undefined}
+          />
+          <DateSeparator>~</DateSeparator>
+          <DateInput
+            type="date"
+            name="leaderboard-to"
+            aria-label="Leaderboard end date"
+            value={customTo}
+            onChange={(e) => setCustomTo(e.target.value)}
+            min={customFrom || undefined}
+          />
+          <DateApplyButton
+            type="button"
+            disabled={!parseCustomDateRange(customFrom, customTo)}
+            onClick={() => {
+              const parsed = parseCustomDateRange(customFrom, customTo);
+              if (!parsed) {
+                return;
+              }
+              setAppliedFrom(parsed.from);
+              setAppliedTo(parsed.to);
+              setPage(1);
+            }}
+          >
+            Apply
+          </DateApplyButton>
+        </DateRangeRow>
+      )}
+
       <SearchSortRow>
-        {period === "all" && (
-          <SearchInputWrapper>
-            <SearchInputIcon>
-              <SearchIcon size={16} />
-            </SearchInputIcon>
-            <SearchInput
-              type="text"
-              placeholder="Search users..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-            {searchQuery && (
-              <ClearSearchButton onClick={() => setSearchQuery("")} aria-label="Clear search">
-                <XIcon size={16} />
-              </ClearSearchButton>
-            )}
-          </SearchInputWrapper>
-        )}
+        <SearchInputWrapper>
+          <SearchInputIcon>
+            <SearchIcon size={16} />
+          </SearchInputIcon>
+          <SearchInput
+            type="text"
+            name="leaderboard-search"
+            aria-label="Search leaderboard users"
+            placeholder="Search users..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchQuery && (
+            <ClearSearchButton type="button" onClick={() => setSearchQuery("")} aria-label="Clear search">
+              <XIcon size={16} />
+            </ClearSearchButton>
+          )}
+        </SearchInputWrapper>
         <SortToggleInner>
-          <SortLabel>Sort by:</SortLabel>
-          <Switch
-            checked={effectiveSortBy === 'cost'}
-            onChange={(checked) => setLeaderboardSort(checked ? 'cost' : 'tokens')}
-            leftLabel="Tokens"
-            rightLabel="Cost"
+          <SortLabel>Sort</SortLabel>
+          <SegmentedControl
+            label="Leaderboard sort"
+            value={effectiveSortBy}
+            options={[
+              { value: "tokens", label: "Tokens" },
+              { value: "cost", label: "Cost" },
+            ]}
+            onChange={(value) => {
+              setUrlSortOverride(null);
+              setLeaderboardSort(value);
+            }}
           />
         </SortToggleInner>
       </SearchSortRow>
@@ -1205,7 +1367,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           <EmptyState>
             <EmptyMessage>Failed to load leaderboard</EmptyMessage>
             <EmptyHint>{error}</EmptyHint>
-            <RetryButton onClick={() => setRetryToken((prev) => prev + 1)}>
+            <RetryButton type="button" onClick={() => setRetryToken((prev) => prev + 1)}>
               Retry
             </RetryButton>
           </EmptyState>
@@ -1238,25 +1400,31 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                       <TableHeaderCell>User</TableHeaderCell>
                       <TableHeaderCell className="text-right hidden-cost-mobile">Cost</TableHeaderCell>
                       <TableHeaderCell className="text-right">Tokens</TableHeaderCell>
-                      {showSubmissionCount && (
-                        <TableHeaderCell className="text-right hidden-mobile w-24">Submits</TableHeaderCell>
-                      )}
                     </tr>
                   </TableHead>
                   <TableBody>
-                    {sortedUsers.map((user, index) => (
+                    {sortedUsers.map((user) => (
                       <LeaderboardRow
                         key={user.userId}
                         user={user}
                         isCurrentUser={!!(currentUser && user.username === currentUser.username)}
-                        isLastRow={index === sortedUsers.length - 1}
-                        showSubmissionCount={showSubmissionCount}
                         onRowClick={handleRowClick}
                       />
                     ))}
                   </TableBody>
                 </Table>
               </TableWrapper>
+
+              <MobileRankingList role="list" aria-label="Leaderboard rankings">
+                {sortedUsers.map((user) => (
+                  <LeaderboardMobileRow
+                    key={user.userId}
+                    user={user}
+                    isCurrentUser={!!(currentUser && user.username === currentUser.username)}
+                    sortBy={effectiveSortBy}
+                  />
+                ))}
+              </MobileRankingList>
 
               {data.pagination.totalPages > 1 && (
                 <PaginationContainer>
@@ -1267,6 +1435,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                   </PaginationText>
                   <PaginationNav>
                     <PageButton
+                      type="button"
                       disabled={data.pagination.page <= 1}
                       onClick={() => setPage(data.pagination.page - 1)}
                       aria-label="Previous page"
@@ -1293,7 +1462,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                             pages.push(<PageEllipsis key={`e${p}`}>…</PageEllipsis>);
                           }
                           pages.push(
-                            <PageButton key={p} $active={p === current} onClick={() => setPage(p)}>
+                            <PageButton type="button" key={p} $active={p === current} onClick={() => setPage(p)}>
                               {p}
                             </PageButton>
                           );
@@ -1303,6 +1472,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                       })()}
                     </PaginationPages>
                     <PageButton
+                      type="button"
                       disabled={data.pagination.page >= data.pagination.totalPages}
                       onClick={() => setPage(data.pagination.page + 1)}
                       aria-label="Next page"
@@ -1321,12 +1491,29 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         <CTATitle>Join the Leaderboard</CTATitle>
         <CTADescription>Install Tokscale CLI and submit your usage data:</CTADescription>
         <CodeBlock>
+          {mounted && typeof window !== "undefined" && window.location.hostname !== "tokscale.ai" && (
+            <CodeLine>
+              <CommandPrompt>$</CommandPrompt>
+              <CommandPrefix>export</CommandPrefix>
+              <CommandName>TOKSCALE_API_URL</CommandName>
+              <CommandArg>={`${window.location.origin}`}</CommandArg>
+              <CopyIconButton
+                type="button"
+                onClick={() => handleCopyCommand(`export TOKSCALE_API_URL=${window.location.origin}`)}
+                className={copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? "copied" : ""}
+                aria-label="Copy command"
+              >
+                {copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
+              </CopyIconButton>
+            </CodeLine>
+          )}
           <CodeLine>
             <CommandPrompt>$</CommandPrompt>
             <CommandPrefix>bunx</CommandPrefix>
             <CommandName>tokscale</CommandName>
             <CommandArg>login</CommandArg>
             <CopyIconButton
+              type="button"
               onClick={() => handleCopyCommand("bunx tokscale login")}
               className={copiedCommand === "bunx tokscale login" ? "copied" : ""}
               aria-label="Copy command"
@@ -1340,6 +1527,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <CommandName>tokscale</CommandName>
             <CommandArg>submit</CommandArg>
             <CopyIconButton
+              type="button"
               onClick={() => handleCopyCommand("bunx tokscale submit")}
               className={copiedCommand === "bunx tokscale submit" ? "copied" : ""}
               aria-label="Copy command"

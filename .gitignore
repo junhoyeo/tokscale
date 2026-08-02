@@ -15,6 +15,7 @@ benchmarks/synthetic-data/
 
 target/
 *.node
+__pycache__/
 
 # Debug logs
 *.log
@@ -29,3 +30,20 @@ ai-todolist.md
 *.tgz
 .sisyphus
 crates/tokscale-cli/tokscale-export-*.json
+self-host/tokscale-key.pem
+self-host/
+.next/
+.vercel
+.env*.local
+# Ephemeral git worktrees created by Claude Code. These are real checkouts
+# containing their own .git file, so `git add -A` from the repo root stages
+# them as embedded-repository gitlinks rather than ignoring them. Only the
+# worktrees are ignored, not all of .claude/ -- project-level agent config
+# there is worth committing deliberately.
+.claude/worktrees/
+.claude/skills/
+.omp/
+.omx/
+.codegraph/
+.agents/
+skills-lock.json

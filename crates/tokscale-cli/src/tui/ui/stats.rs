@@ -1,9 +1,9 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
-use super::widgets::{format_cost, format_tokens, get_client_color, get_client_display_name};
+use super::widgets::{
+    format_cost, format_tokens, get_client_color, get_client_display_name, viewport_scrollbar_state,
+};
 use crate::tui::app::{App, ClickAction};
 
 const CELL_WIDTH: u16 = 2;
@@ -65,6 +65,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_background = app.theme.background;
     let theme_muted = app.theme.muted;
     let theme_colors = app.theme.colors;
+    let subtle_text_style = app.theme.subtle_text_style();
     let selected_cell = app.selected_graph_cell;
     let is_narrow = app.is_narrow();
 
@@ -150,7 +151,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                     if is_selected {
                         ("▓▓", Style::default().fg(Color::White).bg(theme_colors[0]))
                     } else {
-                        ("· ", Style::default().fg(Color::Rgb(102, 102, 102)))
+                        ("· ", subtle_text_style)
                     }
                 }
             };
@@ -221,7 +222,11 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .flat_map(|w| w.iter())
                 .filter_map(|d| d.as_ref())
                 .map(|d| d.tokens)
-                .sum()
+                // Plain `.sum()` panics (debug) / wraps (release) if a single
+                // corrupt/huge day's token count overflows u64 across the
+                // graph; saturate instead so one bad day doesn't poison the
+                // whole panel's total.
+                .fold(0u64, u64::saturating_add)
         })
         .unwrap_or(0);
 
@@ -267,7 +272,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     });
     let favorite_model_name = favorite_model.map(|m| m.model.as_str()).unwrap_or("N/A");
     let model_color = favorite_model
-        .map(|m| app.model_color_for(&m.provider, &m.model))
+        .map(|m| app.model_color_for(&m.provider, &m.color_key))
         .unwrap_or_else(|| app.model_color("N/A"));
     let sessions: u32 = app.data.models.iter().map(|m| m.session_count).sum();
 
@@ -398,7 +403,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let legend_spans = vec![
         Span::styled("Less ", Style::default().fg(app.theme.muted)),
-        Span::styled("· ", Style::default().fg(Color::Rgb(102, 102, 102))),
+        Span::styled("· ", app.theme.subtle_text_style()),
         Span::styled("██", Style::default().fg(app.theme.colors[1])),
         Span::raw(" "),
         Span::styled("██", Style::default().fg(app.theme.colors[2])),
@@ -520,7 +525,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                         .then_with(|| a.display_name.cmp(&b.display_name))
                 });
 
-                let client_color = get_client_color(client);
+                let client_color = app.theme.color(get_client_color(client));
                 let client_name = get_client_display_name(client);
                 let model_count = models.len();
                 let plural = if model_count > 1 { "s" } else { "" };
@@ -559,55 +564,53 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
                     let is_narrow = app.is_narrow();
                     if is_narrow {
+                        let secondary_text_style = app.theme.secondary_text_style();
+                        let subtle_text_style = app.theme.subtle_text_style();
                         lines.push(Line::from(vec![
                             Span::styled("    ", Style::default()),
                             Span::styled(
                                 format_tokens(model_info.tokens.input),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
-                            Span::styled("/", Style::default().fg(Color::Rgb(102, 102, 102))),
+                            Span::styled("/", subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.output),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
-                            Span::styled("/", Style::default().fg(Color::Rgb(102, 102, 102))),
+                            Span::styled("/", subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_read),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
-                            Span::styled("/", Style::default().fg(Color::Rgb(102, 102, 102))),
+                            Span::styled("/", subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_write),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
                         ]));
                     } else {
+                        let secondary_text_style = app.theme.secondary_text_style();
+                        let subtle_text_style = app.theme.subtle_text_style();
                         lines.push(Line::from(vec![
-                            Span::styled(
-                                "    In: ",
-                                Style::default().fg(Color::Rgb(102, 102, 102)),
-                            ),
+                            Span::styled("    In: ", subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.input),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
-                            Span::styled(
-                                " · Out: ",
-                                Style::default().fg(Color::Rgb(102, 102, 102)),
-                            ),
+                            Span::styled(" · Out: ", subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.output),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
-                            Span::styled(" · CR: ", Style::default().fg(Color::Rgb(102, 102, 102))),
+                            Span::styled(" · CR: ", subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_read),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
-                            Span::styled(" · CW: ", Style::default().fg(Color::Rgb(102, 102, 102))),
+                            Span::styled(" · CW: ", subtle_text_style),
                             Span::styled(
                                 format_tokens(model_info.tokens.cache_write),
-                                Style::default().fg(Color::Rgb(170, 170, 170)),
+                                secondary_text_style,
                             ),
                         ]));
                     }
@@ -642,8 +645,11 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state =
-            ScrollbarState::new(app.stats_breakdown_total_lines).position(app.scroll_offset);
+        let mut scrollbar_state = viewport_scrollbar_state(
+            app.stats_breakdown_total_lines,
+            app.scroll_offset,
+            visible_height,
+        );
 
         frame.render_stateful_widget(
             scrollbar,
@@ -668,5 +674,67 @@ fn truncate_model_name(s: &str, max_chars: usize) -> String {
     } else {
         let head: String = s.chars().take(max_chars - 1).collect();
         format!("{}…", head)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{ContributionDay, GraphData};
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn make_app() -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        App::new_with_cached_data(config, None).unwrap()
+    }
+
+    fn corrupt_day(date: NaiveDate) -> ContributionDay {
+        ContributionDay {
+            date,
+            tokens: u64::MAX,
+            cost: 0.0,
+            intensity: 1.0,
+        }
+    }
+
+    #[test]
+    fn saturated_graph_days_render_without_overflowing_total() {
+        let mut app = make_app();
+        // Three days each at u64::MAX: no single day overflows, but a plain
+        // `.sum()` across them does. render_stats_panel must saturate
+        // instead of panicking (debug) or wrapping (release).
+        app.data.graph = Some(GraphData {
+            weeks: vec![vec![
+                Some(corrupt_day(NaiveDate::from_ymd_opt(2026, 5, 27).unwrap())),
+                Some(corrupt_day(NaiveDate::from_ymd_opt(2026, 5, 28).unwrap())),
+                Some(corrupt_day(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap())),
+            ]],
+        });
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_stats_panel(frame, &app, Rect::new(0, 0, 80, 20)))
+            .unwrap();
+
+        let body = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect::<String>();
+        assert!(!body.trim().is_empty());
     }
 }

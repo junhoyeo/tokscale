@@ -81,7 +81,6 @@ describe("GET /api/auth/token", () => {
       username: "alice",
       displayName: null,
       avatarUrl: null,
-      isAdmin: false,
       expiresAt: null,
     });
 
@@ -105,7 +104,6 @@ describe("GET /api/auth/token", () => {
       username: "alice",
       displayName: "Alice",
       avatarUrl: "https://example.com/alice.png",
-      isAdmin: false,
       expiresAt: null,
     });
 

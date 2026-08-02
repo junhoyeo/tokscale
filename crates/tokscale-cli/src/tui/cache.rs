@@ -10,18 +10,54 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::{sessions, GroupBy};
+use tokscale_core::{sessions, GroupBy, ModelPerformance};
 
 use crate::ClientFilter;
 
 use super::data::{
-    AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
-    HourlyModelInfo, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
+    aggregate_monthly_from_daily, AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo,
+    DailyUsage, GraphData, HourlyModelInfo, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
 };
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 7;
+const CACHE_SCHEMA_VERSION: u32 = 10;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheReportScope {
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub year: Option<String>,
+}
+
+impl CacheReportScope {
+    pub fn new(since: Option<String>, until: Option<String>, year: Option<String>) -> Self {
+        Self { since, until, year }
+    }
+}
+
+/// Single source of truth for the `group_by` value used to key the TUI
+/// cache. The cache file's `groupBy` field is compared verbatim against
+/// this on load (`cache.rs::load_cache`), so any code path that writes
+/// the cache — most importantly the detached `warm-tui-cache` subprocess
+/// fired after `tokscale submit` — must use this exact value, NOT
+/// `GroupBy::default()`.
+///
+/// Historical bug: the warm-tui-cache writer keyed on `GroupBy::default()`
+/// (= `ClientModel`) while the TUI loaded with the hard-coded
+/// `GroupBy::Model`, so every submit silently invalidated the next TUI
+/// launch's cache and the "show cached data while refreshing" contract
+/// never triggered. Anchoring both ends on this constant prevents the
+/// two from drifting again — change here ⇒ change everywhere.
+///
+/// The value matches the TUI's runtime default (`App.group_by` in
+/// `app.rs`) so swapping `GroupBy::Model` → `TUI_DEFAULT_GROUP_BY` is
+/// purely a refactor with no user-visible presentation change.
+pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -56,6 +92,8 @@ struct CachedTUIData {
     include_synthetic: bool,
     #[serde(default)]
     group_by: Option<String>,
+    #[serde(default)]
+    report_scope: CacheReportScope,
     data: CachedUsageData,
 }
 
@@ -90,6 +128,8 @@ struct CachedTokenBreakdown {
 #[serde(rename_all = "camelCase")]
 struct CachedModelUsage {
     model: String,
+    #[serde(default)]
+    color_key: String,
     provider: String,
     client: String,
     #[serde(default)]
@@ -98,6 +138,8 @@ struct CachedModelUsage {
     workspace_label: Option<String>,
     tokens: CachedTokenBreakdown,
     cost: f64,
+    #[serde(default)]
+    performance: ModelPerformance,
     session_count: u32,
 }
 
@@ -224,12 +266,14 @@ impl From<&ModelUsage> for CachedModelUsage {
     fn from(m: &ModelUsage) -> Self {
         Self {
             model: m.model.clone(),
+            color_key: m.color_key.clone(),
             provider: m.provider.clone(),
             client: m.client.clone(),
             workspace_key: m.workspace_key.clone(),
             workspace_label: m.workspace_label.clone(),
             tokens: (&m.tokens).into(),
             cost: m.cost,
+            performance: m.performance.clone(),
             session_count: m.session_count,
         }
     }
@@ -237,14 +281,21 @@ impl From<&ModelUsage> for CachedModelUsage {
 
 impl From<CachedModelUsage> for ModelUsage {
     fn from(m: CachedModelUsage) -> Self {
+        let color_key = if m.color_key.is_empty() {
+            m.model.clone()
+        } else {
+            m.color_key
+        };
         Self {
             model: m.model,
+            color_key,
             provider: m.provider,
             client: m.client,
             workspace_key: m.workspace_key,
             workspace_label: m.workspace_label,
             tokens: m.tokens.into(),
             cost: m.cost,
+            performance: m.performance,
             session_count: m.session_count,
         }
     }
@@ -583,16 +634,23 @@ impl TryFrom<CachedUsageData> for UsageData {
         let hourly: Result<Vec<HourlyUsage>, _> =
             u.hourly.into_iter().map(|h| h.try_into()).collect();
         let graph: Option<Result<GraphData, _>> = u.graph.map(|g| g.try_into());
+        let daily = daily?;
+        let monthly = aggregate_monthly_from_daily(&daily);
 
         Ok(Self {
             models: u.models.into_iter().map(|m| m.into()).collect(),
             agents: normalize_cached_agents(u.agents),
-            daily: daily?,
+            daily,
             hourly: hourly?,
             // Minutely data is recomputed on each load (high cardinality,
             // not worth round-tripping through the on-disk cache); the
             // first foreground refresh after cache hit will populate it.
             minutely: Vec::new(),
+            monthly,
+            // Sessions are recomputed on each load (high cardinality, not
+            // worth round-tripping through the on-disk cache); the first
+            // foreground refresh after cache hit will populate it.
+            sessions: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,
@@ -649,8 +707,14 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
 }
 
 fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
-    if clients.split(", ").any(|client| client == "opencode") {
+    // Mirror the per-client normalization in `tui::data` (see the `msg.agent`
+    // branch there): copilot and opencode agent ids use bespoke normalizers,
+    // everything else falls back to the generic one. Keep these two in sync.
+    let has_client = |name: &str| clients.split(", ").any(|client| client == name);
+    if has_client("opencode") {
         sessions::normalize_opencode_agent_name(agent)
+    } else if has_client("copilot") {
+        sessions::normalize_copilot_agent_name(agent)
     } else {
         sessions::normalize_agent_name(agent)
     }
@@ -687,7 +751,11 @@ enum ClientMatch {
 /// `(enabled_clients: Vec<String>, include_synthetic: bool)` shape so
 /// existing user caches keep working across upgrades — projection
 /// happens here.
-pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -> CacheResult {
+pub fn load_cache(
+    enabled_clients: &HashSet<ClientFilter>,
+    group_by: &GroupBy,
+    report_scope: &CacheReportScope,
+) -> CacheResult {
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
     };
@@ -721,6 +789,10 @@ pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -
     }
 
     if cached_group_by.as_ref() != Some(group_by) {
+        return CacheResult::Miss;
+    }
+
+    if &cached.report_scope != report_scope {
         return CacheResult::Miss;
     }
 
@@ -815,6 +887,7 @@ pub fn save_cached_data(
     data: &UsageData,
     enabled_clients: &HashSet<ClientFilter>,
     group_by: &GroupBy,
+    report_scope: &CacheReportScope,
 ) {
     let Some(cache_path) = cache_file() else {
         return;
@@ -850,6 +923,7 @@ pub fn save_cached_data(
         enabled_clients: clients_vec,
         include_synthetic,
         group_by: Some(group_by.to_string()),
+        report_scope: report_scope.clone(),
         data: data.into(),
     };
 
@@ -945,6 +1019,28 @@ mod tests {
             .find(|agent| agent.agent == "Prometheus")
             .unwrap();
         assert_eq!(prometheus.message_count, 1);
+    }
+
+    #[test]
+    fn test_normalize_cached_agents_merges_copilot_display_variants() {
+        // Copilot cached agent ids must go through normalize_copilot_agent_name
+        // (mirroring tui::data). Without the copilot branch in
+        // normalize_cached_agent_name, the raw "github.copilot.default" id would
+        // be left untouched (generic normalizer titlecases it differently) and
+        // would NOT merge with the "GitHub Copilot" display name.
+        let agents = normalize_cached_agents(vec![
+            cached_agent("github.copilot.default", "copilot", 10),
+            cached_agent("GITHUB.COPILOT.DEFAULT", "copilot", 20),
+        ]);
+
+        assert_eq!(agents.len(), 1);
+        let copilot = agents
+            .iter()
+            .find(|agent| agent.agent == "GitHub Copilot")
+            .unwrap();
+        assert_eq!(copilot.clients, "copilot");
+        assert_eq!(copilot.message_count, 2);
+        assert_eq!(copilot.tokens.input, 30);
     }
 
     // ── check_client_match ──────────────────────────────────────────
@@ -1053,6 +1149,162 @@ mod tests {
 
     #[test]
     #[serial]
+    fn load_cache_misses_when_report_scope_differs() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 10,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "reportScope": {
+    "since": "2026-05-01",
+    "until": "2026-05-07",
+    "year": null
+  },
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let unfiltered_scope = CacheReportScope::default();
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &unfiltered_scope),
+            CacheResult::Miss
+        ));
+
+        let filtered_scope = CacheReportScope::new(
+            Some("2026-05-01".to_string()),
+            Some("2026-05-07".to_string()),
+            None,
+        );
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &filtered_scope),
+            CacheResult::Fresh(_)
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn save_cached_data_writes_report_scope() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let scope = CacheReportScope::new(
+            Some("2026-05-01".to_string()),
+            Some("2026-05-07".to_string()),
+            Some("2026".to_string()),
+        );
+
+        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model, &scope);
+
+        let cache_path = cache_file().unwrap();
+        let saved: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(saved.report_scope, scope);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Fresh(_)
+        ));
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn old_cache_without_report_scope_is_stale_for_unfiltered_scope() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 8,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
+            CacheResult::Stale(_)
+        ));
+
+        let filtered_scope = CacheReportScope::new(Some("2026-05-01".to_string()), None, None);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &filtered_scope),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_load_cache_misses_for_legacy_schema_without_group_by() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
@@ -1083,7 +1335,7 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1127,7 +1379,11 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::WorkspaceModel),
+            load_cache(
+                &clients,
+                &GroupBy::WorkspaceModel,
+                &CacheReportScope::default()
+            ),
             CacheResult::Miss
         ));
 
@@ -1195,7 +1451,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
             CacheResult::Stale(data) => {
                 let source = data.daily[0].source_breakdown.get("claude").unwrap();
                 let daily_model = source.models.get("claude-sonnet-4-5").unwrap();
@@ -1228,7 +1484,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 7,
+  "schemaVersion": 10,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
@@ -1315,7 +1571,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
             CacheResult::Fresh(data) => {
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
@@ -1396,7 +1652,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
             CacheResult::Fresh(data) | CacheResult::Stale(data) => {
                 let hourly_model = data.hourly[0].models.get("claude-sonnet-4-5").unwrap();
                 assert_eq!(hourly_model.display_name, "claude-sonnet-4-5");
@@ -1469,7 +1725,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
             CacheResult::Stale(data) => {
                 assert!(
                     data.daily[0].source_breakdown.contains_key("unknown"),
@@ -1510,7 +1766,7 @@ mod tests {
         fs::write(
             &legacy_path,
             r#"{
-  "schemaVersion": 7,
+  "schemaVersion": 10,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,
@@ -1532,7 +1788,7 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Fresh(_)
         ));
 
@@ -1589,7 +1845,7 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1647,7 +1903,12 @@ mod tests {
         assert!(fs::metadata(&cache_path).is_ok());
 
         let clients = make_filters(&[ClientFilter::Claude], false);
-        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model);
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &CacheReportScope::default(),
+        );
 
         let metadata = fs::metadata(&cache_path).unwrap();
         assert!(metadata.is_file());
@@ -1669,6 +1930,115 @@ mod tests {
             CacheResult::Fresh(_) => "Fresh",
             CacheResult::Stale(_) => "Stale",
             CacheResult::Miss => "Miss",
+        }
+    }
+
+    /// Regression test for the TUI cache `group_by` mismatch bug.
+    ///
+    /// Symptom: `npx tokscale@latest` (TUI launch) silently dropped the
+    /// on-disk cache and showed an empty dashboard until the background
+    /// scan finished, even though `~/.config/tokscale/cache/tui-data-cache.json`
+    /// existed and was well-formed.
+    ///
+    /// Root cause: the warm-tui-cache writer (`run_warm_tui_cache` in
+    /// `main.rs`, spawned as a detached subprocess after every successful
+    /// `tokscale submit`) saved the cache with `GroupBy::default()`
+    /// (= `ClientModel`, serialized as `"client,model"`), while the TUI
+    /// reader (`tui::run`) loaded with the hard-coded `GroupBy::Model`
+    /// (serialized as `"model"`). `cache.rs::load_cache` does a strict
+    /// inequality check on the cached vs. requested `group_by`, so the
+    /// two never matched and every submit silently invalidated the next
+    /// TUI launch's cache.
+    ///
+    /// Fix: anchor both ends on `TUI_DEFAULT_GROUP_BY`. This test pins
+    /// the contract — round-tripping a save→load under the canonical key
+    /// must return `Fresh`, never `Miss`.
+    #[test]
+    #[serial]
+    fn warm_cache_round_trip_under_canonical_key_is_fresh() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let enabled = ClientFilter::default_set();
+        let scope = CacheReportScope::default();
+
+        // Write with the canonical key (mirrors what `run_warm_tui_cache`
+        // does after the fix).
+        save_cached_data(
+            &UsageData::default(),
+            &enabled,
+            &TUI_DEFAULT_GROUP_BY,
+            &scope,
+        );
+
+        // Read with the canonical key (mirrors what `tui::run` does on
+        // launch). The bug would have returned `Miss` here because the
+        // historical writer used `GroupBy::default()` (= ClientModel)
+        // while the reader used `GroupBy::Model`.
+        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
+        assert!(
+            matches!(result, CacheResult::Fresh(_)),
+            "expected Fresh after writing with TUI_DEFAULT_GROUP_BY, got {}",
+            other_variant_name(&result)
+        );
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+    }
+
+    /// Documents the historical bug as a frozen regression: writing with
+    /// `GroupBy::default()` (the pre-fix `run_warm_tui_cache` behavior)
+    /// and reading with `TUI_DEFAULT_GROUP_BY` returns `Miss`. If
+    /// anyone re-introduces `GroupBy::default()` at any TUI cache write
+    /// site, this assertion proves the cache breaks.
+    #[test]
+    #[serial]
+    fn pre_fix_writer_key_misses_under_canonical_reader_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let enabled = ClientFilter::default_set();
+        let scope = CacheReportScope::default();
+
+        // Pre-fix: writer used `GroupBy::default()`.
+        save_cached_data(&UsageData::default(), &enabled, &GroupBy::default(), &scope);
+
+        // Reader uses the canonical key. If `GroupBy::default()` and
+        // `TUI_DEFAULT_GROUP_BY` ever coincide (e.g. someone changes
+        // `impl Default for GroupBy` to return `Model`), this assertion
+        // will start failing — at which point the divergent-write site
+        // in `run_warm_tui_cache` is no longer dangerous and the test
+        // should be updated accordingly.
+        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
+        assert!(
+            matches!(result, CacheResult::Miss),
+            "expected Miss when reader uses TUI_DEFAULT_GROUP_BY and writer used GroupBy::default(), got {}",
+            other_variant_name(&result)
+        );
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
         }
     }
 }

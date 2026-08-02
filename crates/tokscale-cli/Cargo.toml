@@ -11,6 +11,12 @@ description = "CLI and TUI for tokscale - AI token usage analytics"
 name = "tokscale"
 path = "src/main.rs"
 
+[features]
+# Optional: native FFI into Apple's FoundationModels (on-device Apple Intelligence)
+# for the `apple-fm` report summarizer backend. macOS-only; no-op elsewhere.
+# NOT enabled by default — the default build degrades to a Rust heuristic.
+apple-fm = []
+
 [dependencies]
 tokscale-core = { workspace = true }
 
@@ -29,18 +35,36 @@ toml = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 rayon = { workspace = true }
-arboard = { workspace = true }
 reqwest = { workspace = true }
+fs2 = { workspace = true }
 image = "0.25"
 imageproc = "0.25"
 ab_glyph = "0.2"
 resvg = "0.43"
 usvg = "0.43"
 hostname = "0.4"
+qrcode = "0.14"
 uuid = { version = "1.0", features = ["v4"] }
 rpassword = "7.0"
 sha2 = "0.10"
 csv = "1.3"
+unicode-normalization = "0.1"
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+
+# Trae iCubeAuthInfo decryption (Electron globalStorage)
+aes = { workspace = true }
+cbc = { workspace = true }
+base64 = { workspace = true }
+
+# Cursor desktop state.vscdb accessToken import
+rusqlite = { workspace = true }
+
+# arboard has no Android backend and fails to compile for
+# aarch64-linux-android. The clipboard module in tui/ provides a
+# no-op fallback on Android so the rest of the code stays portable.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = { workspace = true }

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db, deviceCodes, users } from "@/lib/db";
 import { eq, and, gt } from "drizzle-orm";
-import { issuePersonalToken } from "@/lib/auth/personalTokens";
+import { issuePersonalTokenInTransaction } from "@/lib/auth/personalTokens";
 
 export async function POST(request: Request) {
   try {
@@ -15,58 +15,67 @@ export async function POST(request: Request) {
       );
     }
 
-    // Find the device code record
-    const [record] = await db
-      .select()
-      .from(deviceCodes)
-      .where(
-        and(
-          eq(deviceCodes.deviceCode, deviceCode),
-          gt(deviceCodes.expiresAt, new Date())
+    const result = await db.transaction(async (tx) => {
+      // Lock the device code row so concurrent polls cannot issue duplicate tokens.
+      const [record] = await tx
+        .select()
+        .from(deviceCodes)
+        .where(
+          and(
+            eq(deviceCodes.deviceCode, deviceCode),
+            gt(deviceCodes.expiresAt, new Date())
+          )
         )
-      )
-      .limit(1);
+        .for("update")
+        .limit(1);
 
-    if (!record) {
-      return NextResponse.json({ status: "expired" });
-    }
+      if (!record) {
+        return { status: "expired" as const };
+      }
 
-    // Check if user has authorized
-    if (!record.userId) {
-      return NextResponse.json({ status: "pending" });
-    }
+      // Check if user has authorized
+      if (!record.userId) {
+        return { status: "pending" as const };
+      }
 
-    // User has authorized - create API token
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, record.userId))
-      .limit(1);
+      // User has authorized - create API token
+      const [user] = await tx
+        .select()
+        .from(users)
+        .where(eq(users.id, record.userId))
+        .limit(1);
 
-    if (!user) {
+      if (!user) {
+        return { status: "user_not_found" as const };
+      }
+
+      const issuedToken = await issuePersonalTokenInTransaction(tx, {
+        userId: user.id,
+        name: record.deviceName || "CLI",
+        ensureUniqueName: true,
+      });
+
+      // Delete the device code (one-time use) before committing the transaction.
+      await tx.delete(deviceCodes).where(eq(deviceCodes.id, record.id));
+
+      return {
+        status: "complete" as const,
+        token: issuedToken.token,
+        user: {
+          username: user.username,
+          avatarUrl: user.avatarUrl,
+        },
+      };
+    });
+
+    if (result.status === "user_not_found") {
       return NextResponse.json(
         { error: "User not found" },
         { status: 500 }
       );
     }
 
-    const issuedToken = await issuePersonalToken({
-      userId: user.id,
-      name: record.deviceName || "CLI",
-      ensureUniqueName: true,
-    });
-
-    // Delete the device code (one-time use)
-    await db.delete(deviceCodes).where(eq(deviceCodes.id, record.id));
-
-    return NextResponse.json({
-      status: "complete",
-      token: issuedToken.token,
-      user: {
-        username: user.username,
-        avatarUrl: user.avatarUrl,
-      },
-    });
+    return NextResponse.json(result);
   } catch (error) {
     console.error("Device poll error:", error);
     return NextResponse.json(

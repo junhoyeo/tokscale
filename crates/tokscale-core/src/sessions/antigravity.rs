@@ -69,6 +69,7 @@ fn parse_usage_row(value: &Value, fallback_model: Option<&str>) -> Option<Unifie
         .filter(|text| !text.trim().is_empty())
         .map(|text| text.to_string())
         .unwrap_or_else(|| infer_provider(&model_id).to_string());
+    let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
 
     let input = to_safe_i64(value.get("input"));
     let output = to_safe_i64(value.get("output"));
@@ -153,5 +154,22 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-opus-4-6");
         assert_eq!(messages[0].provider_id, "anthropic");
+    }
+
+    #[test]
+    fn parse_usage_row_resolves_current_placeholder_models() {
+        let input = r#"{"type":"usage","sessionId":"abc","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1}
+{"type":"usage","sessionId":"abc","modelId":"model_placeholder_m16","timestamp":1711200000001,"input":8,"output":3,"cacheRead":0,"cacheWrite":0,"reasoning":0}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let messages = parse_antigravity_file(path.path());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].provider_id, "google");
+        assert_eq!(messages[1].model_id, "gemini-3.1-pro");
+        assert_eq!(messages[1].provider_id, "google");
     }
 }
