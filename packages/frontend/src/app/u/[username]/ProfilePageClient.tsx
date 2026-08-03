@@ -30,6 +30,7 @@ import {
 import type { DailyContribution } from "@/lib/types";
 import { useSettings } from "@/lib/useSettings";
 import { resolveEffectiveTimeZone } from "@/lib/timezone";
+import type { ModerationNotice } from "@/lib/moderation/notice";
 
 type ProfilePeriod = "all" | "week" | "month";
 
@@ -90,14 +91,58 @@ interface ProfilePageClientProps {
   initialData: ProfileData;
   initialDevices?: ProfileDevice[];
   username: string;
+  /**
+   * Only ever populated when the viewer is the account owner. The server
+   * resolves this outside the cached public payload, so a visitor receives
+   * null and renders nothing — a hide is not announced to anyone else.
+   */
+  moderationNotice?: ModerationNotice | null;
 }
 
 const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
+
+/**
+ * Amber for the two cases the account owner may want to contest, neutral blue
+ * when the cause is our own data problem — that one is informational, and
+ * dressing it as a warning would imply they did something wrong.
+ */
+const ModerationNoticeBanner = styled.div<{ $tone: ModerationNotice["tone"] }>`
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  border: 1px solid
+    ${({ $tone }) =>
+      $tone === "our-fault" ? "rgba(47, 143, 255, 0.4)" : "rgba(217, 119, 6, 0.45)"};
+  border-radius: 10px;
+  background: ${({ $tone }) =>
+    $tone === "our-fault" ? "rgba(47, 143, 255, 0.09)" : "rgba(217, 119, 6, 0.09)"};
+
+  strong {
+    color: var(--service-text);
+    font-size: 0.9375rem;
+    font-weight: 600;
+  }
+
+  span {
+    color: var(--service-text-muted);
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+`;
+
+const NOTICE_TITLE: Record<ModerationNotice["tone"], string> = {
+  enforcement: "Removed from the leaderboard",
+  pending: "Withheld from the leaderboard",
+  "our-fault": "Temporarily hidden — our issue, not yours",
+};
 
 export default function ProfilePageClient({
   initialData,
   initialDevices,
   username,
+  moderationNotice,
 }: ProfilePageClientProps) {
   const [activeTab, setActiveTab] = useState<ProfileTab>("activity");
   const [contributionView, setContributionView] =
@@ -238,6 +283,13 @@ export default function ProfilePageClient({
 
       <MainContent id="main-content">
         <ContentWrapper>
+          {moderationNotice && (
+            <ModerationNoticeBanner role="status" $tone={moderationNotice.tone}>
+              <strong>{NOTICE_TITLE[moderationNotice.tone]}</strong>
+              <span>{moderationNotice.message}</span>
+            </ModerationNoticeBanner>
+          )}
+
           {showResubmitBanner && (
             <UpdateNotice role="status">
               <strong>Fresh detail is available.</strong> Re-submit with{" "}

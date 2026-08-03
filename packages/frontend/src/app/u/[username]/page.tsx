@@ -4,6 +4,8 @@ import type { ProfileDevice } from '@/components/profile';
 import { loadPublicProfileDevicesForPage } from '@/lib/publicProfileDevices';
 import { loadPublicProfileForPage } from '@/lib/publicProfileData';
 import { profileUrl } from '@/lib/seo/urls';
+import { getSession } from '@/lib/auth/session';
+import { getModerationNotice } from '@/lib/moderation/notice';
 import ProfilePageClient, { type ProfileData } from './ProfilePageClient';
 
 export const revalidate = 60;
@@ -108,5 +110,21 @@ export default async function ProfilePage({
     permanentRedirect(`/u/${data.user.username}${period === "all" ? "" : `?period=${period}`}`);
   }
 
-  return <ProfilePageClient initialData={data} initialDevices={devices} username={username} />;
+  // Fetched outside the cached public payload and only for the account owner:
+  // publicProfileData is unstable_cache'd and served to everyone, so moderation
+  // state must never travel with it. A visitor sees nothing at all.
+  const session = await getSession().catch(() => null);
+  const moderationNotice =
+    session && data.user?.id && session.id === data.user.id
+      ? await getModerationNotice(session.id).catch(() => null)
+      : null;
+
+  return (
+    <ProfilePageClient
+      initialData={data}
+      initialDevices={devices}
+      username={username}
+      moderationNotice={moderationNotice}
+    />
+  );
 }
