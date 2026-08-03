@@ -4060,8 +4060,8 @@ mod tests {
         dedupe_latest_trae_messages, filter_messages_for_report,
         generate_graph_with_loaded_pricing, get_home_dir_string, message_cache,
         normalize_model_for_grouping, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, validate_priced_messages, ClientId,
+        parse_local_clients, parsed_to_unified, paths, pricing, retain_for_requested_clients,
+        scanner, select_local_parse_pricing, unified_to_parsed, validate_priced_messages, ClientId,
         GraphPricingRequirement, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown,
         UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
@@ -5821,8 +5821,8 @@ mod tests {
     fn test_parse_all_messages_keeps_conflicted_grok_unified_attribution_unpriced() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", cache_home.path());
+        let mut env = paths::test_env::EnvGuard::capture(&["HOME"]);
+        env.set("HOME", cache_home.path());
 
         {
             let session_dir = source_home
@@ -5870,11 +5870,6 @@ mod tests {
                 assert!(messages[0].model_attribution_conflicted);
                 assert_eq!(messages[0].cost, 0.0);
             }
-        }
-
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
         }
     }
 
