@@ -29,7 +29,7 @@ mod tests {
         let path = project_dir.join("session-1.jsonl");
         std::fs::write(
             &path,
-            r#"{"id":"assistant-1","timestamp":1780000000100,"type":"message","role":"assistant","status":"completed","sessionId":"session-1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"msg-1"},"message":{"usage":{"input_tokens":24486,"output_tokens":3,"cache_read_input_tokens":14720}}}"#,
+            r#"{"id":"assistant-1","timestamp":1780000000100,"type":"message","role":"assistant","status":"completed","sessionId":"session-1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"msg-1"},"message":{"usage":{"input_tokens":24486,"output_tokens":3,"total_tokens":24489,"cache_read_input_tokens":14720}}}"#,
         )
         .unwrap();
 
@@ -60,7 +60,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "minimax-m3-pay");
         assert_eq!(messages[0].provider_id, "minimax");
-        assert_eq!(messages[0].tokens.total(), 12);
+        assert_eq!(messages[0].tokens.total(), 15);
     }
 
     #[test]

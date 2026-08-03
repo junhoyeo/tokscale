@@ -57,6 +57,9 @@ struct BuddyUsage {
     #[serde(rename = "inputTokens")]
     input_tokens_camel: Option<i64>,
     prompt_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    #[serde(rename = "totalTokens")]
+    total_tokens_camel: Option<i64>,
     #[serde(rename = "output_tokens")]
     output_tokens: Option<i64>,
     #[serde(rename = "outputTokens")]
@@ -94,47 +97,74 @@ impl BuddyUsage {
             self.prompt_cache_hit_tokens,
             self.cached_tokens,
         ]);
+        let output = first_present(&[
+            self.output_tokens,
+            self.output_tokens_camel,
+            self.completion_tokens,
+        ]);
+        let cache_write = first_positive(&[
+            self.cache_creation_input_tokens,
+            self.cache_creation_input_tokens_camel,
+            self.cached_write_tokens,
+            self.prompt_cache_write_tokens,
+        ]);
+        let reasoning = first_present(&[
+            self.completion_thinking_tokens,
+            self.completion_thinking_tokens_camel,
+            self.reasoning_tokens,
+        ]);
         let tokens = TokenBreakdown {
-            input: self.input_exclusive(cache_read),
-            output: first_present(&[
-                self.output_tokens,
-                self.output_tokens_camel,
-                self.completion_tokens,
-            ]),
+            input: self.input_exclusive(cache_read, cache_write, reasoning, output),
+            output,
             cache_read,
-            cache_write: first_positive(&[
-                self.cache_creation_input_tokens,
-                self.cache_creation_input_tokens_camel,
-                self.cached_write_tokens,
-                self.prompt_cache_write_tokens,
-            ]),
-            reasoning: first_present(&[
-                self.completion_thinking_tokens,
-                self.completion_thinking_tokens_camel,
-                self.reasoning_tokens,
-            ]),
+            cache_write,
+            reasoning,
         };
 
         (tokens.total() > 0).then_some(tokens)
     }
 
     /// `cachedMissTokens` / `cacheMissTokens` (extension-log style) already
-    /// exclude cached input. The OpenAI-style fields (`input_tokens`,
-    /// `inputTokens`, `prompt_tokens`) include cache-hit tokens, so subtract
-    /// `cache_read` to keep `input + output + cache_*` aligned with provider
-    /// billing instead of counting the cached portion twice.
-    fn input_exclusive(&self, cache_read: i64) -> i64 {
-        let miss_input = first_present(&[self.cached_miss_tokens, self.cache_miss_tokens]);
-        if miss_input > 0 {
+    /// exclude cached input. Other input fields are ambiguous unless a
+    /// reported total proves they include the cache buckets.
+    fn input_exclusive(
+        &self,
+        cache_read: i64,
+        cache_write: i64,
+        reasoning: i64,
+        output: i64,
+    ) -> i64 {
+        if let Some(miss_input) = self
+            .cached_miss_tokens
+            .or(self.cache_miss_tokens)
+            .map(|tokens| tokens.max(0))
+        {
             return miss_input;
         }
-        first_present(&[
+        let input = first_present(&[
             self.input_tokens,
             self.input_tokens_camel,
             self.prompt_tokens,
-        ])
-        .saturating_sub(cache_read)
+        ]);
+        let Some(total) = first_option(&[self.total_tokens, self.total_tokens_camel]) else {
+            return input;
+        };
+
+        let inclusive_total = input.saturating_add(output);
+        let exclusive_total = inclusive_total
+            .saturating_add(cache_read)
+            .saturating_add(cache_write)
+            .saturating_add(reasoning);
+        if cache_read > 0 && total.max(0) == inclusive_total && inclusive_total != exclusive_total {
+            input.saturating_sub(cache_read)
+        } else {
+            input
+        }
     }
+}
+
+fn first_option(values: &[Option<i64>]) -> Option<i64> {
+    values.iter().copied().flatten().next()
 }
 
 fn first_present(values: &[Option<i64>]) -> i64 {
@@ -502,12 +532,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_jsonl_file_reads_function_call_usage() {
+    fn parse_jsonl_file_keeps_ambiguous_raw_usage_input_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-2.jsonl");
         std::fs::write(
             &path,
-            r#"{"id":"call-1","timestamp":1780000000100,"type":"function_call","sessionId":"session-2","providerData":{"requestModelId":"glm-5.2","messageId":"msg-2","rawUsage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":3,"prompt_cache_write_tokens":4,"completion_thinking_tokens":5}}}"#,
+            r#"{"id":"call-1","timestamp":1780000000100,"type":"function_call","sessionId":"session-2","providerData":{"requestModelId":"glm-5.2","messageId":"msg-2","rawUsage":{"prompt_tokens":3,"completion_tokens":2,"prompt_cache_hit_tokens":4,"prompt_cache_write_tokens":4,"completion_thinking_tokens":5}}}"#,
         )
         .unwrap();
 
@@ -515,12 +545,12 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "workbuddy");
-        assert_eq!(messages[0].tokens.input, 7);
+        assert_eq!(messages[0].tokens.input, 3);
         assert_eq!(messages[0].tokens.output, 2);
-        assert_eq!(messages[0].tokens.cache_read, 3);
+        assert_eq!(messages[0].tokens.cache_read, 4);
         assert_eq!(messages[0].tokens.cache_write, 4);
         assert_eq!(messages[0].tokens.reasoning, 5);
-        assert_eq!(messages[0].tokens.total(), 21);
+        assert_eq!(messages[0].tokens.total(), 18);
     }
 
     #[test]
@@ -542,6 +572,46 @@ mod tests {
         assert_eq!(message.tokens.cache_read, 112224);
         // Provider-billed total (114405), not input + cache_read + output (226629).
         assert_eq!(message.tokens.total(), 114405);
+    }
+
+    #[test]
+    fn parse_jsonl_file_keeps_ambiguous_codebuddy_input_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-ambiguous.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"assistant-1","timestamp":1780000000100,"type":"message","role":"assistant","status":"completed","sessionId":"session-ambiguous","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"msg-1"},"message":{"usage":{"inputTokens":7,"outputTokens":2,"cacheTokens":10}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jsonl_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.tokens.input, 7);
+        assert_eq!(message.tokens.output, 2);
+        assert_eq!(message.tokens.cache_read, 10);
+        assert_eq!(message.tokens.total(), 19);
+    }
+
+    #[test]
+    fn parse_jsonl_file_keeps_zero_cached_miss_tokens_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-zero-cache-miss.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"assistant-1","timestamp":1780000000100,"type":"message","role":"assistant","status":"completed","sessionId":"session-zero-cache-miss","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"msg-1"},"message":{"usage":{"inputTokens":100,"outputTokens":5,"cacheTokens":100,"cachedMissTokens":0}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jsonl_file("workbuddy", "workbuddy", &path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.tokens.input, 0);
+        assert_eq!(message.tokens.output, 5);
+        assert_eq!(message.tokens.cache_read, 100);
+        assert_eq!(message.tokens.total(), 105);
     }
 
     #[test]
