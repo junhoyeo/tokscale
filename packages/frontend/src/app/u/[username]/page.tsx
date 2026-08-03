@@ -116,7 +116,7 @@ export default async function ProfilePage({
   const session = await getSession().catch(() => null);
   const moderationNotice =
     session && data.user?.id && session.id === data.user.id
-      ? await getModerationNotice(session.id).catch(() => null)
+      ? await getModerationNotice(session.id)
       : null;
 
   return (

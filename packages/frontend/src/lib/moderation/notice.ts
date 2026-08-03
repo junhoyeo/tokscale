@@ -59,7 +59,7 @@ export function moderationNoticeFor(reason: string | null): ModerationNotice {
     tone: "pending",
     message:
       `Your account is currently withheld from the leaderboard pending review. ` +
-      `Your profile, badges and totals still work. ` +
+      `Your profile and totals still work, but rank badges show N/A while your account is withheld. ` +
       `If you think this is a mistake, email ${CONTACT_EMAIL}`,
   };
 }

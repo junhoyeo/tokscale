@@ -36,6 +36,7 @@ describe("moderationNoticeFor", () => {
 
       expect(notice.tone).toBe("pending");
       expect(notice.message).not.toMatch(/abus/i);
+      expect(notice.message).toContain("rank badges show N/A");
     }
   });
 
