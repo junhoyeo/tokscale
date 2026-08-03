@@ -526,6 +526,20 @@ mod tests {
         assert_eq!(message.provider_id, "google");
     }
 
+    // Issue #1019: the generic `gemini-default` routing label must resolve to
+    // the billable flash-lite key (via the pricing alias) so submit validation
+    // does not fail on cache-read usage.
+    #[test]
+    fn gemini_default_response_model_resolves_to_flash_lite() {
+        let blob = build_gen_metadata_with_model("gemini-default");
+        let mut seen = HashSet::new();
+
+        let message = parse_gen_metadata(&blob, "session", 1_000, &mut seen).unwrap();
+
+        assert_eq!(message.model_id, "gemini-2.0-flash-lite");
+        assert_eq!(message.provider_id, "google");
+    }
+
     #[test]
     fn per_generation_timestamp_overrides_session_fallback() {
         // chatModel.#9.#4 = {#1: seconds, #2: nanos} is the per-turn wall-clock

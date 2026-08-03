@@ -47,10 +47,11 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
     "orcarouter/",
 ];
 
-// Bare brand tokens ("claude", "anthropic") are blocked because they contain
-// no model information: a fuzzy hit from them can land on any model of the
-// brand (e.g. retired `claude-2.1` eroding to `claude` and billing at an
-// opus-fast key), so such a match is never trustworthy.
+// Bare brand tokens ("claude", "anthropic", "gemini") are blocked because they
+// contain no model information: a fuzzy hit from them can land on any model of
+// the brand (e.g. retired `claude-2.1` eroding to `claude` and billing at an
+// opus-fast key, or `gemini-default` eroding to `gemini` and landing on a
+// native-audio preview key), so such a match is never trustworthy.
 //
 // Generic English words ("model", "router") are blocked for the same reason:
 // they carry no model identity, yet substring-match real priced keys
@@ -65,6 +66,7 @@ const FUZZY_BLOCKLIST: &[&str] = &[
     "base",
     "claude",
     "anthropic",
+    "gemini",
     "model",
     "router",
 ];
@@ -1159,10 +1161,21 @@ impl PricingLookup {
         usage: &TokenBreakdown,
     ) -> f64 {
         let provider_id = normalize_provider_hint(provider_id);
-        let result = match self.lookup_with_provider(model_id, provider_id) {
-            Some(r) => r,
-            None => return 0.0,
+        let Some(result) = self.lookup_with_provider(model_id, provider_id) else {
+            return 0.0;
         };
+
+        // The provider hint is inferred from the model name and can pin the
+        // resolution to a reseller row whose rates do not cover every bucket
+        // (e.g. `google/gemini-default` -> `vercel_ai_gateway/google/
+        // gemini-2.0-flash-lite` has no cache rates). When the hinted pricing
+        // would under-price the usage, prefer the canonical unhinted
+        // resolution (the bare official key) instead.
+        if provider_id.is_some() && !result.pricing.covers_usage(usage) {
+            if let Some(unhinted) = self.lookup_with_provider(model_id, None) {
+                return compute_cost_for_lookup(&unhinted, None, usage);
+            }
+        }
 
         compute_cost_for_lookup(&result, provider_id, usage)
     }
@@ -3181,6 +3194,34 @@ mod tests {
         );
     }
 
+    // Issue #1019: the bare brand token `gemini` must not fuzzy-match any
+    // gemini key. Before the blocklist entry, `gemini-default` eroded to
+    // `gemini` and landed on the LONGEST unrelated gemini key (a native-audio
+    // preview with no cache rates).
+    #[test]
+    fn bare_gemini_token_does_not_fuzzy_match() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gemini/gemini-2.5-flash-native-audio-preview-12-2025".into(),
+            ModelPricing {
+                input_cost_per_token: Some(3e-7),
+                output_cost_per_token: Some(2.5e-6),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "gemini-2.0-flash-lite".into(),
+            ModelPricing {
+                input_cost_per_token: Some(7.5e-8),
+                output_cost_per_token: Some(3e-7),
+                cache_read_input_token_cost: Some(1.875e-8),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        assert!(lookup.lookup("gemini").is_none());
+    }
     #[test]
     fn test_provider_hint_normalizes_openai_codex_alias() {
         let mut litellm = HashMap::new();
