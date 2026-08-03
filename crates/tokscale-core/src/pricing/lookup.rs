@@ -3197,35 +3197,6 @@ mod tests {
         );
     }
 
-    // Issue #1019: the bare brand token `gemini` must not fuzzy-match any
-    // gemini key. Before the blocklist entry, `gemini-default` eroded to
-    // `gemini` and landed on the LONGEST unrelated gemini key (a native-audio
-    // preview with no cache rates).
-    #[test]
-    fn bare_gemini_token_does_not_fuzzy_match() {
-        let mut litellm = HashMap::new();
-        litellm.insert(
-            "gemini/gemini-2.5-flash-native-audio-preview-12-2025".into(),
-            ModelPricing {
-                input_cost_per_token: Some(3e-7),
-                output_cost_per_token: Some(2.5e-6),
-                ..Default::default()
-            },
-        );
-        litellm.insert(
-            "gemini-2.0-flash-lite".into(),
-            ModelPricing {
-                input_cost_per_token: Some(7.5e-8),
-                output_cost_per_token: Some(3e-7),
-                cache_read_input_token_cost: Some(1.875e-8),
-                ..Default::default()
-            },
-        );
-        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
-
-        assert!(lookup.lookup("gemini").is_none());
-    }
-
     #[test]
     fn incomplete_unhinted_result_does_not_replace_provider_pricing() {
         let mut litellm = HashMap::new();

@@ -5481,6 +5481,25 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
     println!();
 }
 
+fn report_unpriced_submission_exclusions(excluded: &[tokscale_core::UnpricedSubmissionExclusion]) {
+    use colored::Colorize;
+
+    for row in excluded {
+        println!(
+            "{}",
+            format!(
+                "  Warning: excluded {} unpriced {}/{} message(s) ({} tokens): {}. Remaining priced usage will be submitted.",
+                row.message_count,
+                row.provider_id,
+                row.model_id,
+                format_tokens_with_commas(row.total_tokens),
+                row.reason,
+            )
+            .yellow()
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SubmitMode {
     Interactive,
@@ -5636,6 +5655,7 @@ fn run_submit_command(
     // left out, so a single legacy charge can't block the whole submission.
     let excluded_rows = exclude_tokenless_cost_contributions(&mut graph_result);
     report_excluded_tokenless_rows(&excluded_rows);
+    report_unpriced_submission_exclusions(&graph_result.unpriced_submission_exclusions);
 
     println!("{}", "  Data to submit:".white());
     println!(
@@ -6568,6 +6588,7 @@ mod tests {
             years: calculate_years(&contributions),
             contributions,
             time_metrics: None,
+            unpriced_submission_exclusions: Vec::new(),
         }
     }
 

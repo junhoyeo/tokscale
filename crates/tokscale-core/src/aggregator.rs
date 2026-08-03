@@ -220,6 +220,7 @@ pub fn generate_graph_result(
         years,
         contributions,
         time_metrics: None,
+        unpriced_submission_exclusions: Vec::new(),
     }
 }
 

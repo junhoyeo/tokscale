@@ -496,6 +496,19 @@ pub struct GraphResult {
     pub contributions: Vec<DailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_metrics: Option<sessionize::TimeMetrics>,
+    #[serde(skip)]
+    pub unpriced_submission_exclusions: Vec<UnpricedSubmissionExclusion>,
+}
+
+/// Token-bearing usage excluded only from a submission because its generic
+/// routing label has no authoritative model-to-price mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpricedSubmissionExclusion {
+    pub provider_id: String,
+    pub model_id: String,
+    pub message_count: usize,
+    pub total_tokens: i64,
+    pub reason: &'static str,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2927,9 +2940,15 @@ fn build_graph_from_messages(
     start: Instant,
     bucket_timezone: &bucket_tz::BucketTimezone,
 ) -> Result<GraphResult, String> {
-    if matches!(pricing_requirement, GraphPricingRequirement::Submission) {
-        validate_priced_messages(&filtered, pricing)?;
-    }
+    let (filtered, unpriced_submission_exclusions) = match pricing_requirement {
+        GraphPricingRequirement::Lenient => (filtered, Vec::new()),
+        GraphPricingRequirement::Submission => {
+            let (submitted, exclusions) =
+                exclude_generic_unpriced_submission_messages(filtered, pricing);
+            validate_priced_messages(&submitted, pricing)?;
+            (submitted, exclusions)
+        }
+    };
 
     let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
     let time_metrics =
@@ -2944,6 +2963,7 @@ fn build_graph_from_messages(
     let processing_time_ms = start.elapsed().as_millis() as u32;
     let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
     result.time_metrics = Some(time_metrics);
+    result.unpriced_submission_exclusions = unpriced_submission_exclusions;
 
     for contribution in &mut result.contributions {
         if let Some(&ms) = daily_active_time.get(&contribution.date) {
@@ -2952,6 +2972,58 @@ fn build_graph_from_messages(
     }
 
     Ok(result)
+}
+
+const GEMINI_DEFAULT_UNPRICED_REASON: &str =
+    "generic routing label has no authoritative model-to-price mapping";
+
+fn exclude_generic_unpriced_submission_messages(
+    messages: Vec<UnifiedMessage>,
+    pricing: Option<&pricing::PricingService>,
+) -> (Vec<UnifiedMessage>, Vec<UnpricedSubmissionExclusion>) {
+    let Some(pricing) = pricing else {
+        return (messages, Vec::new());
+    };
+
+    let mut submitted = Vec::with_capacity(messages.len());
+    let mut exclusions: std::collections::BTreeMap<(String, String), (usize, i64)> =
+        std::collections::BTreeMap::new();
+
+    for message in messages {
+        let is_unpriced_gemini_default = message.tokens.total() > 0
+            && !message.has_authoritative_cost()
+            && message.provider_id.eq_ignore_ascii_case("google")
+            && message.model_id.eq_ignore_ascii_case("gemini-default")
+            && !pricing.covers_usage_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            );
+
+        if is_unpriced_gemini_default {
+            let entry = exclusions
+                .entry((message.provider_id.clone(), message.model_id.clone()))
+                .or_default();
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(message.tokens.total());
+        } else {
+            submitted.push(message);
+        }
+    }
+
+    let exclusions = exclusions
+        .into_iter()
+        .map(|((provider_id, model_id), (message_count, total_tokens))| {
+            UnpricedSubmissionExclusion {
+                provider_id,
+                model_id,
+                message_count,
+                total_tokens,
+                reason: GEMINI_DEFAULT_UNPRICED_REASON,
+            }
+        })
+        .collect();
+    (submitted, exclusions)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4150,7 +4222,8 @@ mod tests {
         parse_local_clients, parsed_to_unified, paths, pricing, retain_for_requested_clients,
         scanner, select_local_parse_pricing, unified_to_parsed, validate_priced_messages, ClientId,
         GraphPricingRequirement, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown,
-        UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        UnifiedMessage, UnpricedSubmissionExclusion, GEMINI_DEFAULT_UNPRICED_REASON,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
@@ -7840,6 +7913,94 @@ mod tests {
 
         assert_eq!(report.summary.total_tokens, 1);
         assert!(submission_error.contains("unknown-provider/genuinely-unpriced-model"));
+    }
+
+    #[test]
+    fn submission_excludes_unpriced_generic_gemini_default_but_keeps_priceable_usage() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4o".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let generic = UnifiedMessage::new(
+            "antigravity-cli",
+            "gemini-default",
+            "google",
+            "generic",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 7,
+                cache_read: 11,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let concrete = UnifiedMessage::new(
+            "synthetic",
+            "gpt-4o",
+            "openai",
+            "concrete",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 13,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let graph = build_graph_from_messages(
+            vec![generic, concrete],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+        )
+        .expect("generic routing label must not block fully priced submission usage");
+
+        assert_eq!(graph.summary.total_tokens, 13);
+        assert_eq!(graph.contributions[0].clients.len(), 1);
+        assert_eq!(graph.contributions[0].clients[0].model_id, "gpt-4o");
+        assert_eq!(graph.unpriced_submission_exclusions.len(), 1);
+        assert_eq!(
+            graph.unpriced_submission_exclusions[0],
+            UnpricedSubmissionExclusion {
+                provider_id: "google".to_string(),
+                model_id: "gemini-default".to_string(),
+                message_count: 1,
+                total_tokens: 18,
+                reason: GEMINI_DEFAULT_UNPRICED_REASON,
+            }
+        );
+    }
+
+    #[test]
+    fn submission_still_rejects_unpriced_concrete_models() {
+        let concrete = UnifiedMessage::new(
+            "synthetic",
+            "gemini-3.5-pro",
+            "google",
+            "concrete",
+            1_736_510_400_000,
+            TokenBreakdown {
+                input: 1,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+
+        let error = build_graph_from_messages(
+            vec![concrete],
+            Some(&pricing),
+            GraphPricingRequirement::Submission,
+            std::time::Instant::now(),
+        )
+        .expect_err("concrete unpriced models must remain a submission error");
+
+        assert!(error.contains("google/gemini-3.5-pro"));
     }
 
     #[test]
