@@ -1161,24 +1161,10 @@ impl PricingLookup {
         usage: &TokenBreakdown,
     ) -> f64 {
         let provider_id = normalize_provider_hint(provider_id);
-        let Some(result) = self.lookup_with_provider(model_id, provider_id) else {
-            return 0.0;
+        let result = match self.lookup_with_provider(model_id, provider_id) {
+            Some(r) => r,
+            None => return 0.0,
         };
-
-        // The provider hint is inferred from the model name and can pin the
-        // resolution to a reseller row whose rates do not cover every bucket
-        // (e.g. `google/gemini-default` -> `vercel_ai_gateway/google/
-        // gemini-2.0-flash-lite` has no cache rates). When the hinted pricing
-        // would under-price the usage, prefer the canonical unhinted
-        // resolution (the bare official key) instead.
-        if provider_id.is_some() && !result.pricing.covers_usage(usage) {
-            if let Some(unhinted) = self
-                .lookup_with_provider(model_id, None)
-                .filter(|unhinted| unhinted.pricing.covers_usage(usage))
-            {
-                return compute_cost_for_lookup(&unhinted, None, usage);
-            }
-        }
 
         compute_cost_for_lookup(&result, provider_id, usage)
     }

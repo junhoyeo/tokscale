@@ -74,13 +74,6 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("model_placeholder_m20", "gemini-3.5-flash-medium");
     m.insert("gemini-pro-default", "gemini-3.1-pro");
     m.insert("gemini-pro-agent", "gemini-3.1-pro");
-    // `gemini-default` is Antigravity CLI's generic routing label when no
-    // specific model is selected in Google AI Studio (issue #1019). It is not
-    // a billable model id, so pin it to the flash-lite key the local display
-    // already resolves it to; without this, submission validation could
-    // fuzzy-match the bare `gemini` token onto an unrelated gemini key (e.g. a
-    // native-audio preview) whose rates do not cover cache-read usage.
-    m.insert("gemini-default", "gemini-2.0-flash-lite");
     m.insert("gemini-3-flash-agent", "gemini-3.5-flash-high");
     m.insert("gemini-3-flash-b", "gemini-3.5-flash-high");
     m.insert("gemini-3.5-flash-low", "gemini-3.5-flash-medium");
@@ -141,7 +134,6 @@ mod tests {
             ("model_placeholder_m20", "gemini-3.5-flash-medium"),
             ("gemini-pro-default", "gemini-3.1-pro"),
             ("gemini-pro-agent", "gemini-3.1-pro"),
-            ("gemini-default", "gemini-2.0-flash-lite"),
             ("gemini-3-flash-agent", "gemini-3.5-flash-high"),
             ("gemini-3-flash-b", "gemini-3.5-flash-high"),
             ("gemini-3.5-flash-low", "gemini-3.5-flash-medium"),

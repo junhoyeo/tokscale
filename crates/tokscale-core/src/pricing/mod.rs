@@ -400,19 +400,7 @@ impl PricingService {
         let Some(result) = self.lookup_with_source_and_provider(model_id, None, provider_id) else {
             return false;
         };
-        if result.pricing.covers_usage(usage) {
-            return true;
-        }
-
-        // The provider hint is inferred from the model name and can pin the
-        // resolution to a reseller row lacking cache rates (issue #1019:
-        // `gemini-default` -> `vercel_ai_gateway/google/gemini-2.0-flash-lite`).
-        // The canonical unhinted resolution (bare official key) covers the
-        // usage, so accept it rather than blocking the whole submission.
-        provider_id.is_some()
-            && self
-                .lookup_with_source_and_provider(model_id, None, None)
-                .is_some_and(|unhinted| unhinted.pricing.covers_usage(usage))
+        result.pricing.covers_usage(usage)
     }
 
     fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
@@ -444,54 +432,6 @@ mod tests {
         openrouter: HashMap<String, ModelPricing>,
     ) -> PricingService {
         PricingService::new_with_custom(CustomPricing::from_models(custom), litellm, openrouter)
-    }
-
-    // Issue #1019: antigravity-cli records `gemini-default` (provider
-    // `google`). The alias pins it to `gemini-2.0-flash-lite`; the hinted
-    // resolution would then land on `vercel_ai_gateway/google/
-    // gemini-2.0-flash-lite`, whose row has no cache rates, so submission
-    // validation must fall back to the canonical bare key for cache-read
-    // usage instead of blocking the whole submit.
-    #[test]
-    fn gemini_default_submission_validation_covers_cache_usage() {
-        let mut litellm = HashMap::new();
-        litellm.insert(
-            "gemini/gemini-2.5-flash-native-audio-preview-12-2025".into(),
-            model_pricing(3e-7, 2.5e-6),
-        );
-        litellm.insert(
-            "vercel_ai_gateway/google/gemini-2.0-flash-lite".into(),
-            model_pricing(7.5e-8, 3e-7),
-        );
-        litellm.insert(
-            "gemini-2.0-flash-lite".into(),
-            ModelPricing {
-                input_cost_per_token: Some(7.5e-8),
-                output_cost_per_token: Some(3e-7),
-                cache_read_input_token_cost: Some(1.875e-8),
-                ..Default::default()
-            },
-        );
-        let pricing = custom_service(HashMap::new(), litellm, HashMap::new());
-
-        let usage = TokenBreakdown {
-            input: 2_507_742,
-            output: 37_487,
-            cache_read: 16_000,
-            cache_write: 0,
-            reasoning: 40,
-        };
-        assert!(
-            pricing.covers_usage_with_provider("gemini-default", Some("google"), &usage),
-            "submission validation must cover cache-read usage for gemini-default"
-        );
-
-        let cost = pricing.calculate_cost_with_provider("gemini-default", Some("google"), &usage);
-        let expected = 2_507_742.0 * 7.5e-8 + (37_487.0 + 40.0) * 3e-7 + 16_000.0 * 1.875e-8;
-        assert!(
-            (cost - expected).abs() < 1e-9,
-            "cost must use the canonical flash-lite rates incl. cache read: {cost} vs {expected}"
-        );
     }
 
     fn fixture_models_dev() -> HashMap<String, ModelPricing> {
