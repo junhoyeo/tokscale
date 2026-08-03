@@ -23,7 +23,9 @@ use std::time::UNIX_EPOCH;
 // 3: UnifiedMessage gained session_title, changing the bincode payload layout.
 // Old shards must read as Stale (silent rebuild), not Invalid (corruption
 // warning), so the format version moves with the struct.
-const CACHE_FORMAT_VERSION: u32 = 3;
+// 4: UnifiedMessage gained model_attribution_conflicted, changing the bincode
+// payload layout. Old shards must be silently rebuilt rather than decoded.
+const CACHE_FORMAT_VERSION: u32 = 4;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:
 // the monolith did not record a trustworthy parser owner for migration.
 const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
@@ -3023,6 +3025,38 @@ mod tests {
         assert!(SourceMessageCache::load()
             .get(claude, source.path())
             .is_some());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prior_cache_format_shard_is_skipped_before_decoding_payload() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let codex = CacheIdentity::for_client(ClientId::Codex);
+        let stale_key = CacheShardKey {
+            namespace: codex.namespace.to_string(),
+            index: 0,
+        };
+        let stale_path = shard_path(&cache_shard_dir().unwrap(), &stale_key);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        let stale_envelope = CachedShardEnvelope {
+            format_version: CACHE_FORMAT_VERSION - 1,
+            parser_namespace: codex.namespace.to_string(),
+            parser_version: codex.parser_version,
+            payload: b"prior UnifiedMessage layout".to_vec(),
+        };
+        let mut writer = BufWriter::new(File::create(&stale_path).unwrap());
+        bincode::options()
+            .serialize_into(&mut writer, &stale_envelope)
+            .unwrap();
+        writer.flush().unwrap();
+
+        assert!(matches!(
+            read_shard(&stale_path, codex),
+            ShardReadStatus::Stale
+        ));
 
         restore_cache_env(prev_env);
     }

@@ -706,11 +706,16 @@ fn parse_grok_unified_log_snapshot(
         let known_scope = child_scope
             .as_ref()
             .is_some_and(|scope| evidence.known_scopes.contains(scope));
+        let model_attribution_conflicted = child_scope
+            .as_ref()
+            .is_some_and(|scope| has_conflicting_child_evidence(&evidence, scope));
         let known_child_session = evidence.child_session_ids.contains(&session_id);
         let exact_model = model_by_pid_and_session
             .get(&(pid, generation, session_id.clone()))
             .cloned();
-        let model_id = if let Some(model_id) = exact_model {
+        let model_id = if model_attribution_conflicted {
+            UNKNOWN_MODEL.to_string()
+        } else if let Some(model_id) = exact_model {
             model_id
         } else if known_scope {
             child_scope
@@ -742,9 +747,7 @@ fn parse_grok_unified_log_snapshot(
             dedup_key,
             loop_index == 1,
         );
-        message.model_attribution_conflicted = child_scope
-            .as_ref()
-            .is_some_and(|scope| has_conflicting_child_evidence(&evidence, scope));
+        message.model_attribution_conflicted = model_attribution_conflicted;
         message.session_id = session_id;
         message.message_count = i32::from(message.is_turn_start);
         messages.push(message);

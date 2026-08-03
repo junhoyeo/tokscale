@@ -223,7 +223,7 @@ fn file_modified_ms(path: &Path) -> i64 {
 /// Convert a `file://` URI to a filesystem path, percent-decoding UTF-8 escapes
 /// (workspace paths on cloud drives can be percent-encoded CJK). After the
 /// scheme the remainder is `authority + path`; the three shapes RFC 8089 (and
-/// Antigravity) produce are handled:
+/// Antigravity) produces are handled:
 /// - `file:///C:/x`        → `C:/x`            (empty authority, Windows drive: drop the leading slash)
 /// - `file:///home/x`      → `/home/x`         (empty authority, POSIX absolute: keep as-is)
 /// - `file://host/share/x` → `//host/share/x`  (non-empty authority → UNC: restore the leading `//`)
