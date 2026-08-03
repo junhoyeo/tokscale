@@ -926,9 +926,7 @@ fn grok_home_from_scan_root(path: &Path) -> PathBuf {
             .unwrap_or(false)
     }) {
         if let Some(grok_home) = sessions_dir.parent() {
-            if !grok_home.as_os_str().is_empty() {
-                return grok_home.to_path_buf();
-            }
+            return grok_home.to_path_buf();
         }
     }
 
