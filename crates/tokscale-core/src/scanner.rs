@@ -913,18 +913,26 @@ fn push_unique_scan_task_with_pattern(
 /// Derive the Grok home directory from a scanned root path.
 ///
 /// The primary resolution (`ClientDef::resolve_path_with_env_strategy`) returns
-/// `<home>/sessions`, so a configured alternate root may point at either the
-/// home itself (`~/.grok`) or its `sessions` subdirectory. A trailing
-/// `sessions` component is treated as the home's child in both cases, keeping
-/// discovery robust to either configuration shape.
+/// `<home>/sessions`, so a configured alternate root may point at the home
+/// itself, its `sessions` directory, or any nested workspace/session directory.
+/// The nearest ancestor named `sessions` (case-insensitively) is treated as the
+/// home's child in all of those cases.
 fn grok_home_from_scan_root(path: &Path) -> PathBuf {
-    if path.file_name().and_then(|name| name.to_str()) == Some("sessions") {
-        path.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.to_path_buf())
-    } else {
-        path.to_path_buf()
+    if let Some(sessions_dir) = path.ancestors().find(|candidate| {
+        candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("sessions"))
+            .unwrap_or(false)
+    }) {
+        if let Some(grok_home) = sessions_dir.parent() {
+            if !grok_home.as_os_str().is_empty() {
+                return grok_home.to_path_buf();
+            }
+        }
     }
+
+    path.to_path_buf()
 }
 
 /// Register the dual-source scan tasks for one Grok root.
@@ -2545,8 +2553,9 @@ mod tests {
         // unified log was only added for the resolved primary home, so an
         // alternate root contributed only the registered `updates.jsonl`
         // pattern and its inference breakdowns were silently missed.
-        let mut env = EnvGuard::capture(&["GROK_HOME"]);
+        let mut env = EnvGuard::capture(&["GROK_HOME", "TOKSCALE_EXTRA_DIRS"]);
         env.remove("GROK_HOME");
+        env.remove("TOKSCALE_EXTRA_DIRS");
 
         let home = TempDir::new().unwrap();
         let alt_home = TempDir::new().unwrap();
@@ -2601,8 +2610,9 @@ mod tests {
         // extraScanPaths.grok may point at the `sessions` subdirectory (the
         // shape the primary resolution returns) instead of the home itself;
         // the unified log is derived from the parent home either way.
-        let mut env = EnvGuard::capture(&["GROK_HOME"]);
+        let mut env = EnvGuard::capture(&["GROK_HOME", "TOKSCALE_EXTRA_DIRS"]);
         env.remove("GROK_HOME");
+        env.remove("TOKSCALE_EXTRA_DIRS");
 
         let home = TempDir::new().unwrap();
         let alt_home = TempDir::new().unwrap();
@@ -2618,6 +2628,50 @@ mod tests {
         let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
             "extraScanPaths": {
                 "grok": [alt_home.path().join("sessions")]
+            }
+        }))
+        .unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.path().to_str().unwrap(),
+            &["grok".to_string()],
+            true,
+            &settings,
+        );
+
+        let files = result.get(ClientId::Grok);
+        assert_eq!(
+            files.len(),
+            2,
+            "expected updates.jsonl + unified.jsonl: {files:?}"
+        );
+        assert!(files.iter().any(|p| p.ends_with("updates.jsonl")));
+        assert!(files.iter().any(|p| p.ends_with("unified.jsonl")));
+    }
+
+    #[test]
+    #[serial]
+    fn test_grok_extra_scan_path_nested_session_shape_discovers_unified_log() {
+        // A root below a mixed-case `sessions` directory still belongs to the
+        // surrounding Grok home, so its sibling logs/unified.jsonl is found.
+        let mut env = EnvGuard::capture(&["GROK_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        env.remove("GROK_HOME");
+        env.remove("TOKSCALE_EXTRA_DIRS");
+
+        let home = TempDir::new().unwrap();
+        let alt_home = TempDir::new().unwrap();
+
+        let alt_session = alt_home
+            .path()
+            .join("Sessions/%2Ftmp%2Fproject/session-alt");
+        fs::create_dir_all(&alt_session).unwrap();
+        File::create(alt_session.join("updates.jsonl")).unwrap();
+        fs::create_dir_all(alt_home.path().join("logs")).unwrap();
+        File::create(alt_home.path().join("logs/unified.jsonl")).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "grok": [alt_session]
             }
         }))
         .unwrap();
