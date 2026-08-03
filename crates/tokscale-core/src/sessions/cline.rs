@@ -33,9 +33,26 @@ struct ClineCliMessage {
     id: Option<String>,
     role: Option<String>,
     ts: Option<Value>,
+    content: Option<Vec<Value>>,
     #[serde(rename = "modelInfo")]
     model_info: Option<ClineCliModelInfo>,
     metrics: Option<ClineCliMetrics>,
+}
+
+fn is_human_user_prompt(content: Option<&[Value]>) -> bool {
+    let Some(content) = content else {
+        return false;
+    };
+
+    let mut has_text_block = false;
+    for block in content {
+        match block.get("type").and_then(Value::as_str) {
+            Some("tool_result") => return false,
+            Some("text") => has_text_block = true,
+            _ => {}
+        }
+    }
+    has_text_block
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +177,9 @@ pub fn parse_cline_cli_file(path: &Path) -> Vec<UnifiedMessage> {
 
     for entry in file.messages.unwrap_or_default() {
         if entry.role.as_deref() == Some("user") {
-            pending_turn_start = true;
+            if is_human_user_prompt(entry.content.as_deref()) {
+                pending_turn_start = true;
+            }
             continue;
         }
         if entry.role.as_deref() != Some("assistant") {
@@ -338,7 +357,11 @@ mod tests {
   "sessionId": "cline-cli-session",
   "agent": "lead",
   "messages": [
-    {"role": "user", "ts": 1785320464923},
+    {
+      "role": "user",
+      "ts": 1785320464923,
+      "content": [{"type": "text", "text": "Inspect this project."}]
+    },
     {
       "id": "msg-1",
       "role": "assistant",
@@ -377,6 +400,99 @@ mod tests {
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
         assert_eq!(messages[0].session_title.as_deref(), Some("CLI task"));
         assert!(messages[0].is_turn_start);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("cline-cli:cline-cli-session:msg-1")
+        );
+    }
+
+    #[test]
+    fn test_parse_cline_cli_turn_starts_ignore_tool_results() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("turns.messages.json");
+        fs::write(
+            &path,
+            r#"{
+  "sessionId": "turns",
+  "messages": [
+    {
+      "id": "prompt-1",
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Please inspect the repository."}
+      ]
+    },
+    {
+      "id": "assistant-tool-use",
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "I will inspect the repository."},
+        {
+          "type": "tool_use",
+          "id": "tool-1",
+          "name": "read_file",
+          "input": {"path": "README.md"}
+        },
+        {"type": "future_block", "payload": {"priority": "low"}}
+      ],
+      "modelInfo": {"id": "provider/model", "provider": "provider"},
+      "metrics": {
+        "inputTokens": 100,
+        "outputTokens": 20,
+        "cacheReadTokens": 10,
+        "cacheWriteTokens": 5,
+        "cost": 0.02
+      }
+    },
+    {
+      "id": "tool-result",
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tool-1",
+          "content": [{"type": "text", "text": "README contents"}]
+        }
+      ]
+    },
+    {
+      "id": "assistant-final",
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "The repository is ready."}
+      ],
+      "metrics": {
+        "inputTokens": 15,
+        "outputTokens": 6,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let messages = parse_cline_cli_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("cline-cli:turns:assistant-tool-use")
+        );
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some("cline-cli:turns:assistant-final")
+        );
+        assert!(messages[0].is_turn_start);
+        assert!(!messages[1].is_turn_start);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.is_turn_start)
+                .count(),
+            1
+        );
     }
 
     #[test]

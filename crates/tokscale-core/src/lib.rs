@@ -1984,8 +1984,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
+    let mut cline_seen: HashSet<String> = HashSet::new();
     for outcome in cline_outcomes {
-        all_messages.extend(outcome.messages);
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut cline_seen, message)),
+        );
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
@@ -3792,15 +3798,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::KiloCode, kilocode_count);
     messages.extend(kilocode_msgs);
 
-    let cline_msgs: Vec<ParsedMessage> = scan_result
+    let cline_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Cline)
         .par_iter()
-        .flat_map(|path| {
-            sessions::cline::parse_cline_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|path| sessions::cline::parse_cline_file(path))
+        .collect();
+    let mut cline_seen: HashSet<String> = HashSet::new();
+    let cline_msgs: Vec<ParsedMessage> = cline_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut cline_seen, message))
+        .map(|message| unified_to_parsed(&message))
         .collect();
     let cline_count = summed_parsed_message_count(&cline_msgs);
     counts.set(ClientId::Cline, cline_count);
@@ -5930,6 +5937,81 @@ mod tests {
 {"type":"message","id":"kimchi-message","timestamp":"2026-08-01T00:00:01.000Z","message":{"role":"assistant","model":"kimi-k2.6","provider":"kimchi-dev","usage":{"input":100,"output":10,"cacheRead":5,"cacheWrite":2,"totalTokens":117}}}"#,
         )
         .unwrap();
+    }
+    fn write_cline_cli_fixture(path: &std::path::Path, messages: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(r#"{{"sessionId":"cline-dedup-session","messages":[{messages}]}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_cline_cli_deduplicates_duplicate_records_in_cached_and_local_paths() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let duplicate = r#"{"id":"duplicate","role":"assistant","ts":1785320475705,"modelInfo":{"id":"cline-free/glm-5.2","provider":"cline-pass"},"metrics":{"inputTokens":100,"outputTokens":10}}"#;
+            let distinct_a = r#"{"id":"distinct-a","role":"assistant","ts":1785320476705,"metrics":{"inputTokens":200,"outputTokens":20}}"#;
+            let distinct_b = r#"{"id":"distinct-b","role":"assistant","ts":1785320477705,"metrics":{"inputTokens":300,"outputTokens":30}}"#;
+            write_cline_cli_fixture(
+                &source_home
+                    .path()
+                    .join(".cline/data/sessions/first/first.messages.json"),
+                &format!("{duplicate},{distinct_a}"),
+            );
+            write_cline_cli_fixture(
+                &source_home
+                    .path()
+                    .join(".cline/data/sessions/second/second.messages.json"),
+                &format!("{duplicate},{distinct_b}"),
+            );
+
+            let clients = ["cline".to_string()];
+            let scanner_settings = scanner::ScannerSettings::default();
+            let cached = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner_settings,
+            );
+            let mut cached_inputs = cached
+                .iter()
+                .map(|message| message.tokens.input)
+                .collect::<Vec<_>>();
+            cached_inputs.sort_unstable();
+            assert_eq!(cached_inputs, vec![100, 200, 300]);
+
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(clients.to_vec()),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings,
+            })
+            .unwrap();
+            let mut local_inputs = parsed
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .collect::<Vec<_>>();
+            local_inputs.sort_unstable();
+            assert_eq!(local_inputs, vec![100, 200, 300]);
+            assert_eq!(parsed.counts.get(ClientId::Cline), 3);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

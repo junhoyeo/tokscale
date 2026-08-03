@@ -905,7 +905,10 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Kimi => 4,
         // v1->v2: standalone Cline messages subtract cache buckets from gross
         // input tokens, reject non-finite costs, and preserve zero-cost reports.
-        ClientId::Cline => 2,
+        // v2->v3: content-aware Cline CLI turn-start classification now
+        // recognizes user tool-result records as continuations instead of
+        // beginning a new turn, so cached turns must be reparsed.
+        ClientId::Cline => 3,
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,

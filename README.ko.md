@@ -69,6 +69,7 @@
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` and `~/.omp/agent/sessions/` ([Oh My Pi](https://github.com/can1357/oh-my-pi)) |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR`로 오버라이드 가능) |
+| <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/` (`KIMCHI_CODING_AGENT_DIR`로 오버라이드 가능) |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (override via `KIMI_CODE_HOME`) |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) |
@@ -84,7 +85,7 @@
 | <img width="48px" src="https://github.com/xai-org.png" alt="Grok Build" /> | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl` (폴백: `~/.grok/sessions/*/*/updates.jsonl`) |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; 호스팅된 Zed 모델 전용, 외부 ACP 에이전트 제외) |
 | <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`), `~/.local/share/kiro-cli/data.sqlite3` (macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`), 그리고 Kiro IDE globalStorage 스냅샷 (`Kiro/User/globalStorage/kiro.kiroagent`; macOS Application Support, Linux `~/.config/Kiro`, Windows `%APPDATA%\Kiro`) |
-| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage tasks (Linux: `~/.config/Code/...`; macOS: `~/Library/Application Support/Code/...`; Windows: `%APPDATA%\Code\...`; server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`) |
+| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage tasks (Linux: `~/.config/Code/...`; macOS: `~/Library/Application Support/Code/...`; Windows: `%APPDATA%\Code\...`; server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`) + Cline CLI 세션 (사용 가능한 첫 루트를 다음 순서로 선택: `$CLINE_SESSION_DATA_DIR`, `$CLINE_DATA_DIR/sessions/`, `$CLINE_DIR/data/sessions/`, 폴백 `~/.cline/data/sessions/`; 비어 있거나 공백만 있는 환경 변수는 무시) |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/` (`GJC_CODING_AGENT_DIR`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`로 오버라이드 가능; Linux/macOS에서는 `$XDG_DATA_HOME/gjc/sessions/`도 확인) |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` 사이드카 (`JCODE_HOME`으로 재정의 가능) |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) | `~/.local/share/mimocode/mimocode.db` (XDG 데이터 디렉토리; SQLite) |
@@ -169,7 +170,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Kimi CLI, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -378,7 +379,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`.
 
 > **Breaking change (v4.0.0):** 클라이언트별 boolean 플래그(`--opencode`, `--claude`, `--codex` 등)는 제거되었으며 이제 오류를 발생시킵니다. 대신 정식 `--client`/`-c` 플래그를 사용하세요 — 예: `tokscale --client opencode,claude`.
 
@@ -1320,12 +1321,13 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Cursor | API 동기화 | API 동기화 | API로 가져와 `usage*.csv`로 캐시; 데스크톱 자동 로그인은 `state.vscdb` 인증만 읽음; 로컬 `~/.cursor` 세션 데이터는 파싱하지 않음 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 모든 플랫폼에서 동일한 경로 |
 | Pi | `~/.pi/` and `~/.omp/` | `%USERPROFILE%\.pi\` and `%USERPROFILE%\.omp\` | 모든 플랫폼에서 동일한 경로 (Pi 및 [Oh My Pi](https://github.com/can1357/oh-my-pi) 모두 지원) |
+| Kimchi Coding | `~/.config/kimchi/harness/sessions/` | `%USERPROFILE%\.config\kimchi\harness\sessions\` | `KIMCHI_CODING_AGENT_DIR` 환경변수로 오버라이드 가능; Pi 호환 JSONL 세션 |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | 모든 플랫폼에서 동일한 경로 |
 | Kimi Code | `~/.kimi-code/` | `%USERPROFILE%\.kimi-code\` | 모든 플랫폼에서 동일한 경로 |
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | 모든 플랫폼에서 동일한 경로 |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage 작업 로그 |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 작업 로그 |
-| Cline | Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`; macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`; 서버: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/` | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\tasks\` | VS Code globalStorage 작업 로그 |
+| Cline | Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`; macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`; 서버: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`; Cline CLI 폴백: `~/.cline/data/sessions/` | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\tasks\`; Cline CLI 폴백: `%USERPROFILE%\.cline\data\sessions\` | VS Code globalStorage 작업 로그; Cline CLI는 `{SESSION_ID}/{SESSION_ID}.messages.json`을 사용하며 루트는 `$CLINE_SESSION_DATA_DIR` → `$CLINE_DATA_DIR/sessions/` → `$CLINE_DIR/data/sessions/` → `~/.cline/data/sessions/` 순으로 선택; 비어 있거나 공백만 있는 환경 변수는 무시 |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | 모든 플랫폼에서 동일한 경로 |
 | Codebuff | `~/.config/manicode/projects/` (+ `manicode-dev`, `manicode-staging`) | `%USERPROFILE%\.config\manicode\projects\` | `CODEBUFF_DATA_DIR` 환경변수로 오버라이드 |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | OpenCode와 같이 `xdg-basedir` 사용 |
@@ -1715,6 +1717,14 @@ Cline은 Roo Code와 Kilo가 포크한 원본(upstream) 프로젝트로, 동일�
 - `ui_messages.json`에서 `say/api_req_started` 이벤트만 계산
 - `text` JSON에서 `tokensIn`, `tokensOut`, `cacheReads`, `cacheWrites`, `cost`, `apiProtocol` 파싱
 - 사용 가능한 경우 인접한 `api_conversation_history.json`에서 모델/에이전트 메타데이터 보강
+Cline CLI 세션은 다음 우선순위에 따라 사용 가능한 첫 번째 루트를 선택합니다: `$CLINE_SESSION_DATA_DIR` → `$CLINE_DATA_DIR/sessions/` → `$CLINE_DIR/data/sessions/` → 폴백 `~/.cline/data/sessions/`. 비어 있거나 공백만 있는 환경 변수는 설정되지 않은 것으로 처리됩니다. 선택된 루트에서 세션은 `{SESSION_ID}/{SESSION_ID}.messages.json`에서 읽습니다. Tokscale은 영구 `metrics`가 있는 어시스턴트 메시지를 계산하며 입력/출력/캐시 토큰과 프로바이더가 보고한 비용을 포함하고, 형제 세션 매니페스트에서 워크스페이스 및 폴백 모델 메타데이터를 사용합니다. 환경 루트 검색을 비활성화하면 홈 폴백만 사용합니다.
+
+### Kimchi Coding
+
+위치:
+- `~/.config/kimchi/harness/sessions/{ENCODED_WORKSPACE}/*.jsonl` (또는 `$KIMCHI_CODING_AGENT_DIR/sessions/`)
+
+Kimchi는 Pi 호환 JSONL 세션 형식을 사용합니다. Tokscale은 영구 입력/출력/캐시 사용량이 있는 어시스턴트 메시지를 계산하며, 세션 스키마가 공유되더라도 Kimchi를 Pi와 별도의 클라이언트로 유지합니다.
 
 ### Mux
 

@@ -70,6 +70,7 @@
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` |
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` 和 `~/.omp/agent/sessions/`（[Oh My Pi](https://github.com/can1357/oh-my-pi)） |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/`（通过 `SENPI_CODING_AGENT_DIR` 覆盖） |
+| <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（可通过 `KIMCHI_CODING_AGENT_DIR` 覆盖） |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/`（可通过 `KIMI_CODE_HOME` 覆盖） |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) |
@@ -85,7 +86,7 @@
 | <img width="48px" src="https://github.com/xai-org.png" alt="Grok Build" /> | Grok Build | `$GROK_HOME/sessions/*/*/updates.jsonl`（回退：`~/.grok/sessions/*/*/updates.jsonl`） |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db`（macOS: `~/Library/Application Support/Zed/threads/threads.db`；Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`；仅限托管 Zed 模型，不含外部 ACP 代理） |
 | <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json`（+ `*.jsonl`）、`~/.local/share/kiro-cli/data.sqlite3`（macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`），以及 Kiro IDE globalStorage 快照（`Kiro/User/globalStorage/kiro.kiroagent`；macOS Application Support、Linux `~/.config/Kiro`、Windows `%APPDATA%\Kiro`） |
-| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage 任务（Linux: `~/.config/Code/...`；macOS: `~/Library/Application Support/Code/...`；Windows: `%APPDATA%\Code\...`；server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`） |
+| <img width="48px" src="https://github.com/cline.png" alt="Cline" /> | [Cline](https://github.com/cline/cline) | VS Code globalStorage 任务（Linux: `~/.config/Code/...`；macOS: `~/Library/Application Support/Code/...`；Windows: `%APPDATA%\Code\...`；server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`）+ Cline CLI 会话（按顺序选择第一个可用根目录：`$CLINE_SESSION_DATA_DIR`、`$CLINE_DATA_DIR/sessions/`、`$CLINE_DIR/data/sessions/`、回退 `~/.cline/data/sessions/`；空值或仅包含空白字符的环境变量会被忽略） |
 | <img width="48px" src="https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2" alt="Gajae-Code" /> | [gajae-code (gjc)](https://github.com/Yeachan-Heo/gajae-code) | `~/.gjc/agent/sessions/`（可通过 `GJC_CODING_AGENT_DIR`、`GJC_CONFIG_DIR`、`PI_CONFIG_DIR` 覆盖；Linux/macOS 上 `$XDG_DATA_HOME/gjc/sessions/` 亦支持） |
 | <img width="48px" src=".github/assets/client-jcode.png" alt="Jcode" /> | [Jcode](https://github.com/1jehuang/jcode) | `~/.jcode/sessions/session_*.json` + `session_*.journal.jsonl` sidecar（可通过 `JCODE_HOME` 覆盖） |
 | <img width="48px" src="https://github.com/XiaomiMiMo.png" alt="MiMo Code" /> | [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) | `~/.local/share/mimocode/mimocode.db`（XDG 数据目录；SQLite） |
@@ -169,7 +170,7 @@
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code 和 Synthetic 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code 和 Synthetic 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -379,7 +380,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`。
+可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`kimchi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`。
 
 > **破坏性变更（v4.0.0）**：单客户端布尔选项（`--opencode`、`--claude`、`--codex` 等）已被移除，现在会直接报错。请改用规范的 `--client`/`-c` 选项——例如 `tokscale --client opencode,claude`。
 
@@ -1318,12 +1319,13 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Cursor | API 同步 | API 同步 | 通过 API 获取并缓存为 `usage*.csv`；桌面端自动登录仅读取 `state.vscdb` 认证；不解析本地 `~/.cursor` 会话数据 |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | 所有平台使用相同路径 |
 | Pi | `~/.pi/` and `~/.omp/` | `%USERPROFILE%\.pi\` and `%USERPROFILE%\.omp\` | 所有平台使用相同路径（支持 Pi 和 [Oh My Pi](https://github.com/can1357/oh-my-pi)） |
+| Kimchi Coding | `~/.config/kimchi/harness/sessions/` | `%USERPROFILE%\.config\kimchi\harness\sessions\` | 可通过 `KIMCHI_CODING_AGENT_DIR` 环境变量覆盖；Pi 兼容的 JSONL 会话 |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | 所有平台使用相同路径 |
 | Kimi Code | `~/.kimi-code/` | `%USERPROFILE%\.kimi-code\` | 所有平台使用相同路径 |
 | Qwen CLI | `~/.qwen/` | `%USERPROFILE%\.qwen\` | 所有平台使用相同路径 |
 | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\rooveterinaryinc.roo-cline\tasks\` | VS Code globalStorage 任务日志 |
 | Kilo | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/` | `%USERPROFILE%\.config\Code\User\globalStorage\kilocode.kilo-code\tasks\` | VS Code globalStorage 任务日志 |
-| Cline | Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`；macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`；server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/` | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\tasks\` | VS Code globalStorage 任务日志 |
+| Cline | Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`；macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`；server: `~/.vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/`；Cline CLI 回退：`~/.cline/data/sessions/` | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\tasks\`；Cline CLI 回退：`%USERPROFILE%\.cline\data\sessions\` | VS Code globalStorage 任务日志；Cline CLI 使用 `{SESSION_ID}/{SESSION_ID}.messages.json`，按 `$CLINE_SESSION_DATA_DIR` → `$CLINE_DATA_DIR/sessions/` → `$CLINE_DIR/data/sessions/` → `~/.cline/data/sessions/` 的顺序选择根目录；空值或仅包含空白字符的环境变量会被忽略 |
 | Mux | `~/.mux/sessions/` | `%USERPROFILE%\.mux\sessions\` | 所有平台相同路径 |
 | Codebuff | `~/.config/manicode/projects/`（+ `manicode-dev`、`manicode-staging`） | `%USERPROFILE%\.config\manicode\projects\` | 通过 `CODEBUFF_DATA_DIR` 环境变量覆盖 |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | 与 OpenCode 一样使用 `xdg-basedir` |
@@ -1713,6 +1715,14 @@ Cline 是 Roo Code 和 Kilo 从中 fork 的上游项目，因此使用相同的 
 - 仅计算 `ui_messages.json` 中的 `say/api_req_started` 事件
 - 从 `text` JSON 中解析 `tokensIn`、`tokensOut`、`cacheReads`、`cacheWrites`、`cost` 和 `apiProtocol`
 - 在可用时从相邻的 `api_conversation_history.json` 中丰富模型/代理元数据
+Cline CLI 会话按以下优先级选择第一个可用根目录进行发现：`$CLINE_SESSION_DATA_DIR` → `$CLINE_DATA_DIR/sessions/` → `$CLINE_DIR/data/sessions/` → 回退 `~/.cline/data/sessions/`。空值或仅包含空白字符的环境变量视为未设置。在选定根目录中，会话从 `{SESSION_ID}/{SESSION_ID}.messages.json` 读取。Tokscale 统计带有持久化 `metrics` 的 assistant 消息，包括输入/输出/缓存 Token 和提供商报告的成本，并使用同级会话清单中的工作区和回退模型元数据。禁用环境根目录发现时，仅使用主目录回退路径。
+
+### Kimchi Coding
+
+位置：
+- `~/.config/kimchi/harness/sessions/{ENCODED_WORKSPACE}/*.jsonl`（或 `$KIMCHI_CODING_AGENT_DIR/sessions/`）
+
+Kimchi 使用 Pi 兼容的 JSONL 会话格式。Tokscale 统计带有持久化输入/输出/缓存用量的 assistant 消息，并将 Kimchi 保持为独立于 Pi 的客户端，即使两者共享会话架构。
 
 ### Mux
 
