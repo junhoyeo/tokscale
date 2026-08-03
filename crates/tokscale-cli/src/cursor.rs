@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 /// auto-sync (which runs synchronously before local reports and the TUI) while
 /// still tolerating routine API latency. If the network is hung, the report
 /// proceeds against cached data after this timeout instead of stalling forever.
-const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+const CURSOR_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Skip implicit pre-report sync when every expected Cursor account cache file
 /// was modified within this window. Prevents `tokscale models` (and its
@@ -1661,8 +1661,8 @@ mod tests {
         let client = build_cursor_http_client().expect("client builds");
         // reqwest::Client doesn't expose its timeout publicly, but we can at
         // least confirm the const wired into the builder is the documented
-        // 8s value — a future change to the constant must be deliberate.
-        assert_eq!(CURSOR_HTTP_TIMEOUT, std::time::Duration::from_secs(8));
+        // 15s value — a future change to the constant must be deliberate.
+        assert_eq!(CURSOR_HTTP_TIMEOUT, std::time::Duration::from_secs(15));
         // Use the client briefly to ensure it's structurally valid.
         let _ = client.get("https://example.invalid").build();
     }
