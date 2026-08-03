@@ -5987,6 +5987,19 @@ mod tests {
                 .collect::<Vec<_>>();
             cached_inputs.sort_unstable();
             assert_eq!(cached_inputs, vec![100, 200, 300]);
+            let cached_again = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner_settings,
+            );
+            let mut cached_again_inputs = cached_again
+                .iter()
+                .map(|message| message.tokens.input)
+                .collect::<Vec<_>>();
+            cached_again_inputs.sort_unstable();
+            assert_eq!(cached_again_inputs, vec![100, 200, 300]);
 
             let parsed = parse_local_clients(LocalParseOptions {
                 home_dir: Some(source_home.path().to_str().unwrap().to_string()),
