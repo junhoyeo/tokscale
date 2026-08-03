@@ -38,9 +38,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "codebuddy");
         assert_eq!(messages[0].model_id, "glm-5.2");
-        assert_eq!(messages[0].tokens.input, 24486);
+        assert_eq!(messages[0].tokens.input, 9766);
         assert_eq!(messages[0].tokens.output, 3);
         assert_eq!(messages[0].tokens.cache_read, 14720);
+        assert_eq!(messages[0].tokens.total(), 24489);
         assert_eq!(messages[0].workspace_label.as_deref(), Some("repo"));
     }
 
@@ -59,7 +60,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "minimax-m3-pay");
         assert_eq!(messages[0].provider_id, "minimax");
-        assert_eq!(messages[0].tokens.total(), 15);
+        assert_eq!(messages[0].tokens.total(), 12);
     }
 
     #[test]

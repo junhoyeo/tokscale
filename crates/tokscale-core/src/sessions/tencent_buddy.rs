@@ -87,26 +87,21 @@ struct BuddyUsage {
 
 impl BuddyUsage {
     fn to_breakdown(&self) -> Option<TokenBreakdown> {
+        let cache_read = first_positive(&[
+            self.cache_read_input_tokens,
+            self.cache_read_input_tokens_camel,
+            self.cache_tokens,
+            self.prompt_cache_hit_tokens,
+            self.cached_tokens,
+        ]);
         let tokens = TokenBreakdown {
-            input: first_present(&[
-                self.cached_miss_tokens,
-                self.cache_miss_tokens,
-                self.input_tokens,
-                self.input_tokens_camel,
-                self.prompt_tokens,
-            ]),
+            input: self.input_exclusive(cache_read),
             output: first_present(&[
                 self.output_tokens,
                 self.output_tokens_camel,
                 self.completion_tokens,
             ]),
-            cache_read: first_positive(&[
-                self.cache_read_input_tokens,
-                self.cache_read_input_tokens_camel,
-                self.cache_tokens,
-                self.prompt_cache_hit_tokens,
-                self.cached_tokens,
-            ]),
+            cache_read,
             cache_write: first_positive(&[
                 self.cache_creation_input_tokens,
                 self.cache_creation_input_tokens_camel,
@@ -121,6 +116,24 @@ impl BuddyUsage {
         };
 
         (tokens.total() > 0).then_some(tokens)
+    }
+
+    /// `cachedMissTokens` / `cacheMissTokens` (extension-log style) already
+    /// exclude cached input. The OpenAI-style fields (`input_tokens`,
+    /// `inputTokens`, `prompt_tokens`) include cache-hit tokens, so subtract
+    /// `cache_read` to keep `input + output + cache_*` aligned with provider
+    /// billing instead of counting the cached portion twice.
+    fn input_exclusive(&self, cache_read: i64) -> i64 {
+        let miss_input = first_present(&[self.cached_miss_tokens, self.cache_miss_tokens]);
+        if miss_input > 0 {
+            return miss_input;
+        }
+        first_present(&[
+            self.input_tokens,
+            self.input_tokens_camel,
+            self.prompt_tokens,
+        ])
+        .saturating_sub(cache_read)
     }
 }
 
@@ -477,9 +490,10 @@ mod tests {
         // identify the model at all.
         assert_eq!(message.provider_id, "zai");
         assert_eq!(message.session_id, "session-1");
-        assert_eq!(message.tokens.input, 24486);
+        assert_eq!(message.tokens.input, 9766);
         assert_eq!(message.tokens.output, 3);
         assert_eq!(message.tokens.cache_read, 14720);
+        assert_eq!(message.tokens.total(), 24489);
         assert_eq!(message.workspace_label.as_deref(), Some("repo"));
         assert_eq!(
             message.dedup_key.as_deref(),
@@ -501,11 +515,33 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "workbuddy");
-        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].tokens.cache_read, 3);
         assert_eq!(messages[0].tokens.cache_write, 4);
         assert_eq!(messages[0].tokens.reasoning, 5);
+        assert_eq!(messages[0].tokens.total(), 21);
+    }
+
+    #[test]
+    fn parse_jsonl_file_does_not_double_count_inclusive_cache_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-cache.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"assistant-1","timestamp":1780000000100,"type":"message","role":"assistant","status":"completed","sessionId":"session-cache","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"msg-1"},"message":{"usage":{"input_tokens":113415,"output_tokens":990,"total_tokens":114405,"cache_read_input_tokens":112224}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jsonl_file("workbuddy", "workbuddy", &path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.tokens.input, 1191);
+        assert_eq!(message.tokens.output, 990);
+        assert_eq!(message.tokens.cache_read, 112224);
+        // Provider-billed total (114405), not input + cache_read + output (226629).
+        assert_eq!(message.tokens.total(), 114405);
     }
 
     #[test]

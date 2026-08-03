@@ -248,7 +248,10 @@ mod tests {
         let path = dir.path().join("session-1.jsonl");
         std::fs::write(
             &path,
-            r#"{"id":"call-1","timestamp":1780000000100,"type":"function_call","sessionId":"session-1","cwd":"/Users/alice/admin-panel","providerData":{"requestModelId":"glm-5.2","messageId":"msg-1","rawUsage":{"prompt_tokens":64700,"completion_tokens":635,"prompt_cache_hit_tokens":76032}}}"#,
+            // OpenAI-style usage: prompt_tokens (140732) includes the cached
+            // hit (76032); the exclusive input is 64700, matching the
+            // extension-log mirror of the same agent execution.
+            r#"{"id":"call-1","timestamp":1780000000100,"type":"function_call","sessionId":"session-1","cwd":"/Users/alice/admin-panel","providerData":{"requestModelId":"glm-5.2","messageId":"msg-1","rawUsage":{"prompt_tokens":140732,"completion_tokens":635,"prompt_cache_hit_tokens":76032}}}"#,
         )
         .unwrap();
 
