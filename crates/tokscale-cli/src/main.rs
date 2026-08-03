@@ -5481,19 +5481,26 @@ fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
     println!();
 }
 
-fn report_unpriced_submission_exclusions(excluded: &[tokscale_core::UnpricedSubmissionExclusion]) {
+fn report_unpriced_submission_exclusions(
+    excluded: &[tokscale_core::UnpricedSubmissionExclusion],
+    has_remaining_usage: bool,
+) {
     use colored::Colorize;
 
     for row in excluded {
+        let remaining_usage_message = has_remaining_usage
+            .then_some(" Remaining priced usage will be submitted.")
+            .unwrap_or_default();
         println!(
             "{}",
             format!(
-                "  Warning: excluded {} unpriced {}/{} message(s) ({} tokens): {}. Remaining priced usage will be submitted.",
+                "  Warning: excluded {} unpriced {}/{} message(s) ({} tokens): {}.{}",
                 row.message_count,
                 row.provider_id,
                 row.model_id,
                 format_tokens_with_commas(row.total_tokens),
                 row.reason,
+                remaining_usage_message,
             )
             .yellow()
         );
@@ -5655,7 +5662,10 @@ fn run_submit_command(
     // left out, so a single legacy charge can't block the whole submission.
     let excluded_rows = exclude_tokenless_cost_contributions(&mut graph_result);
     report_excluded_tokenless_rows(&excluded_rows);
-    report_unpriced_submission_exclusions(&graph_result.unpriced_submission_exclusions);
+    report_unpriced_submission_exclusions(
+        &graph_result.unpriced_submission_exclusions,
+        graph_result.summary.total_tokens > 0,
+    );
 
     println!("{}", "  Data to submit:".white());
     println!(

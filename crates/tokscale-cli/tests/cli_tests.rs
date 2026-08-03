@@ -3560,6 +3560,39 @@ fn test_submit_offline_without_pricing_cache_fails() {
         "stderr should contain a pricing/network error: {stderr}"
     );
 }
+
+#[test]
+fn test_submit_excluding_only_generic_gemini_usage_does_not_promise_submission() {
+    let tmp = create_empty_fixture_dir();
+    let message_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/gemini-default");
+    fs::create_dir_all(&message_dir).unwrap();
+    fs::write(
+        message_dir.join("gemini-default.json"),
+        r#"{
+            "id": "gemini-default",
+            "sessionID": "gemini-default",
+            "role": "assistant",
+            "modelID": "gemini-default",
+            "providerID": "google",
+            "tokens": { "input": 1, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1736510400000.0 }
+        }"#,
+    )
+    .unwrap();
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["submit", "--client", "opencode", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "excluded 1 unpriced google/gemini-default message(s) (1 tokens)",
+        ))
+        .stdout(predicate::str::contains("Remaining priced usage will be submitted.").not())
+        .stdout(predicate::str::contains("No usage data found to submit."));
+}
 // ── gjc client filter tests ────────────────────────────────────────────────
 
 /// Write a gjc session JSONL file at
