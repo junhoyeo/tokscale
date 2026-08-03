@@ -1172,7 +1172,10 @@ impl PricingLookup {
         // would under-price the usage, prefer the canonical unhinted
         // resolution (the bare official key) instead.
         if provider_id.is_some() && !result.pricing.covers_usage(usage) {
-            if let Some(unhinted) = self.lookup_with_provider(model_id, None) {
+            if let Some(unhinted) = self
+                .lookup_with_provider(model_id, None)
+                .filter(|unhinted| unhinted.pricing.covers_usage(usage))
+            {
                 return compute_cost_for_lookup(&unhinted, None, usage);
             }
         }
@@ -3221,6 +3224,41 @@ mod tests {
         let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         assert!(lookup.lookup("gemini").is_none());
+    }
+
+    #[test]
+    fn incomplete_unhinted_result_does_not_replace_provider_pricing() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure/gpt-fallback-guard".into(),
+            ModelPricing {
+                input_cost_per_token: Some(1.0),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "gpt-fallback-guard".into(),
+            ModelPricing {
+                output_cost_per_token: Some(2.0),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let usage = TokenBreakdown {
+            input: 1,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        // Neither row covers both populated buckets. Retain the provider row
+        // rather than replacing it with an unhinted row that silently prices
+        // the input bucket at zero.
+        assert_eq!(
+            lookup.calculate_cost_with_provider("gpt-fallback-guard", Some("azure"), &usage),
+            1.0
+        );
     }
     #[test]
     fn test_provider_hint_normalizes_openai_codex_alias() {
