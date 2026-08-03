@@ -886,7 +886,9 @@ fn parser_version(client: ClientId) -> u32 {
         // session, so the same source can now produce different model IDs.
         // v5 preserves distinct unified events when timestamps and token
         // buckets repeat, and fingerprints the complete sessions metadata tree.
-        ClientId::Grok => 5,
+        // v6 persists whether an unknown unified model was deliberately
+        // fail-closed due to conflicting child attribution evidence.
+        ClientId::Grok => 6,
         // v1 retained MiMo's embedded `cost` value but did not preserve its
         // provider-reported provenance. Reparse cached rows so strict submit
         // validation does not reject valid unknown-model MiMo usage offline.
@@ -2211,8 +2213,8 @@ mod tests {
     }
 
     #[test]
-    fn test_grok_scoped_model_attribution_bumps_parser_version() {
-        assert_eq!(parser_version(ClientId::Grok), 5);
+    fn test_grok_conflicted_model_attribution_bumps_parser_version() {
+        assert_eq!(parser_version(ClientId::Grok), 6);
     }
 
     #[test]

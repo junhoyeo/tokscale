@@ -89,6 +89,10 @@ pub struct UnifiedMessage {
     /// Used to count user interaction turns (as opposed to API message count).
     #[serde(default)]
     pub is_turn_start: bool,
+    /// True when the parser observed conflicting authoritative model evidence.
+    /// Such rows must remain unpriced rather than accepting fallback attribution.
+    #[serde(default)]
+    pub model_attribution_conflicted: bool,
 }
 
 const fn default_message_count() -> i32 {
@@ -366,6 +370,7 @@ impl UnifiedMessage {
             dedup_key,
             session_title: None,
             is_turn_start: false,
+            model_attribution_conflicted: false,
         }
     }
 

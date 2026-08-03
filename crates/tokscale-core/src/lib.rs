@@ -4049,6 +4049,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         dedup_key: None,
         session_title: None,
         is_turn_start: false,
+        model_attribution_conflicted: false,
     }
 }
 
@@ -5807,6 +5808,68 @@ mod tests {
             assert_eq!(second.len(), 1);
             assert_eq!(second[0].model_id, "grok-code");
             assert!(second[0].cost > 0.0);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_keeps_conflicted_grok_unified_attribution_unpriced() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let session_dir = source_home
+                .path()
+                .join(".grok/sessions/%2Ftmp%2Fproject/child");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            std::fs::write(
+                session_dir.join("updates.jsonl"),
+                r#"{"method":"session/update","params":{"sessionId":"child","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-code"}},"_meta":{"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"child","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":999,"agentTimestampMs":1785456003000}}}"#,
+            )
+            .unwrap();
+
+            let logs_dir = source_home.path().join(".grok/logs");
+            std::fs::create_dir_all(&logs_dir).unwrap();
+            std::fs::write(
+                logs_dir.join("unified.jsonl"),
+                r#"{"ts":"2026-07-31T00:00:01Z","pid":19,"msg":"subagent spawn credentials","ctx":{"subagent_id":"child","effective_model":"grok-4.8"}}
+{"ts":"2026-07-31T00:00:02Z","pid":19,"msg":"subagent failed","ctx":{"subagent_id":"child","effective_model":"grok-4.9"}}
+{"ts":"2026-07-31T00:00:03Z","pid":19,"sid":"child","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}"#,
+            )
+            .unwrap();
+
+            let mut litellm = HashMap::new();
+            litellm.insert(
+                "grok-code".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    output_cost_per_token: Some(0.002),
+                    ..Default::default()
+                },
+            );
+            let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+            for _ in 0..2 {
+                let messages = parse_all_messages_with_pricing_with_env_strategy(
+                    source_home.path().to_str().unwrap(),
+                    &["grok".to_string()],
+                    Some(&pricing),
+                    false,
+                    &scanner::ScannerSettings::default(),
+                );
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].model_id, "grok-unknown");
+                assert!(messages[0].model_attribution_conflicted);
+                assert_eq!(messages[0].cost, 0.0);
+            }
         }
 
         match original_home {

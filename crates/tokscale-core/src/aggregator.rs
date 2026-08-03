@@ -782,6 +782,7 @@ mod tests {
             dedup_key: None,
             session_title: None,
             is_turn_start: false,
+            model_attribution_conflicted: false,
         }
     }
 
@@ -1397,6 +1398,7 @@ mod tests {
             dedup_key: None,
             session_title: None,
             is_turn_start: false,
+            model_attribution_conflicted: false,
             duration_ms: None,
         }
     }

@@ -140,6 +140,19 @@ fn unique_terminal_model<'a>(
     (terminal_model == child_model).then_some(child_model)
 }
 
+fn has_conflicting_child_evidence(
+    evidence: &UnifiedChildEvidence,
+    scope: &UnifiedChildScope,
+) -> bool {
+    matches!(
+        evidence.child_models.get(scope),
+        Some(UnifiedModelEvidence::Conflict)
+    ) || matches!(
+        evidence.terminal_models.get(scope),
+        Some(UnifiedModelEvidence::Conflict)
+    )
+}
+
 #[derive(Debug, Clone)]
 struct GrokMetadata {
     session_id: String,
@@ -729,6 +742,9 @@ fn parse_grok_unified_log_snapshot(
             dedup_key,
             loop_index == 1,
         );
+        message.model_attribution_conflicted = child_scope
+            .as_ref()
+            .is_some_and(|scope| has_conflicting_child_evidence(&evidence, scope));
         message.session_id = session_id;
         message.message_count = i32::from(message.is_turn_start);
         messages.push(message);
@@ -914,7 +930,7 @@ pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Uni
         .iter_mut()
         .filter(|message| is_unified_log_message(message))
     {
-        if message.model_id == UNKNOWN_MODEL {
+        if message.model_id == UNKNOWN_MODEL && !message.model_attribution_conflicted {
             if let Some(Some(model_id)) = legacy_models.get(&message.session_id) {
                 message.model_id = model_id.clone();
             }
