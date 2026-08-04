@@ -926,9 +926,8 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: Kimchi's Pi-compatible messages now carry stable namespaced
         // deduplication keys.
         ClientId::Kimchi => 2,
-        // Initial Reasonix implementation. The fingerprint includes its meta
-        // and checkpoint sidecars because they define model, workspace, and
-        // turn timestamps.
+        // Initial Reasonix implementation. The fingerprint samples the
+        // append-only stats JSONL source so appended records are reparsed.
         ClientId::Reasonix => 1,
         // v1->v2: per-model token attribution now comes from
         // session_model_usage instead of crediting the whole session to
