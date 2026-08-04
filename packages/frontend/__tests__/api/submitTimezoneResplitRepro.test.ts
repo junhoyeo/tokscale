@@ -19,15 +19,19 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 // The regression guard cannot see this: it defends per-client decreases
 // WITHIN a day, and the emptied day is not part of the payload at all.
 //
-// These tests pin CURRENT behavior (the inflation is real and silent). They
-// are the verification harness the day-level heal in
-// docs/ratchet-inflation-recovery.md (Phase 4) must change. The CLI-side fix
-// in #1016 (pinned `scanner.bucketTimezone`) stops new re-splits from pinned
-// devices; the last test here asserts the server-side consequence -- a
-// same-day rescan merges flat instead of inflating.
+// These tests characterize CURRENT submit behavior (the inflation is real and
+// silent). The offline recovery described in docs/ratchet-inflation-recovery.md
+// is intentionally out of this route's scope. The CLI-side fix in #1016
+// (pinned `scanner.bucketTimezone`) stops new re-splits from pinned devices;
+// the last test asserts the server-side consequence -- a same-day rescan
+// merges flat instead of inflating.
 //
-// This test uses the REAL @/lib/db/helpers implementations (not mocks) and
-// only mocks the database transaction.
+// This is a route harness: it uses the real merge helpers and a stateful
+// transaction double. The double records the route's daily_breakdown SQL
+// writes, applies them to an in-memory table, and derives the later aggregate
+// read from that table. Validation remains mocked only to keep this focused on
+// the merge/write path; each test asserts the parsed request reaches that
+// boundary unchanged.
 const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
   const validateSubmission = vi.fn();
@@ -143,13 +147,18 @@ function makeAwaitableBuilder(result: unknown) {
     where: vi.fn(() => builder),
     for: vi.fn(() => builder),
     limit: vi.fn(() => builder),
-    then: (resolve: (value: unknown) => unknown) => Promise.resolve(resolve(result)),
+    then: (resolve: (value: unknown) => unknown) =>
+      Promise.resolve(resolve(result)),
   };
   return builder;
 }
 
 /** Recursively collect every string reachable from a value (cycle-safe). */
-function collectStrings(node: unknown, out: string[], seen = new Set<object>()): void {
+function collectStrings(
+  node: unknown,
+  out: string[],
+  seen = new Set<object>(),
+): void {
   if (typeof node === "string") {
     out.push(node);
     return;
@@ -191,22 +200,101 @@ function storedClientEntry(tokens: number) {
   };
 }
 
-function aggregatesRow(totalTokens: number, dateStart: string, dateEnd: string, activeDays: number) {
+function aggregatesRow(
+  days: Array<{
+    date: string;
+    sourceBreakdown: Record<string, { tokens: number }>;
+  }>,
+) {
+  const totalTokens = days.reduce(
+    (total, day) =>
+      total +
+      Object.values(day.sourceBreakdown).reduce(
+        (sum, client) => sum + client.tokens,
+        0,
+      ),
+    0,
+  );
+  const dates = days.map((day) => day.date).sort();
   return {
     totalTokens,
     totalCost: (totalTokens / 1000).toFixed(4),
     inputTokens: totalTokens,
     outputTokens: 0,
-    dateStart,
-    dateEnd,
-    activeDays,
+    dateStart: dates[0] ?? null,
+    dateEnd: dates[dates.length - 1] ?? null,
+    activeDays: days.length,
     totalActiveTimeMs: 0,
-    rowCount: activeDays,
+    rowCount: days.length,
   };
 }
 
-function buildTx(selectResults: unknown[][]) {
+type PersistedDay = {
+  id: string;
+  date: string;
+  timestampMs: number | null;
+  activeTimeMs: number | null;
+  sourceBreakdown: Record<string, { tokens: number }>;
+};
+
+function buildTx(initialDays: PersistedDay[]) {
   const executedSqlArgs: unknown[] = [];
+  const persistedDays = structuredClone(initialDays);
+  let selectNumber = 0;
+
+  function applyDailyBreakdownWrite(sqlArg: unknown): void {
+    const strings: string[] = [];
+    collectStrings(sqlArg, strings);
+    const breakdownJson = strings.find(
+      (value) => value.startsWith("{") && value.includes('"tokens"'),
+    );
+    if (!breakdownJson) return;
+
+    const sourceBreakdown = JSON.parse(
+      breakdownJson,
+    ) as PersistedDay["sourceBreakdown"];
+    if (
+      strings.some((value) => value.includes("INSERT INTO daily_breakdown"))
+    ) {
+      const date = strings.find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value));
+      if (!date) throw new Error("daily breakdown INSERT did not bind a date");
+      persistedDays.push({
+        id: `inserted-${persistedDays.length + 1}`,
+        date,
+        timestampMs: null,
+        activeTimeMs: null,
+        sourceBreakdown,
+      });
+      return;
+    }
+
+    if (strings.some((value) => value.includes("UPDATE daily_breakdown"))) {
+      const target = persistedDays.find((day) => strings.includes(day.id));
+      if (!target)
+        throw new Error("daily breakdown UPDATE did not bind a known row id");
+      target.sourceBreakdown = sourceBreakdown;
+    }
+  }
+
+  function nextSelectResult(): unknown[] {
+    switch (selectNumber++) {
+      case 0:
+        return existingSubmissionRow();
+      case 1:
+        return persistedDays;
+      case 2:
+        return [aggregatesRow(persistedDays)];
+      case 3:
+        return [{}];
+      case 4:
+        return persistedDays.map(({ sourceBreakdown }) => ({
+          sourceBreakdown,
+        }));
+      default:
+        throw new Error(`unexpected SELECT #${selectNumber}`);
+    }
+  }
+
   const tx = {
     update: vi.fn(() => {
       const builder = {
@@ -215,7 +303,7 @@ function buildTx(selectResults: unknown[][]) {
       };
       return builder;
     }),
-    select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+    select: vi.fn(() => makeAwaitableBuilder(nextSelectResult())),
     insert: vi.fn(() => {
       const builder = {
         values: vi.fn(() => builder),
@@ -226,23 +314,61 @@ function buildTx(selectResults: unknown[][]) {
     }),
     execute: vi.fn((sqlArg: unknown) => {
       executedSqlArgs.push(sqlArg);
+      applyDailyBreakdownWrite(sqlArg);
       return Promise.resolve();
     }),
     transaction: vi.fn(async (callback: (sp: typeof tx) => Promise<unknown>) =>
-      callback(tx)
+      callback(tx),
     ),
   };
   mockState.db.transaction.mockImplementation(
-    async (callback: (transaction: typeof tx) => Promise<unknown>) => callback(tx)
+    async (callback: (transaction: typeof tx) => Promise<unknown>) =>
+      callback(tx),
   );
-  return { tx, executedSqlArgs };
+  return { tx, executedSqlArgs, persistedDays };
 }
 
-function mockResubmit(contributions: Array<{
-  date: string;
-  client: string;
-  tokens: number;
-}>) {
+function submissionBody(
+  contributions: Array<{
+    date: string;
+    client: string;
+    tokens: number;
+  }>,
+) {
+  const dates = contributions.map((c) => c.date).sort();
+  return {
+    device: { id: "dev_1", name: "Device one" },
+    meta: {
+      generatedAt: "2026-03-03T00:00:00Z",
+      version: "4.10.0",
+      dateRange: { start: dates[0], end: dates[dates.length - 1] },
+    },
+    summary: {
+      clients: Array.from(new Set(contributions.map((c) => c.client))),
+    },
+    years: [],
+    contributions: contributions.map((c) => ({
+      date: c.date,
+      clients: [
+        {
+          client: c.client,
+          modelId: "test-model",
+          tokens: {
+            input: c.tokens,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          cost: c.tokens / 1000,
+          messages: 5,
+        },
+      ],
+    })),
+  };
+}
+
+function mockResubmit(body: ReturnType<typeof submissionBody>) {
   mockState.authenticatePersonalToken.mockResolvedValue({
     status: "valid",
     tokenId: "token-1",
@@ -252,47 +378,24 @@ function mockResubmit(contributions: Array<{
     avatarUrl: null,
     expiresAt: null,
   });
-
-  const dates = contributions.map((c) => c.date).sort();
   mockState.validateSubmission.mockReturnValue({
     valid: true,
     errors: [],
     warnings: [],
-    data: {
-      device: { id: "dev_1", name: "Device one" },
-      meta: {
-        generatedAt: "2026-03-03T00:00:00Z",
-        version: "4.10.0",
-        dateRange: { start: dates[0], end: dates[dates.length - 1] },
-      },
-      summary: {
-        clients: Array.from(new Set(contributions.map((c) => c.client))),
-      },
-      years: [],
-      contributions: contributions.map((c) => ({
-        date: c.date,
-        clients: [
-          {
-            client: c.client,
-            modelId: "test-model",
-            tokens: { input: c.tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
-            cost: c.tokens / 1000,
-            messages: 5,
-          },
-        ],
-      })),
-    },
+    data: body,
   });
 }
 
 function existingSubmissionRow() {
-  return [{
-    id: "submission-existing",
-    totalActiveTimeMs: null,
-    longestContinuousMs: null,
-    maxConcurrentSessions: null,
-    sessionCount: null,
-  }];
+  return [
+    {
+      id: "submission-existing",
+      totalActiveTimeMs: null,
+      longestContinuousMs: null,
+      maxConcurrentSessions: null,
+      sessionCount: null,
+    },
+  ];
 }
 
 function post(body: object) {
@@ -304,7 +407,7 @@ function post(body: object) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-    })
+    }),
   );
 }
 
@@ -313,7 +416,10 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
     // Stored by the first scan (Asia/Seoul): the whole 1000-token session is
     // on 2026-03-03. The rescan from UTC moves it to 2026-03-02, so the
     // payload only mentions 03-02.
-    mockResubmit([{ date: "2026-03-02", client: "claude", tokens: 1000 }]);
+    const body = submissionBody([
+      { date: "2026-03-02", client: "claude", tokens: 1000 },
+    ]);
+    mockResubmit(body);
 
     const storedSeoulDay = {
       id: "day-0303",
@@ -323,15 +429,10 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
       sourceBreakdown: { claude: storedClientEntry(1000) },
     };
 
-    const { tx, executedSqlArgs } = buildTx([
-      existingSubmissionRow(),
-      [storedSeoulDay],
-      [aggregatesRow(2000, "2026-03-02", "2026-03-03", 2)],
-      [{ sourceBreakdown: storedSeoulDay.sourceBreakdown }],
-    ]);
+    const { tx, executedSqlArgs, persistedDays } = buildTx([storedSeoulDay]);
     void tx;
 
-    const response = await post({ meta: {}, contributions: [] });
+    const response = await post(body);
     expect(response.status).toBe(200);
     const json = await response.json();
 
@@ -341,29 +442,47 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
     expect(json.mode).toBe("merge");
     expect(json.metrics.totalTokens).toBe(2000);
     expect(json.warnings).toBeUndefined();
+    expect(mockState.validateSubmission).toHaveBeenCalledWith(body);
 
     // The moved day is inserted fresh (the source_breakdown JSON is passed as
     // a standalone parameter, the date as another).
     const strings: string[] = [];
     for (const arg of executedSqlArgs) collectStrings(arg, strings);
-    const breakdownJsons = strings.filter((s) => s.startsWith("{") && s.includes('"claude"'));
+    const breakdownJsons = strings.filter(
+      (s) => s.startsWith("{") && s.includes('"claude"'),
+    );
     expect(breakdownJsons).toHaveLength(1);
-    const inserted = JSON.parse(breakdownJsons[0]) as { claude: { tokens: number } };
+    const inserted = JSON.parse(breakdownJsons[0]) as {
+      claude: { tokens: number };
+    };
     expect(inserted.claude.tokens).toBe(1000);
     expect(strings).toContain("2026-03-02");
 
+    expect(persistedDays).toEqual([
+      storedSeoulDay,
+      expect.objectContaining({
+        date: "2026-03-02",
+        sourceBreakdown: expect.objectContaining({
+          claude: expect.objectContaining({ tokens: 1000 }),
+        }),
+      }),
+    ]);
+
     // ...and the stale day is never touched: no UPDATE ran at all.
-    expect(strings.some((s) => s.includes("UPDATE daily_breakdown"))).toBe(false);
+    expect(strings.some((s) => s.includes("UPDATE daily_breakdown"))).toBe(
+      false,
+    );
   });
 
   it("lets the regression guard preserve the client that moved off a day", async () => {
     // Asia/Seoul scan: two clients on 2026-03-02 (500 each). The UTC rescan
     // moves codex's messages to 03-03, so the payload reports 03-02 with
     // claude only plus 03-03 with codex.
-    mockResubmit([
+    const body = submissionBody([
       { date: "2026-03-02", client: "claude", tokens: 500 },
       { date: "2026-03-03", client: "codex", tokens: 500 },
     ]);
+    mockResubmit(body);
 
     const storedSeoulDay = {
       id: "day-0302",
@@ -376,20 +495,18 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
       },
     };
 
-    const { tx, executedSqlArgs } = buildTx([
-      existingSubmissionRow(),
-      [storedSeoulDay],
-      [aggregatesRow(1500, "2026-03-02", "2026-03-03", 2)],
-      [{ sourceBreakdown: storedSeoulDay.sourceBreakdown }],
-    ]);
+    const { tx, executedSqlArgs } = buildTx([storedSeoulDay]);
     void tx;
 
-    const response = await post({ meta: {}, contributions: [] });
+    const response = await post(body);
     expect(response.status).toBe(200);
     const json = await response.json();
 
     expect(json.metrics.totalTokens).toBe(1500);
-    expect(json.warnings.some((w: string) => w.includes("Preserved codex"))).toBe(true);
+    expect(
+      json.warnings.some((w: string) => w.includes("Preserved codex")),
+    ).toBe(true);
+    expect(mockState.validateSubmission).toHaveBeenCalledWith(body);
 
     const strings: string[] = [];
     for (const arg of executedSqlArgs) collectStrings(arg, strings);
@@ -397,7 +514,8 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
     // The UPDATE for 03-02 keeps the stale codex row next to the accepted
     // claude row: 500 + 500 on one day, plus codex's 500 inserted on 03-03.
     const updateJsons = strings.filter(
-      (s) => s.startsWith("{") && s.includes('"claude"') && s.includes('"codex"')
+      (s) =>
+        s.startsWith("{") && s.includes('"claude"') && s.includes('"codex"'),
     );
     expect(updateJsons).toHaveLength(1);
     const merged = JSON.parse(updateJsons[0]) as {
@@ -409,10 +527,13 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
     expect(strings).toContain("2026-03-03");
 
     const insertJsons = strings.filter(
-      (s) => s.startsWith("{") && s.includes('"codex"') && !s.includes('"claude"')
+      (s) =>
+        s.startsWith("{") && s.includes('"codex"') && !s.includes('"claude"'),
     );
     expect(insertJsons).toHaveLength(1);
-    const inserted = JSON.parse(insertJsons[0]) as { codex: { tokens: number } };
+    const inserted = JSON.parse(insertJsons[0]) as {
+      codex: { tokens: number };
+    };
     expect(inserted.codex.tokens).toBe(500);
   });
 
@@ -420,7 +541,10 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
     // A pinned `scanner.bucketTimezone` (#1016) means the UTC rescan reports
     // the SAME day keys as the Seoul scan, so the payload still carries
     // 03-03. Equal tokens are accepted unchanged: no new row, no inflation.
-    mockResubmit([{ date: "2026-03-03", client: "claude", tokens: 1000 }]);
+    const body = submissionBody([
+      { date: "2026-03-03", client: "claude", tokens: 1000 },
+    ]);
+    mockResubmit(body);
 
     const storedSeoulDay = {
       id: "day-0303",
@@ -430,27 +554,27 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
       sourceBreakdown: { claude: storedClientEntry(1000) },
     };
 
-    const { tx, executedSqlArgs } = buildTx([
-      existingSubmissionRow(),
-      [storedSeoulDay],
-      [aggregatesRow(1000, "2026-03-03", "2026-03-03", 1)],
-      [{ sourceBreakdown: storedSeoulDay.sourceBreakdown }],
-    ]);
+    const { tx, executedSqlArgs } = buildTx([storedSeoulDay]);
     void tx;
 
-    const response = await post({ meta: {}, contributions: [] });
+    const response = await post(body);
     expect(response.status).toBe(200);
     const json = await response.json();
 
     expect(json.metrics.totalTokens).toBe(1000);
     expect(json.warnings).toBeUndefined();
+    expect(mockState.validateSubmission).toHaveBeenCalledWith(body);
 
     const strings: string[] = [];
     for (const arg of executedSqlArgs) collectStrings(arg, strings);
-    const updateJsons = strings.filter((s) => s.startsWith("{") && s.includes('"claude"'));
+    const updateJsons = strings.filter(
+      (s) => s.startsWith("{") && s.includes('"claude"'),
+    );
     expect(updateJsons).toHaveLength(1);
     const merged = JSON.parse(updateJsons[0]) as { claude: { tokens: number } };
     expect(merged.claude.tokens).toBe(1000);
-    expect(strings.some((s) => s.includes("INSERT INTO daily_breakdown"))).toBe(false);
+    expect(strings.some((s) => s.includes("INSERT INTO daily_breakdown"))).toBe(
+      false,
+    );
   });
 });
