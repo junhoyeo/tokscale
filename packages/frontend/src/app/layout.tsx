@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from "next";
+import { connection } from "next/server";
 import { JetBrains_Mono, Figtree } from "next/font/google";
 import NextTopLoader from "nextjs-toploader";
 import { ToastContainer } from "react-toastify";
 import { Analytics } from "@vercel/analytics/next";
 import { Providers } from "@/lib/providers";
+import { getRootMetadata } from "@/lib/seo/rootMetadata";
 import "./globals.css";
 import "react-toastify/dist/ReactToastify.css";
 
@@ -19,38 +21,12 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
-export const metadata: Metadata = {
-  title: "Tokscale - AI Token Usage Tracker & Leaderboard",
-  description: "Track, visualize, and compete on AI coding assistant token usage across Claude Code, Cursor, OpenCode, Codex, Gemini, Kimi, and Qwen. The Kardashev Scale for AI Devs.",
-  icons: {
-    icon: [
-      { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
-      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
-    ],
-    apple: "/apple-icon.png",
-  },
-  manifest: "/site.webmanifest",
-  openGraph: {
-    title: "Tokscale - AI Token Usage Tracker & Leaderboard",
-    description: "Track, visualize, and compete on AI coding assistant token usage across Claude Code, Cursor, OpenCode, Codex, Gemini, Kimi, and Qwen. The Kardashev Scale for AI Devs.",
-    type: "website",
-    siteName: "Tokscale",
-    images: [
-      {
-        url: "/og-image.png",
-        width: 1200,
-        height: 630,
-        alt: "Tokscale - AI Token Usage Tracker",
-      },
-    ],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "Tokscale - AI Token Usage Tracker & Leaderboard",
-    description: "Track, visualize, and compete on AI coding assistant token usage across Claude Code, Cursor, OpenCode, Codex, Gemini, Kimi, and Qwen.",
-    images: ["/og-image.png"],
-  },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  // APP_URL belongs to the container runtime, not the Docker build. Make
+  // metadata request-dynamic so self-hosted deployments emit their own origin.
+  await connection();
+  return getRootMetadata();
+}
 
 export const viewport: Viewport = {
   width: "device-width",

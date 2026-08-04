@@ -10,18 +10,29 @@ import {
   leaderboardUrl,
   profileUrl,
 } from "@/lib/seo/urls";
+import { getRootMetadata } from "@/lib/seo/rootMetadata";
 
 afterEach(() => vi.unstubAllEnvs());
 
 describe("SITE_URL", () => {
-  it("matches the metadataBase declared in app/layout.tsx", () => {
-    // A canonical whose host differs from metadataBase resolves to a URL the
-    // page does not live at, which drops it from the index.
+  it("uses the hosted default when no runtime APP_URL is configured", () => {
     expect(SITE_URL).toBe("https://tokscale.ai");
   });
 
   it("has no trailing slash, so `${SITE_URL}/path` never doubles it", () => {
     expect(SITE_URL.endsWith("/")).toBe(false);
+  });
+});
+
+describe("root metadata", () => {
+  it("uses absolute runtime-origin Open Graph and Twitter images", () => {
+    const metadata = getRootMetadata("https://runtime.example");
+    expect(metadata.metadataBase?.toString()).toBe("https://runtime.example/");
+    expect(metadata.openGraph?.url).toBe("https://runtime.example");
+    expect(metadata.openGraph?.images).toEqual(expect.arrayContaining([
+      expect.objectContaining({ url: "https://runtime.example/og-image.png" }),
+    ]));
+    expect(metadata.twitter?.images).toContain("https://runtime.example/og-image.png");
   });
 });
 
