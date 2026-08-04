@@ -476,27 +476,65 @@ mod tests {
         litellm.insert(
             "azure/codex-cache-gap".to_string(),
             ModelPricing {
-                input_cost_per_token: Some(1e-5),
-                output_cost_per_token: Some(1e-4),
+                input_cost_per_token: Some(1.75e-6),
+                output_cost_per_token: Some(1.4e-5),
                 ..Default::default()
             },
         );
         litellm.insert(
             "codex-cache-gap".to_string(),
             ModelPricing {
-                input_cost_per_token: Some(1e-6),
-                output_cost_per_token: Some(1e-5),
-                cache_read_input_token_cost: Some(1e-7),
+                input_cost_per_token: Some(1.75e-6),
+                output_cost_per_token: Some(1.4e-5),
+                cache_read_input_token_cost: Some(1.75e-7),
                 ..Default::default()
             },
         );
         let service = PricingService::new(litellm, HashMap::new());
+        let usage = cache_read_usage();
 
-        assert!(service.covers_usage_with_provider(
-            "codex-cache-gap",
-            Some("azure"),
-            &cache_read_usage()
-        ));
+        assert!(service.covers_usage_with_provider("codex-cache-gap", Some("azure"), &usage));
+        let cost = service.calculate_cost_with_provider("codex-cache-gap", Some("azure"), &usage);
+        assert!((cost - 1.925).abs() < 1e-9, "unexpected cost: {cost}");
+    }
+
+    // The two rows must be the same deal before one lends the other a rate.
+    // `azure_ai/grok-code-fast-1` bills $3.50/$17.50 per million with no
+    // cache-read rate while the canonical `xai/` row bills $0.20/$1.50 with
+    // one; borrowing across them would invent an Azure-base, xAI-cache tariff
+    // that neither provider charges.
+    #[test]
+    fn differently_priced_canonical_row_does_not_lend_its_cache_rate() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure/grok-tariff-guard".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(3.5e-6),
+                output_cost_per_token: Some(1.75e-5),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "grok-tariff-guard".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(2e-7),
+                output_cost_per_token: Some(1.5e-6),
+                cache_read_input_token_cost: Some(2e-8),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = cache_read_usage();
+
+        assert!(
+            !service.covers_usage_with_provider("grok-tariff-guard", Some("azure"), &usage),
+            "a differently priced row must not make the usage look priceable"
+        );
+        let cost = service.calculate_cost_with_provider("grok-tariff-guard", Some("azure"), &usage);
+        assert!(
+            (cost - 3.5).abs() < 1e-9,
+            "the reseller's own rates must be the only ones applied: {cost}"
+        );
     }
 
     // Guard for the fix above: borrowing must never reach a bucket the hinted

@@ -1218,7 +1218,9 @@ impl PricingLookup {
         let Some(canonical) = self.lookup_with_provider(model_id, None) else {
             return Some(hinted);
         };
-        if canonical.matched_key == hinted.matched_key {
+        if canonical.matched_key == hinted.matched_key
+            || !quote_same_base_rates(&hinted.pricing, &canonical.pricing)
+        {
             return Some(hinted);
         }
 
@@ -1237,6 +1239,48 @@ impl PricingLookup {
             ..hinted
         })
     }
+}
+
+/// Whether two rows price the same deal, judged on the base rates they both
+/// publish.
+///
+/// Borrowing a rate across rows that disagree would invent a tariff neither
+/// provider charges: `azure_ai/grok-code-fast-1` bills $3.50/$17.50 per
+/// million with no cache-read rate, while the canonical `xai/` row bills
+/// $0.20/$1.50 with one, so an Azure row must never inherit xAI's cache
+/// price. Rows must also agree on at least one bucket — without a single
+/// shared rate there is no evidence they describe the same deal at all.
+fn quote_same_base_rates(hinted: &ModelPricing, canonical: &ModelPricing) -> bool {
+    let mut shared = false;
+
+    for (hinted_rate, canonical_rate) in [
+        (hinted.input_cost_per_token, canonical.input_cost_per_token),
+        (
+            hinted.output_cost_per_token,
+            canonical.output_cost_per_token,
+        ),
+        (
+            hinted.cache_read_input_token_cost,
+            canonical.cache_read_input_token_cost,
+        ),
+        (
+            hinted.cache_creation_input_token_cost,
+            canonical.cache_creation_input_token_cost,
+        ),
+    ] {
+        let (Some(hinted_rate), Some(canonical_rate)) = (hinted_rate, canonical_rate) else {
+            continue;
+        };
+        if !hinted_rate.is_finite() || !canonical_rate.is_finite() {
+            return false;
+        }
+        if (hinted_rate - canonical_rate).abs() > canonical_rate.abs() * 1e-9 {
+            return false;
+        }
+        shared = true;
+    }
+
+    shared
 }
 
 fn matches_model_or_snapshot(model_id: &str, base: &str) -> bool {
@@ -3278,15 +3322,13 @@ mod tests {
             reasoning: 0,
         };
 
-        // Neither row covers both populated buckets on its own. The provider
-        // row keeps its own input rate (1.0) and only borrows the output rate
-        // it does not publish (2.0). The hazard this guards against — the
-        // unhinted row replacing the provider row wholesale, pricing input at
-        // zero — would total 2.0, and pricing the unfilled output bucket at
-        // zero would total 1.0.
+        // Neither row covers both populated buckets, and they share no base
+        // bucket that would show they price the same deal, so no rate is
+        // borrowed. Retain the provider row rather than replacing it with an
+        // unhinted row that silently prices the input bucket at zero.
         assert_eq!(
             lookup.calculate_cost_with_provider("gpt-fallback-guard", Some("azure"), &usage),
-            3.0
+            1.0
         );
     }
 
