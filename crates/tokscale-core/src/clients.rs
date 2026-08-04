@@ -108,6 +108,7 @@ impl PathRoot {
 
 fn clean_reasonix_env_dir(name: &str, home_dir: &str) -> Option<String> {
     let value = std::env::var(name).ok()?;
+    let value = expand_reasonix_env_vars(value.trim());
     let value = value.trim();
     if value.is_empty() {
         return None;
@@ -130,6 +131,47 @@ fn clean_reasonix_env_dir(name: &str, home_dir: &str) -> Option<String> {
         std::env::current_dir().ok()?.join(path)
     };
     Some(path.to_string_lossy().into_owned())
+}
+
+// Match Reasonix's config expansion for ${VAR} and ${VAR:-default}. This must
+// happen before tilde and relative-path handling because either expansion may
+// produce one of those forms.
+fn expand_reasonix_env_vars(value: &str) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut remainder = value;
+
+    while let Some(start) = remainder.find("${") {
+        expanded.push_str(&remainder[..start]);
+        let reference = &remainder[start + 2..];
+        let Some(end) = reference.find('}') else {
+            expanded.push_str(&remainder[start..]);
+            return expanded;
+        };
+
+        let expression = &reference[..end];
+        let (name, default) = expression
+            .split_once(":-")
+            .map_or((expression, None), |(name, default)| (name, Some(default)));
+        let is_valid_name = name.chars().enumerate().all(|(index, character)| {
+            (character == '_' || character.is_ascii_alphabetic())
+                || (index > 0 && character.is_ascii_digit())
+        });
+
+        if is_valid_name && !name.is_empty() {
+            match std::env::var(name) {
+                Ok(env_value) if !env_value.is_empty() => expanded.push_str(&env_value),
+                _ => expanded.push_str(default.unwrap_or_default()),
+            }
+        } else {
+            expanded.push_str("${");
+            expanded.push_str(expression);
+            expanded.push('}');
+        }
+        remainder = &reference[end + 1..];
+    }
+
+    expanded.push_str(remainder);
+    expanded
 }
 
 #[derive(Debug, Clone)]
@@ -816,6 +858,46 @@ mod tests {
 
         restore_env("REASONIX_STATE_HOME", state_previous);
         restore_env("REASONIX_HOME", home_previous);
+    }
+
+    #[test]
+    fn test_reasonix_stats_expands_environment_references_before_normalizing_paths() {
+        let _guard = env_lock().lock().unwrap();
+        let state_previous = std::env::var("REASONIX_STATE_HOME").ok();
+        let root_previous = std::env::var("TOKSCALE_REASONIX_TEST_ROOT").ok();
+        let unset_previous = std::env::var("TOKSCALE_REASONIX_TEST_UNSET").ok();
+        let client = ClientId::Reasonix;
+
+        unsafe {
+            std::env::set_var("TOKSCALE_REASONIX_TEST_ROOT", "~/reasonix-state");
+            std::env::remove_var("TOKSCALE_REASONIX_TEST_UNSET");
+            std::env::set_var(
+                "REASONIX_STATE_HOME",
+                "${TOKSCALE_REASONIX_TEST_ROOT}/nested",
+            );
+        }
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            "/tmp/home/reasonix-state/nested/stats"
+        );
+
+        unsafe {
+            std::env::set_var(
+                "REASONIX_STATE_HOME",
+                "${TOKSCALE_REASONIX_TEST_UNSET:-relative-reasonix}",
+            );
+        }
+        let expected = std::env::current_dir()
+            .expect("test process has a current directory")
+            .join("relative-reasonix")
+            .join("stats")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(client.data().resolve_path("/tmp/home"), expected);
+
+        restore_env("REASONIX_STATE_HOME", state_previous);
+        restore_env("TOKSCALE_REASONIX_TEST_ROOT", root_previous);
+        restore_env("TOKSCALE_REASONIX_TEST_UNSET", unset_previous);
     }
 
     #[test]
