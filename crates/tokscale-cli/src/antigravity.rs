@@ -452,13 +452,13 @@ impl SyncLockGuard {
     /// contenders could find the same dead owner and both proceed, a
     /// contender arriving before the pid was written read an empty file and
     /// evicted a live owner, and a recycled pid could make a stranger look
-    /// like the owner. None of those are reachable through an OS lock, and
-    /// the kernel releases it on process death, so no stale-lock recovery is
-    /// needed either (#1010).
+    /// like the owner. The companion OS lock prevents those races between new
+    /// binaries, while the visible PID record remains readable by older
+    /// binaries during a rolling upgrade.
     ///
-    /// The lock file is deliberately left on disk. Unlinking it would let a
-    /// contender create a fresh file and lock that instead, which is the same
-    /// hole in a different shape.
+    /// On normal release the guard removes only its own visible record while
+    /// holding the companion lock. After a crash, a surviving visible record
+    /// fails closed and requires the documented user-mediated recovery.
     fn acquire(cache_dir: &Path) -> Result<Self> {
         let cache_lock = CacheOperationLockGuard::acquire(cache_dir, "antigravity sync")?;
         Self::acquire_with_cache_lock(cache_dir, cache_lock)

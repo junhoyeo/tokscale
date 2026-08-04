@@ -1130,11 +1130,13 @@ pub mod sync {
         /// unlink and retry — a read-decide-unlink sequence that is not
         /// atomic, so two contenders could find the same dead owner and both
         /// proceed, and a contender arriving before the pid was written read
-        /// an empty file and evicted a live owner. The kernel releases the
-        /// lock on process death, so no stale-lock recovery is needed (#1010).
+        /// an empty file and evicted a live owner. The companion OS lock prevents
+        /// those races between new binaries, while the visible PID record remains
+        /// readable by older binaries during a rolling upgrade.
         ///
-        /// The lock file is deliberately left on disk: unlinking it would let
-        /// a contender create a fresh file and lock that instead.
+        /// On normal release the guard removes only its own visible record while
+        /// holding the companion lock. After a crash, a surviving visible record
+        /// fails closed and requires the documented user-mediated recovery.
         fn acquire(cache_dir: &std::path::Path) -> Result<Self> {
             if !cache_dir.exists() {
                 std::fs::create_dir_all(cache_dir)?;
