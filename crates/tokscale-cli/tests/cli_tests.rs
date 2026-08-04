@@ -705,7 +705,31 @@ fn write_fake_credentials(base: &Path) {
 }
 
 fn write_settings_json(base: &Path, body: &str) {
-    let path = settings_json_path(base);
+    write_settings_json_at(settings_json_path(base), body);
+}
+
+/// Settings for a run that passes `--home <base>` rather than inheriting the
+/// sandbox config dir.
+///
+/// An explicit `--home` bypasses `TOKSCALE_CONFIG_DIR` entirely:
+/// `Settings::load_for_home_override` reads
+/// `ExplicitHomeConfigLayout::current()` under the given home, which is
+/// `.config/tokscale` on Unix and `AppData\Roaming\tokscale` on Windows. That
+/// branch is real product behavior, unlike the one [`settings_json_path`] used
+/// to carry, so this mirrors it.
+fn write_explicit_home_settings_json(base: &Path, body: &str) {
+    let path = if cfg!(target_os = "windows") {
+        base.join("AppData")
+            .join("Roaming")
+            .join("tokscale")
+            .join("settings.json")
+    } else {
+        base.join(".config").join("tokscale").join("settings.json")
+    };
+    write_settings_json_at(path, body);
+}
+
+fn write_settings_json_at(path: std::path::PathBuf, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, body).unwrap();
 }
@@ -2348,7 +2372,7 @@ fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
         210,
         40,
     );
-    write_settings_json(
+    write_explicit_home_settings_json(
         real_home.path(),
         &format!(
             r#"{{
