@@ -7,6 +7,10 @@ import { Providers } from "@/lib/providers";
 import "./globals.css";
 import "react-toastify/dist/ReactToastify.css";
 
+// The self-hosted image must build without a reachable database. All pages
+// therefore render on demand and connect only at request time.
+export const dynamic = "force-dynamic";
+
 const figtree = Figtree({
   variable: "--font-figtree",
   subsets: ["latin"],

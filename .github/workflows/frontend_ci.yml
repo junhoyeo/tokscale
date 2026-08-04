@@ -10,6 +10,12 @@ on:
       - ".github/assets/**"
       - "package.json"
       - "bun.lock"
+      - "Dockerfile"
+      - "Dockerfile.tui"
+      - "Makefile"
+      - "README.md"
+      - "docker-compose.yml"
+      - "docker-entrypoint.sh"
       - ".github/workflows/frontend_ci.yml"
   pull_request:
     branches: [main, develop]
@@ -19,6 +25,12 @@ on:
       - ".github/assets/**"
       - "package.json"
       - "bun.lock"
+      - "Dockerfile"
+      - "Dockerfile.tui"
+      - "Makefile"
+      - "README.md"
+      - "docker-compose.yml"
+      - "docker-entrypoint.sh"
       - ".github/workflows/frontend_ci.yml"
 
 permissions:
@@ -83,3 +95,13 @@ jobs:
 
       - name: Replay frontend database migrations
         run: bun run --cwd packages/frontend test:migrations
+
+  container-build:
+    name: Container Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build self-hosted frontend image offline
+        run: docker build --tag tokscale:self-host-smoke .

@@ -28,21 +28,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        # next build statically prerenders pages that query the DB, so
-        # DATABASE_URL must resolve to a live database at build time.
-        # Build the image separately with `make docker/build` after starting
-        # the db service; do not rely on compose's implicit --build here.
-        DATABASE_URL: ${DATABASE_URL:-postgresql://tokscale:tokscale@db:5432/tokscale}
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://tokscale:tokscale@db:5432/tokscale}
+      # postgres:16-alpine has no TLS configured. Production deployments using
+      # a managed database should set DATABASE_SSL=require (the default outside
+      # this Compose stack also remains require in NODE_ENV=production).
+      DATABASE_SSL: ${DATABASE_SSL:-false}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
-      NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:-http://localhost:3000}
+      NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:-http://localhost:3333}
       AUTH_SECRET: ${AUTH_SECRET:-}
       # CSRF_ALLOWED_ORIGINS: ${CSRF_ALLOWED_ORIGINS}
     ports:

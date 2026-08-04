@@ -11,6 +11,21 @@ function getConnectionString(): string {
   return connectionString;
 }
 
+function getSslMode(): "require" | false {
+  const configured = process.env.DATABASE_SSL?.trim().toLowerCase();
+
+  if (configured === "false" || configured === "disable") {
+    return false;
+  }
+  if (configured === "true" || configured === "require") {
+    return "require";
+  }
+
+  // Preserve the existing managed-production default while allowing local
+  // container deployments to opt out explicitly via DATABASE_SSL=false.
+  return process.env.NODE_ENV === "production" ? "require" : false;
+}
+
 // Singleton pattern: prevent creating multiple connection pools across
 // serverless invocations sharing the same runtime (hot-start reuse).
 //
@@ -22,7 +37,7 @@ function createDb() {
   return drizzle({
     connection: {
       url: getConnectionString(),
-      ssl: process.env.NODE_ENV === "production" ? "require" : false,
+      ssl: getSslMode(),
 
       // Serverless-optimized pool settings:
       // Each Vercel function instance gets its own pool. With dozens of

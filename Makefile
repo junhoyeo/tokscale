@@ -200,9 +200,8 @@ coverage:  ## Run Rust tests and generate coverage report (requires cargo-tarpau
 ## Docker
 
 .PHONY: docker/build
-docker/build:  ## Build the Docker image for the frontend (run make up/db first)
+docker/build:  ## Build the Docker image for the frontend (no database required)
 	$(DOCKER) build \
-	  --build-arg DATABASE_URL=$${DATABASE_URL:-postgresql://tokscale:tokscale@localhost:5432/tokscale} \
 	  -t tokscale:latest .
 	@echo "Image built: tokscale:latest. Start full stack with: make up"
 

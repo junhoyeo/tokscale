@@ -1,6 +1,8 @@
 import type { MetadataRoute } from "next";
 import { desc, eq } from "drizzle-orm";
 import { db, groups, submissions, users } from "@/lib/db";
+
+export const dynamic = "force-dynamic";
 import {
   SITEMAP_GROUP_LIMIT,
   SITEMAP_USER_LIMIT,

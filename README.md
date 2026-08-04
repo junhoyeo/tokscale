@@ -1210,17 +1210,16 @@ Docker or Podman can substitute for both — see [Container Setup](#container-se
 
 ### Container Setup
 
-The repo ships a `Makefile` and Docker/Podman compose stack. No local Rust or Bun install required. The stack auto-detects `podman` over `docker`.
+The repo ships a `Makefile` and Docker/Podman Compose stack for a **single-host deployment**. No local Rust or Bun install is required. The stack auto-detects `podman` over `docker`.
 
-**First run** — build the image before starting the stack. The homepage and leaderboard are statically prerendered and query the database at build time, so the DB must be running first:
+**First run** — image builds do not connect to a database. Migrations run when the app container starts, after Compose marks Postgres healthy:
 
 ```bash
-make up/db          # 1. start postgres (127.0.0.1:5432)
-make docker/build   # 2. build and tag the frontend image (tokscale:latest)
-make up             # 3. start the full stack (frontend on http://localhost:3333)
+make docker/build   # build and tag the frontend image (tokscale:latest)
+make up             # start Postgres and the frontend on http://localhost:3333
 ```
 
-`make up` uses the pre-built `tokscale:latest` image from step 2 — it does not trigger a compose rebuild.
+`make up` uses the pre-built `tokscale:latest` image — it does not trigger a compose rebuild.
 
 **Subsequent runs** — the image is already built; just start the services:
 
@@ -1244,7 +1243,7 @@ make db/migrate   # run pending migrations manually
 make help         # full target list
 ```
 
-**Custom credentials** — set all four variables together before running `make up/db` or `make docker/build`. Compose cannot derive `DATABASE_URL` from the `POSTGRES_*` vars automatically:
+**Custom credentials** — set all four variables together before running `make up`. Compose cannot derive `DATABASE_URL` from the `POSTGRES_*` variables automatically. The hostname `db` is valid only for the app container on the Compose network; do not use it from your host shell or as a Docker build argument:
 
 ```bash
 export POSTGRES_USER=myuser
@@ -1254,6 +1253,8 @@ export DATABASE_URL=postgresql://myuser:mypass@db:5432/mydb
 ```
 
 The defaults (`tokscale`/`tokscale`/`tokscale`) are for local dev only.
+
+**Public deployments** — this Compose file binds both ports to loopback and is intended to sit behind a reverse proxy that terminates TLS. Set `NEXT_PUBLIC_URL` to the public HTTPS URL before `make up` (for example, `https://tokscale.example.com`), configure that URL in the proxy, and keep `DATABASE_SSL=false` only for the bundled local Postgres service. When using a managed database, remove the `db` service, provide its `DATABASE_URL`, and set `DATABASE_SSL=require`. Keep `AUTH_SECRET` and GitHub OAuth credentials in a protected `.env` file or your deployment secret store; the sample defaults intentionally do not enable OAuth.
 
 ### How to Run (without containers)
 
