@@ -245,6 +245,9 @@ function buildTx(initialDays: PersistedDay[]) {
   function applyDailyBreakdownWrite(sqlArg: unknown): void {
     const strings: string[] = [];
     collectStrings(sqlArg, strings);
+    if (strings.some((value) => value.includes("DELETE FROM daily_breakdown"))) {
+      throw new Error("submit route deleted a daily_breakdown row");
+    }
     const breakdownJson = strings.find(
       (value) => value.startsWith("{") && value.includes('"tokens"'),
     );
