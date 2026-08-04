@@ -1114,7 +1114,7 @@ pub mod sync {
 
     #[derive(Debug)]
     struct SyncLockGuard {
-        _file: std::fs::File,
+        file: std::fs::File,
     }
 
     impl SyncLockGuard {
@@ -1141,10 +1141,9 @@ pub mod sync {
 
             let lock_path = cache_dir.join("sync.lock");
             // Older binaries use this file as a PID-only lock. Preserve a
-            // live legacy record during rolling upgrades: the new OS lock is
-            // not evidence that an older owner has stopped.
-            let legacy_owner =
-                read_legacy_sync_lock(&lock_path).filter(|(pid, _)| pid_is_alive(*pid));
+            // live record during rolling upgrades: the new OS lock is not
+            // evidence that an older owner has stopped.
+            let legacy_owner = read_sync_lock(&lock_path).filter(|(pid, _)| pid_is_alive(*pid));
             let mut file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -1178,36 +1177,33 @@ pub mod sync {
 
             // Recorded for diagnostics only — the lock above is what excludes.
             let _ = file.set_len(0);
-            let _ = writeln!(file, "os {} {}", std::process::id(), Utc::now().timestamp());
+            // Keep active ownership readable by pre-OS-lock binaries. They
+            // would treat a tagged record as malformed and unlink this live
+            // inode, bypassing the OS lock.
+            let _ = writeln!(file, "{} {}", std::process::id(), Utc::now().timestamp());
 
-            Ok(Self { _file: file })
+            Ok(Self { file })
+        }
+    }
+
+    impl Drop for SyncLockGuard {
+        fn drop(&mut self) {
+            use std::io::Write;
+            use std::io::{Seek, SeekFrom};
+
+            let _ = fs2::FileExt::unlock(&self.file);
+            let _ = self.file.set_len(0);
+            let _ = self.file.seek(SeekFrom::Start(0));
+            let _ = writeln!(self.file, "released");
         }
     }
 
     fn read_sync_lock(path: &std::path::Path) -> Option<(u32, u64)> {
         let contents = std::fs::read_to_string(path).ok()?;
         let mut parts = contents.split_whitespace();
-        let first = parts.next()?;
-        let (pid, timestamp) = if first == "os" {
-            (
-                parts.next()?.parse::<u32>().ok()?,
-                parts.next()?.parse::<u64>().ok()?,
-            )
-        } else {
-            (
-                first.parse::<u32>().ok()?,
-                parts.next()?.parse::<u64>().ok()?,
-            )
-        };
-        Some((pid, timestamp))
-    }
-
-    fn read_legacy_sync_lock(path: &std::path::Path) -> Option<(u32, u64)> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let mut parts = contents.split_whitespace();
         let pid = parts.next()?.parse::<u32>().ok()?;
         let timestamp = parts.next()?.parse::<u64>().ok()?;
-        parts.next().is_none().then_some((pid, timestamp))
+        Some((pid, timestamp))
     }
 
     // ── Main sync logic ────────────────────────────────────────────────────
@@ -1429,9 +1425,10 @@ pub mod sync {
 
             drop(SyncLockGuard::acquire(cache_dir).expect("an unheld lock file is taken over"));
 
-            // The file stays: unlinking it would let a contender lock a
-            // different file and defeat the exclusion.
-            assert!(cache_dir.join("sync.lock").exists());
+            assert_eq!(
+                std::fs::read_to_string(cache_dir.join("sync.lock")).unwrap(),
+                "released\n"
+            );
         }
 
         /// A live PID-only lock belongs to a pre-OS-lock binary. A new
@@ -1454,6 +1451,29 @@ pub mod sync {
                 Some(std::process::id()),
                 "the new binary must not overwrite the legacy owner's record"
             );
+        }
+
+        #[test]
+        fn test_acquire_remains_readable_to_the_legacy_protocol() {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache_dir = tmp.path();
+            let lock_path = cache_dir.join("sync.lock");
+            let guard = SyncLockGuard::acquire(cache_dir).unwrap();
+
+            let legacy_open = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap_err();
+            assert_eq!(legacy_open.kind(), std::io::ErrorKind::AlreadyExists);
+            let (pid, _) = read_sync_lock(&lock_path).expect("legacy PID record");
+            assert_eq!(pid, std::process::id());
+            assert!(pid_is_alive(pid), "legacy sync would preserve a live owner");
+            assert!(
+                lock_path.exists(),
+                "legacy sync must not unlink the live inode"
+            );
+            drop(guard);
         }
 
         /// Regression (#1010): the old protocol decided ownership from the
@@ -1499,14 +1519,16 @@ pub mod sync {
         }
 
         #[test]
-        fn test_acquire_writes_pid_and_timestamp() {
+        fn test_acquire_marks_released_lock_after_drop() {
             let tmp = tempfile::tempdir().unwrap();
             let cache_dir = tmp.path();
             // Read back after the guard is dropped: Windows refuses reads of a
             // range another handle has locked.
             drop(SyncLockGuard::acquire(cache_dir).expect("first acquire"));
-            let (pid, _) = read_sync_lock(&cache_dir.join("sync.lock")).expect("readable");
-            assert_eq!(pid, std::process::id());
+            assert_eq!(
+                std::fs::read_to_string(cache_dir.join("sync.lock")).unwrap(),
+                "released\n"
+            );
         }
 
         #[test]
