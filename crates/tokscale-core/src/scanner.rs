@@ -4684,6 +4684,16 @@ mod tests {
     /// resolves — trimming the value here would silently miss it.
     #[test]
     #[serial]
+    // Unix-only because the fixture cannot exist on Windows: a directory name
+    // ending in a space is not addressable there. `CreateDirectoryW` strips the
+    // trailing space, so `<tmp>\ padded-kimi-code ` becomes
+    // `<tmp>\ padded-kimi-code`, and the very next call — which carries that
+    // component in the middle of a longer path, where no stripping happens —
+    // fails with ERROR_PATH_NOT_FOUND. The claim being made here (a padded
+    // KIMI_CODE_HOME is honored verbatim rather than trimmed) is also one
+    // Windows cannot violate: the OS trims the name before tokscale sees a
+    // directory at all.
+    #[cfg(unix)]
     fn test_scan_all_clients_kimi_code_home_override_is_not_trimmed() {
         let mut env = EnvGuard::capture(&["KIMI_CODE_HOME"]);
         let dir = TempDir::new().unwrap();

@@ -119,44 +119,51 @@ fn legacy_cache_paths(filename: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::test_env::EnvGuard;
     use serial_test::serial;
-    use std::env;
     use tempfile::TempDir;
-
-    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
-        unsafe {
-            match value {
-                Some(value) => env::set_var(key, value),
-                None => env::remove_var(key),
-            }
-        }
-    }
 
     #[test]
     #[serial]
     fn load_falls_back_to_legacy_dirs_cache_path() {
         let temp_home = TempDir::new().unwrap();
         let temp_xdg_cache = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_xdg_cache = env::var_os("XDG_CACHE_HOME");
-        let previous_xdg_config = env::var_os("XDG_CONFIG_HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", temp_home.path());
-            env::set_var("XDG_CACHE_HOME", temp_xdg_cache.path());
-            // Pin XDG_CONFIG_HOME so paths::get_cache_dir() stays inside
-            // the sandboxed HOME on Linux CI runners that set this var
-            // globally — without the pin, the canonical path resolves
-            // outside the temp dir and the legacy fallback never gets
-            // exercised because the binary never tries the right legacy
-            // root either.
-            env::set_var("XDG_CONFIG_HOME", temp_home.path().join(".config"));
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
+        let mut env = EnvGuard::capture(&[
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "TOKSCALE_CONFIG_DIR",
+        ]);
+        env.set("HOME", temp_home.path());
+        env.set("XDG_CACHE_HOME", temp_xdg_cache.path());
+        // Pin XDG_CONFIG_HOME so paths::get_cache_dir() stays inside
+        // the sandboxed HOME on Linux CI runners that set this var
+        // globally — without the pin, the canonical path resolves
+        // outside the temp dir and the legacy fallback never gets
+        // exercised because the binary never tries the right legacy
+        // root either.
+        env.set("XDG_CONFIG_HOME", temp_home.path().join(".config"));
+        env.remove("TOKSCALE_CONFIG_DIR");
 
         let legacy_path = crate::paths::legacy_dirs_cache_dir()
             .unwrap()
             .join("pricing-litellm.json");
+
+        // `dirs::cache_dir()` reads `XDG_CACHE_HOME` on Linux and `$HOME` on
+        // macOS, but on Windows it is a `SHGetKnownFolderPath` call that no
+        // environment variable reaches, so the redirects above do not move it.
+        // Writing the fixture anyway would put a pricing file in the real
+        // `%LOCALAPPDATA%\tokscale\` of whatever machine ran the suite — the
+        // same escape from the sandbox that #997 found — and the assertion
+        // would still be meaningless, because the canonical path outside the
+        // temp dir may already hold a cache and the fallback would never run.
+        // Skip instead of doing either.
+        if !legacy_path.starts_with(temp_home.path())
+            && !legacy_path.starts_with(temp_xdg_cache.path())
+        {
+            return;
+        }
+
         fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -170,10 +177,5 @@ mod tests {
 
         let loaded: Option<serde_json::Value> = load_cache("pricing-litellm.json");
         assert_eq!(loaded.unwrap()["ok"], serde_json::json!(true));
-
-        restore_env_var("HOME", previous_home);
-        restore_env_var("XDG_CACHE_HOME", previous_xdg_cache);
-        restore_env_var("XDG_CONFIG_HOME", previous_xdg_config);
-        restore_env_var("TOKSCALE_CONFIG_DIR", previous_override);
     }
 }

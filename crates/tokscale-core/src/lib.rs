@@ -10024,9 +10024,16 @@ mod tests {
     #[test]
     fn test_submit_default_graph_includes_antigravity_cache_rows() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let sessions_dir = temp_dir
-            .path()
-            .join(".config/tokscale/antigravity-cache/sessions");
+        // Resolved rather than hardcoded: under an explicit home the config
+        // root is `~/.config/tokscale` on Unix and
+        // `%HOME%\AppData\Roaming\tokscale` on Windows, so the Unix spelling
+        // put the fixture outside the tree the scan walks and the graph came
+        // back empty.
+        let sessions_dir = std::path::PathBuf::from(
+            ClientId::Antigravity
+                .data()
+                .resolve_path_with_env_strategy(&temp_dir.path().to_string_lossy(), false),
+        );
         std::fs::create_dir_all(&sessions_dir).unwrap();
         std::fs::write(
             sessions_dir.join("ag-submit.jsonl"),
@@ -10517,7 +10524,18 @@ mod tests {
     #[test]
     fn test_parse_local_clients_reasonix_counts_reported_requests() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let stats_dir = temp_dir.path().join(".reasonix/stats");
+        // Where the scan will actually look, rather than the Unix spelling of
+        // it: under an explicit home Reasonix lives at `~/.reasonix` on Unix
+        // and `%HOME%\AppData\Roaming\reasonix` on Windows, so a hardcoded
+        // `.reasonix/stats` fixture is written somewhere the scanner never
+        // reads and the test asserts on an empty parse. The path layout has its
+        // own coverage in `clients::tests`; this test is about the request
+        // count.
+        let stats_dir = std::path::PathBuf::from(
+            ClientId::Reasonix
+                .data()
+                .resolve_path_with_env_strategy(&temp_dir.path().to_string_lossy(), false),
+        );
         std::fs::create_dir_all(&stats_dir).unwrap();
         std::fs::write(
             stats_dir.join("2026-08-04.jsonl"),
