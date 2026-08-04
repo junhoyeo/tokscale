@@ -4385,6 +4385,30 @@ mod tests {
         std::env::set_var("TOKSCALE_CONFIG_DIR", home.join(".config").join("tokscale"));
     }
 
+    /// A client's scan root under `home`, spelled the way a scan will spell it.
+    ///
+    /// `ClientDef::resolve_path` builds the root with `format!("{root}/{rel}")`
+    /// and `WalkDir` appends each component below it with the platform
+    /// separator, so on Windows a discovered file reads
+    /// `C:\home/.claude/projects\demo\session.jsonl`. A fixture that builds the
+    /// same file with `Path::join` gets all backslashes — the same file, a
+    /// different string.
+    ///
+    /// That difference is invisible until a test seeds the message cache by
+    /// hand and expects the next scan to find it, because `CachedPath` keys on
+    /// the OS string as written: two spellings are two keys, so the seeded
+    /// entry is never read and the parse silently falls back to a cold parse.
+    /// Seeding under the spelling the scan produces is what these tests mean.
+    /// Whether the cache *ought* to fold the two spellings into one key is a
+    /// separate question about the product; nothing here depends on the answer.
+    fn client_scan_root(home: &std::path::Path, client: ClientId) -> std::path::PathBuf {
+        std::path::PathBuf::from(
+            client
+                .data()
+                .resolve_path_with_env_strategy(&home.to_string_lossy(), false),
+        )
+    }
+
     fn restore_cache_home(previous: CacheHomeEnv) {
         for (key, value) in [("HOME", previous.0), ("TOKSCALE_CONFIG_DIR", previous.1)] {
             match value {
@@ -6492,7 +6516,7 @@ mod tests {
         redirect_cache_home(cache_home.path());
 
         {
-            let claude_dir = source_home.path().join(".claude/projects/demo");
+            let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("demo");
             std::fs::create_dir_all(&claude_dir).unwrap();
             let transcript = claude_dir.join("session.jsonl");
             std::fs::write(
@@ -6637,9 +6661,8 @@ mod tests {
         redirect_cache_home(cache_home.path());
 
         {
-            let message_dir = source_home
-                .path()
-                .join(".local/share/opencode/storage/message/project-1");
+            let message_dir =
+                client_scan_root(source_home.path(), ClientId::OpenCode).join("project-1");
             std::fs::create_dir_all(&message_dir).unwrap();
             let path = message_dir.join("msg_001.json");
             std::fs::write(
@@ -7522,7 +7545,7 @@ mod tests {
         redirect_cache_home(cache_home.path());
 
         {
-            let codex_dir = source_home.path().join(".codex/sessions");
+            let codex_dir = client_scan_root(source_home.path(), ClientId::Codex);
             std::fs::create_dir_all(&codex_dir).unwrap();
             let path = codex_dir.join("session.jsonl");
             std::fs::write(
@@ -7886,7 +7909,7 @@ mod tests {
         redirect_cache_home(cache_home.path());
 
         {
-            let session_dir = source_home.path().join(".codex/sessions");
+            let session_dir = client_scan_root(source_home.path(), ClientId::Codex);
             std::fs::create_dir_all(&session_dir).unwrap();
             let path = session_dir.join("session.jsonl");
             std::fs::write(

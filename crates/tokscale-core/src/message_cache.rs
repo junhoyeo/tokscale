@@ -2607,9 +2607,21 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
         let source_home = TempDir::new().unwrap();
-        let wire_path = source_home
-            .path()
-            .join(".kimi/sessions/group/session/wire.jsonl");
+        // Spelled the way the scan will spell it. `ClientDef::resolve_path`
+        // joins the root with `/` and `WalkDir` appends the components below it
+        // with the platform separator, so on Windows the parse stores this
+        // entry under `<home>/.kimi/sessions\group\session\wire.jsonl` while a
+        // `Path::join` fixture asks for it back under all backslashes.
+        // `CachedPath` keys on the OS string as written, so those are two keys
+        // for one file and the lookup below found nothing.
+        let wire_path = PathBuf::from(
+            ClientId::Kimi
+                .data()
+                .resolve_path_with_env_strategy(&source_home.path().to_string_lossy(), false),
+        )
+        .join("group")
+        .join("session")
+        .join("wire.jsonl");
         std::fs::create_dir_all(wire_path.parent().unwrap()).unwrap();
         std::fs::write(
             &wire_path,
@@ -3152,11 +3164,18 @@ mod tests {
             parser_version: codex.parser_version.saturating_sub(1),
             payload: b"deliberately invalid entry payload".to_vec(),
         };
-        let mut writer = BufWriter::new(File::create(&stale_path).unwrap());
-        bincode::options()
-            .serialize_into(&mut writer, &stale_envelope)
-            .unwrap();
-        writer.flush().unwrap();
+        // Scoped, so the handle is closed before anything rewrites this shard:
+        // the rewrite goes through an atomic replace, and Windows refuses to
+        // replace a file another handle still has open (`Access is denied`, os
+        // error 5). On Unix the rename succeeds with the handle open, which is
+        // why the leak was invisible.
+        {
+            let mut writer = BufWriter::new(File::create(&stale_path).unwrap());
+            bincode::options()
+                .serialize_into(&mut writer, &stale_envelope)
+                .unwrap();
+            writer.flush().unwrap();
+        }
 
         assert!(matches!(
             read_shard(&stale_path, codex),

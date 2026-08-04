@@ -4267,6 +4267,12 @@ mod tests {
             .any(|p| p.ends_with("messages.jsonl")));
     }
 
+    // The expected `workspace_key` runs through `normalize_workspace_key`
+    // rather than being the path's own spelling: that function is what
+    // `scan_crush_registry` applies, and it deliberately folds `\` to `/` so a
+    // workspace reached under two separator spellings is one key rather than
+    // two. Asserting the raw `display()` string instead only agreed with the
+    // normalizer on Unix, where there is nothing to fold.
     #[test]
     fn test_scan_crush_registry_resolves_relative_and_absolute_data_dirs() {
         let dir = TempDir::new().unwrap();
@@ -4299,12 +4305,14 @@ mod tests {
             vec![
                 CrushDbSource {
                     db_path: project_a.join(".crush").join("crush.db"),
-                    workspace_key: Some(project_a.display().to_string()),
+                    workspace_key: normalize_workspace_key(&project_a.to_string_lossy()),
                     workspace_label: Some("project-a".to_string()),
                 },
                 CrushDbSource {
                     db_path: project_b_data.join("crush.db"),
-                    workspace_key: Some(dir.path().join("project-b").display().to_string()),
+                    workspace_key: normalize_workspace_key(
+                        &dir.path().join("project-b").to_string_lossy()
+                    ),
                     workspace_label: Some("project-b".to_string()),
                 },
             ]
@@ -4337,7 +4345,7 @@ mod tests {
             result,
             vec![CrushDbSource {
                 db_path: valid_project.join(".crush").join("crush.db"),
-                workspace_key: Some(valid_project.display().to_string()),
+                workspace_key: normalize_workspace_key(&valid_project.to_string_lossy()),
                 workspace_label: Some("valid-project".to_string()),
             }]
         );
@@ -4520,7 +4528,7 @@ mod tests {
             result.crush_dbs,
             vec![CrushDbSource {
                 db_path: data_dir.join("crush.db"),
-                workspace_key: Some(project.display().to_string()),
+                workspace_key: normalize_workspace_key(&project.to_string_lossy()),
                 workspace_label: Some("project".to_string()),
             }]
         );

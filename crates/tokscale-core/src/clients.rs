@@ -809,14 +809,63 @@ mod tests {
         assert!(!client.data().headless);
     }
 
+    /// A home directory these tests can hand to the reasonix resolver.
+    ///
+    /// Reasonix is the one client whose root runs through `Path` — tilde
+    /// expansion, an `is_absolute` check, and joins — rather than string
+    /// concatenation. `Path` on Windows reads a POSIX-shaped `/tmp/home` as
+    /// "the root of the current drive": not absolute, because it carries no
+    /// drive prefix, so the resolver's relative-path arm fires and prepends the
+    /// process's working directory. The other clients in this module keep
+    /// `/tmp/home` because they never look at the value.
+    fn reasonix_home() -> &'static str {
+        if cfg!(windows) {
+            "C:\\tmp\\home"
+        } else {
+            "/tmp/home"
+        }
+    }
+
+    /// An absolute path on this platform, from `/`-separated components.
+    fn absolute_test_path(relative: &str) -> std::path::PathBuf {
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        let mut path = std::path::PathBuf::from(root);
+        for component in relative.split('/') {
+            path.push(component);
+        }
+        path
+    }
+
+    /// `<root>/stats`, spelled the way [`ClientDef::resolve_path`] appends a
+    /// client's relative path: a forward slash, whatever the root's own
+    /// separators are.
+    fn reasonix_stats_under(root: impl AsRef<std::path::Path>) -> String {
+        format!("{}/stats", root.as_ref().to_string_lossy())
+    }
+
+    /// The reasonix root with no environment override.
+    ///
+    /// Spelled out per platform rather than resolved, because the layout is the
+    /// claim: `~/.reasonix` on Unix, and `%HOME%\AppData\Roaming\reasonix` on
+    /// Windows, matching where the application actually keeps per-user config
+    /// there.
+    fn reasonix_default_root() -> std::path::PathBuf {
+        let home = std::path::Path::new(reasonix_home());
+        if cfg!(windows) {
+            home.join("AppData").join("Roaming").join("reasonix")
+        } else {
+            home.join(".reasonix")
+        }
+    }
+
     #[test]
     fn test_reasonix_client_registered_as_local_session_source() {
         let client = ClientId::from_str("reasonix").expect("reasonix client should be registered");
         assert_eq!(
             client
                 .data()
-                .resolve_path_with_env_strategy("/tmp/home", false),
-            "/tmp/home/.reasonix/stats"
+                .resolve_path_with_env_strategy(reasonix_home(), false),
+            reasonix_stats_under(reasonix_default_root())
         );
         assert_eq!(client.data().pattern, "*.jsonl");
         assert!(client.data().parse_local);
@@ -828,17 +877,19 @@ mod tests {
     #[serial]
     fn test_reasonix_stats_prefers_state_home_then_reasonix_home() {
         let mut env = EnvGuard::capture(&["REASONIX_STATE_HOME", "REASONIX_HOME"]);
-        env.set("REASONIX_HOME", "/custom/reasonix-home");
-        env.set("REASONIX_STATE_HOME", "/custom/reasonix-state");
+        let custom_home = absolute_test_path("custom/reasonix-home");
+        let custom_state = absolute_test_path("custom/reasonix-state");
+        env.set("REASONIX_HOME", &custom_home);
+        env.set("REASONIX_STATE_HOME", &custom_state);
         let client = ClientId::Reasonix;
         assert_eq!(
-            client.data().resolve_path("/tmp/home"),
-            "/custom/reasonix-state/stats"
+            client.data().resolve_path(reasonix_home()),
+            reasonix_stats_under(&custom_state)
         );
         env.remove("REASONIX_STATE_HOME");
         assert_eq!(
-            client.data().resolve_path("/tmp/home"),
-            "/custom/reasonix-home/stats"
+            client.data().resolve_path(reasonix_home()),
+            reasonix_stats_under(&custom_home)
         );
     }
 
@@ -849,21 +900,20 @@ mod tests {
         let client = ClientId::Reasonix;
 
         env.set("REASONIX_STATE_HOME", "  ~/reasonix-state  ");
-        env.set("REASONIX_HOME", "/unused/reasonix-home");
+        env.set("REASONIX_HOME", absolute_test_path("unused/reasonix-home"));
         assert_eq!(
-            client.data().resolve_path("/tmp/home"),
-            "/tmp/home/reasonix-state/stats"
+            client.data().resolve_path(reasonix_home()),
+            reasonix_stats_under(std::path::Path::new(reasonix_home()).join("reasonix-state"))
         );
 
         env.set("REASONIX_STATE_HOME", " \t ");
         env.set("REASONIX_HOME", " relative-reasonix ");
-        let expected = std::env::current_dir()
-            .expect("test process has a current directory")
-            .join("relative-reasonix")
-            .join("stats")
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(client.data().resolve_path("/tmp/home"), expected);
+        let expected = reasonix_stats_under(
+            std::env::current_dir()
+                .expect("test process has a current directory")
+                .join("relative-reasonix"),
+        );
+        assert_eq!(client.data().resolve_path(reasonix_home()), expected);
     }
 
     #[test]
@@ -883,20 +933,21 @@ mod tests {
             "${TOKSCALE_REASONIX_TEST_ROOT}/nested",
         );
         assert_eq!(
-            client.data().resolve_path("/tmp/home"),
-            "/tmp/home/reasonix-state/nested/stats"
+            client.data().resolve_path(reasonix_home()),
+            reasonix_stats_under(
+                std::path::Path::new(reasonix_home()).join("reasonix-state/nested")
+            )
         );
 
         env.set(
             "REASONIX_STATE_HOME",
             "${TOKSCALE_REASONIX_TEST_UNSET:-relative-reasonix}",
         );
-        let expected = std::env::current_dir()
-            .expect("test process has a current directory")
-            .join("relative-reasonix")
-            .join("stats")
-            .to_string_lossy()
-            .into_owned();
+        let expected = reasonix_stats_under(
+            std::env::current_dir()
+                .expect("test process has a current directory")
+                .join("relative-reasonix"),
+        );
         assert_eq!(client.data().resolve_path("/tmp/home"), expected);
     }
 
@@ -904,14 +955,17 @@ mod tests {
     #[serial]
     fn test_reasonix_stats_ignores_env_roots_when_requested() {
         let mut env = EnvGuard::capture(&["REASONIX_STATE_HOME", "REASONIX_HOME"]);
-        env.set("REASONIX_STATE_HOME", "/custom/reasonix-state");
-        env.set("REASONIX_HOME", "/custom/reasonix-home");
+        env.set(
+            "REASONIX_STATE_HOME",
+            absolute_test_path("custom/reasonix-state"),
+        );
+        env.set("REASONIX_HOME", absolute_test_path("custom/reasonix-home"));
 
         assert_eq!(
             ClientId::Reasonix
                 .data()
-                .resolve_path_with_env_strategy("/tmp/home", false),
-            "/tmp/home/.reasonix/stats"
+                .resolve_path_with_env_strategy(reasonix_home(), false),
+            reasonix_stats_under(reasonix_default_root())
         );
     }
 
