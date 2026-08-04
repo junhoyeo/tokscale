@@ -699,6 +699,23 @@ fn settings_json_path(base: &Path) -> std::path::PathBuf {
     sandbox_config_dir(base).join("settings.json")
 }
 
+/// A scan path spelled the way the binary spells it.
+///
+/// `ClientDef::resolve_path` builds every client's root as
+/// `format!("{root}/{relative}")` — one separator, `/`, on every platform,
+/// with the relative half a `/`-joined literal in the client table. Windows
+/// accepts `/` in a path, so the value works; it just is not what
+/// `Path::join` produces. An expectation built with `join` disagreed on the
+/// first separator only (`...\.tmpXXXX\.codex/sessions` against the emitted
+/// `...\.tmpXXXX/.codex/sessions`) — and note that `join` did not give a
+/// natively-spelled path either, because the rest of the literal keeps its
+/// forward slashes. There was no native-separator contract to preserve, only
+/// two spellings of the same path, so match the one the binary actually
+/// emits.
+fn client_scan_path(home: &Path, relative: &str) -> String {
+    format!("{}/{}", home.display(), relative)
+}
+
 /// Writes a minimal clawdboard account export to `<dir>/export.json` and
 /// returns its path, for exercising `tokscale import`.
 fn write_clawdboard_export_fixture(dir: &Path) -> std::path::PathBuf {
@@ -1334,7 +1351,7 @@ fn test_clients_home_override_uses_explicit_home_for_json() {
         .unwrap();
     assert_eq!(
         codex["sessionsPath"],
-        serde_json::json!(real_home.path().join(".codex/sessions"))
+        serde_json::json!(client_scan_path(real_home.path(), ".codex/sessions"))
     );
     assert_eq!(codex["messageCount"].as_i64().unwrap(), 2);
 }
@@ -3095,7 +3112,7 @@ fn test_clients_json_includes_claude_transcripts_path() {
 
     assert_eq!(
         claude["additionalPaths"][0]["path"],
-        serde_json::json!(tmp.path().join(".claude/transcripts"))
+        serde_json::json!(client_scan_path(tmp.path(), ".claude/transcripts"))
     );
     assert_eq!(claude["additionalPaths"][0]["exists"], true);
 }
