@@ -176,6 +176,13 @@
       "when": 1785785051220,
       "tag": "0024_parched_dreadnoughts",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1785854002944,
+      "tag": "0025_bouncy_vertigo",
+      "breakpoints": true
     }
   ]
 }

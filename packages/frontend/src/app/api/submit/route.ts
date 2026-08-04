@@ -25,6 +25,10 @@ import {
   recoverRatchetCensusWork,
   DUAL_DERIVATION_LOG_PREFIX,
 } from "@/lib/db/deviceClientTotals";
+import {
+  foldContributionsIntoReportedRows,
+  recordDailyBreakdownReported,
+} from "@/lib/db/dailyBreakdownReported";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
@@ -395,6 +399,14 @@ export async function POST(request: Request) {
     const ratchetCensusBuckets = ratchetCensusEnabled
       ? foldContributionsIntoBuckets(data.contributions, isBackfill ? "backfill" : "cli")
       : [];
+    // Phase 4a: unguarded per-(date, client) snapshot. Folded once up front so
+    // the write sees the same pre-guard totals the merge loop builds into
+    // `incomingClientBreakdown`, not the post-guard values that land in
+    // `daily_breakdown`. Always on — nothing reads the table.
+    const reportedRows = foldContributionsIntoReportedRows(
+      data.contributions,
+      isBackfill ? "backfill" : "cli"
+    );
     const result = await db.transaction(async (tx) => {
       await tx
         .update(apiTokens)
@@ -838,6 +850,18 @@ export async function POST(request: Request) {
             AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown)
           WHERE d.id = batch.id
         `);
+      }
+
+      // Phase 4a shadow write — same transaction as the daily rows above, so a
+      // crash cannot leave the guarded store without its unguarded counterpart.
+      // Last-write-wins (no GREATEST): a truthful lower rescan must replace the
+      // previous report or Phase 4b cannot see the #960 emptied-day divergence.
+      if (reportedRows.length > 0) {
+        await recordDailyBreakdownReported({
+          executor: tx,
+          submittedDeviceId: submittedDevice.id,
+          rows: reportedRows,
+        });
       }
 
       // ------------------------------------------

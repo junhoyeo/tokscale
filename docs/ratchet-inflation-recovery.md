@@ -6,7 +6,10 @@ totals, and the monotonic guard that causes it exists to prevent a real
 production data loss. This document proposes a correction that heals the
 inflation without weakening that protection.
 
-> **Status: none of Phases 1–6 is implemented.** Accept, reject, or amend.
+> **Status:** Phases 1, 1.5 and 3 are implemented. Phase 4a (shadow table write)
+> lands with `daily_breakdown_reported` — additive, nothing reads it. Phases 2,
+> 4b, 5 and 6 remain gated. Accept, reject, or amend.
+>
 > Several *adjacent* defects this document catalogued have since been fixed and
 > are marked inline — see "Already fixed" below.
 
@@ -620,6 +623,7 @@ review what it is about to do.
 
 ### 4a — Record what the CLI actually reported (additive, safe)
 
+**Implemented** (`daily_breakdown_reported`, migration `0025_bouncy_vertigo`).
 Submit additionally writes each payload's **unguarded** per-`(device, date,
 client)` values to a shadow table:
 
