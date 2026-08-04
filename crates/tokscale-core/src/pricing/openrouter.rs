@@ -135,43 +135,78 @@ async fn fetch_author_pricing(
         }
     };
 
-    // Find the endpoint from the author provider
-    let author_endpoint = match data
-        .data
-        .endpoints
-        .iter()
-        .find(|e| e.provider_name == author_name)
-    {
-        Some(ep) => ep,
-        None => {
-            return fallback_pricing.map(|p| (model_id, p));
-        }
-    };
-
-    let input_cost = parse_price(&author_endpoint.pricing.prompt);
-    let output_cost = parse_price(&author_endpoint.pricing.completion);
-
-    if input_cost.is_none() || output_cost.is_none() {
-        return fallback_pricing.map(|p| (model_id, p));
+    match select_endpoint_pricing(&data.data.endpoints, author_name, fallback_pricing.as_ref()) {
+        Some(pricing) => Some((model_id, pricing)),
+        None => fallback_pricing.map(|p| (model_id, p)),
     }
+}
 
-    let pricing = ModelPricing {
-        input_cost_per_token: input_cost,
-        output_cost_per_token: output_cost,
-        cache_read_input_token_cost: author_endpoint
+fn endpoint_pricing(endpoint: &Endpoint) -> Option<ModelPricing> {
+    Some(ModelPricing {
+        input_cost_per_token: Some(parse_price(&endpoint.pricing.prompt)?),
+        output_cost_per_token: Some(parse_price(&endpoint.pricing.completion)?),
+        cache_read_input_token_cost: endpoint
             .pricing
             .input_cache_read
-            .as_ref()
-            .and_then(|s| parse_price(s)),
-        cache_creation_input_token_cost: author_endpoint
+            .as_deref()
+            .and_then(parse_price),
+        cache_creation_input_token_cost: endpoint
             .pricing
             .input_cache_write
-            .as_ref()
-            .and_then(|s| parse_price(s)),
+            .as_deref()
+            .and_then(parse_price),
         ..Default::default()
+    })
+}
+
+fn quotes_same_base_price(candidate: &ModelPricing, listed: &ModelPricing) -> bool {
+    let same = |candidate: Option<f64>, listed: Option<f64>| match (candidate, listed) {
+        (Some(candidate), Some(listed)) => (candidate - listed).abs() <= listed.abs() * 1e-9,
+        _ => false,
     };
 
-    Some((model_id, pricing))
+    same(candidate.input_cost_per_token, listed.input_cost_per_token)
+        && same(
+            candidate.output_cost_per_token,
+            listed.output_cost_per_token,
+        )
+}
+
+/// Pick the pricing row for a model from its OpenRouter endpoints.
+///
+/// The model author's own endpoint still wins, so `glm-4.7` keeps Z.AI's
+/// price rather than a reseller's markup. When the model has no endpoint from
+/// its author, the listed price is used exactly as before — but it is taken
+/// from an endpoint that quotes that same base price, so the cache rates
+/// OpenRouter publishes alongside it survive.
+///
+/// Discarding them is what broke `tokscale submit`: OpenRouter serves
+/// `openai/gpt-5.2-codex` only from an `Azure` endpoint, so the author lookup
+/// missed and the row lost the `input_cache_read` price it publishes.
+/// Submission validation treats a populated bucket with no rate as
+/// unpriceable, so every Codex session — which always carries cached tokens —
+/// aborted the whole submission (#1013).
+fn select_endpoint_pricing(
+    endpoints: &[Endpoint],
+    author_name: &str,
+    listed: Option<&ModelPricing>,
+) -> Option<ModelPricing> {
+    if let Some(author) = endpoints.iter().find(|e| e.provider_name == author_name) {
+        return endpoint_pricing(author);
+    }
+
+    let listed = listed?;
+    let matching: Vec<ModelPricing> = endpoints
+        .iter()
+        .filter_map(endpoint_pricing)
+        .filter(|pricing| quotes_same_base_price(pricing, listed))
+        .collect();
+
+    matching
+        .iter()
+        .find(|pricing| pricing.cache_read_input_token_cost.is_some())
+        .cloned()
+        .or_else(|| matching.into_iter().next())
 }
 
 /// Fetch all models and get author pricing for each
@@ -296,6 +331,85 @@ mod tests {
             }
         });
         url
+    }
+
+    fn endpoint(
+        provider_name: &str,
+        prompt: &str,
+        completion: &str,
+        input_cache_read: Option<&str>,
+    ) -> Endpoint {
+        Endpoint {
+            provider_name: provider_name.to_string(),
+            pricing: EndpointPricing {
+                prompt: prompt.to_string(),
+                completion: completion.to_string(),
+                input_cache_read: input_cache_read.map(str::to_string),
+                input_cache_write: None,
+            },
+        }
+    }
+
+    fn listed(input: f64, output: f64) -> ModelPricing {
+        ModelPricing {
+            input_cost_per_token: Some(input),
+            output_cost_per_token: Some(output),
+            ..Default::default()
+        }
+    }
+
+    // Regression: #1013. OpenRouter serves `openai/gpt-5.2-codex` only from an
+    // `Azure` endpoint, so the `OpenAI` author lookup missed and the row fell
+    // back to the listed price with its cache rates dropped. Submission
+    // validation then rejected every Codex session as unpriced.
+    #[test]
+    fn cache_rates_survive_when_the_model_has_no_author_endpoint() {
+        let endpoints = vec![endpoint(
+            "Azure",
+            "0.00000175",
+            "0.000014",
+            Some("0.000000175"),
+        )];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(1.75e-6, 1.4e-5))).unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(1.75e-6));
+        assert_eq!(pricing.output_cost_per_token, Some(1.4e-5));
+        assert_eq!(pricing.cache_read_input_token_cost, Some(1.75e-7));
+    }
+
+    // The author's own price stays authoritative, so a reseller endpoint can
+    // never override it just because it publishes extra cache rates.
+    #[test]
+    fn author_endpoint_still_wins_over_other_providers() {
+        let endpoints = vec![
+            endpoint("Azure", "0.0000035", "0.0000175", Some("0.00000035")),
+            endpoint("OpenAI", "0.0000002", "0.0000015", None),
+        ];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(3.5e-6, 1.75e-5))).unwrap();
+
+        assert_eq!(pricing.input_cost_per_token, Some(2e-7));
+        assert_eq!(pricing.output_cost_per_token, Some(1.5e-6));
+        assert_eq!(pricing.cache_read_input_token_cost, None);
+    }
+
+    // An endpoint quoting a different base price is a different deal, so its
+    // cache rate must not be grafted onto the listed price.
+    #[test]
+    fn endpoints_quoting_another_base_price_are_not_adopted() {
+        let endpoints = vec![endpoint(
+            "Azure",
+            "0.0000035",
+            "0.0000175",
+            Some("0.00000035"),
+        )];
+
+        assert!(
+            select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(1.75e-6, 1.4e-5))).is_none()
+        );
     }
 
     #[tokio::test]
