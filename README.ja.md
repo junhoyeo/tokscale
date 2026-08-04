@@ -47,7 +47,7 @@
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
 
-> **[`bunx tokscale submit`](#ソーシャルプラットフォームコマンド)を実行して、使用量データをリーダーボードに送信し、公開プロフィールを作成しましょう！**
+> **[`bunx tokscale@latest submit`](#ソーシャルプラットフォームコマンド)を実行して、使用量データをリーダーボードに送信し、公開プロフィールを作成しましょう！**
 
 ## 概要
 
@@ -70,6 +70,7 @@
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` and `~/.omp/agent/sessions/` ([Oh My Pi](https://github.com/can1357/oh-my-pi)) |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/` (`SENPI_CODING_AGENT_DIR` でオーバーライド可能) |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（`KIMCHI_CODING_AGENT_DIR` でオーバーライド可能） |
+| <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl`（`REASONIX_STATE_HOME` または `REASONIX_HOME` でオーバーライド可能） |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/` (`KIMI_CODE_HOME` でオーバーライド可能) |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) |
@@ -153,6 +154,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
 - [開発](#開発)
   - [前提条件](#前提条件-1)
   - [実行方法](#実行方法)
+  - [コンテナセットアップ](#コンテナセットアップ)
 - [サポートプラットフォーム](#サポートプラットフォーム)
   - [ネイティブモジュールターゲット](#ネイティブモジュールターゲット)
   - [Windowsサポート](#windowsサポート)
@@ -172,7 +174,7 @@ AI支援開発の時代において、**トークンは新しいエネルギー*
   - 設定可能なカラーテーマのGitHubスタイル貢献グラフ
   - リアルタイムフィルタリングとソート
   - ゼロフリッカーレンダリング
-- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic全体の使用量を追跡
+- **マルチプラットフォームサポート** - OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic全体の使用量を追跡
 - **リアルタイム価格** - 1時間ディスクキャッシュ付きでLiteLLMから現在の価格を取得；OpenRouter自動フォールバックと新規モデル向けCursor価格サポート
 - **詳細な内訳** - 入力、出力、キャッシュ読み書き、推論トークン追跡
 - **ネイティブRustコア** - 10倍高速な処理のため、すべての解析と集計をRustで実行
@@ -663,6 +665,10 @@ tokscale trae logout --variant solo
 
 **仕組み**: tokscale はデスクトップクライアントの `iCubeAuthInfo://*` blob（`globalStorage/storage.json`）を復号して JWT を取得するか、`--manual` で貼り付けられた JWT を使用します。その後 `POST /trae/api/v1/pay/query_user_usage_group_by_session` をページングしながら呼び出し、未加工 JSON を保存します。最新の Trae データをレポートに反映したい場合は、レポート実行前に sync を実行してください。
 
+#### アップグレード時の同期ロック復旧
+
+Antigravity と Trae の同期では、ローリングアップグレード中に古い tokscale バイナリと重複しないよう、レガシー互換の `sync.lock` ファイルを使用します。クラッシュまたは強制停止の後、このファイルが残ることがあります。古いバイナリが同じパスを作成または更新している可能性があるため、Tokscale は意図的にファイルを置き換えず、安全側に失敗します。`tokscale antigravity sync` または `tokscale trae sync` のプロセスが動作中でないことを確認し、コマンドが表示した正確な引用付き `sync.lock` パスだけを削除してから再試行してください。同期がまだ実行中の可能性がある間は、ロックを削除しないでください。
+
 > **中国版**: 中国版（`trae.com.cn`）は意図的に未対応です。CN バックエンドはセッション単位の使用量クエリ API を公開していません。上流で公式エンドポイントが提供された場合に追加します。
 
 ### Warp/Oz コマンド
@@ -876,6 +882,30 @@ Tokscaleは設定を`~/.config/tokscale/settings.json`に保存します：
 | `light.writeCache` | boolean | `false` | `true` のとき、`tokscale --light` はレンダリング直後に TUI キャッシュを原子的に上書きします。CLI フラグ `--write-cache` / `--no-write-cache` が実行ごとに優先されます。 |
 | `minutelyTabEnabled` | boolean | `false` | TUI に分単位の Minutely タブを表示し、データ読み込み時に分単位の集計を実行します。分単位の粒度はほとんどのユーザーにとってニッチな診断ビューであり、大規模データセットでは分単位のバケット処理に無視できないコストがかかるため、既定では無効になっています。 |
 | `scanner.extraScanPaths` | object | `{}` | Tokscale のデフォルトのホームルート以外にあるセッション向けの、クライアントごとの追加スキャンルート |
+| `scanner.bucketTimezone` | string | 自動検出 | このデバイスが使用量の日付をバケット化するタイムゾーンの IANA 名（例: `"Asia/Seoul"`）。初回実行時に自動記録されます。手編集ではなく `tokscale config set timezone <zone>` を使用してください。 |
+
+#### 日境界と `scanner.bucketTimezone`
+
+各メッセージをどの暦日に計上するかはタイムゾーンに依存します。Tokscale はスキャンごとにマシンの現在のタイムゾーンを読み取るのではなく、このデバイスのタイムゾーンを初回実行時に記録して再利用します。
+
+これは、日別の合計が日単位で送信され、減らすことを許可されないため重要です。同じ履歴を別のタイムゾーンで再バケット化すると、旅行やシステムクロックの変更、異なる `TZ` の CI 実行などにより、深夜付近のセッションが隣の日へ移動します。古い日と新しい日の両方が値を保持するため、新しい使用量がなくても合計が増加します。タイムゾーンを固定すれば日境界が安定し、変更されていない履歴を再スキャンしても常に同じバケットが生成されます。
+
+```console
+$ tokscale config list
+timezone     Asia/Seoul
+
+$ tokscale config get timezone
+Asia/Seoul
+
+# `set timezone auto` は、有効な固定値がまだない場合（または手編集で無効にした値を復旧する場合）にのみ使用できます。確立済みのデバイスを再固定することはできません。
+$ tokscale config set timezone auto
+```
+
+受け付けるのは IANA タイムゾーン名のみです。`+09:00` のような固定 UTC オフセットは拒否されます。オフセットは夏時間に追従できないため、DST 移行後には固定オフセットがローカルの深夜と一致しなくなり、日境界付近の使用量を再分割します。これは、この固定が防ぐ問題をより小さな形で再現するものです。
+
+確立済みの有効な固定値は、`auto` を含めて変更または解除できません。送信済みの日別履歴行は単調増加であるため、過去の使用量を再キー化すると恒久的に二重計上されます。デバイスを移転するには、別のバケットタイムゾーンを選択する前にサーバーの再同期または置き換えの移行が必要です。
+
+既存のインストールは、タイムゾーンを固定するまで影響を受けません。また、固定する実行では元からマシンが使用していたタイムゾーンが記録されるため、その実行のレポート内容は従来どおりです。
 
 プロジェクトレベルの `.codex` ディレクトリや、インポートした Gemini/OpenClaw 履歴など、恒久的な追加ルートには `scanner.extraScanPaths` を使用してください。Tokscale は `$HERMES_HOME/profiles/*/state.db` 以下の Hermes プロファイルデータベースを自動的に検出します（`HERMES_HOME` が未設定の場合は `~/.hermes/profiles/*/state.db`）。標準外の Hermes プロファイル場所にのみ `scanner.extraScanPaths.hermes` を使用してください。Hermes のエントリは `state.db` を含むプロファイルディレクトリ、または `state.db` ファイルを直接指すことができます。Tokscale はこれらのパスを毎回デフォルトのスキャンルートとマージし、重複するルートを正規パスで重複排除します。
 
@@ -904,6 +934,8 @@ Minutely タブはトークン使用量を分単位で表示し、バースト�
 - `fonts/`、`images/` — Wrapped アセットキャッシュ
 
 このディレクトリは削除しても安全です。必要になれば Tokscale が再作成し、再生成します。
+
+Claude Code に限って注意点があります。Claude Code はセッションを再開またはコンパクト化すると、トランスクリプトを同じファイル名のまま書き換え、すでに書き出していたアシスタントターンを失います。`source-message-cache-v2/` はトランスクリプトファイルが存在する限りそれらのターンを記憶するため、合計には引き続き計上されます。これらのターンが残るのはキャッシュだけであり、トランスクリプト自体にはもう存在しません。キャッシュを削除するか、Claude パーサーのアップグレードによって再構築されると、コンパクト化済みトランスクリプトから再構築されるため、コンパクト化を多用したセッションの合計は低くなることがあります。一方、トランスクリプトを削除すると、どちらの場合でもそのターンは除外されます。これはローカルディスクを信頼できる情報源に保つためです。
 
 ### 環境変数
 
@@ -1136,10 +1168,10 @@ tokscale wrapped --year 2025
 ### 前提条件
 
 ```bash
-# Bun（必須）
+# Bun（JS ツール用に必須）
 bun --version
 
-# Rust（ネイティブモジュール用）
+# Rust（ネイティブ CLI バイナリ用）
 rustc --version
 cargo --version
 ```
@@ -1158,6 +1190,74 @@ cd packages/cli && bun src/index.ts
 # またはレガシーCLIモードを使用
 cd packages/cli && bun src/index.ts --light
 ```
+
+<details>
+
+<summary>セルフホスティングで実行</summary>
+
+### コンテナセットアップ
+
+このリポジトリには、**単一ホストへのデプロイ**用の `Makefile` と Docker/Podman Compose スタックが含まれています。ローカルの Rust または Bun のインストールは不要です。スタックは `docker` より `podman` を優先して自動検出します。
+
+**初回実行** — イメージのビルド中にデータベースへ接続することはありません。Compose が Postgres の正常起動を確認した後、アプリコンテナの開始時にマイグレーションが実行されます。
+
+```bash
+make docker/build   # フロントエンドイメージをビルドしてタグ付け（tokscale:latest）
+make up             # Postgres とフロントエンドを http://localhost:3333 で起動
+```
+
+`make up` はビルド済みの `tokscale:latest` イメージを使用し、Compose の再ビルドは行いません。
+
+**2 回目以降** — イメージはすでにビルド済みなので、サービスを起動するだけです。
+
+```bash
+make up
+```
+
+**TUI** — Web スタックとは独立して動作し、ホストのファイルシステムマウントからセッションデータを直接読み取ります。
+
+```bash
+make tui/build   # 一度だけビルド
+make tui         # 起動
+```
+
+`make tui` は現在のホスト UID と GID でコンテナを実行し、必要な場合にのみ `~/.config/tokscale` と `~/.cache/tokscale` を作成して、この 2 つのディレクトリを読み書き可能でマウントします。セッションデータのマウントは読み取り専用のままなので、コンテナがクライアントディレクトリに root 所有のファイルを作成することはありません。`make tui` ではなく Compose を直接呼び出す場合は、`TOKSCALE_UID=$(id -u)` と `TOKSCALE_GID=$(id -g)` を設定し、この 2 つの書き込み可能ディレクトリを自分で作成してください。
+
+既定の TUI プロファイルは、クライアントデータディレクトリを意図的にバインドしません。root 実行の Docker は、読み取り専用マウントであっても存在しないバインド元を root として作成するためです。自分のマシンにすでに存在するパスだけを明示的に追加してください。例:
+
+```bash
+TOKSCALE_UID=$(id -u) TOKSCALE_GID=$(id -g) \
+  docker compose --profile tui run --rm \
+  -v "$HOME/.claude:/home/tokscale/.claude:ro" tui
+```
+
+利用するクライアントごとに同等の `-v` フラグを追加してください。これにより、既定のコマンドが任意のホストクライアントディレクトリを作成することを防ぎます。
+
+**その他のよく使うターゲット:**
+
+```bash
+make down         # すべてのサービスを停止
+make logs/app     # アプリログを追跡
+make db/migrate   # 保留中のマイグレーションを手動実行
+make help         # すべてのターゲット一覧
+```
+
+**カスタム認証情報** — `make up` の前に 4 つの変数をすべて設定してください。Compose は `POSTGRES_*` 変数から `DATABASE_URL` を自動導出できません。ホスト名 `db` は Compose ネットワーク上のアプリコンテナでのみ有効であり、ホストシェルや Docker ビルド引数では使用しないでください。
+
+```bash
+export POSTGRES_USER=myuser
+export POSTGRES_PASSWORD=mypass
+export POSTGRES_DB=mydb
+export DATABASE_URL=postgresql://myuser:mypass@db:5432/mydb
+```
+
+既定値（`tokscale`/`tokscale`/`tokscale`）はローカル開発専用です。
+
+**公開デプロイ** — この Compose ファイルは両方のポートをループバックにバインドし、TLS を終端するリバースプロキシの背後に置くことを想定しています。`make up` の前に `APP_URL` を公開 HTTPS オリジン（例: `https://tokscale.example.com`）へ設定し、プロキシにもその URL を設定してください。この値は OAuth リダイレクト、CSRF の既定値、正規メタデータ、サイトマップ、robots を実行時に制御します。`DATABASE_SSL=false` は同梱のローカル Postgres サービスでのみ使用してください。マネージドデータベースの場合は、`DATABASE_URL`、`DATABASE_SSL=require`、`APP_URL`、および任意の GitHub OAuth 認証情報を保護された `.env`/シークレットストアに置き、`docker compose -f docker-compose.external-db.yml up -d` を実行してください。このファイルには `db` サービスもローカルデータベース依存もありません。サンプルの既定値では OAuth は意図的に有効化されていません。
+
+再利用可能な 1 つのイメージが実行時の `APP_URL` をページメタデータとソーシャルカードに出力する必要があるため、ルートレイアウトはリクエストごとに動的になります。これは、デプロイごとに正しい公開オリジンを得るためにフルルートの静的/ISR 出力を意図的にトレードオフするものです。データ取得は既存のキャッシュタグと再検証ポリシーを引き続き使用します。
+
+</details>
 
 <details>
 <summary>高度な開発</summary>
@@ -1346,8 +1446,12 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | OpenCodeReview | `~/.opencodereview/sessions/` | `%USERPROFILE%\.opencodereview\sessions\` | `*.jsonl` セッショントランスクリプトを解析；Alibaba の AI コードレビューツール |
 | CodeBuddy | `~/.codebuddy/projects/` + 拡張機能ログ | `%USERPROFILE%\.codebuddy\projects\` + CodeBuddy / VS Code 拡張機能ログ | CodeBuddy CLI・IDE・VS Code プラグインのトークン使用量を解析 |
 | WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db` | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db` | WorkBuddy のトークン使用量を解析し、集約 SQLite データベースをフォールバックとして使用 |
+| Devin CLI | `~/.local/share/devin/cli/sessions.db` | `%USERPROFILE%\.local\share\devin\cli\sessions.db` | 信頼できるローカル SQLite 使用量データベースを読み取る |
+| Devin Desktop | Linux: `~/.config/Devin/User/acp-events/`; macOS: `~/Library/Application Support/Devin/User/acp-events/` | `%APPDATA%\Devin\User\acp-events\` | ACP 使用量イベントを解析し、CLI データベースが存在する場合は一致するセッションタイトルを解決する |
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | Auggie CLI のセッション JSON スナップショット（`*.json`）を解析。結合キーはトップレベルの `sessionId` |
 | Synthetic | 他ソースから再帰属 | 他ソースから再帰属 | `hf:`モデル + `synthetic`プロバイダを検出 |
+
+> **Devin Desktop のエージェント対応**: ローカル使用量の解析は、NDJSON ストリームで `usage_update` イベントを出力する ACP 接続エージェント（例: Cascade/Windsurf、claude-code、opencode）で機能します。既定の **devin-cloud** エージェントはローカルの `usage_update` を出力しないため、使用量はサーバー側にとどまり、アカウントレベルの API なしには tokscale で追跡できません。
 
 > **注**: Windowsでは`~`は`%USERPROFILE%`に展開されます（例：`C:\Users\ユーザー名`）。これらのツールは`%APPDATA%`のようなWindowsネイティブパスではなく、クロスプラットフォームの一貫性のためにUnixスタイルのパス（`.local/share`など）を意図的に使用しています。
 

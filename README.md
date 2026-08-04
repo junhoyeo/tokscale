@@ -151,6 +151,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 - [Development](#development)
   - [Prerequisites](#prerequisites-1)
   - [How to Run](#how-to-run)
+  - [Container Setup](#container-setup)
 - [Supported Platforms](#supported-platforms)
   - [Native Module Targets](#native-module-targets)
   - [Windows Support](#windows-support)

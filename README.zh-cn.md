@@ -48,7 +48,7 @@
 |:---:|:---:|
 | <a href="https://tokscale.ai"><img alt="Frontend (3D Contributions Graph)" src=".github/assets/frontend-contributions-graph.png" width="700px" /></a> | <a href="#wrapped-2025"><img alt="Wrapped 2025" src=".github/assets/wrapped-2025-agents.png" width="700px" /></a> |
 
-> **运行 [`bunx tokscale submit`](#社交平台命令) 将您的使用数据提交到排行榜并创建公开个人资料！**
+> **运行 [`bunx tokscale@latest submit`](#社交平台命令) 将您的使用数据提交到排行榜并创建公开个人资料！**
 
 ## 概述
 
@@ -71,6 +71,7 @@
 | <img width="48px" src=".github/assets/client-pi.png" alt="Pi" /> | [Pi](https://github.com/badlogic/pi-mono) | `~/.pi/agent/sessions/` 和 `~/.omp/agent/sessions/`（[Oh My Pi](https://github.com/can1357/oh-my-pi)） |
 | <img width="48px" src=".github/assets/client-senpi.png" alt="Senpi" /> | [Senpi (OmO Native)](https://github.com/code-yeongyu/senpi) | `~/.senpi/agent/sessions/`（通过 `SENPI_CODING_AGENT_DIR` 覆盖） |
 | <img width="48px" src="https://github.com/getkimchi.png" alt="Kimchi" /> | [Kimchi Coding](https://kimchi.dev/) | `~/.config/kimchi/harness/sessions/`（可通过 `KIMCHI_CODING_AGENT_DIR` 覆盖） |
+| <img width="48px" src=".github/assets/client-synthetic.png" alt="Reasonix" /> | [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) | `~/.reasonix/stats/*.jsonl`（可通过 `REASONIX_STATE_HOME` 或 `REASONIX_HOME` 覆盖） |
 | <img width="48px" src=".github/assets/client-kimi.png" alt="Kimi" /> | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) / [Kimi Code](https://github.com/MoonshotAI/kimi-code) | kimi-cli: `~/.kimi/sessions/` kimi-code: `~/.kimi-code/sessions/`（可通过 `KIMI_CODE_HOME` 覆盖） |
 | <img width="48px" src=".github/assets/client-qwen.png" alt="Qwen" /> | [Qwen CLI](https://github.com/QwenLM/qwen-cli) | `~/.qwen/projects/` |
 | <img width="48px" src=".github/assets/client-roocode.png" alt="Roo Code" /> | [Roo Code](https://github.com/RooCodeInc/Roo-Code) | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/` (+ server: `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`) |
@@ -151,6 +152,7 @@
 - [开发](#开发)
   - [先决条件](#先决条件-1)
   - [运行方法](#运行方法)
+  - [容器设置](#容器设置)
 - [支持的平台](#支持的平台)
   - [原生模块目标](#原生模块目标)
   - [Windows 支持](#windows-支持)
@@ -170,7 +172,7 @@
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code 和 Synthetic 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code 和 Synthetic 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -664,6 +666,10 @@ tokscale trae logout --variant solo
 
 **工作原理**：tokscale 会解密桌面客户端的 `iCubeAuthInfo://*` blob（`globalStorage/storage.json`）来恢复 JWT，或接受通过 `--manual` 粘贴的 JWT。随后它分页调用 `POST /trae/api/v1/pay/query_user_usage_group_by_session` 并保存原始 JSON。如果希望报告反映最新的 Trae 数据，请在生成报告前先运行同步。
 
+#### 升级期间的同步锁恢复
+
+Antigravity 和 Trae 同步使用一个与旧版本兼容的 `sync.lock` 文件，以避免滚动升级期间与旧版 tokscale 二进制文件重叠运行。崩溃或强制停止后，该文件可能仍会保留。Tokscale 会刻意采用故障关闭策略，而不是替换它，因为旧版二进制文件可能仍在创建或更新同一路径。确认没有正在运行的 `tokscale antigravity sync` 或 `tokscale trae sync` 进程后，删除命令输出中精确加引号的 `sync.lock` 路径，再重试。如果同步仍可能正在运行，请勿删除该锁。
+
 > **中国区版本**：中国区版本（`trae.com.cn`）目前有意不支持。CN 后端暂未暴露按会话查询使用量的官方 API；如果上游提供正式端点，再加入支持。
 
 ### Warp/Oz 命令
@@ -875,6 +881,31 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | `light.writeCache` | boolean | `false` | 为 `true` 时，`tokscale --light` 会在渲染完成后以原子方式覆盖 TUI 缓存。CLI 标志 `--write-cache` / `--no-write-cache` 会按次运行覆盖该设置。 |
 | `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
 | `scanner.extraScanPaths` | object | `{}` | 针对 Tokscale 默认 home 根位置之外的会话，为各客户端额外指定的扫描根目录 |
+| `scanner.bucketTimezone` | string | 自动检测 | 此设备将使用量按天分桶时所用时区的 IANA 名称（例如 `"Asia/Seoul"`）。首次运行时会自动记录。请优先使用 `tokscale config set timezone <zone>`，而非手动编辑。 |
+
+#### 每日边界与 `scanner.bucketTimezone`
+
+一条消息计入哪个日历日取决于时区。Tokscale 会在首次运行时记录此设备的时区并持续复用，而不是在每次扫描时读取机器当前的时区。
+
+这很重要，因为每日总量按天提交，且绝不允许减少。如果同一份历史记录在另一个时区重新分桶——例如旅行、更改系统时钟，或在使用不同 `TZ` 的 CI 中运行——接近午夜的会话会转移到相邻日期，旧日期和新日期都会保留其数值。没有新增使用量时总计也会增加。固定时区可使每日边界保持稳定，因此重新扫描未变更的历史始终产生相同的分桶。
+
+```console
+$ tokscale config list
+timezone     Asia/Seoul
+
+$ tokscale config get timezone
+Asia/Seoul
+
+# 仅在尚未存在有效固定值时（或恢复手动编辑出的无效值时），
+# 才允许使用 `set timezone auto`。它不能重新固定已确立的设备。
+$ tokscale config set timezone auto
+```
+
+只接受 IANA 时区名称。`+09:00` 这样的固定 UTC 偏移量会被拒绝：偏移量无法跟随夏令时，因此在夏令时切换后，固定偏移量会不再匹配当地午夜，并在每日边界附近重新拆分使用量——这正是固定时区要消除的问题，只是规模更小。
+
+一旦建立有效固定值，就不能再更改或取消（包括使用 `auto`）。如果设备确实迁移到新的时区，需要与服务器重新同步，或者使用新的设备身份；Tokscale 不会悄悄重新分配已提交的历史记录。
+
+现有安装在首次建立固定值之前不会受到影响。记录的时区等于该设备当前机器时区，因此首次固定操作不会重新分桶现有历史记录。
 
 使用 `scanner.extraScanPaths` 配置持久化的额外根目录，例如项目级的 `.codex` 目录或导入的 Gemini/OpenClaw 历史。Tokscale 会自动发现 `$HERMES_HOME/profiles/*/state.db` 下的 Hermes 配置文件数据库（未设置 `HERMES_HOME` 时为 `~/.hermes/profiles/*/state.db`）。仅对非标准的 Hermes 配置文件位置使用 `scanner.extraScanPaths.hermes`；Hermes 条目既可以指向包含 `state.db` 的配置文件目录，也可以直接指向 `state.db` 文件。Tokscale 在每次运行时都会将这些路径与默认扫描根目录合并，并按规范路径去重重叠的根目录。
 
@@ -905,6 +936,8 @@ Minutely 标签按分钟显示 Token 使用情况，最适合用于诊断突发�
 - `fonts/`、`images/` —— Wrapped 资源缓存
 
 删除该目录是安全的。Tokscale 会在需要时重新创建并重新生成其中的内容。
+
+仅 Claude Code 有一项注意事项。Claude Code 会在恢复或压缩会话时原地重写会话转录：文件名保留，但先前写入的助手轮次会丢失。`source-message-cache-v2/` 会在转录文件存在期间记住这些轮次，因此它们仍计入总量。这是它们唯一仍然存在的位置——转录本身已不再包含它们。删除缓存（或让 Claude 解析器升级时重建缓存）会从压缩后的转录重新构建，因此大量压缩的会话总量可能会变低。无论如何，删除转录文件仍会丢弃其轮次，这正是本地磁盘成为事实来源的原因。
 
 ### 环境变量
 
@@ -1161,6 +1194,74 @@ cd packages/cli && bun src/index.ts --light
 ```
 
 <details>
+
+<summary>使用自托管运行</summary>
+
+### 容器设置
+
+仓库提供用于**单主机部署**的 `Makefile` 和 Docker/Podman Compose 栈。无需在本地安装 Rust 或 Bun。该栈会优先自动检测 `podman`，否则使用 `docker`。
+
+**首次运行**——构建镜像时不会连接数据库。Compose 将 Postgres 标记为健康后，迁移会在应用容器启动时运行：
+
+```bash
+make docker/build   # 构建并标记前端镜像（tokscale:latest）
+make up             # 启动 Postgres 和前端，访问 http://localhost:3333
+```
+
+`make up` 使用预构建的 `tokscale:latest` 镜像——不会触发 Compose 重新构建。
+
+**后续运行**——镜像已构建完成，只需启动服务：
+
+```bash
+make up
+```
+
+**TUI**——独立于 Web 栈运行，直接从主机文件系统挂载中读取会话数据：
+
+```bash
+make tui/build   # 只需构建一次
+make tui         # 启动
+```
+
+`make tui` 使用当前主机的 UID 和 GID 运行容器，仅在需要时创建 `~/.config/tokscale` 和 `~/.cache/tokscale`，并以读写方式挂载这两个目录。会话数据挂载保持只读，因此容器无法在您的客户端目录中创建归 root 所有的文件。如果直接调用 Compose 而非 `make tui`，请设置 `TOKSCALE_UID=$(id -u)` 和 `TOKSCALE_GID=$(id -g)`，并自行创建这两个可写目录。
+
+默认 TUI profile 刻意不绑定客户端数据目录：即使是只读挂载，rootful Docker 也会将缺失的绑定源创建为 root 所有。只应选择机器上已存在的路径，例如：
+
+```bash
+TOKSCALE_UID=$(id -u) TOKSCALE_GID=$(id -g) \
+  docker compose --profile tui run --rm \
+  -v "$HOME/.claude:/home/tokscale/.claude:ro" tui
+```
+
+为您使用的客户端添加等效的 `-v` 标志。这样默认命令不会创建任意主机客户端目录。
+
+**其他常用目标：**
+
+```bash
+make down         # 停止所有服务
+make logs/app     # 跟踪应用日志
+make db/migrate   # 手动运行待执行迁移
+make help         # 完整目标列表
+```
+
+**自定义凭据**——运行 `make up` 前，请同时设置以下四个变量。Compose 无法从 `POSTGRES_*` 变量自动推导 `DATABASE_URL`。主机名 `db` 只对 Compose 网络中的应用容器有效；不要在主机 shell 中或作为 Docker 构建参数使用它：
+
+```bash
+export POSTGRES_USER=myuser
+export POSTGRES_PASSWORD=mypass
+export POSTGRES_DB=mydb
+export DATABASE_URL=postgresql://myuser:mypass@db:5432/mydb
+```
+
+默认值（`tokscale`/`tokscale`/`tokscale`）仅用于本地开发。
+
+**公开部署**——此 Compose 文件将两个端口绑定到回环地址，旨在置于终止 TLS 的反向代理之后。运行 `make up` 前，将 `APP_URL` 设置为公开 HTTPS 源（例如 `https://tokscale.example.com`），并在代理中配置该 URL；它会在运行时驱动 OAuth 重定向、CSRF 默认值、规范元数据、站点地图和 robots。仅对随附的本地 Postgres 服务保持 `DATABASE_SSL=false`。若使用托管数据库，请将 `DATABASE_URL`、`DATABASE_SSL=require`、`APP_URL` 和可选的 GitHub OAuth 凭据放入受保护的 `.env`/密钥存储，然后运行 `docker compose -f docker-compose.external-db.yml up -d`。该文件没有 `db` 服务，也不依赖本地数据库。示例默认值刻意不启用 OAuth。
+
+由于一个可复用镜像必须在页面元数据和社交卡片中输出运行时 `APP_URL`，根布局会按请求动态渲染。这刻意以完整路由的静态/ISR 输出为代价，换取每次部署都正确的公开源；数据获取仍使用现有的缓存标签和重新验证策略。
+
+</details>
+
+<details>
 <summary>高级开发</summary>
 
 ### 项目脚本
@@ -1345,8 +1446,12 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | OpenCodeReview | `~/.opencodereview/sessions/` | `%USERPROFILE%\.opencodereview\sessions\` | 解析 `*.jsonl` 会话记录；阿里巴巴的 AI 代码审查工具 |
 | CodeBuddy | `~/.codebuddy/projects/` + 扩展日志 | `%USERPROFILE%\.codebuddy\projects\` + CodeBuddy / VS Code 扩展日志 | 解析 CodeBuddy CLI、IDE 和 VS Code 插件的 token 用量 |
 | WorkBuddy | `~/.workbuddy/projects/` + `~/.workbuddy/workbuddy.db` | `%USERPROFILE%\.workbuddy\projects\` + `%USERPROFILE%\.workbuddy\workbuddy.db` | 解析 WorkBuddy token 用量，以聚合 SQLite 数据库作为回退 |
+| Devin CLI | `~/.local/share/devin/cli/sessions.db` | `%USERPROFILE%\.local\share\devin\cli\sessions.db` | 读取权威的本地 SQLite 用量数据库 |
+| Devin Desktop | Linux：`~/.config/Devin/User/acp-events/`；macOS：`~/Library/Application Support/Devin/User/acp-events/` | `%APPDATA%\Devin\User\acp-events\` | 解析 ACP 用量事件；存在 CLI 数据库时会解析匹配的会话标题 |
 | Augment Code | `~/.augment/sessions/` | `%USERPROFILE%\.augment\sessions\` | 解析 Auggie CLI 会话 JSON 快照（`*.json`）；关联键为顶层 `sessionId` |
 | Synthetic | 从其他来源重归属 | 从其他来源重归属 | 检测 `hf:` 模型前缀 + `synthetic` provider |
+
+> **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
 
 > **注意**：在 Windows 上，`~` 扩展为 `%USERPROFILE%`（例如 `C:\Users\用户名`）。这些工具故意使用 Unix 风格的路径（如 `.local/share`）而不是 Windows 原生路径（如 `%APPDATA%`），以实现跨平台一致性。
 
