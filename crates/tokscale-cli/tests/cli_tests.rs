@@ -3,10 +3,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
-// Only the unix-only `headless_capture_*` tests time anything.
-#[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 // ── Fixture helpers ────────────────────────────────────────────────────────
@@ -124,57 +121,37 @@ fn create_temp_fixture_dir() -> TempDir {
     create_temp_fixture_dir_with_pricing_cache(true)
 }
 
-/// The three `headless_capture_*` tests below stand up a fake `codex` on PATH
-/// and are unix-only because the fake is a `#!/bin/sh` script.
+/// Put a stand-in `codex` on PATH for the three `headless_capture_*` tests.
 ///
-/// Windows has no shebang: `CreateProcess` will not run a `codex` with no
-/// extension, so the child reports `Failed to spawn 'codex': program not
-/// found` and the assertions are about the harness rather than about headless
-/// capture. It is the fixture that cannot cross over, not the feature — a
-/// Windows shim would need a `.cmd` whose slow arm blocks for twenty seconds
-/// and whose kill semantics match what `TOKSCALE_NATIVE_TIMEOUT_MS` expects,
-/// and none of that can be verified from a Unix host. Left as a gap rather
-/// than guessed at, so headless capture stays uncovered on Windows.
-#[cfg(unix)]
+/// The stand-in is `src/bin/fake_codex.rs`, built by cargo as a real binary for
+/// whatever platform the tests are running on, and copied here under the name
+/// `run_capture_command` looks for. `CARGO_BIN_EXE_<name>` is set by cargo for
+/// every binary in this package when it compiles this package's integration
+/// tests, so the helper is guaranteed to exist and there is no target directory
+/// to guess at.
+///
+/// It used to be a `#!/bin/sh` script written at test time, which is why these
+/// tests could not run on Windows: there is no shebang there, and
+/// `Command::new("codex")` resolves a bare program name by appending `.exe`
+/// only — an extensionless `codex` is never even probed, so the child reported
+/// `Failed to spawn 'codex': program not found`. That was the fixture failing,
+/// not the feature.
+///
+/// The extension matters, so it is chosen per platform rather than assumed.
+/// `std::fs::copy` carries the source's mode on Unix, which is why there is no
+/// longer an explicit chmod.
 fn create_fake_codex_bin() -> TempDir {
     let tmp = TempDir::new().expect("failed to create fake codex dir");
-    let codex_path = tmp.path().join("codex");
-    fs::write(
-        &codex_path,
-        r#"#!/bin/sh
-case "$TOKSCALE_FAKE_CODEX_MODE" in
-  success)
-    printf 'captured ok'
-    exit 0
-    ;;
-  fail)
-    printf 'captured fail'
-    exit 17
-    ;;
-  slow)
-    exec sleep 20
-    ;;
-  *)
-    echo "unknown TOKSCALE_FAKE_CODEX_MODE" >&2
-    exit 2
-    ;;
-esac
-"#,
-    )
-    .unwrap();
+    let codex_path = tmp
+        .path()
+        .join(if cfg!(windows) { "codex.exe" } else { "codex" });
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&codex_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&codex_path, permissions).unwrap();
-    }
+    fs::copy(Path::new(env!("CARGO_BIN_EXE_fake_codex")), &codex_path)
+        .expect("failed to install the fake codex onto PATH");
 
     tmp
 }
 
-#[cfg(unix)]
 fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -199,7 +176,6 @@ fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> 
 }
 
 #[test]
-#[cfg(unix)]
 fn headless_capture_fast_success_does_not_wait_for_timeout() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("success.jsonl");
@@ -218,7 +194,6 @@ fn headless_capture_fast_success_does_not_wait_for_timeout() {
 }
 
 #[test]
-#[cfg(unix)]
 fn headless_capture_fast_nonzero_preserves_exit_code() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("fail.jsonl");
@@ -238,7 +213,6 @@ fn headless_capture_fast_nonzero_preserves_exit_code() {
 }
 
 #[test]
-#[cfg(unix)]
 fn headless_capture_slow_command_times_out() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("slow.jsonl");

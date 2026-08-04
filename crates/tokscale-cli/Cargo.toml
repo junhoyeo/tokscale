@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CLI and TUI for tokscale - AI token usage analytics"
+# `src/bin/fake_codex.rs` is a second binary (a test stand-in for the `codex`
+# CLI, see its module docs), so `cargo run -p tokscale-cli` would otherwise be
+# ambiguous — which `build-native.yml` relies on for the Android smoke step.
+default-run = "tokscale"
 
 [[bin]]
 name = "tokscale"
