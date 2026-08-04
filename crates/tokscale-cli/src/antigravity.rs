@@ -541,13 +541,24 @@ fn publish_legacy_readable_lock(lock_path: &Path) -> Result<()> {
                 )
             }
         }
-        let owner = read_sync_lock(lock_path).filter(|(pid, _)| pid_is_alive(*pid));
-        if let Some((pid, _)) = owner {
-            anyhow::bail!("Another tokscale antigravity sync is in progress (pid {pid}); aborting");
+        let contents = std::fs::read_to_string(lock_path).ok();
+        match contents.as_deref() {
+            Some("released\n") => {}
+            _ => {
+                match read_sync_lock(lock_path) {
+                    Some((pid, _)) if pid_is_alive(pid) => {
+                        anyhow::bail!("Another tokscale antigravity sync is in progress (pid {pid}); aborting")
+                    }
+                    Some(_) => {}
+                    None => anyhow::bail!(
+                        "Antigravity sync lock has an indeterminate owner; refusing to replace it"
+                    ),
+                }
+            }
         }
-        // This is a released new-format marker or a stale legacy record. An
-        // old sync may race to replace it, but atomic publication below will
-        // then fail safely instead of unlinking its inode.
+        // This is an explicit released marker or a parseable dead legacy
+        // record. Empty or malformed files can belong to an old binary paused
+        // between create-new and write, so they fail closed above.
         let _ = FileExt::unlock(&existing);
         fs::remove_file(lock_path)?;
     }
@@ -3540,6 +3551,25 @@ mod tests {
         let (pid, timestamp) = read_sync_lock(&lock_path).expect("complete legacy record");
         assert_eq!(pid, std::process::id());
         assert!(timestamp > 0);
+    }
+
+    /// An old binary creates its PID-file before writing the record. It may be
+    /// paused in that exact interval and holds no OS lock, so new code must
+    /// still fail closed rather than unlink its pending inode.
+    #[test]
+    fn sync_lock_guard_refuses_an_empty_legacy_inode_without_an_os_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path();
+        let lock_path = cache_dir.join("sync.lock");
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+
+        let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
+        assert!(err.to_string().contains("indeterminate owner"));
+        assert!(lock_path.exists(), "the pending legacy inode must survive");
     }
 
     /// `purge-cache` must use a lock outside the cache directory. Otherwise

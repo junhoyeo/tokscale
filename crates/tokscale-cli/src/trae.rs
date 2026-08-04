@@ -1208,9 +1208,18 @@ pub mod sync {
                     return Err(anyhow::Error::new(err).context("failed to inspect sync lock"))
                 }
             }
-            if let Some((pid, _)) = read_sync_lock(lock_path).filter(|(pid, _)| pid_is_alive(*pid))
-            {
-                anyhow::bail!("another trae sync is in progress (pid {pid}); aborting");
+            let contents = std::fs::read_to_string(lock_path).ok();
+            match contents.as_deref() {
+                Some("released\n") => {}
+                _ => match read_sync_lock(lock_path) {
+                    Some((pid, _)) if pid_is_alive(pid) => {
+                        anyhow::bail!("another trae sync is in progress (pid {pid}); aborting")
+                    }
+                    Some(_) => {}
+                    None => anyhow::bail!(
+                        "trae sync lock has an indeterminate owner; refusing to replace it"
+                    ),
+                },
             }
             let _ = fs2::FileExt::unlock(&existing);
             std::fs::remove_file(lock_path)?;
@@ -1531,6 +1540,22 @@ pub mod sync {
             let (pid, timestamp) = read_sync_lock(&lock_path).expect("complete legacy record");
             assert_eq!(pid, std::process::id());
             assert!(timestamp > 0);
+        }
+
+        #[test]
+        fn test_acquire_refuses_an_empty_legacy_inode_without_an_os_lock() {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache_dir = tmp.path();
+            let lock_path = cache_dir.join("sync.lock");
+            std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+
+            let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
+            assert!(err.to_string().contains("indeterminate owner"));
+            assert!(lock_path.exists(), "the pending legacy inode must survive");
         }
 
         /// Regression (#1010): the old protocol decided ownership from the
