@@ -3095,40 +3095,60 @@ fn validate_priced_messages(
         return Err("pricing data is unavailable for submission".to_string());
     };
 
-    let unpriced: Vec<String> = messages
-        .iter()
-        .filter(|message| {
-            let tokens = &message.tokens;
-            let token_bearing = tokens.input > 0
-                || tokens.output > 0
-                || tokens.cache_read > 0
-                || tokens.cache_write > 0
-                || tokens.reasoning > 0;
-            token_bearing
-                && !message.has_authoritative_cost()
-                && !pricing.covers_usage_with_provider(
-                    &message.model_id,
-                    Some(&message.provider_id),
-                    &message.tokens,
-                )
-        })
-        .map(|message| {
-            if message.provider_id.is_empty() {
-                message.model_id.clone()
-            } else {
-                format!("{}/{}", message.provider_id, message.model_id)
-            }
-        })
-        .collect();
+    // Counted rather than listed per message: a real submission repeats the
+    // same handful of ids thousands of times, and the raw list buried the
+    // actionable model names under hundreds of kilobytes of output (#1013).
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
 
-    if unpriced.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "pricing is unavailable for submitted token usage: {}",
-            unpriced.join(", ")
-        ))
+    for message in messages {
+        let tokens = &message.tokens;
+        let token_bearing = tokens.input > 0
+            || tokens.output > 0
+            || tokens.cache_read > 0
+            || tokens.cache_write > 0
+            || tokens.reasoning > 0;
+        let unpriced = token_bearing
+            && !message.has_authoritative_cost()
+            && !pricing.covers_usage_with_provider(
+                &message.model_id,
+                Some(&message.provider_id),
+                &message.tokens,
+            );
+        if !unpriced {
+            continue;
+        }
+
+        let id = if message.provider_id.is_empty() {
+            message.model_id.clone()
+        } else {
+            format!("{}/{}", message.provider_id, message.model_id)
+        };
+        match counts.get_mut(&id) {
+            Some(count) => *count += 1,
+            None => {
+                counts.insert(id.clone(), 1);
+                order.push(id);
+            }
+        }
     }
+
+    if order.is_empty() {
+        return Ok(());
+    }
+
+    let summary = order
+        .into_iter()
+        .map(|id| match counts.get(&id).copied().unwrap_or(1) {
+            1 => id,
+            count => format!("{id} (x{count})"),
+        })
+        .collect::<Vec<String>>()
+        .join(", ");
+
+    Err(format!(
+        "pricing is unavailable for submitted token usage: {summary}"
+    ))
 }
 
 fn filter_messages_for_report(
@@ -7876,6 +7896,51 @@ mod tests {
 
         let error = validate_priced_messages(&[message], Some(&pricing)).unwrap_err();
         assert!(error.contains("provider/unlisted-model"));
+    }
+
+    // Regression: #1013. The message used to repeat one entry per affected
+    // message, so a real submission produced a ~290KB error that scrolled the
+    // actionable model ids off screen.
+    #[test]
+    fn strict_pricing_validation_error_deduplicates_models_with_counts() {
+        let unpriced = |model: &str, session: &str| {
+            UnifiedMessage::new(
+                "synthetic",
+                model,
+                "provider",
+                session,
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )
+        };
+        let messages = vec![
+            unpriced("repeated-model", "a"),
+            unpriced("repeated-model", "b"),
+            unpriced("repeated-model", "c"),
+            unpriced("single-model", "d"),
+        ];
+        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+
+        let error = validate_priced_messages(&messages, Some(&pricing)).unwrap_err();
+
+        assert_eq!(error.matches("provider/repeated-model").count(), 1);
+        assert_eq!(error.matches("provider/single-model").count(), 1);
+        assert!(
+            error.contains("provider/repeated-model (x3)"),
+            "repeated ids must carry an occurrence count: {error}"
+        );
+        assert!(
+            !error.contains("provider/single-model (x"),
+            "single occurrences must not be annotated: {error}"
+        );
+        assert!(
+            error.find("provider/repeated-model") < error.find("provider/single-model"),
+            "ids must keep first-seen order: {error}"
+        );
     }
 
     #[test]
