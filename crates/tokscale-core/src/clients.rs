@@ -796,7 +796,9 @@ mod tests {
     fn test_reasonix_client_registered_as_local_session_source() {
         let client = ClientId::from_str("reasonix").expect("reasonix client should be registered");
         assert_eq!(
-            client.data().resolve_path("/tmp/home"),
+            client
+                .data()
+                .resolve_path_with_env_strategy("/tmp/home", false),
             "/tmp/home/.reasonix/stats"
         );
         assert_eq!(client.data().pattern, "*.jsonl");
