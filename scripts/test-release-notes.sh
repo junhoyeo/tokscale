@@ -121,6 +121,10 @@ assert_contains "${notes}" '* @alice made their first contribution in https://gi
 assert_contains "${notes}" '**Full Changelog**: https://github.com/acme/tokscale/compare/v1.2.2...v1.2.3'
 assert_excludes "${notes}" 'chore: bump version'
 
+skip_output="$(env -u DISCORD_WEBHOOK_URL bash scripts/post-discord-release.sh 1.2.3)"
+assert_contains "${skip_output}" 'DISCORD_WEBHOOK_URL not set, skipping Discord notification'
+[ ! -s "${CURL_PAYLOADS}" ] || { echo "Discord skip path unexpectedly posted a payload" >&2; exit 1; }
+
 DISCORD_WEBHOOK_URL="https://discord.invalid/webhook" \
   bash scripts/post-discord-release.sh 1.2.3 >"${TMP_DIR}/discord-output.txt"
 

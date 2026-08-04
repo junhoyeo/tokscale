@@ -78,6 +78,61 @@ def strip_yaml_scalar(value: str) -> str:
     return value
 
 
+def decode_yaml_double_quoted(value: str) -> str:
+    escapes = {
+        "0": "\0",
+        "a": "\a",
+        "b": "\b",
+        "t": "\t",
+        "n": "\n",
+        "v": "\v",
+        "f": "\f",
+        "r": "\r",
+        "e": "\x1b",
+        " ": " ",
+        '"': '"',
+        "/": "/",
+        "\\": "\\",
+        "N": "\x85",
+        "_": "\xa0",
+        "L": "\u2028",
+        "P": "\u2029",
+    }
+    hex_widths = {"x": 2, "u": 4, "U": 8}
+    decoded: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            decoded.append(value[index])
+            index += 1
+            continue
+
+        index += 1
+        if index >= len(value):
+            raise ValueError("unterminated YAML escape")
+        escape = value[index]
+        if escape in escapes:
+            decoded.append(escapes[escape])
+            index += 1
+            continue
+        if escape not in hex_widths:
+            raise ValueError(f"unsupported YAML escape: \\{escape}")
+
+        width = hex_widths[escape]
+        start = index + 1
+        end = start + width
+        digits = value[start:end]
+        if len(digits) != width or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
+            raise ValueError(f"invalid YAML escape: \\{escape}{digits}")
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+            raise ValueError(f"invalid YAML codepoint: {codepoint:#x}")
+        decoded.append(chr(codepoint))
+        index = end
+
+    return "".join(decoded)
+
+
 def yaml_mapping_entry(line: str, indent: int) -> tuple[str, str] | None:
     content = strip_yaml_comment(line)
     match = re.match(
@@ -86,7 +141,16 @@ def yaml_mapping_entry(line: str, indent: int) -> tuple[str, str] | None:
     )
     if not match:
         return None
-    key = next(group for group in match.groups()[:3] if group is not None)
+    bare_key, double_quoted_key, single_quoted_key = match.groups()[:3]
+    if double_quoted_key is not None:
+        try:
+            key = decode_yaml_double_quoted(double_quoted_key)
+        except ValueError:
+            return None
+    else:
+        key = bare_key if bare_key is not None else single_quoted_key
+    if key is None:
+        return None
     return key, strip_yaml_scalar(match.group(4))
 
 

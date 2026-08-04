@@ -258,6 +258,56 @@ PY
   grep -q "publish workflow must reject non-default branch dispatches" "${output}"
 }
 
+test_rejects_escaped_conditional_default_branch_gate_step() {
+  local work="${TMP_DIR}/escaped-conditional-default-branch-gate"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "      - name: Require the default branch\n",
+    '      - name: Require the default branch\n        "\\u0069f": false\n',
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/escaped-conditional-default-branch-gate-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject an escaped conditional default-branch gate" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must reject non-default branch dispatches" "${output}"
+}
+
+test_rejects_hex_escaped_conditional_default_branch_gate_step() {
+  local work="${TMP_DIR}/hex-escaped-conditional-default-branch-gate"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "      - name: Require the default branch\n",
+    '      - name: Require the default branch\n        "\\x69f": false\n',
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/hex-escaped-conditional-default-branch-gate-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a hex-escaped conditional default-branch gate" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must reject non-default branch dispatches" "${output}"
+}
+
 test_rejects_ignored_default_branch_gate_failure() {
   local work="${TMP_DIR}/ignored-default-branch-gate"
   write_good_workflows "${work}"
@@ -302,6 +352,31 @@ PY
   local output="${TMP_DIR}/quoted-ignored-default-branch-gate-output.txt"
   if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
     echo "Expected workflow safety check to reject a quoted ignored default-branch gate failure" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must reject non-default branch dispatches" "${output}"
+}
+
+test_rejects_hex_escaped_ignored_default_branch_gate_failure() {
+  local work="${TMP_DIR}/hex-escaped-ignored-default-branch-gate"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "      - name: Require the default branch\n",
+    '      - name: Require the default branch\n        "continue\\x2don\\x2derror": true\n',
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/hex-escaped-ignored-default-branch-gate-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a hex-escaped ignored default-branch gate failure" >&2
     return 1
   fi
 
@@ -882,8 +957,11 @@ test_rejects_publish_without_default_branch_gate
 test_rejects_default_branch_gate_without_failure
 test_rejects_conditional_default_branch_gate_step
 test_rejects_quoted_conditional_default_branch_gate_step
+test_rejects_escaped_conditional_default_branch_gate_step
+test_rejects_hex_escaped_conditional_default_branch_gate_step
 test_rejects_ignored_default_branch_gate_failure
 test_rejects_quoted_ignored_default_branch_gate_failure
+test_rejects_hex_escaped_ignored_default_branch_gate_failure
 test_rejects_nested_default_branch_gate_env
 test_rejects_inexact_default_branch_gate_env_value
 test_rejects_default_branch_gate_exit_after_first_fi
