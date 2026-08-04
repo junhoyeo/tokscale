@@ -41,10 +41,11 @@ impl ModelPricing {
     /// A copy of this row with rates taken from `fallback` for the buckets
     /// `usage` populates but this row cannot price.
     ///
-    /// Rates already present here are never overwritten, so a reseller row
-    /// keeps its own markup and only gains the buckets it omits. Each bucket
-    /// is filled together with its long-context tiers, so a tiered walk never
-    /// mixes base and above-threshold rates from two different rows.
+    /// No rate already present here is ever overwritten, including the
+    /// long-context tiers: a row that publishes an above-threshold rate for a
+    /// bucket whose base rate it omits keeps that tier, and only the rates it
+    /// genuinely lacks are taken from `fallback`. Callers are responsible for
+    /// establishing that the two rows price the same deal before borrowing.
     pub(crate) fn with_missing_rates_from(
         &self,
         fallback: &Self,
@@ -59,14 +60,18 @@ impl ModelPricing {
             && valid_rate(fallback.input_cost_per_token)
         {
             filled.input_cost_per_token = fallback.input_cost_per_token;
-            filled.input_cost_per_token_above_128k_tokens =
-                fallback.input_cost_per_token_above_128k_tokens;
-            filled.input_cost_per_token_above_200k_tokens =
-                fallback.input_cost_per_token_above_200k_tokens;
-            filled.input_cost_per_token_above_256k_tokens =
-                fallback.input_cost_per_token_above_256k_tokens;
-            filled.input_cost_per_token_above_272k_tokens =
-                fallback.input_cost_per_token_above_272k_tokens;
+            filled.input_cost_per_token_above_128k_tokens = filled
+                .input_cost_per_token_above_128k_tokens
+                .or(fallback.input_cost_per_token_above_128k_tokens);
+            filled.input_cost_per_token_above_200k_tokens = filled
+                .input_cost_per_token_above_200k_tokens
+                .or(fallback.input_cost_per_token_above_200k_tokens);
+            filled.input_cost_per_token_above_256k_tokens = filled
+                .input_cost_per_token_above_256k_tokens
+                .or(fallback.input_cost_per_token_above_256k_tokens);
+            filled.input_cost_per_token_above_272k_tokens = filled
+                .input_cost_per_token_above_272k_tokens
+                .or(fallback.input_cost_per_token_above_272k_tokens);
         }
 
         if (usage.output > 0 || usage.reasoning > 0)
@@ -74,14 +79,18 @@ impl ModelPricing {
             && valid_rate(fallback.output_cost_per_token)
         {
             filled.output_cost_per_token = fallback.output_cost_per_token;
-            filled.output_cost_per_token_above_128k_tokens =
-                fallback.output_cost_per_token_above_128k_tokens;
-            filled.output_cost_per_token_above_200k_tokens =
-                fallback.output_cost_per_token_above_200k_tokens;
-            filled.output_cost_per_token_above_256k_tokens =
-                fallback.output_cost_per_token_above_256k_tokens;
-            filled.output_cost_per_token_above_272k_tokens =
-                fallback.output_cost_per_token_above_272k_tokens;
+            filled.output_cost_per_token_above_128k_tokens = filled
+                .output_cost_per_token_above_128k_tokens
+                .or(fallback.output_cost_per_token_above_128k_tokens);
+            filled.output_cost_per_token_above_200k_tokens = filled
+                .output_cost_per_token_above_200k_tokens
+                .or(fallback.output_cost_per_token_above_200k_tokens);
+            filled.output_cost_per_token_above_256k_tokens = filled
+                .output_cost_per_token_above_256k_tokens
+                .or(fallback.output_cost_per_token_above_256k_tokens);
+            filled.output_cost_per_token_above_272k_tokens = filled
+                .output_cost_per_token_above_272k_tokens
+                .or(fallback.output_cost_per_token_above_272k_tokens);
         }
 
         if usage.cache_read > 0
@@ -89,10 +98,12 @@ impl ModelPricing {
             && valid_rate(fallback.cache_read_input_token_cost)
         {
             filled.cache_read_input_token_cost = fallback.cache_read_input_token_cost;
-            filled.cache_read_input_token_cost_above_200k_tokens =
-                fallback.cache_read_input_token_cost_above_200k_tokens;
-            filled.cache_read_input_token_cost_above_272k_tokens =
-                fallback.cache_read_input_token_cost_above_272k_tokens;
+            filled.cache_read_input_token_cost_above_200k_tokens = filled
+                .cache_read_input_token_cost_above_200k_tokens
+                .or(fallback.cache_read_input_token_cost_above_200k_tokens);
+            filled.cache_read_input_token_cost_above_272k_tokens = filled
+                .cache_read_input_token_cost_above_272k_tokens
+                .or(fallback.cache_read_input_token_cost_above_272k_tokens);
         }
 
         if usage.cache_write > 0
@@ -100,8 +111,9 @@ impl ModelPricing {
             && valid_rate(fallback.cache_creation_input_token_cost)
         {
             filled.cache_creation_input_token_cost = fallback.cache_creation_input_token_cost;
-            filled.cache_creation_input_token_cost_above_200k_tokens =
-                fallback.cache_creation_input_token_cost_above_200k_tokens;
+            filled.cache_creation_input_token_cost_above_200k_tokens = filled
+                .cache_creation_input_token_cost_above_200k_tokens
+                .or(fallback.cache_creation_input_token_cost_above_200k_tokens);
         }
 
         filled
@@ -120,6 +132,95 @@ impl ModelPricing {
 }
 
 pub type PricingDataset = HashMap<String, ModelPricing>;
+
+#[cfg(test)]
+mod pricing_row_tests {
+    use super::ModelPricing;
+    use crate::TokenBreakdown;
+
+    fn cache_read_usage() -> TokenBreakdown {
+        TokenBreakdown {
+            input: 10,
+            output: 0,
+            cache_read: 10,
+            cache_write: 0,
+            reasoning: 0,
+        }
+    }
+
+    // A hinted row can publish a long-context tier for a bucket whose base
+    // rate it omits. Filling the base must not drag the fallback's tier in
+    // with it, or long-context usage silently reprices onto another row.
+    #[test]
+    fn existing_long_context_tiers_survive_a_filled_base_rate() {
+        let hinted = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            output_cost_per_token: Some(1.4e-5),
+            cache_read_input_token_cost_above_200k_tokens: Some(5e-7),
+            ..Default::default()
+        };
+        let fallback = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            output_cost_per_token: Some(1.4e-5),
+            cache_read_input_token_cost: Some(1.75e-7),
+            cache_read_input_token_cost_above_200k_tokens: Some(9.9e-7),
+            ..Default::default()
+        };
+
+        let filled = hinted.with_missing_rates_from(&fallback, &cache_read_usage());
+
+        assert_eq!(filled.cache_read_input_token_cost, Some(1.75e-7));
+        assert_eq!(
+            filled.cache_read_input_token_cost_above_200k_tokens,
+            Some(5e-7),
+            "the hinted row's own long-context tier must be preserved"
+        );
+    }
+
+    // Absent tiers are still worth filling, otherwise a borrowed base rate
+    // walks off a cliff once usage crosses the threshold.
+    #[test]
+    fn absent_long_context_tiers_are_filled_alongside_the_base_rate() {
+        let hinted = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            output_cost_per_token: Some(1.4e-5),
+            ..Default::default()
+        };
+        let fallback = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            output_cost_per_token: Some(1.4e-5),
+            cache_read_input_token_cost: Some(1.75e-7),
+            cache_read_input_token_cost_above_200k_tokens: Some(9.9e-7),
+            ..Default::default()
+        };
+
+        let filled = hinted.with_missing_rates_from(&fallback, &cache_read_usage());
+
+        assert_eq!(filled.cache_read_input_token_cost, Some(1.75e-7));
+        assert_eq!(
+            filled.cache_read_input_token_cost_above_200k_tokens,
+            Some(9.9e-7)
+        );
+    }
+
+    // A bucket the usage does not touch is never filled.
+    #[test]
+    fn untouched_buckets_are_left_alone() {
+        let hinted = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            ..Default::default()
+        };
+        let fallback = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            cache_creation_input_token_cost: Some(2e-6),
+            ..Default::default()
+        };
+
+        let filled = hinted.with_missing_rates_from(&fallback, &cache_read_usage());
+
+        assert_eq!(filled.cache_creation_input_token_cost, None);
+    }
+}
 
 pub fn load_cached() -> Option<PricingDataset> {
     cache::load_cache(CACHE_FILENAME)
