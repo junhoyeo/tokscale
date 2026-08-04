@@ -533,9 +533,7 @@ impl SyncLockGuard {
 /// a legacy process can replace them between observation and unlink.
 fn publish_legacy_readable_lock(lock_path: &Path) -> Result<String> {
     if lock_path.exists() {
-        anyhow::bail!(
-            "Antigravity sync lock already exists; refusing to replace it during a rolling upgrade"
-        );
+        return Err(existing_sync_lock_error(lock_path));
     }
 
     let temp_path = lock_path.with_extension(format!(
@@ -583,6 +581,22 @@ fn publish_legacy_readable_lock(lock_path: &Path) -> Result<String> {
             Err(anyhow::Error::new(err)
                 .context("Failed to publish Antigravity sync lock atomically"))
         }
+    }
+}
+
+fn existing_sync_lock_error(lock_path: &Path) -> anyhow::Error {
+    if let Some((pid, _)) = read_sync_lock(lock_path).filter(|(pid, _)| pid_is_alive(*pid)) {
+        anyhow::anyhow!(
+            "Another tokscale Antigravity sync may be in progress (pid {pid}); do not remove '{}' until that process has stopped. If it has stopped, remove '{}' and retry.",
+            lock_path.display(),
+            lock_path.display()
+        )
+    } else {
+        anyhow::anyhow!(
+            "Antigravity sync lock at '{}' already exists. To avoid overlapping a possible active sync during a rolling upgrade, tokscale will not replace it automatically. Confirm no tokscale Antigravity sync is running, then remove '{}' and retry.",
+            lock_path.display(),
+            lock_path.display()
+        )
     }
 }
 
@@ -3476,6 +3490,19 @@ mod tests {
         assert!(lock_path.exists());
     }
 
+    #[test]
+    fn existing_sync_lock_error_names_the_exact_stale_lock_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lock_path = temp_dir.path().join("sync.lock");
+        std::fs::write(&lock_path, "999999 1\n").unwrap();
+
+        let err = existing_sync_lock_error(&lock_path).to_string();
+        let quoted_path = format!("'{}'", lock_path.display());
+        assert!(err.contains(&quoted_path));
+        assert!(err.contains("Confirm no tokscale Antigravity sync is running"));
+        assert!(err.contains("remove"));
+    }
+
     /// During a rolling upgrade an older binary still uses `sync.lock` as a
     /// PID-file lock. The new OS lock is not evidence that the old owner has
     /// stopped, so its live record must prevent takeover.
@@ -3489,7 +3516,8 @@ mod tests {
 
         let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
         assert!(
-            err.to_string().contains("already exists"),
+            err.to_string()
+                .contains("Another tokscale Antigravity sync may be in progress"),
             "a live legacy owner must be preserved, got: {err:#}"
         );
         assert_eq!(
@@ -3601,7 +3629,8 @@ mod tests {
 
         let err = run_antigravity_purge_cache().unwrap_err();
         assert!(
-            err.to_string().contains("already exists"),
+            err.to_string()
+                .contains("Another tokscale Antigravity sync may be in progress"),
             "purge must preserve a live legacy sync, got: {err:#}"
         );
         assert!(cache_dir.join("manifest.json").exists());

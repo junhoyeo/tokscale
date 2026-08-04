@@ -6,7 +6,6 @@ mod cursor;
 mod device;
 mod paths;
 mod process_liveness;
-mod sync_lock;
 mod trae;
 mod tui;
 mod warp;

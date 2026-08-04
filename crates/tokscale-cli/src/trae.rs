@@ -1202,9 +1202,7 @@ pub mod sync {
 
     fn publish_legacy_readable_lock(lock_path: &std::path::Path) -> Result<String> {
         if lock_path.exists() {
-            anyhow::bail!(
-                "trae sync lock already exists; refusing to replace it during a rolling upgrade"
-            );
+            return Err(existing_sync_lock_error(lock_path));
         }
 
         let temp_path = lock_path.with_extension(format!(
@@ -1235,6 +1233,22 @@ pub mod sync {
             Err(err) => {
                 Err(anyhow::Error::new(err).context("failed to publish sync lock atomically"))
             }
+        }
+    }
+
+    fn existing_sync_lock_error(lock_path: &std::path::Path) -> anyhow::Error {
+        if let Some((pid, _)) = read_sync_lock(lock_path).filter(|(pid, _)| pid_is_alive(*pid)) {
+            anyhow::anyhow!(
+                "Another tokscale Trae sync may be in progress (pid {pid}); do not remove '{}' until that process has stopped. If it has stopped, remove '{}' and retry.",
+                lock_path.display(),
+                lock_path.display()
+            )
+        } else {
+            anyhow::anyhow!(
+                "Trae sync lock at '{}' already exists. To avoid overlapping a possible active sync during a rolling upgrade, tokscale will not replace it automatically. Confirm no tokscale Trae sync is running, then remove '{}' and retry.",
+                lock_path.display(),
+                lock_path.display()
+            )
         }
     }
 
@@ -1460,6 +1474,19 @@ pub mod sync {
             assert!(cache_dir.join("sync.lock").exists());
         }
 
+        #[test]
+        fn test_existing_sync_lock_error_names_the_exact_stale_lock_path() {
+            let tmp = tempfile::tempdir().unwrap();
+            let lock_path = tmp.path().join("sync.lock");
+            std::fs::write(&lock_path, "999999 1\n").unwrap();
+
+            let err = existing_sync_lock_error(&lock_path).to_string();
+            let quoted_path = format!("'{}'", lock_path.display());
+            assert!(err.contains(&quoted_path));
+            assert!(err.contains("Confirm no tokscale Trae sync is running"));
+            assert!(err.contains("remove"));
+        }
+
         /// A live PID-only lock belongs to a pre-OS-lock binary. A new
         /// version must not overwrite it while a rolling upgrade is in
         /// progress.
@@ -1472,7 +1499,8 @@ pub mod sync {
 
             let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
             assert!(
-                err.to_string().contains("already exists"),
+                err.to_string()
+                    .contains("Another tokscale Trae sync may be in progress"),
                 "a live legacy owner must be preserved, got: {err:#}"
             );
             assert_eq!(
