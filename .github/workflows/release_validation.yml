@@ -23,6 +23,7 @@ on:
       - "scripts/test-npm-release-state.sh"
       - "scripts/test-prepare-release-provenance.sh"
       - "scripts/test-release-package-artifacts.sh"
+      - "scripts/test-release-notes.sh"
       - "scripts/test-release-workflow-safety.sh"
       - ".github/workflows/build-native.yml"
       - ".github/workflows/publish-cli.yml"
@@ -57,17 +58,12 @@ jobs:
       - name: Verify release workflow topology
         run: python3 scripts/check-release-workflow-safety.py
 
-      - name: Validate release-only helpers
-        run: |
-          bash -n scripts/test-release-package-artifacts.sh
-          bash -n scripts/post-discord-release.sh
-          bun build scripts/generate-release-notes.ts --target=bun --outfile=/tmp/generate-release-notes.js
-          env -u DISCORD_WEBHOOK_URL bash scripts/post-discord-release.sh 0.0.0-ci
-
       - name: Run release helper tests
         run: |
+          bash -n scripts/test-release-package-artifacts.sh
           bash scripts/test-calculate-release-version.sh
           bash scripts/test-check-version-coherence.sh
           bash scripts/test-npm-release-state.sh
           bash scripts/test-prepare-release-provenance.sh
+          bash scripts/test-release-notes.sh
           bash scripts/test-release-workflow-safety.sh

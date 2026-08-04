@@ -78,6 +78,28 @@ def strip_yaml_scalar(value: str) -> str:
     return value
 
 
+def yaml_mapping_entry(line: str, indent: int) -> tuple[str, str] | None:
+    content = strip_yaml_comment(line)
+    match = re.match(
+        rf"\s{{{indent}}}(?:([A-Za-z_][A-Za-z0-9_-]*)|\"([^\"]+)\"|'([^']+)'):\s*(.*)$",
+        content,
+    )
+    if not match:
+        return None
+    key = next(group for group in match.groups()[:3] if group is not None)
+    return key, strip_yaml_scalar(match.group(4))
+
+
+def mapping_scalars(lines: list[str], indent: int) -> dict[str, str]:
+    mappings: dict[str, str] = {}
+    for line in lines:
+        entry = yaml_mapping_entry(line, indent)
+        if entry:
+            key, value = entry
+            mappings[key] = value
+    return mappings
+
+
 def top_level_env(lines: list[str]) -> dict[str, str]:
     env: dict[str, str] = {}
     for index, line in enumerate(lines):
@@ -270,7 +292,8 @@ def step_has_property(step_lines: list[str], property_name: str) -> bool:
         return False
     property_indent = len(match.group(1)) + 2
     return any(
-        re.match(rf"\s{{{property_indent}}}{re.escape(property_name)}:\s*", line)
+        (entry := yaml_mapping_entry(line, property_indent)) is not None
+        and entry[0] == property_name
         for line in uncommented_lines(step_lines[1:])
     )
 
@@ -325,23 +348,27 @@ def main() -> None:
 
     publish_bump = uncommented_lines(job_block(publish_lines, "bump-versions"))
     default_branch_step = named_step_block(publish_bump, "Require the default branch")
-    default_branch_env = (
-        "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
-        "RELEASE_REF_NAME: ${{ github.ref_name }}",
-        "RELEASE_REF_TYPE: ${{ github.ref_type }}",
-    )
+    default_branch_env = {
+        "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+        "RELEASE_REF_NAME": "${{ github.ref_name }}",
+        "RELEASE_REF_TYPE": "${{ github.ref_type }}",
+    }
     default_branch_env_block = mapping_block(default_branch_step, "env", 8)
+    default_branch_env_values = mapping_scalars(default_branch_env_block, 10)
     default_branch_run = step_run_block(default_branch_step)
     guard = 'if [[ "$RELEASE_REF_TYPE" != "branch" || "$RELEASE_REF_NAME" != "$DEFAULT_BRANCH" ]]; then'
     try:
         guard_index = default_branch_run.index(guard)
-        exit_index = default_branch_run.index("exit 1", guard_index + 1)
-        fi_index = default_branch_run.index("fi", exit_index + 1)
+        fi_index = default_branch_run.index("fi", guard_index + 1)
+        exit_index = default_branch_run.index("exit 1", guard_index + 1, fi_index)
         gate_aborts = guard_index == 0 and guard_index < exit_index < fi_index
     except ValueError:
         gate_aborts = False
     if (
-        not all(block_contains(default_branch_env_block, snippet) for snippet in default_branch_env)
+        not all(
+            default_branch_env_values.get(key) == value
+            for key, value in default_branch_env.items()
+        )
         or step_has_property(default_branch_step, "if")
         or step_has_property(default_branch_step, "continue-on-error")
         or not gate_aborts
