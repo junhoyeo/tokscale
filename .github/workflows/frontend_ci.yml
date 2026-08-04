@@ -116,6 +116,8 @@ jobs:
               docker compose restart app
               for restart_attempt in {1..30}; do
                 if curl --fail --silent --show-error http://localhost:3333/ >/dev/null; then
+                  bash scripts/test-self-host-runtime.sh http://localhost:3333 http://runtime.example
+                  APP_URL=https://runtime.example DATABASE_URL=postgresql://example.invalid/tokscale docker compose -f docker-compose.external-db.yml config -q
                   exit 0
                 fi
                 sleep 2
@@ -126,10 +128,8 @@ jobs:
           done
           exit 1
 
-      - name: Verify runtime public origin and external Compose contract
-        run: |
-          bash scripts/test-self-host-runtime.sh http://localhost:3333 http://runtime.example
-          APP_URL=https://runtime.example DATABASE_URL=postgresql://example.invalid/tokscale docker compose -f docker-compose.external-db.yml config -q
-
       - name: Verify TUI default mount safety
         run: bash scripts/test-tui-mounts.sh
+
+      - name: Build TUI image
+        run: docker build --file Dockerfile.tui --tag tokscale-tui:self-host-smoke .
