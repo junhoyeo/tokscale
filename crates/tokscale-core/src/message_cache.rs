@@ -751,8 +751,25 @@ impl CachedPath {
     }
 }
 
+/// `/` and `\` as UTF-16 code units, and the `\\?\` verbatim prefix.
 #[cfg(windows)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+const FORWARD_SLASH_UTF16: u16 = b'/' as u16;
+#[cfg(windows)]
+const BACKSLASH_UTF16: u16 = b'\\' as u16;
+#[cfg(windows)]
+const VERBATIM_PREFIX_UTF16: [u16; 4] = [
+    BACKSLASH_UTF16,
+    BACKSLASH_UTF16,
+    b'?' as u16,
+    BACKSLASH_UTF16,
+];
+
+/// The stored spelling is kept verbatim so [`CachedPath::to_path_buf`] hands
+/// back exactly the path that was cached, but *identity* — equality, hashing
+/// and the shard digest — folds `/` into `\` first. See [`CachedPath::
+/// identity_units`] for why.
+#[cfg(windows)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CachedPath(Vec<u16>);
 
 #[cfg(windows)]
@@ -770,9 +787,70 @@ impl CachedPath {
         PathBuf::from(OsString::from_wide(&self.0))
     }
 
+    /// The code units this path is *identified* by: the stored ones, with `/`
+    /// folded to `\`.
+    ///
+    /// On Windows both characters are directory separators, so `C:\a/b\f.jsonl`
+    /// and `C:\a\b\f.jsonl` name one file — and a scan produces both spellings
+    /// for that one file. `ClientDef::resolve_path` assembles every scan root by
+    /// string concatenation (`format!("{root}/{relative}")`), so the root half
+    /// carries forward slashes, while `WalkDir` appends each child below it with
+    /// the platform separator. Hashing the units as written therefore gave one
+    /// file two cache keys.
+    ///
+    /// That is not only a test artifact. `tokscale --home C:/Users/me` and a
+    /// default run (where `dirs` yields `C:\Users\me`) disagree on every key, so
+    /// neither run can ever read the other's entries: the cache stays cold and
+    /// the shards accumulate a duplicate copy of every file. Git Bash and MSYS2
+    /// export `HOME` with forward slashes, so this is reachable without anyone
+    /// typing an unusual path.
+    ///
+    /// Paths in the verbatim namespace are exempt. After `\\?\` the object
+    /// manager performs no translation at all, so `/` there is an ordinary
+    /// character in a name rather than a separator, and folding it would merge
+    /// two genuinely different paths.
+    ///
+    /// Case is deliberately *not* folded. Windows filesystems are usually but
+    /// not always case-insensitive — NTFS supports per-directory sensitivity —
+    /// so folding case could merge two real files. Separator folding has no such
+    /// exception outside the verbatim namespace, which is why only it is safe.
+    fn identity_units(&self) -> impl Iterator<Item = u16> + '_ {
+        let verbatim = self.0.starts_with(&VERBATIM_PREFIX_UTF16);
+        self.0.iter().map(move |unit| {
+            if !verbatim && *unit == FORWARD_SLASH_UTF16 {
+                BACKSLASH_UTF16
+            } else {
+                *unit
+            }
+        })
+    }
+
     fn update_digest(&self, hasher: &mut Sha256) {
-        for code_unit in &self.0 {
+        for code_unit in self.identity_units() {
             hasher.update(code_unit.to_le_bytes());
+        }
+    }
+}
+
+#[cfg(windows)]
+impl PartialEq for CachedPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity_units().eq(other.identity_units())
+    }
+}
+
+#[cfg(windows)]
+impl Eq for CachedPath {}
+
+#[cfg(windows)]
+impl std::hash::Hash for CachedPath {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Length first, mirroring the `Vec<u16>` derive this replaces. Folding
+        // `/` to `\` never changes the length, so this stays consistent with
+        // the `PartialEq` above.
+        state.write_usize(self.0.len());
+        for code_unit in self.identity_units() {
+            state.write_u16(code_unit);
         }
     }
 }
@@ -3859,5 +3937,67 @@ mod tests {
         let cached_path = CachedPath::from_path(&path);
 
         assert_eq!(cached_path.to_path_buf(), path);
+    }
+
+    /// One file reached under both separators is one cache entry.
+    ///
+    /// A scan spells a discovered transcript with both: the root half comes
+    /// from `format!("{root}/{relative}")` and the children below it from
+    /// `Path::join`. Keying on the raw code units made those two spellings two
+    /// entries for one file, so the cache could never hit.
+    #[cfg(windows)]
+    #[test]
+    fn cached_path_identity_folds_the_two_windows_separators() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(path: &CachedPath) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            path.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let mixed = CachedPath::from_path(Path::new(r"C:\home/.claude/projects\demo\s.jsonl"));
+        let native = CachedPath::from_path(Path::new(r"C:\home\.claude\projects\demo\s.jsonl"));
+
+        assert_eq!(mixed, native, "both spellings name one file");
+        assert_eq!(hash_of(&mixed), hash_of(&native), "Hash must match Eq");
+
+        let mut digests = Vec::new();
+        for path in [&mixed, &native] {
+            let mut hasher = Sha256::new();
+            path.update_digest(&mut hasher);
+            digests.push(hasher.finalize());
+        }
+        assert_eq!(
+            digests[0], digests[1],
+            "the shard digest must agree too, or one file lands in two shards"
+        );
+
+        // The stored spelling is untouched: `to_path_buf` still round-trips,
+        // which `SourceMessageCache` relies on to stat the file it cached.
+        assert_eq!(
+            mixed.to_path_buf(),
+            PathBuf::from(r"C:\home/.claude/projects\demo\s.jsonl")
+        );
+
+        // Different files stay different.
+        let other = CachedPath::from_path(Path::new(r"C:\home\.claude\projects\demo\t.jsonl"));
+        assert_ne!(mixed, other);
+    }
+
+    /// After `\\?\` the object manager stops translating, so `/` is an ordinary
+    /// character in a name rather than a separator. Folding it there would merge
+    /// two genuinely different paths.
+    #[cfg(windows)]
+    #[test]
+    fn cached_path_identity_leaves_verbatim_paths_alone() {
+        let with_slash = CachedPath::from_path(Path::new(r"\\?\C:\dir/name\f.jsonl"));
+        let with_backslash = CachedPath::from_path(Path::new(r"\\?\C:\dir\name\f.jsonl"));
+
+        assert_ne!(
+            with_slash, with_backslash,
+            "inside the verbatim namespace `/` is part of the name, not a separator"
+        );
     }
 }
