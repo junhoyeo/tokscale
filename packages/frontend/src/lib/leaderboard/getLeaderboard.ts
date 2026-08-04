@@ -200,6 +200,7 @@ function resultQuery(
   text: string,
   sequentialRanks: boolean,
   exactUsername?: string,
+  statsBase: ReturnType<typeof sql> = base,
 ): ReturnType<typeof sql> {
   const offset = (page - 1) * limit;
   const primary = sortBy === "cost" ? sql`total_cost` : sql`total_tokens`;
@@ -208,7 +209,7 @@ function resultQuery(
   return sql`
     WITH aggregated AS (${base}),
     rankable AS (
-      SELECT aggregated.*, ${sequentialRanks ? sql`ROW_NUMBER()` : sql`RANK()`} OVER (ORDER BY ${primary} DESC) AS rank
+      SELECT aggregated.*, ${sequentialRanks ? sql`ROW_NUMBER()` : sql`RANK()`} OVER (ORDER BY ${primary} DESC${sequentialRanks ? sql`, ${secondary} DESC, LOWER(username) ASC, user_id ASC` : sql``}) AS rank
       FROM aggregated
       WHERE leaderboard_hidden = false
     ),
@@ -225,9 +226,9 @@ function resultQuery(
     SELECT
       COALESCE((SELECT json_agg(json_build_object('rank', rank, 'userId', user_id, 'username', username, 'displayName', display_name, 'avatarUrl', avatar_url, 'totalTokens', total_tokens, 'totalCost', total_cost) ORDER BY rank ASC, ${secondary} DESC, LOWER(username) ASC, user_id ASC) FROM paged), '[]'::json) AS users,
       COALESCE((SELECT filtered_users FROM filtered LIMIT 1), 0)::int AS "totalUsers",
-      COALESCE((SELECT SUM(total_tokens) FROM aggregated), 0) AS "totalTokens",
-      COALESCE((SELECT SUM(total_cost) FROM aggregated), 0) AS "totalCost",
-      COALESCE((SELECT COUNT(*) FROM aggregated), 0)::int AS "uniqueUsers"
+      COALESCE((SELECT SUM(total_tokens) FROM (${statsBase}) AS stats), 0) AS "totalTokens",
+      COALESCE((SELECT SUM(total_cost) FROM (${statsBase}) AS stats), 0) AS "totalCost",
+      COALESCE((SELECT COUNT(*) FROM (${statsBase}) AS stats), 0)::int AS "uniqueUsers"
   `;
 }
 
@@ -295,6 +296,12 @@ async function fetchAllTimeLeaderboardData(
     AND (${parsed.models.length === 0} OR EXISTS (SELECT 1 FROM unnest(s.models_used) AS model WHERE ${modelMatch}))
   `
     : sql``;
+  const globalStatsBase = sql`
+    SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
+      s.total_tokens, CAST(s.total_cost AS DECIMAL(18,4)) AS total_cost
+    FROM submissions s
+    INNER JOIN users u ON s.user_id = u.id
+  `;
   const base = sql`
     SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
       s.total_tokens, CAST(s.total_cost AS DECIMAL(18,4)) AS total_cost
@@ -303,7 +310,16 @@ async function fetchAllTimeLeaderboardData(
     WHERE TRUE ${sourceFilter}
   `;
   const result = await db.execute<LeaderboardQueryResult>(
-    resultQuery(base, page, limit, sortBy, parsed.text, false),
+    resultQuery(
+      base,
+      page,
+      limit,
+      sortBy,
+      parsed.text,
+      false,
+      undefined,
+      globalStatsBase,
+    ),
   );
   return buildLeaderboardData(result[0], page, limit, "all", sortBy);
 }
