@@ -1998,6 +1998,7 @@ pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::json_path_literal;
     use crate::paths::test_env::EnvGuard;
     use serial_test::serial;
     use std::fs::{self, File};
@@ -4019,8 +4020,8 @@ mod tests {
         fs::write(
             &variant_file,
             format!(
-                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
-                config_dir.display()
+                r#"{{"name":"kimi-code","provider":"kimi","configDir":{}}}"#,
+                json_path_literal(&config_dir)
             ),
         )
         .unwrap();
@@ -4057,8 +4058,8 @@ mod tests {
         fs::write(
             variant_dir.join("variant.json"),
             format!(
-                r#"{{"name":"plain-mirror","provider":"mirror","configDir":"{}"}}"#,
-                normal_claude_dir.display()
+                r#"{{"name":"plain-mirror","provider":"mirror","configDir":{}}}"#,
+                json_path_literal(&normal_claude_dir)
             ),
         )
         .unwrap();
@@ -4280,15 +4281,15 @@ mod tests {
         let projects_json = format!(
             r#"{{
   "projects": [
-    {{ "path": "{}", "data_dir": ".crush" }},
-    {{ "path": "{}", "data_dir": "{}" }},
-    {{ "path": "{}", "data_dir": ".crush" }}
+    {{ "path": {}, "data_dir": ".crush" }},
+    {{ "path": {}, "data_dir": {} }},
+    {{ "path": {}, "data_dir": ".crush" }}
   ]
 }}"#,
-            project_a.display(),
-            dir.path().join("project-b").display(),
-            project_b_data.display(),
-            dir.path().join("missing-project").display(),
+            json_path_literal(&project_a),
+            json_path_literal(&dir.path().join("project-b")),
+            json_path_literal(&project_b_data),
+            json_path_literal(&dir.path().join("missing-project")),
         );
         setup_mock_crush_registry(&registry_path, &projects_json);
 
@@ -4321,13 +4322,13 @@ mod tests {
         let projects_json = format!(
             r#"{{
   "projects": [
-    {{ "path": "{}", "data_dir": ".crush" }},
+    {{ "path": {}, "data_dir": ".crush" }},
     {{ "path": 123, "data_dir": ".crush" }},
     {{ "data_dir": ".crush" }},
     "not-an-object"
   ]
 }}"#,
-            valid_project.display()
+            json_path_literal(&valid_project)
         );
         setup_mock_crush_registry(&registry_path, &projects_json);
 
@@ -4390,8 +4391,8 @@ mod tests {
         File::create(project.join(".crush").join("crush.db")).unwrap();
 
         let projects_json = format!(
-            r#"{{ "projects": [ {{ "path": "{}", "data_dir": ".crush" }} ] }}"#,
-            project.display()
+            r#"{{ "projects": [ {{ "path": {}, "data_dir": ".crush" }} ] }}"#,
+            json_path_literal(&project)
         );
         setup_mock_crush_registry(&global_data.join("projects.json"), &projects_json);
 
@@ -4428,8 +4429,8 @@ mod tests {
         File::create(project.join(".crush").join("crush.db")).unwrap();
 
         let projects_json = format!(
-            r#"{{ "projects": [ {{ "path": "{}", "data_dir": ".crush" }} ] }}"#,
-            project.display()
+            r#"{{ "projects": [ {{ "path": {}, "data_dir": ".crush" }} ] }}"#,
+            json_path_literal(&project)
         );
         setup_mock_crush_registry(
             &home.join("AppData/Local/crush/projects.json"),
@@ -4460,8 +4461,8 @@ mod tests {
         File::create(project.join(".crush").join("crush.db")).unwrap();
 
         let projects_json = format!(
-            r#"{{ "projects": [ {{ "path": "{}", "data_dir": ".crush" }} ] }}"#,
-            project.display()
+            r#"{{ "projects": [ {{ "path": {}, "data_dir": ".crush" }} ] }}"#,
+            json_path_literal(&project)
         );
         setup_mock_crush_registry(&xdg.join("crush/projects.json"), &projects_json);
         setup_mock_crush_registry(
@@ -4505,10 +4506,10 @@ mod tests {
         let projects_json = format!(
             r#"{{
   "projects": [
-    {{ "path": "{}", "data_dir": ".crush" }}
+    {{ "path": {}, "data_dir": ".crush" }}
   ]
 }}"#,
-            project.display()
+            json_path_literal(&project)
         );
         setup_mock_crush_registry(&registry_path, &projects_json);
 

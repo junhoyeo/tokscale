@@ -1674,6 +1674,7 @@ fn finalize_headless_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::json_path_literal;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
@@ -1774,8 +1775,8 @@ mod tests {
         std::fs::write(
             variant_dir.join("variant.json"),
             format!(
-                r#"{{"name":"{variant}","provider":"{provider}","configDir":"{}"}}"#,
-                config_dir.display()
+                r#"{{"name":"{variant}","provider":"{provider}","configDir":{}}}"#,
+                json_path_literal(&config_dir)
             ),
         )
         .unwrap();

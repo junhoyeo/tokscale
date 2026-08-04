@@ -1796,6 +1796,7 @@ pub(crate) fn codex_cache_entry_matches_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::json_path_literal;
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
@@ -2872,8 +2873,8 @@ mod tests {
         std::fs::write(
             &variant_path,
             format!(
-                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
-                config_dir.display()
+                r#"{{"name":"kimi-code","provider":"kimi","configDir":{}}}"#,
+                json_path_literal(&config_dir)
             ),
         )
         .unwrap();
@@ -2883,8 +2884,8 @@ mod tests {
         std::fs::write(
             &variant_path,
             format!(
-                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
-                config_dir.display()
+                r#"{{"name":"kimi-code","provider":"minimax","configDir":{}}}"#,
+                json_path_literal(&config_dir)
             ),
         )
         .unwrap();
@@ -2912,8 +2913,8 @@ mod tests {
         std::fs::write(
             &variant_path,
             format!(
-                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
-                config_dir.display()
+                r#"{{"name":"kimi-code","provider":"kimi","configDir":{}}}"#,
+                json_path_literal(&config_dir)
             ),
         )
         .unwrap();
@@ -2924,8 +2925,8 @@ mod tests {
         std::fs::write(
             &variant_path,
             format!(
-                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
-                config_dir.display()
+                r#"{{"name":"kimi-code","provider":"minimax","configDir":{}}}"#,
+                json_path_literal(&config_dir)
             ),
         )
         .unwrap();

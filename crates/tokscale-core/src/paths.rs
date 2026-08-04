@@ -224,6 +224,28 @@ pub(crate) mod test_env {
     }
 }
 
+/// Encode a filesystem path as a JSON string *literal*, quotes included, for
+/// the fixtures that hand-assemble config files with `format!`.
+///
+/// A `format!(r#"{{"configDir":"{}"}}"#, dir.display())` reads as harmless
+/// until the path contains a backslash. `C:\Users\RUNNER~1\...` puts `\U`,
+/// `\A` and `\T` inside a JSON string, none of which are escape sequences, so
+/// `serde_json::from_str` rejects the whole document. The production readers
+/// all treat an unparseable config as "absent" rather than erroring, so the
+/// test does not fail where the fixture is wrong — it fails several layers
+/// later, asserting on a discovery that silently found nothing. Real writers
+/// (Crush's Go `encoding/json`, cc-mirror's Node `JSON.stringify`) escape the
+/// separator, so the fixture was the only thing that ever produced invalid
+/// JSON.
+///
+/// Returns the quoted literal rather than the inner text so a call site cannot
+/// re-add the quotes and undo the escaping: write `"path": {}` around it, not
+/// `"path": "{}"`.
+#[cfg(test)]
+pub(crate) fn json_path_literal(path: &std::path::Path) -> String {
+    serde_json::to_string(&path.to_string_lossy()).expect("a string always serializes to JSON")
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_env::EnvGuard;

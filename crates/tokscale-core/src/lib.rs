@@ -10413,8 +10413,8 @@ mod tests {
             std::fs::write(
                 &variant_path,
                 format!(
-                    r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
-                    config_dir.display()
+                    r#"{{"name":"kimi-code","provider":"kimi","configDir":{}}}"#,
+                    paths::json_path_literal(&config_dir)
                 ),
             )
             .unwrap();
@@ -10438,8 +10438,8 @@ mod tests {
             std::fs::write(
                 &variant_path,
                 format!(
-                    r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
-                    config_dir.display()
+                    r#"{{"name":"kimi-code","provider":"minimax","configDir":{}}}"#,
+                    paths::json_path_literal(&config_dir)
                 ),
             )
             .unwrap();
@@ -10485,8 +10485,8 @@ mod tests {
             std::fs::write(
                 variant_dir.join("variant.json"),
                 format!(
-                    r#"{{"name":"plain-mirror","provider":"mirror","configDir":"{}"}}"#,
-                    claude_dir.display()
+                    r#"{{"name":"plain-mirror","provider":"mirror","configDir":{}}}"#,
+                    paths::json_path_literal(&claude_dir)
                 ),
             )
             .unwrap();
