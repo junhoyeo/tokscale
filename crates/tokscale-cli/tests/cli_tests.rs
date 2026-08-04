@@ -467,12 +467,36 @@ fn create_conflicting_codex_fixture_dir() -> TempDir {
 
 /// Build a Command pointing HOME and the XDG dirs at the given temp dir for
 /// hermetic test runs (no flags are added; callers append their own).
+/// The config root every `cmd_with_home` fixture writes into, and the value
+/// the child is told to use.
+///
+/// `HOME` plus the `XDG_*` vars locate the config dir on Unix and reach nothing
+/// on Windows: `paths::get_config_dir` resolves the Windows root through
+/// `dirs::config_dir()`, a `SHGetKnownFolderPath` call no environment variable
+/// redirects. The child therefore read the *runner's* real
+/// `%APPDATA%\tokscale\` — so a fixture's settings.json was never seen (model
+/// aliases went unfolded, `scanner.extraScanPaths` came back null, auto-pinning
+/// had nothing to pin into) and the pricing cache the fixture primed with an
+/// empty catalog was replaced by whatever real prices happened to be on the
+/// machine.
+///
+/// `TOKSCALE_CONFIG_DIR` is the one override consulted first on every platform,
+/// and on Unix it names the directory the `XDG_CONFIG_HOME` pin already
+/// produced, so nothing moves there. Setting it also means these runs no longer
+/// depend on the legacy macOS settings fallback, which is correct for a
+/// hermetic fixture: `paths.rs` documents the override as meaning exactly "do
+/// not ingest anything from outside this root".
+fn sandbox_config_dir(tmp: &Path) -> std::path::PathBuf {
+    tmp.join(".config").join("tokscale")
+}
+
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
+        .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp))
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         // Clear scan-path overrides inherited from the dev's shell, otherwise a
         // developer who exports e.g. TOKSCALE_EXTRA_DIRS=~/.codex/sessions (for
@@ -485,8 +509,7 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env_remove("GOOSE_PATH_ROOT")
         .env_remove("CODEBUFF_DATA_DIR")
         .env_remove("GEMINI_CLI_HOME")
-        .env_remove("HERMES_HOME")
-        .env_remove("TOKSCALE_CONFIG_DIR");
+        .env_remove("HERMES_HOME");
     cmd
 }
 
@@ -510,6 +533,7 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
         .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
+        .env("TOKSCALE_CONFIG_DIR", sandbox_config_dir(tmp))
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -521,8 +545,7 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env_remove("GOOSE_PATH_ROOT")
         .env_remove("CODEBUFF_DATA_DIR")
         .env_remove("GEMINI_CLI_HOME")
-        .env_remove("HERMES_HOME")
-        .env_remove("TOKSCALE_CONFIG_DIR");
+        .env_remove("HERMES_HOME");
     cmd
 }
 
@@ -666,15 +689,14 @@ fn write_settings_json(base: &Path, body: &str) {
     fs::write(path, body).unwrap();
 }
 
+/// One path on every platform: the child is given `TOKSCALE_CONFIG_DIR`, so
+/// where it looks no longer depends on the OS. The Windows arm this replaces
+/// mirrored the real `%APPDATA%` layout under the fixture home, which the child
+/// never consulted — `dirs::config_dir()` reads the known folder, not `HOME` —
+/// so the fixture and the reader disagreed and every settings-driven assertion
+/// on Windows saw an absent file.
 fn settings_json_path(base: &Path) -> std::path::PathBuf {
-    if cfg!(target_os = "windows") {
-        base.join("AppData")
-            .join("Roaming")
-            .join("tokscale")
-            .join("settings.json")
-    } else {
-        base.join(".config").join("tokscale").join("settings.json")
-    }
+    sandbox_config_dir(base).join("settings.json")
 }
 
 /// Writes a minimal clawdboard account export to `<dir>/export.json` and
@@ -2526,17 +2548,9 @@ fn add_alias_variant_message(tmp: &Path) {
 }
 
 /// Writes a tokscale `settings.json` with the given `modelAliases` object into
-/// the sandbox config dir that `cmd_with_home` points at
-/// (`XDG_CONFIG_HOME/tokscale`). `cmd_with_home` clears `TOKSCALE_CONFIG_DIR`, so
-/// the config must live under the pinned XDG path to be read.
+/// the sandbox config dir `cmd_with_home` points the child at.
 fn write_model_aliases(tmp: &Path, aliases_json: &str) {
-    let config_dir = tmp.join(".config/tokscale");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("settings.json"),
-        format!(r#"{{"modelAliases": {aliases_json}}}"#),
-    )
-    .unwrap();
+    write_settings_json(tmp, &format!(r#"{{"modelAliases": {aliases_json}}}"#));
 }
 
 fn models_by_name(tmp: &Path) -> serde_json::Value {
@@ -3816,13 +3830,10 @@ fn pin_bucket_timezone(base: &Path, zone: &str) {
 /// [`pin_bucket_timezone`] with the raw JSON value, so a test can write `null`
 /// as well as a string.
 fn pin_bucket_timezone_field(base: &Path, json_value: &str) {
-    let config_dir = base.join(".config/tokscale");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("settings.json"),
-        format!(r#"{{ "scanner": {{ "bucketTimezone": {json_value} }} }}"#),
-    )
-    .unwrap();
+    write_settings_json(
+        base,
+        &format!(r#"{{ "scanner": {{ "bucketTimezone": {json_value} }} }}"#),
+    );
 }
 
 /// Day buckets that actually carry messages, as `(date, message_count)`.
@@ -3913,7 +3924,7 @@ fn test_unpinned_first_scan_still_buckets_by_the_host_timezone() {
 #[test]
 fn test_first_run_pins_the_host_timezone_without_changing_its_own_output() {
     let tmp = create_bucket_timezone_fixture_dir();
-    let settings_path = tmp.path().join(".config/tokscale/settings.json");
+    let settings_path = settings_json_path(tmp.path());
     assert!(!settings_path.exists(), "fixture must start unpinned");
 
     let buckets = graph_day_buckets(tmp.path(), "Asia/Seoul");
@@ -4214,7 +4225,7 @@ fn test_hourly_keys_follow_the_pinned_bucket_timezone() {
 fn test_auto_pinning_never_overwrites_a_settings_file_it_could_not_read() {
     // Positive control — a readable file on this host really does get pinned.
     let control = create_bucket_timezone_fixture_dir();
-    let control_settings = control.path().join(".config/tokscale/settings.json");
+    let control_settings = settings_json_path(control.path());
     fs::create_dir_all(control_settings.parent().unwrap()).unwrap();
     fs::write(&control_settings, r#"{"colorPalette":"green"}"#).unwrap();
     graph_day_buckets(control.path(), "Asia/Seoul");
@@ -4238,7 +4249,7 @@ fn test_auto_pinning_never_overwrites_a_settings_file_it_could_not_read() {
         r#"{"colorPalette": 42, "scanner": {"extraScanPaths": {"claude": ["/data"]}}}"#,
     ] {
         let tmp = create_bucket_timezone_fixture_dir();
-        let settings_path = tmp.path().join(".config/tokscale/settings.json");
+        let settings_path = settings_json_path(tmp.path());
         fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         fs::write(&settings_path, unreadable).unwrap();
 
@@ -4263,7 +4274,7 @@ fn test_auto_pinning_never_overwrites_a_settings_file_it_could_not_read() {
 #[test]
 fn test_config_set_refuses_to_overwrite_unreadable_settings() {
     let tmp = create_bucket_timezone_fixture_dir();
-    let settings_path = tmp.path().join(".config/tokscale/settings.json");
+    let settings_path = settings_json_path(tmp.path());
     fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     let unreadable = r#"{"scanner": {"extraScanPaths": "not-a-map"}}"#;
     fs::write(&settings_path, unreadable).unwrap();
@@ -4290,10 +4301,8 @@ fn test_config_set_refuses_to_overwrite_unreadable_settings() {
 #[test]
 fn test_auto_pinning_recovers_from_a_bucket_timezone_that_names_no_zone() {
     let pinned_zone = |base: &Path| -> String {
-        let settings: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(base.join(".config/tokscale/settings.json")).unwrap(),
-        )
-        .unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(settings_json_path(base)).unwrap()).unwrap();
         settings["scanner"]["bucketTimezone"]
             .as_str()
             .unwrap_or_default()
@@ -4375,7 +4384,7 @@ fn test_auto_pinning_declines_when_settings_json_cannot_be_opened() {
         return;
     }
 
-    let settings_path = tmp.path().join(".config/tokscale/settings.json");
+    let settings_path = settings_json_path(tmp.path());
     fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     fs::write(&settings_path, r#"{"colorPalette":"green"}"#).unwrap();
     fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o000)).unwrap();
@@ -4420,10 +4429,18 @@ fn test_auto_pinning_does_not_shadow_a_legacy_settings_file_it_cannot_open() {
     fs::write(&legacy, r#"{"colorPalette":"green"}"#).unwrap();
     fs::set_permissions(&legacy, fs::Permissions::from_mode(0o000)).unwrap();
 
-    let primary = tmp.path().join(".config/tokscale/settings.json");
+    let primary = settings_json_path(tmp.path());
     assert!(!primary.exists(), "fixture must start with no primary file");
 
     cmd_with_home(tmp.path())
+        // The one test here that must run *without* the config-dir override:
+        // `Settings::load_with_origin` skips the legacy macOS read whenever
+        // `TOKSCALE_CONFIG_DIR` is set, because the override means "this root
+        // and nothing outside it". With it set there is no fallback left to
+        // shadow and the assertion below could never fail. Clearing it leaves
+        // the resolver on `$HOME/.config/tokscale`, which is the same sandbox
+        // directory — this is macOS-only, so no known-folder lookup is in play.
+        .env_remove("TOKSCALE_CONFIG_DIR")
         .env("TZ", "Asia/Seoul")
         .args(["graph", "--client", "opencode", "--no-spinner"])
         .assert()
