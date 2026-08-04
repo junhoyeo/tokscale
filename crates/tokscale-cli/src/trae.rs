@@ -1115,7 +1115,9 @@ pub mod sync {
 
     #[derive(Debug)]
     struct SyncLockGuard {
-        file: std::fs::File,
+        _os_file: std::fs::File,
+        path: std::path::PathBuf,
+        record: String,
     }
 
     impl SyncLockGuard {
@@ -1139,15 +1141,19 @@ pub mod sync {
             }
 
             let lock_path = cache_dir.join("sync.lock");
-            publish_legacy_readable_lock(&lock_path)?;
-            let file = std::fs::OpenOptions::new()
+            let record = publish_legacy_readable_lock(&lock_path)?;
+            // Do not range-lock the legacy PID file: on Windows that can
+            // make an old reader fail and then unlink the live record.
+            let os_path = cache_dir.join("sync.os.lock");
+            let os_file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
+                .create(true)
                 .truncate(false)
-                .open(&lock_path)
-                .with_context(|| format!("failed to open sync lock at {}", lock_path.display()))?;
+                .open(&os_path)
+                .with_context(|| format!("failed to open OS sync lock at {}", os_path.display()))?;
 
-            match fs2::FileExt::try_lock_exclusive(&file) {
+            match fs2::FileExt::try_lock_exclusive(&os_file) {
                 Ok(()) => {}
                 Err(e) if crate::commands::autosubmit::is_lock_contention(&e) => {
                     // Best effort: name the owner when its pid is recorded and
@@ -1166,19 +1172,19 @@ pub mod sync {
                 }
             }
 
-            Ok(Self { file })
+            Ok(Self {
+                _os_file: os_file,
+                path: lock_path,
+                record,
+            })
         }
     }
 
     impl Drop for SyncLockGuard {
         fn drop(&mut self) {
-            use std::io::Write;
-            use std::io::{Seek, SeekFrom};
-
-            let _ = fs2::FileExt::unlock(&self.file);
-            let _ = self.file.set_len(0);
-            let _ = self.file.seek(SeekFrom::Start(0));
-            let _ = writeln!(self.file, "released");
+            if std::fs::read_to_string(&self.path).ok().as_deref() == Some(&self.record) {
+                let _ = std::fs::remove_file(&self.path);
+            }
         }
     }
 
@@ -1190,39 +1196,11 @@ pub mod sync {
         Some((pid, timestamp))
     }
 
-    fn publish_legacy_readable_lock(lock_path: &std::path::Path) -> Result<()> {
+    fn publish_legacy_readable_lock(lock_path: &std::path::Path) -> Result<String> {
         if lock_path.exists() {
-            let existing = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(lock_path)
-                .with_context(|| {
-                    format!("failed to inspect sync lock at {}", lock_path.display())
-                })?;
-            match fs2::FileExt::try_lock_exclusive(&existing) {
-                Ok(()) => {}
-                Err(err) if crate::commands::autosubmit::is_lock_contention(&err) => {
-                    anyhow::bail!("another trae sync is in progress; aborting")
-                }
-                Err(err) => {
-                    return Err(anyhow::Error::new(err).context("failed to inspect sync lock"))
-                }
-            }
-            let contents = std::fs::read_to_string(lock_path).ok();
-            match contents.as_deref() {
-                Some("released\n") => {}
-                _ => match read_sync_lock(lock_path) {
-                    Some((pid, _)) if pid_is_alive(pid) => {
-                        anyhow::bail!("another trae sync is in progress (pid {pid}); aborting")
-                    }
-                    Some(_) => {}
-                    None => anyhow::bail!(
-                        "trae sync lock has an indeterminate owner; refusing to replace it"
-                    ),
-                },
-            }
-            let _ = fs2::FileExt::unlock(&existing);
-            std::fs::remove_file(lock_path)?;
+            anyhow::bail!(
+                "trae sync lock already exists; refusing to replace it during a rolling upgrade"
+            );
         }
 
         let temp_path = lock_path.with_extension(format!(
@@ -1237,11 +1215,12 @@ pub mod sync {
             .with_context(|| format!("failed to prepare sync lock at {}", temp_path.display()))?;
         writeln!(temp, "{} {}", std::process::id(), Utc::now().timestamp())?;
         drop(temp);
+        let record = std::fs::read_to_string(&temp_path)?;
 
         let published = std::fs::hard_link(&temp_path, lock_path);
         let _ = std::fs::remove_file(&temp_path);
         match published {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(record),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 let owner = read_sync_lock(lock_path)
                     .filter(|(pid, _)| pid_is_alive(*pid))
@@ -1472,12 +1451,9 @@ pub mod sync {
             let cache_dir = tmp.path();
             std::fs::write(cache_dir.join("sync.lock"), "0 1\n").unwrap();
 
-            drop(SyncLockGuard::acquire(cache_dir).expect("an unheld lock file is taken over"));
-
-            assert_eq!(
-                std::fs::read_to_string(cache_dir.join("sync.lock")).unwrap(),
-                "released\n"
-            );
+            let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
+            assert!(err.to_string().contains("already exists"));
+            assert!(cache_dir.join("sync.lock").exists());
         }
 
         /// A live PID-only lock belongs to a pre-OS-lock binary. A new
@@ -1492,7 +1468,7 @@ pub mod sync {
 
             let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
             assert!(
-                err.to_string().contains("another trae sync is in progress"),
+                err.to_string().contains("already exists"),
                 "a live legacy owner must be preserved, got: {err:#}"
             );
             assert_eq!(
@@ -1554,7 +1530,7 @@ pub mod sync {
                 .unwrap();
 
             let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
-            assert!(err.to_string().contains("indeterminate owner"));
+            assert!(err.to_string().contains("already exists"));
             assert!(lock_path.exists(), "the pending legacy inode must survive");
         }
 
@@ -1578,7 +1554,7 @@ pub mod sync {
 
             let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
             assert!(
-                err.to_string().contains("another trae sync is in progress"),
+                err.to_string().contains("already exists"),
                 "a held lock must never be evicted, got: {err:#}"
             );
 
@@ -1594,23 +1570,18 @@ pub mod sync {
 
             let guard = SyncLockGuard::acquire(cache_dir).expect("first acquire");
             let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
-            assert!(err.to_string().contains("another trae sync is in progress"));
+            assert!(err.to_string().contains("already exists"));
 
             drop(guard);
             SyncLockGuard::acquire(cache_dir).expect("the lock is free once the guard is dropped");
         }
 
         #[test]
-        fn test_acquire_marks_released_lock_after_drop() {
+        fn test_acquire_removes_its_lock_after_drop() {
             let tmp = tempfile::tempdir().unwrap();
             let cache_dir = tmp.path();
-            // Read back after the guard is dropped: Windows refuses reads of a
-            // range another handle has locked.
             drop(SyncLockGuard::acquire(cache_dir).expect("first acquire"));
-            assert_eq!(
-                std::fs::read_to_string(cache_dir.join("sync.lock")).unwrap(),
-                "released\n"
-            );
+            assert!(!cache_dir.join("sync.lock").exists());
         }
 
         #[test]
