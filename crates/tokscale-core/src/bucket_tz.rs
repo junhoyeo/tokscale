@@ -204,8 +204,10 @@ pub fn detect_local_iana_name() -> Option<String> {
 
 /// The zone this machine claims to be in, as an IANA name.
 ///
-/// `TZ` is consulted first because it is what `chrono::Local` itself honors,
-/// and `chrono::Local` is what produced every date already on disk. Falling
+/// `TZ` is consulted first *on the platforms where `chrono::Local` honors it*,
+/// because `chrono::Local` is what produced every date already on disk. It is
+/// skipped entirely on Windows, where `Local` reads the Win32 zone and the
+/// variable names somewhere the machine is not — see [`tz_env_zone`]. Falling
 /// back to `iana-time-zone` covers the normal case where `TZ` is unset.
 ///
 /// Either source can be wrong or absent; [`detect_local_iana_name`] verifies
@@ -219,10 +221,35 @@ fn candidate_local_zone() -> Option<chrono_tz::Tz> {
 /// POSIX allows a leading colon (`TZ=:Asia/Seoul`). Values that are not zone
 /// names — `TZ=EST5EDT`-style rules, `TZ=<+09>-9`, a path — return `None`;
 /// those are honored by `chrono::Local` but cannot be stored as a pinned name.
+#[cfg(unix)]
 fn tz_env_zone() -> Option<chrono_tz::Tz> {
     let raw = std::env::var("TZ").ok()?;
     let name = raw.strip_prefix(':').unwrap_or(&raw);
     name.parse::<chrono_tz::Tz>().ok()
+}
+
+/// `None` on Windows: `TZ` is not what `chrono::Local` reads there.
+///
+/// The whole reason `TZ` is offered before the detector is that `chrono::Local`
+/// honors it, which makes it the best available name for the zone that produced
+/// the dates already on disk. Windows breaks that premise — `Local` resolves
+/// `GetTimeZoneInformation` and never looks at the environment — so a `TZ`
+/// exported by Git Bash, MSYS2, a container image, or a CI job names a zone the
+/// machine is not in.
+///
+/// Offering it anyway never produced a *wrong* pin, because [`zones_agree`]
+/// rejects it. It produced no pin at all, on every run, for as long as the
+/// variable stayed set: the candidate disagreed with `Local` forever, so the
+/// device kept bucketing by `chrono::Local` and kept the rescan-splits-history
+/// bug that pinning exists to remove — silently, since declining is the safe
+/// branch and says nothing. Falling straight through to `iana-time-zone`, which
+/// maps the Win32 zone the machine is actually in, lets the agreement check
+/// pass and the device pin. The check itself is unchanged and still runs
+/// against `chrono::Local`, so nothing here can pin a zone that buckets
+/// differently from what the parsers already produced.
+#[cfg(not(unix))]
+fn tz_env_zone() -> Option<chrono_tz::Tz> {
+    None
 }
 
 /// Approximate milliseconds in a year. Only used to size the forward edge of
@@ -580,6 +607,36 @@ mod tests {
         // that can be pinned, so they must fall through to the detector.
         assert!("<+09>-9".parse::<chrono_tz::Tz>().is_err());
         assert!("/etc/localtime".parse::<chrono_tz::Tz>().is_err());
+    }
+
+    /// A `TZ` the machine is not in must not make the device unpinnable.
+    ///
+    /// Windows-only because it is the only platform where the two disagree:
+    /// `chrono::Local` reads the Win32 zone and never the environment, so
+    /// offering `TZ` as the candidate would fail [`zones_agree`] on every run
+    /// and leave the device bucketing by `chrono::Local` forever — carrying the
+    /// exact bug pinning removes, and saying nothing, because declining is the
+    /// safe branch. Mutating `TZ` here is harmless for the same reason nothing
+    /// on this platform reads it.
+    #[test]
+    #[cfg(not(unix))]
+    fn a_foreign_tz_does_not_make_a_windows_host_unpinnable() {
+        let mut env = crate::paths::test_env::EnvGuard::capture(&["TZ"]);
+        env.set("TZ", "Asia/Seoul");
+
+        assert!(
+            tz_env_zone().is_none(),
+            "TZ must not be offered as the pin candidate where chrono::Local \
+             does not read it"
+        );
+
+        let with_foreign_tz = detect_local_iana_name();
+        env.remove("TZ");
+        let without_tz = detect_local_iana_name();
+        assert_eq!(
+            with_foreign_tz, without_tz,
+            "detection must reach the same answer with and without TZ set"
+        );
     }
 
     #[test]
