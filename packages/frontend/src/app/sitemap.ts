@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { unstable_cache } from "next/cache";
 import { desc, eq } from "drizzle-orm";
 import { db, groups, submissions, users } from "@/lib/db";
 
@@ -27,29 +28,35 @@ import {
  * and a sitemap full of empty pages is the fastest way to get a site flagged
  * for thin content.
  */
-async function loadUserRows(): Promise<SitemapUserRow[]> {
-  return db
+const loadUserRows = unstable_cache(
+  async (): Promise<SitemapUserRow[]> =>
+    db
     .select({ username: users.username, updatedAt: submissions.updatedAt })
     .from(users)
     .innerJoin(submissions, eq(submissions.userId, users.id))
     .orderBy(desc(submissions.totalTokens))
-    .limit(SITEMAP_USER_LIMIT);
-}
+    .limit(SITEMAP_USER_LIMIT),
+  ["sitemap-users"],
+  { revalidate: 3600, tags: ["sitemap"] },
+);
 
 /** Private groups 404 for non-members, so only public ones can be listed. */
-async function loadGroupRows(): Promise<SitemapGroupRow[]> {
-  return db
+const loadGroupRows = unstable_cache(
+  async (): Promise<SitemapGroupRow[]> =>
+    db
     .select({ slug: groups.slug, updatedAt: groups.updatedAt })
     .from(groups)
     .where(eq(groups.isPublic, true))
     .orderBy(desc(groups.updatedAt))
-    .limit(SITEMAP_GROUP_LIMIT);
-}
+    .limit(SITEMAP_GROUP_LIMIT),
+  ["sitemap-groups"],
+  { revalidate: 3600, tags: ["sitemap"] },
+);
 
 /**
- * A sitemap is an optimization, never a hard dependency. This route runs during
- * `next build`, so an unreachable DB here would otherwise fail the deploy —
- * degrade to the core pages instead.
+ * A sitemap is an optimization, never a hard dependency. The route renders at
+ * request time so its origin follows runtime APP_URL, while its database rows
+ * are cached hourly. An unreachable DB therefore degrades to core pages.
  */
 async function loadOrEmpty<T>(
   label: string,
@@ -71,11 +78,10 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     loadOrEmpty("groups", loadGroupRows),
   ]);
 
-  // Anchored to real submission activity rather than `now`: this route
-  // revalidates hourly, so `now` would advance the core pages' lastmod every
-  // hour whether or not anything changed, which is what makes Google stop
-  // trusting the field. Falls back to `now` only when the DB is unreachable
-  // and there is nothing truthful to report.
+  // Anchored to real submission activity rather than `now`: the row loaders
+  // revalidate hourly, so `now` would advance the core pages' lastmod every
+  // hour whether or not anything changed. Falls back to `now` only when the
+  // DB is unreachable and there is nothing truthful to report.
   const coreLastModified = latestSubmissionTime(userRows) ?? now;
 
   return [
