@@ -2,6 +2,10 @@ import type { MetadataRoute } from "next";
 import { desc, eq } from "drizzle-orm";
 import { db, groups, submissions, users } from "@/lib/db";
 
+// Metadata routes do not inherit the root layout's runtime rendering mode.
+// Keep APP_URL runtime-configurable for reusable self-hosted images.
+export const dynamic = "force-dynamic";
+
 import {
   SITEMAP_GROUP_LIMIT,
   SITEMAP_USER_LIMIT,

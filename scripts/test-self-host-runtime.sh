@@ -17,7 +17,7 @@ for path in / /privacy /robots.txt /sitemap.xml; do
 done
 
 redirect="$(curl --silent --show-error --dump-header - --output /dev/null "${base_url}/api/auth/github/callback" | tr -d '\r')"
-if [[ "$redirect" != *"location: ${origin}/?error=missing_params"* ]]; then
+if ! grep -qiFx "location: ${origin}/?error=missing_params" <<<"$redirect"; then
   echo "OAuth callback did not redirect to runtime origin" >&2
   exit 1
 fi
