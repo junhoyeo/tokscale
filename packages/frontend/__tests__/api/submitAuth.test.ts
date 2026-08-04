@@ -187,6 +187,14 @@ function dailyBreakdownExecuteArgs(tx: {
     .filter((arg) => !isDailyBreakdownReportedSql(arg));
 }
 
+function dailyBreakdownReportedExecuteArgs(tx: {
+  execute: { mock: { calls: unknown[][] } };
+}): unknown[] {
+  return tx.execute.mock.calls
+    .map((call) => call[0])
+    .filter(isDailyBreakdownReportedSql);
+}
+
 describe("POST /api/submit auth path", () => {
   it("rejects invalid API tokens through the shared auth service", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({ status: "invalid" });
@@ -547,6 +555,15 @@ describe("POST /api/submit auth path", () => {
           /ON CONFLICT \(submission_id, date\)/.test(chunk),
       ),
     ).toBe(false);
+    const reportedQueries = dailyBreakdownReportedExecuteArgs(tx);
+    expect(reportedQueries).toHaveLength(1);
+    expect(flattenSqlChunks(reportedQueries[0])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO daily_breakdown_reported"),
+        "submitted-device-1",
+        "2026-04-30",
+      ]),
+    );
     expect(submissionUpdateValues).toEqual(
       expect.objectContaining({
         mcpServers: ["github", "slack"],

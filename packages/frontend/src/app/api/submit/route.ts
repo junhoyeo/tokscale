@@ -852,10 +852,10 @@ export async function POST(request: Request) {
         `);
       }
 
-      // Phase 4a shadow write — same transaction as the daily rows above, so a
-      // crash cannot leave the guarded store without its unguarded counterpart.
-      // Last-write-wins (no GREATEST): a truthful lower rescan must replace the
-      // previous report or Phase 4b cannot see the #960 emptied-day divergence.
+      // Phase 4a observation write — same transaction as the daily rows above,
+      // so an explicitly reported cell cannot commit without its unguarded
+      // counterpart. Last-write-wins (no GREATEST) for that cell only: omitted
+      // cells are not zero or absent, and this is not a whole-scan snapshot.
       if (reportedRows.length > 0) {
         await recordDailyBreakdownReported({
           executor: tx,

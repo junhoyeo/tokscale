@@ -1,12 +1,13 @@
 /**
- * Unguarded per-(device, date, client) snapshot of what the CLI last reported.
+ * Unguarded latest observation for each reported (device, date, client) cell.
  *
  * Phase 4a of `docs/ratchet-inflation-recovery.md`.
  *
  * Written inside the submit transaction alongside `daily_breakdown`, but with
  * opposite merge semantics: last-write-wins, no `GREATEST`, no regression
- * guard, no alias-fold normalisation. **Nothing reads this table** — Phase 4b
- * is the only planned consumer, and it runs offline.
+ * guard, no alias-fold normalisation. **Nothing reads this table.** This is not
+ * a whole-scan snapshot: a later payload that omits a cell leaves its prior
+ * observation intact, so omission never means zero or absence.
  */
 
 import { sql, type SQL } from "drizzle-orm";
@@ -154,11 +155,12 @@ export function foldContributionsIntoReportedRows(
 /**
  * Last-write-wins upsert of the unguarded per-(date, client) report.
  *
- * Deliberately NOT monotonic: a truthful lower rescan must replace the stored
- * shadow so Phase 4b can see the emptied-day / moved-day divergence that the
- * guarded `daily_breakdown` merge freezes over. That is also why this write
- * lives inside the submit transaction — it is the counterpart of the daily
- * write, not a deferred measurement.
+ * Deliberately NOT monotonic: the latest value explicitly reported for this
+ * cell replaces its prior observation. This does not make omitted cells
+ * authoritative; a future recovery design needs client-declared coverage plus
+ * snapshot generations or tombstones before it can reason about absence. The
+ * write lives inside the submit transaction so each observed cell is committed
+ * alongside its guarded `daily_breakdown` counterpart.
  *
  * Returns the number of rows sent.
  */

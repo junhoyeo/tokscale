@@ -6,9 +6,10 @@ totals, and the monotonic guard that causes it exists to prevent a real
 production data loss. This document proposes a correction that heals the
 inflation without weakening that protection.
 
-> **Status:** Phases 1, 1.5 and 3 are implemented. Phase 4a (shadow table write)
-> lands with `daily_breakdown_reported` — additive, nothing reads it. Phases 2,
-> 4b, 5 and 6 remain gated. Accept, reject, or amend.
+> **Status:** Phases 1, 1.5 and 3 are implemented. Phase 4a
+> (`daily_breakdown_reported`) is an additive, inert per-cell observation table;
+> nothing reads it. It is not sufficient for Phase 4b. Phases 2, 4b, 5 and 6
+> remain gated. Accept, reject, or amend.
 >
 > Several *adjacent* defects this document catalogued have since been fixed and
 > are marked inline — see "Already fixed" below.
@@ -320,9 +321,9 @@ value served is unchanged. In exchange:
   the recorded deltas agree within tolerance, for a stated share of users, over
   a stated window. "Coverage exists" is a much weaker claim than "the numbers
   match".
-- **The zero-out failure is observed rather than reasoned about.** A user whose
-  high-water sum is 0 or partial shows up as an enormous recorded delta long
-  before any read depends on it.
+- **Missing observations remain ambiguous.** The current per-cell LWW table
+  records only explicit reports; it cannot prove a missing cell was zeroed or
+  outside a partial scan.
 
 ### The table cannot be seeded from `daily_breakdown` — the warm-up is forced
 
@@ -346,8 +347,9 @@ read as `0`.
 - **Can be retired:** the `SUM(daily)` derivation *for submission totals*, once
   Phase 2 is stable and the deltas have stayed flat.
 - **Cannot be retired:** `daily_breakdown` itself. The heatmap and per-day views
-  read it, Phase 4 repairs it, and the high-water table holds bucket totals with
-  no day-level detail to replace it with.
+  read it; a future Phase 4 may repair it after authoritative snapshot support,
+  and the high-water table holds bucket totals with no day-level detail to
+  replace it with.
 
 Dual mode ends by retiring a *derivation*, not a table.
 
@@ -621,11 +623,11 @@ review what it is about to do.
 
 **Split it in two instead.**
 
-### 4a — Record what the CLI actually reported (additive, safe)
+### 4a — Record explicit cell observations (additive, safe)
 
 **Implemented** (`daily_breakdown_reported`, migration `0025_bouncy_vertigo`).
 Submit additionally writes each payload's **unguarded** per-`(device, date,
-client)` values to a shadow table:
+client)` values to an inert observation table:
 
 ```
 daily_breakdown_reported(submitted_device_id, date, client, tokens, cost,
@@ -633,34 +635,31 @@ daily_breakdown_reported(submitted_device_id, date, client, tokens, cost,
 PRIMARY KEY (submitted_device_id, date, client)
 ```
 
-Last-write-wins, no `GREATEST`, no merge, no fold normalisation — it records what
-the most recent scan said, which is the one thing the system currently throws
-away. This is a pure insert alongside the existing write, inside the same
-transaction. It cannot regress anything, because nothing reads it.
+Last-write-wins, no `GREATEST`, no merge, no fold normalisation — each write
+records the latest explicit value for that one cell, which is the one thing the
+system currently throws away. This is a pure upsert alongside the existing
+write, inside the same transaction. It cannot regress anything, because nothing
+reads it.
 
 Sized at roughly one extra `daily_breakdown`, and bounded the same way: one row
 per device per day per client, overwritten rather than accumulated.
 
-### 4b — Reconcile offline
+**It is not a whole-scan snapshot.** A later payload only upserts cells it
+contains; it does not delete or tombstone previous cells. Thus an omitted cell
+means neither zero nor absence, even when `meta.dateRange` contains that date.
+Do not infer deletes from that range. A recovery that needs absence must first
+ship a client-declared authoritative coverage contract and record snapshot
+generations or explicit tombstones under that contract.
 
-A separate, resumable job — not a request handler — compares shadow against
-stored and applies the repair per `(device, client)` when both hold:
+### 4b — Reconcile offline (not yet designed by 4a)
 
-1. **Bucket coverage** — the shadow's dates span the bucket being repaired.
-   Without it a `--since` scan's smaller total is not comparable to the stored
-   high-water for that bucket.
-2. **Invariant clears** — the shadow's token total for `C` in that bucket is at
-   least the stored high-water.
-
-**Both gates are evaluated per bucket**, and a bucket failing either is skipped
-while its neighbours proceed. Checking per bucket, like checking per client,
-keeps one shrunken period from blocking every other period's repair.
-
-An earlier draft scoped gate 1 to the whole `(device, client)` date range, which
-silently contradicted row 6c below: a device that deleted its sessions and then
-kept working fails a range-wide check outright, even though its later buckets
-are perfectly comparable. The two gates were at different granularities and the
-text never said what a coarse-gate failure did. Per-bucket for both resolves it.
+The current table alone cannot support reconciliation: it has no authoritative
+claim about omitted cells. A separate, resumable job remains the right shape,
+but it must not be implemented until a client declares exactly which cells its
+scan authoritatively covers and the server stores generations or explicit
+tombstones for those snapshots. Only then can a worker distinguish an emptied
+day from a partial scan or an out-of-scope date. `meta.dateRange` is not that
+contract and must never drive server-side deletes.
 
 ### Why this is materially safer
 
@@ -673,9 +672,9 @@ text never said what a coarse-gate failure did. Per-bucket for both resolves it.
 - **The diff is reviewable before it is applied.** `shadow ⊖ stored` is the census
   at row granularity — strictly better than the bucket ratio in Phase 1, and it
   can be read, sampled, and sanity-checked by a human before a single row changes.
-- **The zero-out becomes trivial.** A day present in stored and absent from a
-  shadow whose range covers it is unambiguously an emptied day. No inferring
-  absence from an in-flight payload.
+- **No absence conclusion is introduced.** This table is useful evidence about
+  explicit values, but without coverage and generation metadata it cannot
+  safely zero, delete, or otherwise rewrite an omitted cell.
 - **Idempotent, resumable, abortable.** Re-running converges; stopping halfway
   leaves consistent state; a bad batch stops the job instead of failing a user's
   submit.
@@ -700,41 +699,40 @@ complete"* — for alias folds:
 Same structure, different axis: fold is client-keys-within-a-day, re-split is
 days-within-a-client.
 
-### Zero, do not delete
+### No zero or delete path exists today
 
-The route has **no delete path for `daily_breakdown`**, and adding one is the
-largest source of risk here. It is also unnecessary: remove `C`'s entry from
-`source_breakdown` and let `recalculateDayTotals` (`helpers.ts:68`) recompute. A
-day that lands at zero keeps a zero row. `activeDays` already guards with
-`COUNT(DISTINCT CASE WHEN tokens > 0 …)` (`:785`), so a zero row does not inflate
-it; other consumers must be checked before shipping.
+The route has **no delete path for `daily_breakdown`**, and Phase 4a must not add
+one. In particular, do not infer a delete or zero from `meta.dateRange`: it is
+not authoritative coverage. A future recovery design may choose zero rows or
+deletes only after its client coverage and snapshot-generation/tombstone
+contract establishes that a cell is absent.
 
-### The zero-out itself is mandatory
+### A future zero-out requires authoritative snapshots
 
 **Rewriting the day that gained while the day that lost keeps its old value
 reproduces the double count exactly** — a heal without the zero-out repairs
 nothing.
 
-This is where the split earns its keep. In the submit path the signal was
-ambiguous: the per-day loop visits only days present in the payload (`:632`), and
-`aggregate_by_date` emits only days with activity, so an emptied day and a day
-outside the scan's scope are indistinguishable at request time. Against the
-shadow table the question is decidable — a day present in stored, absent from
-shadow, and inside a shadow range that covers it, is unambiguously emptied.
+The current per-cell table intentionally does not make this decision. In the
+submit path the per-day loop visits only days present in the payload (`:632`),
+and `aggregate_by_date` emits only days with activity, so an emptied day and a
+day outside the scan's scope are indistinguishable. The same remains true in an
+LWW table that retains old cells when later payloads omit them. A future design
+needs client-declared authoritative coverage plus snapshot generations or
+tombstones before it can identify an emptied cell safely.
 
-### Assert, then commit
+### Future recovery validation
 
-After rewriting `C`, verify `SUM(stored daily for C over the range) == SUM(shadow
-for C over the same range)` inside the batch transaction and roll back on
-mismatch. This turns a silent corruption into a caught error and a preserved
-account — and unlike the in-submit design, a rollback here costs a retry of one
-batch rather than a failed user submission.
+If a future snapshot-based worker rewrites `C`, it must validate its result
+against the authoritative generation inside the batch transaction and roll back
+on mismatch. Comparing the current LWW rows alone is insufficient because they
+cannot establish what an omitted cell means.
 
-### Bound the writes
+### Future write bounds
 
-Touch only rows where stored differs from shadow. A re-split changes a small
-fraction of a long history, and the comparison is now a plain table diff rather
-than something reconstructed per request.
+A future snapshot-based worker should touch only cells that differ from its
+authoritative generation. The current LWW observations alone are not a safe
+comparison set because they do not represent omitted cells.
 
 ### Interactions — what the split neutralises, and what survives it
 
@@ -827,35 +825,37 @@ population is real.
 
 ## Behavior for every user state
 
-P2 fixes ranked totals; P3 removes the cause; P4 fixes day-level rows.
+P2 fixes ranked totals; P3 removes the cause; a future Phase 4 may fix day-level
+rows once authoritative snapshots exist.
 
 | # | User state | P2 | P4 | Outcome |
 |---|---|---|---|---|
 | 1 | Never submitted | n/a | n/a | Plain insert. |
 | 2 | Healthy, stable TZ | correct | no-op | Payload equals stored. |
 | 3 | Healthy, multi-device | correct, additive | per-device | `UNIQUE(submission_id, submitted_device_id, date)` scopes every write. |
-| 4 | **TZ-inflated, sessions intact** | **fixed to within the boundary leak** | **healed** | P3 stops it recurring. |
-| 5 | TZ-inflated, multi-device | fixed | per-device | Each device heals independently. |
+| 4 | **TZ-inflated, sessions intact** | **fixed to within the boundary leak** | gated | P3 stops it recurring. |
+| 5 | TZ-inflated, multi-device | fixed | gated | Requires authoritative snapshots per device. |
 | 6 | **Deleted sessions (`d9df8c9c`)** | high-water held | blocked | Protected exactly as today. |
 | 6b | Sessions moved where the collector does not scan | held | blocked, temporarily | Self-resolves once support lands. |
-| 6c | **Deleted sessions, then kept working** | earlier buckets hold, later buckets grow | later buckets heal | Bucket width bounds how long new work stays invisible. Narrower is better here. |
+| 6c | **Deleted sessions, then kept working** | earlier buckets hold, later buckets grow | gated | Requires authoritative snapshots per bucket. |
 | 7 | Deleted sessions *and* changed TZ | held | blocked | No loss, no healing. Phase 6. |
 | 8 | Retired device | contributes its peak | never runs | Pre-existing, not worsened. |
 | 9 | No high-water yet | falls back to stored | blocked | One-submit warm-up. A missing baseline must not be read as `0`. |
 | 10 | Legacy device-less CLI | max, not sum, across machines | n/a | Pre-#517 behavior, now visible rather than hidden. |
-| 11 | `--client codex` submitter | correct for codex | codex heals | Other clients absent from `submittedClients`, untouched. |
-| 12 | `--since` submitter | correct | blocked | Fails range coverage; heals on the next full scan. |
+| 11 | `--client codex` submitter | correct for codex | gated | Other clients need explicit coverage status. |
+| 12 | `--since` submitter | correct | gated | `meta.dateRange` cannot prove full coverage. |
 | 13 | Backfill user | **additive** via `origin` | excluded | The `origin` key stops import and CLI overwriting each other. |
 | 14 | #961 partial `session_model_usage` | correct | that client blocked | Others still heal. Phase 5. |
 | 15 | Parser regression | held | blocked | Correctly defended. |
 | 16 | Client with an active alias fold | correct | excluded | Fold heal runs first. |
 | 17 | Hidden / moderated user | orthogonal | orthogonal | `leaderboardHidden` affects ranking only. |
-| 18 | Alternating TZ daily | fixed to within the leak | heals each scan | P3 eliminates it at the source. |
+| 18 | Alternating TZ daily | fixed to within the leak | gated | P3 eliminates it at the source. |
 
 ## Known holes
 
 - **Phase 2 bounds inflation, it does not eliminate it.** The boundary leak
-  survives until Phase 3 pins the key or Phase 4 repairs the rows.
+  survives until Phase 3 pins the key or a future snapshot-authorized Phase 4
+  repairs the rows.
 - **Filtered *all-time* leaderboards still over-count, independently of all of
   this.** The period boards were fixed in `cb65bbbf` (#988) and `e80b44a3`
   (#991); both now sum only the matching slice through

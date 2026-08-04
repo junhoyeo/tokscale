@@ -392,15 +392,18 @@ export const dailyBreakdownRelations = relations(dailyBreakdown, ({ one }) => ({
 // DAILY BREAKDOWN REPORTED (ratchet-inflation shadow, Phase 4a)
 // ============================================================================
 /**
- * Unguarded per-(device, date, client) values from the most recent scan.
+ * Unguarded latest observations for reported (device, date, client) cells.
  *
  * Phase 4a of docs/ratchet-inflation-recovery.md. **Nothing reads this table.**
- * It records what the CLI actually reported, which the monotonic merge on
- * `daily_breakdown` throws away. Phase 4b reconciles the two offline.
+ * It records explicit cell reports that the monotonic merge on
+ * `daily_breakdown` throws away. It is not a whole-scan snapshot and has no
+ * reader or recovery behavior today.
  *
  * Merge semantics: last-write-wins on conflict. No `GREATEST`, no regression
- * guard, no alias-fold normalisation. A `--since` scan that omits a day does
- * not touch that day's shadow row — absence is not zero.
+ * guard, no alias-fold normalisation. A `--since` scan that omits a cell does
+ * not touch that cell's row — absence is not zero. A future recovery workflow
+ * needs client-declared authoritative coverage and snapshot generations or
+ * tombstones before an omitted cell can be treated as absent.
  *
  * **Never backfill this from `daily_breakdown`.** The stored rows are the
  * inflated values this table exists to contradict; seeding from them would
@@ -408,8 +411,8 @@ export const dailyBreakdownRelations = relations(dailyBreakdown, ({ one }) => ({
  *
  * `origin` is a plain column, not part of the primary key. Unlike
  * `submitted_device_client_totals`, a later scan of either origin replaces the
- * previous report for that (device, date, client) outright — the shadow is a
- * snapshot of the latest payload, not a high-water across provenance streams.
+ * previous explicit observation for that (device, date, client) outright — it
+ * is a per-cell LWW table, not a complete payload snapshot or high-water.
  */
 export const dailyBreakdownReported = pgTable(
   "daily_breakdown_reported",

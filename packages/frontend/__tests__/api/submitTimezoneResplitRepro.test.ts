@@ -20,9 +20,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 // WITHIN a day, and the emptied day is not part of the payload at all.
 //
 // These tests characterize CURRENT submit behavior (the inflation is real and
-// silent). Phase 4a (`daily_breakdown_reported`) now records the unguarded
-// payload alongside the guarded store so Phase 4b can heal offline — the
-// served `totalTokens` is unchanged. The CLI-side fix in #1016
+// silent). Phase 4a (`daily_breakdown_reported`) now records each explicitly
+// reported unguarded cell alongside the guarded store — the served
+// `totalTokens` is unchanged. It is not a whole-scan snapshot: omitted cells
+// remain unknowable without client-declared coverage plus generations or
+// tombstones. The CLI-side fix in #1016
 // (pinned `scanner.bucketTimezone`) stops new re-splits from pinned devices;
 // the last test asserts the server-side consequence -- a same-day rescan
 // merges flat instead of inflating.
@@ -504,9 +506,9 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
       false,
     );
 
-    // Phase 4a: the shadow records the unguarded truth (moved day only). The
-    // emptied Seoul day is absent from the payload, so it is absent from the
-    // shadow write too — that absence is what Phase 4b needs to see.
+    // Phase 4a records the unguarded observation for the moved day only. The
+    // Seoul day is not written by this payload, but that does not establish it
+    // as absent: an earlier observation for the cell could remain in the table.
     const shadowSqls = executedSqlArgs.filter((arg) => {
       const parts: string[] = [];
       collectStrings(arg, parts);
