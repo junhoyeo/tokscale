@@ -293,9 +293,13 @@ describe("recordDailyBreakdownReported upsert", () => {
     expect(executor.queries).toEqual([]);
   });
 
-  it("chunks large payloads under the Postgres bind-parameter cap", async () => {
+  it("chunks inserts so each statement stays under the Postgres bind-parameter cap", async () => {
+    // Postgres caps a statement at 65,535 binds. Each observation row binds 10
+    // params, so 6,554 unchunked rows would overflow. The module chunks at
+    // 1000; this payload forces several insert statements and pins that none
+    // of them approach the hard cap.
     const executor = capturingExecutor();
-    const padded = Array.from({ length: 1001 }, (_, i) => ({
+    const padded = Array.from({ length: 6554 }, (_, i) => ({
       date: "2020-01-01",
       client: `client-${i}`,
       tokens: 1,
@@ -312,12 +316,16 @@ describe("recordDailyBreakdownReported upsert", () => {
       rows: padded,
     });
 
-    expect(executor.queries).toHaveLength(2);
+    expect(executor.queries.length).toBeGreaterThan(1);
     expect(
       executor.queries.every((q) =>
         q.sql.includes("INSERT INTO daily_breakdown_reported")
       )
     ).toBe(true);
+    expect(executor.queries.every((q) => q.params.length <= 65_535)).toBe(true);
+    expect(
+      Math.max(...executor.queries.map((q) => q.params.length))
+    ).toBeLessThanOrEqual(1000 * 10);
   });
 });
 

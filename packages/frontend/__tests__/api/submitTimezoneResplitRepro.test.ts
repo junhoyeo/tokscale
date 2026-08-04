@@ -509,6 +509,9 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
     // Phase 4a records the unguarded observation for the moved day only. The
     // Seoul day is not written by this payload, but that does not establish it
     // as absent: an earlier observation for the cell could remain in the table.
+    // Assert on calendar-date binds only (`YYYY-MM-DD`), not on `reported_at`
+    // ISO timestamps that can collide with the fixture dates when the suite
+    // runs on that UTC day.
     const shadowSqls = executedSqlArgs.filter((arg) => {
       const parts: string[] = [];
       collectStrings(arg, parts);
@@ -524,10 +527,13 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
         (s) => typeof s === "string" && s.includes("GREATEST"),
       ),
     ).toBe(false);
-    expect(shadowParts).toContain("2026-03-02");
     expect(shadowParts).toContain("claude");
     expect(shadowParts).toContain(1000);
-    expect(shadowParts).not.toContain("2026-03-03");
+    const calendarDates = shadowParts.filter(
+      (value): value is string =>
+        typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value),
+    );
+    expect(calendarDates).toEqual(["2026-03-02"]);
   });
 
   it("lets the regression guard preserve the client that moved off a day", async () => {
