@@ -1171,12 +1171,71 @@ impl PricingLookup {
         usage: &TokenBreakdown,
     ) -> f64 {
         let provider_id = normalize_provider_hint(provider_id);
-        let result = match self.lookup_with_provider(model_id, provider_id) {
+        let result = match self.resolve_for_usage(model_id, provider_id, usage) {
             Some(r) => r,
             None => return 0.0,
         };
 
         compute_cost_for_lookup(&result, provider_id, usage)
+    }
+
+    pub(crate) fn covers_usage_with_provider(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> bool {
+        self.resolve_for_usage(model_id, provider_id, usage)
+            .is_some_and(|result| result.pricing.covers_usage(usage))
+    }
+
+    /// Resolve `model_id` for pricing `usage`, borrowing the rates the
+    /// provider-hinted row omits from the canonical unhinted row.
+    ///
+    /// A provider hint can steer resolution onto a gateway or reseller key
+    /// that lists input and output rates only — OpenRouter's
+    /// `openai/gpt-5.2-codex` and LiteLLM's `gmi/google/gemini-3-pro-preview`
+    /// both do — while the canonical key for the same model publishes the
+    /// cache rates as well. Pricing the hinted row alone bills cached tokens
+    /// at zero and makes `covers_usage` false, which aborted whole
+    /// submissions for every Codex session (#1013).
+    ///
+    /// Only buckets the hinted row cannot price are filled, so a reseller row
+    /// keeps its own markup rather than silently repricing to the author's
+    /// cheaper rate. If the filled row still cannot cover the usage, the
+    /// hinted row is returned unchanged and the usage stays unpriced.
+    fn resolve_for_usage(
+        &self,
+        model_id: &str,
+        provider_id: Option<&str>,
+        usage: &TokenBreakdown,
+    ) -> Option<LookupResult> {
+        let hinted = self.lookup_with_provider(model_id, provider_id)?;
+        if normalize_provider_hint(provider_id).is_none() || hinted.pricing.covers_usage(usage) {
+            return Some(hinted);
+        }
+
+        let Some(canonical) = self.lookup_with_provider(model_id, None) else {
+            return Some(hinted);
+        };
+        if canonical.matched_key == hinted.matched_key {
+            return Some(hinted);
+        }
+
+        let filled = hinted
+            .pricing
+            .with_missing_rates_from(&canonical.pricing, usage);
+        if !filled.covers_usage(usage) {
+            return Some(hinted);
+        }
+
+        // Keep the hinted row's source and matched key: `compute_cost_for_lookup`
+        // branches on both for OpenAI's full-request 272k tiering, so borrowing
+        // rates must not change which pricing model applies.
+        Some(LookupResult {
+            pricing: filled,
+            ..hinted
+        })
     }
 }
 
@@ -3219,14 +3278,18 @@ mod tests {
             reasoning: 0,
         };
 
-        // Neither row covers both populated buckets. Retain the provider row
-        // rather than replacing it with an unhinted row that silently prices
-        // the input bucket at zero.
+        // Neither row covers both populated buckets on its own. The provider
+        // row keeps its own input rate (1.0) and only borrows the output rate
+        // it does not publish (2.0). The hazard this guards against — the
+        // unhinted row replacing the provider row wholesale, pricing input at
+        // zero — would total 2.0, and pricing the unfilled output bucket at
+        // zero would total 1.0.
         assert_eq!(
             lookup.calculate_cost_with_provider("gpt-fallback-guard", Some("azure"), &usage),
-            1.0
+            3.0
         );
     }
+
     #[test]
     fn test_provider_hint_normalizes_openai_codex_alias() {
         let mut litellm = HashMap::new();

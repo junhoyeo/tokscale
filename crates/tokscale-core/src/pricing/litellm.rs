@@ -38,6 +38,75 @@ impl ModelPricing {
             && (usage.cache_write <= 0 || valid_rate(self.cache_creation_input_token_cost))
     }
 
+    /// A copy of this row with rates taken from `fallback` for the buckets
+    /// `usage` populates but this row cannot price.
+    ///
+    /// Rates already present here are never overwritten, so a reseller row
+    /// keeps its own markup and only gains the buckets it omits. Each bucket
+    /// is filled together with its long-context tiers, so a tiered walk never
+    /// mixes base and above-threshold rates from two different rows.
+    pub(crate) fn with_missing_rates_from(
+        &self,
+        fallback: &Self,
+        usage: &crate::TokenBreakdown,
+    ) -> Self {
+        let valid_rate =
+            |rate: Option<f64>| rate.is_some_and(|rate| rate.is_finite() && rate >= 0.0);
+        let mut filled = self.clone();
+
+        if usage.input > 0
+            && !valid_rate(filled.input_cost_per_token)
+            && valid_rate(fallback.input_cost_per_token)
+        {
+            filled.input_cost_per_token = fallback.input_cost_per_token;
+            filled.input_cost_per_token_above_128k_tokens =
+                fallback.input_cost_per_token_above_128k_tokens;
+            filled.input_cost_per_token_above_200k_tokens =
+                fallback.input_cost_per_token_above_200k_tokens;
+            filled.input_cost_per_token_above_256k_tokens =
+                fallback.input_cost_per_token_above_256k_tokens;
+            filled.input_cost_per_token_above_272k_tokens =
+                fallback.input_cost_per_token_above_272k_tokens;
+        }
+
+        if (usage.output > 0 || usage.reasoning > 0)
+            && !valid_rate(filled.output_cost_per_token)
+            && valid_rate(fallback.output_cost_per_token)
+        {
+            filled.output_cost_per_token = fallback.output_cost_per_token;
+            filled.output_cost_per_token_above_128k_tokens =
+                fallback.output_cost_per_token_above_128k_tokens;
+            filled.output_cost_per_token_above_200k_tokens =
+                fallback.output_cost_per_token_above_200k_tokens;
+            filled.output_cost_per_token_above_256k_tokens =
+                fallback.output_cost_per_token_above_256k_tokens;
+            filled.output_cost_per_token_above_272k_tokens =
+                fallback.output_cost_per_token_above_272k_tokens;
+        }
+
+        if usage.cache_read > 0
+            && !valid_rate(filled.cache_read_input_token_cost)
+            && valid_rate(fallback.cache_read_input_token_cost)
+        {
+            filled.cache_read_input_token_cost = fallback.cache_read_input_token_cost;
+            filled.cache_read_input_token_cost_above_200k_tokens =
+                fallback.cache_read_input_token_cost_above_200k_tokens;
+            filled.cache_read_input_token_cost_above_272k_tokens =
+                fallback.cache_read_input_token_cost_above_272k_tokens;
+        }
+
+        if usage.cache_write > 0
+            && !valid_rate(filled.cache_creation_input_token_cost)
+            && valid_rate(fallback.cache_creation_input_token_cost)
+        {
+            filled.cache_creation_input_token_cost = fallback.cache_creation_input_token_cost;
+            filled.cache_creation_input_token_cost_above_200k_tokens =
+                fallback.cache_creation_input_token_cost_above_200k_tokens;
+        }
+
+        filled
+    }
+
     pub(crate) fn has_any_usable_base_rate(&self) -> bool {
         [
             self.input_cost_per_token,

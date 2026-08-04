@@ -397,10 +397,12 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> bool {
-        let Some(result) = self.lookup_with_source_and_provider(model_id, None, provider_id) else {
-            return false;
-        };
-        result.pricing.covers_usage(usage)
+        if let Some(result) = self.custom.lookup_with_key(model_id) {
+            return result.pricing.covers_usage(usage);
+        }
+
+        self.lookup
+            .covers_usage_with_provider(model_id, provider_id, usage)
     }
 
     fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
@@ -451,6 +453,124 @@ mod tests {
             openrouter,
             models_dev,
         )
+    }
+
+    fn cache_read_usage() -> TokenBreakdown {
+        TokenBreakdown {
+            input: 1_000_000,
+            output: 0,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            reasoning: 0,
+        }
+    }
+
+    // Regression: #1013. Submission validation judged bucket coverage against
+    // the provider-hinted row alone. For `openai/gpt-5.2-codex` the hint lands
+    // on an OpenRouter row with no cache-read rate while the canonical LiteLLM
+    // row publishes one, so every Codex session — which always carries cached
+    // tokens — was reported as unpriced and aborted the whole submission.
+    #[test]
+    fn hinted_row_missing_a_cache_rate_still_covers_usage() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure/codex-cache-gap".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-5),
+                output_cost_per_token: Some(1e-4),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "codex-cache-gap".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(1e-5),
+                cache_read_input_token_cost: Some(1e-7),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+
+        assert!(service.covers_usage_with_provider(
+            "codex-cache-gap",
+            Some("azure"),
+            &cache_read_usage()
+        ));
+    }
+
+    // Guard for the fix above: borrowing must never reach a bucket the hinted
+    // row already prices, otherwise a reseller row (e.g. `azure_ai/` at a
+    // markup over `xai/`) would silently reprice to the author's cheaper rate.
+    #[test]
+    fn covered_hinted_row_is_not_replaced_by_the_canonical_row() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure/marked-up-model".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-5),
+                cache_read_input_token_cost: Some(1e-6),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "marked-up-model".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-7),
+                cache_read_input_token_cost: Some(1e-8),
+                ..Default::default()
+            },
+        );
+        let service = PricingService::new(litellm, HashMap::new());
+        let usage = cache_read_usage();
+
+        assert!(service.covers_usage_with_provider("marked-up-model", Some("azure"), &usage));
+        let cost = service.calculate_cost_with_provider("marked-up-model", Some("azure"), &usage);
+        assert!(
+            (cost - 11.0).abs() < 1e-9,
+            "reseller markup must survive: {cost}"
+        );
+    }
+
+    // A model nothing can price must still be rejected, so submissions never
+    // silently bill genuinely unknown usage at zero.
+    #[test]
+    fn usage_stays_uncovered_when_no_resolution_prices_the_bucket() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure/no-cache-anywhere".to_string(),
+            model_pricing(1e-5, 1e-4),
+        );
+        litellm.insert("no-cache-anywhere".to_string(), model_pricing(1e-6, 1e-5));
+        let service = PricingService::new(litellm, HashMap::new());
+
+        assert!(!service.covers_usage_with_provider(
+            "no-cache-anywhere",
+            Some("azure"),
+            &cache_read_usage()
+        ));
+    }
+
+    // Custom overrides are exact-only and provider-agnostic, so they must be
+    // consulted before any provider-hinted resolution or bucket borrowing.
+    #[test]
+    fn custom_pricing_decides_coverage_before_any_fallback() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "custom-covered-model".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                cache_read_input_token_cost: Some(1e-7),
+                ..Default::default()
+            },
+        );
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+
+        assert!(service.covers_usage_with_provider(
+            "custom-covered-model",
+            Some("azure"),
+            &cache_read_usage()
+        ));
     }
 
     // Regression: #1002. A LiteLLM fetch failure used to propagate out of
