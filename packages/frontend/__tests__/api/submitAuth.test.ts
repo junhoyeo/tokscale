@@ -169,6 +169,24 @@ function flattenSqlChunks(node: unknown): unknown[] {
   return [node];
 }
 
+// Phase 4a writes `daily_breakdown_reported` in the same transaction, so raw
+// `tx.execute` call counts include that shadow upsert. Tests that pin the
+// guarded daily_breakdown path filter it out.
+function isDailyBreakdownReportedSql(node: unknown): boolean {
+  return flattenSqlChunks(node).some(
+    (chunk) =>
+      typeof chunk === "string" && chunk.includes("daily_breakdown_reported")
+  );
+}
+
+function dailyBreakdownExecuteArgs(tx: {
+  execute: { mock: { calls: unknown[][] } };
+}): unknown[] {
+  return tx.execute.mock.calls
+    .map((call) => call[0])
+    .filter((arg) => !isDailyBreakdownReportedSql(arg));
+}
+
 describe("POST /api/submit auth path", () => {
   it("rejects invalid API tokens through the shared auth service", async () => {
     mockState.authenticatePersonalToken.mockResolvedValue({ status: "invalid" });
@@ -504,8 +522,8 @@ describe("POST /api/submit auth path", () => {
       deviceKey: "dev_test",
       displayName: "Test device",
     }));
-    expect(tx.execute).toHaveBeenCalledTimes(1);
-    const insertChunks = flattenSqlChunks(tx.execute.mock.calls[0][0]);
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(1);
+    const insertChunks = flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[0]);
     expect(insertChunks).toEqual(
       expect.arrayContaining([
         expect.stringContaining("INSERT INTO daily_breakdown"),
@@ -703,10 +721,10 @@ describe("POST /api/submit auth path", () => {
     expect(tx.insert).toHaveBeenCalledWith(expect.objectContaining({
       id: "submittedDevices.id",
     }));
-    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(1);
     // A same-device update keeps ownership implicit in the selected row and
     // must not rewrite submitted_device_id.
-    expect(flattenSqlChunks(tx.execute.mock.calls[0][0])).not.toEqual(
+    expect(flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[0])).not.toEqual(
       expect.arrayContaining(["submitted-device-1"]),
     );
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
@@ -886,8 +904,8 @@ describe("POST /api/submit auth path", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(tx.execute).toHaveBeenCalledTimes(2);
-    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(2);
+    expect(flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[1])).toEqual(
       expect.arrayContaining([
         expect.stringContaining("INSERT INTO daily_breakdown"),
         "submitted-device-phone",
@@ -1090,7 +1108,7 @@ describe("POST /api/submit auth path", () => {
 
     expect(response.status).toBe(200);
     expect(dailyInsertValues).toBeUndefined();
-    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(1);
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       existingBreakdown,
       {
@@ -1290,8 +1308,8 @@ describe("POST /api/submit auth path", () => {
 
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
-    expect(tx.execute).toHaveBeenCalledTimes(2);
-    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(2);
+    expect(flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[1])).toEqual(
       expect.arrayContaining([
         expect.stringContaining("INSERT INTO daily_breakdown"),
         "submission-1",
@@ -1355,7 +1373,7 @@ describe("POST /api/submit auth path", () => {
     // The ON CONFLICT arm is unreachable while the per-user submissions row
     // lock holds, but it must not be a silent hole in the monotonic guard if
     // that ever changes (or if duplicate dates straddle an INSERT chunk).
-    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+    expect(flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[1])).toEqual(
       expect.arrayContaining([
         expect.stringContaining("GREATEST(daily_breakdown.active_time_ms"),
       ]),
@@ -1547,8 +1565,8 @@ describe("POST /api/submit auth path", () => {
 
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
-    expect(tx.execute).toHaveBeenCalledTimes(1);
-    const updateChunks = flattenSqlChunks(tx.execute.mock.calls[0][0]);
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(1);
+    const updateChunks = flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[0]);
     expect(updateChunks).toEqual(
       expect.arrayContaining([
         expect.stringContaining("UPDATE daily_breakdown"),
@@ -1760,7 +1778,7 @@ describe("POST /api/submit auth path", () => {
     expect(response.status).toBe(200);
     // 9_000, not the stored 2_000: the monotonic guard preserves the LARGER
     // value, it does not freeze the row at whatever landed first.
-    const updateChunks = flattenSqlChunks(tx.execute.mock.calls[0][0]);
+    const updateChunks = flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[0]);
     expect(updateChunks).toEqual(expect.arrayContaining([9_000]));
     expect(updateChunks).not.toEqual(expect.arrayContaining([2_000]));
 
@@ -1965,7 +1983,7 @@ describe("POST /api/submit auth path", () => {
 
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
-    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(2);
     expect(mockState.mergeClientBreakdownsWithRegressionGuard).toHaveBeenCalledWith(
       legacyBreakdown,
       incomingBreakdownWithProvenance,
@@ -2252,8 +2270,8 @@ describe("POST /api/submit auth path", () => {
 
     expect(response.status).toBe(200);
     expect(tx.insert).toHaveBeenCalledTimes(1);
-    expect(tx.execute).toHaveBeenCalledTimes(2);
-    expect(flattenSqlChunks(tx.execute.mock.calls[1][0])).toEqual(
+    expect(dailyBreakdownExecuteArgs(tx)).toHaveLength(2);
+    expect(flattenSqlChunks(dailyBreakdownExecuteArgs(tx)[1])).toEqual(
       expect.arrayContaining([
         expect.stringContaining("INSERT INTO daily_breakdown"),
         "submission-1",
