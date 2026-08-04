@@ -1236,6 +1236,16 @@ make tui         # launch
 
 `make tui` runs the container with your current host UID and GID, creates only `~/.config/tokscale` and `~/.cache/tokscale` if needed, and mounts those two directories read-write. Session-data mounts stay read-only, so the container cannot create root-owned files in your client directories. If you call Compose directly instead of `make tui`, set `TOKSCALE_UID=$(id -u)` and `TOKSCALE_GID=$(id -g)` and create those two writable directories yourself.
 
+The default TUI profile deliberately does **not** bind client-data directories: rootful Docker creates a missing bind source as root even for read-only mounts. Opt in only to paths that already exist on your machine, for example:
+
+```bash
+TOKSCALE_UID=$(id -u) TOKSCALE_GID=$(id -g) \
+  docker compose --profile tui run --rm \
+  -v "$HOME/.claude:/home/tokscale/.claude:ro" tui
+```
+
+Add equivalent `-v` flags for the clients you use. This keeps the default command from creating arbitrary host client directories.
+
 **Other common targets:**
 
 ```bash

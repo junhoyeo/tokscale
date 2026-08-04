@@ -66,15 +66,6 @@ services:
       # `make tui` creates them as the invoking host user before Compose starts.
       - ${HOME}/.config/tokscale:/home/tokscale/.config/tokscale
       - ${HOME}/.cache/tokscale:/home/tokscale/.cache/tokscale
-      # Client data directories — add or remove mounts for the clients you use.
-      # All paths are read-only; the TUI only reads session data.
-      - ${HOME}/.claude:/home/tokscale/.claude:ro
-      # VS Code extensions (Cline / Roo / Claude Dev) — Linux path
-      - ${HOME}/.config/Code/User/globalStorage:/home/tokscale/.config/Code/User/globalStorage:ro
-      # Cursor
-      - ${HOME}/.config/Cursor/User/globalStorage:/home/tokscale/.config/Cursor/User/globalStorage:ro
-      # Zed
-      - ${HOME}/.local/share/zed:/home/tokscale/.local/share/zed:ro
 
 volumes:
   postgres_data:

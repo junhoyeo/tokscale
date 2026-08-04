@@ -3,6 +3,8 @@ import Link from "next/link";
 import { LegalPageShell } from "@/components/layout/LegalPageShell";
 import { legalUrl } from "@/lib/seo/urls";
 
+export const dynamic = "force-dynamic";
+
 const DESCRIPTION =
   "What Tokscale collects, what it never collects, and how to delete your data. Tokscale records token counts and costs only — never prompts, responses, or source code.";
 

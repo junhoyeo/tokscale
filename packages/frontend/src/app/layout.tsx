@@ -4,7 +4,6 @@ import NextTopLoader from "nextjs-toploader";
 import { ToastContainer } from "react-toastify";
 import { Analytics } from "@vercel/analytics/next";
 import { Providers } from "@/lib/providers";
-import { SITE_URL } from "@/lib/seo/urls";
 import "./globals.css";
 import "react-toastify/dist/ReactToastify.css";
 
@@ -23,7 +22,6 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Tokscale - AI Token Usage Tracker & Leaderboard",
   description: "Track, visualize, and compete on AI coding assistant token usage across Claude Code, Cursor, OpenCode, Codex, Gemini, Kimi, and Qwen. The Kardashev Scale for AI Devs.",
-  metadataBase: new URL(SITE_URL),
   icons: {
     icon: [
       { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
@@ -36,11 +34,10 @@ export const metadata: Metadata = {
     title: "Tokscale - AI Token Usage Tracker & Leaderboard",
     description: "Track, visualize, and compete on AI coding assistant token usage across Claude Code, Cursor, OpenCode, Codex, Gemini, Kimi, and Qwen. The Kardashev Scale for AI Devs.",
     type: "website",
-    url: SITE_URL,
     siteName: "Tokscale",
     images: [
       {
-        url: `${SITE_URL}/og-image.png`,
+        url: "/og-image.png",
         width: 1200,
         height: 630,
         alt: "Tokscale - AI Token Usage Tracker",
@@ -51,7 +48,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Tokscale - AI Token Usage Tracker & Leaderboard",
     description: "Track, visualize, and compete on AI coding assistant token usage across Claude Code, Cursor, OpenCode, Codex, Gemini, Kimi, and Qwen.",
-    images: [`${SITE_URL}/og-image.png`],
+    images: ["/og-image.png"],
   },
 };
 

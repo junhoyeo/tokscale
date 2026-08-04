@@ -3,6 +3,8 @@ import Link from "next/link";
 import { LegalPageShell } from "@/components/layout/LegalPageShell";
 import { legalUrl } from "@/lib/seo/urls";
 
+export const dynamic = "force-dynamic";
+
 const DESCRIPTION =
   "The terms for using Tokscale: acceptable use of the leaderboard, the public nature of submitted data, and the limits of the cost estimates it reports.";
 
