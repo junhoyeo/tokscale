@@ -9,8 +9,6 @@ import { getGroupBySlug, getGroupMemberCount } from "@/lib/groups/queries";
 import { groupUrl } from "@/lib/seo/urls";
 import GroupDetailClient from "./GroupDetailClient";
 
-export const dynamic = "force-dynamic";
-
 interface GroupPageProps {
   params: Promise<{ slug: string }>;
 }

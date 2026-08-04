@@ -2,10 +2,9 @@ import { Navigation } from "@/components/layout/Navigation";
 import { ServiceFooter } from "@/components/layout/ServiceFooter";
 
 /**
- * Shell for the static legal/informational pages.
+ * Shell for legal/informational pages.
  *
- * A server component on purpose: this content never changes per request, so
- * rendering it on the server keeps it in the initial HTML for crawlers and
+ * A server component keeps the prose in the initial HTML for crawlers and
  * ships no client JS for the prose itself.
  */
 export function LegalPageShell({

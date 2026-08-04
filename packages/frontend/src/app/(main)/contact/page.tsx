@@ -3,8 +3,6 @@ import Link from "next/link";
 import { LegalPageShell } from "@/components/layout/LegalPageShell";
 import { legalUrl } from "@/lib/seo/urls";
 
-export const dynamic = "force-dynamic";
-
 const DESCRIPTION =
   "How to reach the maintainer of Tokscale — bug reports, client support requests, incorrect leaderboard data, and privacy questions.";
 

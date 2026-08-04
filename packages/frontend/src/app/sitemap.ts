@@ -2,7 +2,6 @@ import type { MetadataRoute } from "next";
 import { desc, eq } from "drizzle-orm";
 import { db, groups, submissions, users } from "@/lib/db";
 
-export const dynamic = "force-dynamic";
 import {
   SITEMAP_GROUP_LIMIT,
   SITEMAP_USER_LIMIT,
@@ -13,11 +12,6 @@ import {
   type SitemapGroupRow,
   type SitemapUserRow,
 } from "@/lib/seo/sitemap";
-
-// Regenerated hourly. Crawlers re-fetch a sitemap far less often than that, so
-// anything shorter just spends DB time; anything longer delays new profiles
-// getting discovered.
-export const revalidate = 3600;
 
 /**
  * Profiles worth indexing, ranked so that truncation at SITEMAP_USER_LIMIT
