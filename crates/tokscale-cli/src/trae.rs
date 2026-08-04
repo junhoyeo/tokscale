@@ -935,6 +935,7 @@ pub mod sync {
     use chrono::Utc;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1133,21 +1134,15 @@ pub mod sync {
         /// The lock file is deliberately left on disk: unlinking it would let
         /// a contender create a fresh file and lock that instead.
         fn acquire(cache_dir: &std::path::Path) -> Result<Self> {
-            use std::io::Write;
-
             if !cache_dir.exists() {
                 std::fs::create_dir_all(cache_dir)?;
             }
 
             let lock_path = cache_dir.join("sync.lock");
-            // Older binaries use this file as a PID-only lock. Preserve a
-            // live record during rolling upgrades: the new OS lock is not
-            // evidence that an older owner has stopped.
-            let legacy_owner = read_sync_lock(&lock_path).filter(|(pid, _)| pid_is_alive(*pid));
-            let mut file = std::fs::OpenOptions::new()
+            publish_legacy_readable_lock(&lock_path)?;
+            let file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .create(true)
                 .truncate(false)
                 .open(&lock_path)
                 .with_context(|| format!("failed to open sync lock at {}", lock_path.display()))?;
@@ -1171,17 +1166,6 @@ pub mod sync {
                 }
             }
 
-            if let Some((pid, _)) = legacy_owner {
-                anyhow::bail!("another trae sync is in progress (pid {pid}); aborting");
-            }
-
-            // Recorded for diagnostics only — the lock above is what excludes.
-            let _ = file.set_len(0);
-            // Keep active ownership readable by pre-OS-lock binaries. They
-            // would treat a tagged record as malformed and unlink this live
-            // inode, bypassing the OS lock.
-            let _ = writeln!(file, "{} {}", std::process::id(), Utc::now().timestamp());
-
             Ok(Self { file })
         }
     }
@@ -1204,6 +1188,62 @@ pub mod sync {
         let pid = parts.next()?.parse::<u32>().ok()?;
         let timestamp = parts.next()?.parse::<u64>().ok()?;
         Some((pid, timestamp))
+    }
+
+    fn publish_legacy_readable_lock(lock_path: &std::path::Path) -> Result<()> {
+        if lock_path.exists() {
+            let existing = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .with_context(|| {
+                    format!("failed to inspect sync lock at {}", lock_path.display())
+                })?;
+            match fs2::FileExt::try_lock_exclusive(&existing) {
+                Ok(()) => {}
+                Err(err) if crate::commands::autosubmit::is_lock_contention(&err) => {
+                    anyhow::bail!("another trae sync is in progress; aborting")
+                }
+                Err(err) => {
+                    return Err(anyhow::Error::new(err).context("failed to inspect sync lock"))
+                }
+            }
+            if let Some((pid, _)) = read_sync_lock(lock_path).filter(|(pid, _)| pid_is_alive(*pid))
+            {
+                anyhow::bail!("another trae sync is in progress (pid {pid}); aborting");
+            }
+            let _ = fs2::FileExt::unlock(&existing);
+            std::fs::remove_file(lock_path)?;
+        }
+
+        let temp_path = lock_path.with_extension(format!(
+            "lock.{}.{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut temp = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed to prepare sync lock at {}", temp_path.display()))?;
+        writeln!(temp, "{} {}", std::process::id(), Utc::now().timestamp())?;
+        drop(temp);
+
+        let published = std::fs::hard_link(&temp_path, lock_path);
+        let _ = std::fs::remove_file(&temp_path);
+        match published {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let owner = read_sync_lock(lock_path)
+                    .filter(|(pid, _)| pid_is_alive(*pid))
+                    .map(|(pid, _)| format!(" (pid {pid})"))
+                    .unwrap_or_default();
+                anyhow::bail!("another trae sync is in progress{owner}; aborting")
+            }
+            Err(err) => {
+                Err(anyhow::Error::new(err).context("failed to publish sync lock atomically"))
+            }
+        }
     }
 
     // ── Main sync logic ────────────────────────────────────────────────────
@@ -1474,6 +1514,23 @@ pub mod sync {
                 "legacy sync must not unlink the live inode"
             );
             drop(guard);
+        }
+
+        #[test]
+        fn test_publish_lock_never_exposes_an_empty_inode_to_legacy_acquire() {
+            let tmp = tempfile::tempdir().unwrap();
+            let lock_path = tmp.path().join("sync.lock");
+
+            publish_legacy_readable_lock(&lock_path).unwrap();
+            let legacy_open = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap_err();
+            assert_eq!(legacy_open.kind(), std::io::ErrorKind::AlreadyExists);
+            let (pid, timestamp) = read_sync_lock(&lock_path).expect("complete legacy record");
+            assert_eq!(pid, std::process::id());
+            assert!(timestamp > 0);
         }
 
         /// Regression (#1010): the old protocol decided ownership from the
