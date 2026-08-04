@@ -399,8 +399,8 @@ export async function POST(request: Request) {
     const ratchetCensusBuckets = ratchetCensusEnabled
       ? foldContributionsIntoBuckets(data.contributions, isBackfill ? "backfill" : "cli")
       : [];
-    // Phase 4a: unguarded per-(date, client) snapshot. Folded once up front so
-    // the write sees the same pre-guard totals the merge loop builds into
+    // Phase 4a: unguarded per-(date, client) observations. Folded once up front
+    // so the write sees the same pre-guard totals the merge loop builds into
     // `incomingClientBreakdown`, not the post-guard values that land in
     // `daily_breakdown`. Always on — nothing reads the table.
     const reportedRows = foldContributionsIntoReportedRows(
@@ -853,8 +853,8 @@ export async function POST(request: Request) {
       }
 
       // Phase 4a observation write — same transaction as the daily rows above,
-      // so an explicitly reported cell cannot commit without its unguarded
-      // counterpart. Last-write-wins (no GREATEST) for that cell only: omitted
+      // so an explicitly reported cell cannot commit without its guarded
+      // daily_breakdown counterpart. Last-write-wins (no GREATEST) for that cell only: omitted
       // cells are not zero or absent, and this is not a whole-scan snapshot.
       if (reportedRows.length > 0) {
         await recordDailyBreakdownReported({
