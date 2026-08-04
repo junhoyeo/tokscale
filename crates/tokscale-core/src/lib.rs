@@ -7957,6 +7957,7 @@ mod tests {
             Some(&pricing),
             GraphPricingRequirement::Submission,
             std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
         )
         .expect("generic routing label must not block fully priced submission usage");
 
@@ -7997,6 +7998,7 @@ mod tests {
             Some(&pricing),
             GraphPricingRequirement::Submission,
             std::time::Instant::now(),
+            &crate::bucket_tz::BucketTimezone::Local,
         )
         .expect_err("concrete unpriced models must remain a submission error");
 
