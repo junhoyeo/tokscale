@@ -141,10 +141,12 @@ describe("all-time leaderboard aggregate query", () => {
       totalCost: 100,
       uniqueUsers: 3,
     });
-    expect(query()).toContain("FROM (\n    SELECT s.user_id");
-    expect(query()).toContain("AS stats");
+    expect(query()).toContain("stat_rows AS (");
+    expect(query()).toContain("stats AS (");
     expect(query()).toContain("WHERE leaderboard_hidden = false");
     expect(occurrences(finalQuery(), "unnest(s.sources_used)")).toBe(1);
+    expect(occurrences(finalQuery(), "stats AS (")).toBe(1);
+    expect(occurrences(finalQuery(), "FROM stat_rows")).toBe(1);
   });
 
   it("aggregates duplicate submission rows into one ranked user before counting", async () => {
@@ -175,7 +177,7 @@ describe("all-time leaderboard aggregate query", () => {
     });
     expect(query()).toContain("SUM(s.total_tokens) AS total_tokens");
     expect(query()).toContain("GROUP BY s.user_id");
-    expect(query()).toContain("COUNT(*) FROM (");
+    expect(query()).toContain("COUNT(*)::int AS unique_users");
     const final = finalQuery();
     expect(final.indexOf("GROUP BY s.user_id")).toBeLessThan(
       final.indexOf("RANK() OVER (ORDER BY total_tokens DESC)"),

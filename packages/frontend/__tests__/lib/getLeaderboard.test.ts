@@ -109,6 +109,8 @@ describe("period leaderboard aggregate query", () => {
     expect(query).toContain("LIMIT 1 OFFSET 1");
     expect(data.users).toMatchObject([{ username: "bravo", rank: 2 }]);
     expect(finalSql().match(/FROM daily_breakdown/g)).toHaveLength(1);
+    expect(finalSql()).toContain("FROM aggregated");
+    expect(finalSql()).not.toContain("stat_rows AS");
   });
 
   it("keeps hidden users in totals while excluding them before rank and page", async () => {

@@ -206,9 +206,17 @@ function resultQuery(
   const primary = sortBy === "cost" ? sql`total_cost` : sql`total_tokens`;
   const secondary = sortBy === "cost" ? sql`total_tokens` : sql`total_cost`;
   const search = userTextCondition(text);
-  const statSource = statsBase ? sql`(${statsBase}) AS stats` : sql`aggregated`;
+  const statRows = statsBase ? sql`, stat_rows AS (${statsBase})` : sql``;
+  const statSource = statsBase ? sql`stat_rows` : sql`aggregated`;
   return sql`
-    WITH aggregated AS (${base}),
+    WITH aggregated AS (${base})${statRows},
+    stats AS (
+      SELECT
+        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        COALESCE(SUM(total_cost), 0) AS total_cost,
+        COUNT(*)::int AS unique_users
+      FROM ${statSource}
+    ),
     rankable AS (
       SELECT aggregated.*, ${sequentialRanks ? sql`ROW_NUMBER()` : sql`RANK()`} OVER (ORDER BY ${primary} DESC${sequentialRanks ? sql`, ${secondary} DESC, LOWER(username) ASC, user_id ASC` : sql``}) AS rank
       FROM aggregated
@@ -227,9 +235,9 @@ function resultQuery(
     SELECT
       COALESCE((SELECT json_agg(json_build_object('rank', rank, 'userId', user_id, 'username', username, 'displayName', display_name, 'avatarUrl', avatar_url, 'totalTokens', total_tokens, 'totalCost', total_cost) ORDER BY rank ASC, ${secondary} DESC, LOWER(username) ASC, user_id ASC) FROM paged), '[]'::json) AS users,
       COALESCE((SELECT filtered_users FROM filtered LIMIT 1), 0)::int AS "totalUsers",
-      COALESCE((SELECT SUM(total_tokens) FROM ${statSource}), 0) AS "totalTokens",
-      COALESCE((SELECT SUM(total_cost) FROM ${statSource}), 0) AS "totalCost",
-      COALESCE((SELECT COUNT(*) FROM ${statSource}), 0)::int AS "uniqueUsers"
+      (SELECT total_tokens FROM stats) AS "totalTokens",
+      (SELECT total_cost FROM stats) AS "totalCost",
+      (SELECT unique_users FROM stats) AS "uniqueUsers"
   `;
 }
 
