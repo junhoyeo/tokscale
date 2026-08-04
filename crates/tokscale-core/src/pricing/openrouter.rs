@@ -202,11 +202,21 @@ fn select_endpoint_pricing(
         .filter(|pricing| quotes_same_base_price(pricing, listed))
         .collect();
 
-    matching
-        .iter()
-        .find(|pricing| pricing.cache_read_input_token_cost.is_some())
-        .cloned()
-        .or_else(|| matching.into_iter().next())
+    // Cache read and cache write are independent fields, so the endpoint
+    // publishing the most of them is the one that leaves the fewest buckets
+    // unpriceable. Ties keep the earliest endpoint.
+    matching.into_iter().reduce(|best, candidate| {
+        if published_cache_rates(&candidate) > published_cache_rates(&best) {
+            candidate
+        } else {
+            best
+        }
+    })
+}
+
+fn published_cache_rates(pricing: &ModelPricing) -> usize {
+    usize::from(pricing.cache_read_input_token_cost.is_some())
+        + usize::from(pricing.cache_creation_input_token_cost.is_some())
 }
 
 /// Fetch all models and get author pricing for each
@@ -339,13 +349,23 @@ mod tests {
         completion: &str,
         input_cache_read: Option<&str>,
     ) -> Endpoint {
+        endpoint_with_cache(provider_name, prompt, completion, input_cache_read, None)
+    }
+
+    fn endpoint_with_cache(
+        provider_name: &str,
+        prompt: &str,
+        completion: &str,
+        input_cache_read: Option<&str>,
+        input_cache_write: Option<&str>,
+    ) -> Endpoint {
         Endpoint {
             provider_name: provider_name.to_string(),
             pricing: EndpointPricing {
                 prompt: prompt.to_string(),
                 completion: completion.to_string(),
                 input_cache_read: input_cache_read.map(str::to_string),
-                input_cache_write: None,
+                input_cache_write: input_cache_write.map(str::to_string),
             },
         }
     }
@@ -410,6 +430,30 @@ mod tests {
         assert!(
             select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(1.75e-6, 1.4e-5))).is_none()
         );
+    }
+
+    // Cache read and cache write are independent fields, so preferring the
+    // first endpoint that publishes a read rate can hide another endpoint
+    // that publishes both. Usage with cache-write tokens would then stay
+    // unpriceable for no reason.
+    #[test]
+    fn the_endpoint_publishing_the_most_cache_rates_wins() {
+        let endpoints = vec![
+            endpoint_with_cache("Azure", "0.00000175", "0.000014", Some("0.000000175"), None),
+            endpoint_with_cache(
+                "Foundry",
+                "0.00000175",
+                "0.000014",
+                Some("0.000000175"),
+                Some("0.0000022"),
+            ),
+        ];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(1.75e-6, 1.4e-5))).unwrap();
+
+        assert_eq!(pricing.cache_read_input_token_cost, Some(1.75e-7));
+        assert_eq!(pricing.cache_creation_input_token_cost, Some(2.2e-6));
     }
 
     #[tokio::test]
