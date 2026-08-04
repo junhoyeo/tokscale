@@ -337,8 +337,7 @@ pub fn run_antigravity_purge_cache() -> Result<()> {
     use colored::Colorize;
 
     let cache_dir = get_antigravity_cache_dir()?;
-    if cache_dir.exists() {
-        fs::remove_dir_all(&cache_dir)?;
+    if purge_cache_dir(&cache_dir)? {
         println!(
             "\n  {}\n",
             format!("✓ Deleted {}", cache_dir.display()).green()
@@ -347,6 +346,23 @@ pub fn run_antigravity_purge_cache() -> Result<()> {
         println!("\n  {}\n", "No Antigravity cache to delete.".bright_black());
     }
     Ok(())
+}
+
+/// Delete the cache directory, reporting whether there was one to delete.
+///
+/// This takes the sync lock first. Deleting the directory out from under a
+/// running sync unlinks the very inode the sync holds its lock on, so the next
+/// sync would create and lock a different `sync.lock` and run concurrently
+/// with the first — the mutual exclusion would be gone even though every sync
+/// took the lock correctly.
+fn purge_cache_dir(cache_dir: &Path) -> Result<bool> {
+    if !cache_dir.exists() {
+        return Ok(false);
+    }
+
+    let _lock = acquire_sync_lock(cache_dir)?;
+    fs::remove_dir_all(cache_dir)?;
+    Ok(true)
 }
 
 fn ensure_dir(path: &Path) -> Result<()> {
@@ -3148,6 +3164,46 @@ mod tests {
             })
             .collect();
         assert_eq!(backups.len(), 1, "expected one backup file");
+    }
+
+    /// Regression (#1010 review): deleting the cache directory unlinks the
+    /// inode a running sync holds its lock on, so the next sync would create
+    /// and lock a different file and run alongside the first. Purging has to
+    /// take the same lock.
+    #[test]
+    #[serial]
+    fn purge_cache_is_refused_while_a_sync_holds_the_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("antigravity-cache");
+        std::fs::create_dir_all(cache_dir.join("sessions")).unwrap();
+
+        let _guard = acquire_sync_lock(&cache_dir).unwrap();
+
+        let err = purge_cache_dir(&cache_dir).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Another tokscale antigravity sync is in progress"),
+            "got: {err:#}"
+        );
+        assert!(
+            cache_dir.join("sessions").exists(),
+            "a refused purge must leave the cache intact"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn purge_cache_deletes_the_directory_when_no_sync_holds_the_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("antigravity-cache");
+        std::fs::create_dir_all(cache_dir.join("sessions")).unwrap();
+
+        assert!(purge_cache_dir(&cache_dir).unwrap());
+        assert!(!cache_dir.exists());
+        assert!(
+            !purge_cache_dir(&cache_dir).unwrap(),
+            "nothing left to delete"
+        );
     }
 
     /// Regression (#1010): a lock file exists before it means anything. The
