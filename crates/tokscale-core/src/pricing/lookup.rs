@@ -406,6 +406,16 @@ impl PricingLookup {
             if let Some(result) = guarded_lookup(terminal) {
                 return Some(result);
             }
+
+            // The terminal segment can still carry a tier suffix, and the two
+            // transformations have to compose here or they never meet: the
+            // suffix stage below only ever sees the prefixed id, and it splits
+            // on `-`, so it can peel `-xhigh` off `cx/gpt-5.5-xhigh` but is
+            // left with `cx/gpt-5.5`, which is not a dataset key either. Both
+            // halves resolve alone while the combination billed $0 (#846).
+            if let Some(result) = try_strip_unknown_suffix(terminal, guarded_lookup) {
+                return Some(result);
+            }
         }
 
         // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
@@ -4043,6 +4053,33 @@ mod tests {
             prefixed.pricing.output_cost_per_token,
             direct.pricing.output_cost_per_token
         );
+    }
+
+    /// Regression (#846): an id carrying both a routing prefix and a tier
+    /// suffix resolved to nothing, so real usage billed $0. Each id below
+    /// resolves once one transformation is applied, but the two were never
+    /// applied together: prefix stripping only retried the terminal segment
+    /// as-is, and suffix stripping splits on `-`, so it never shed the `cx/`.
+    #[test]
+    fn test_routing_prefix_and_tier_suffix_strip_together() {
+        let lookup = create_lookup();
+        let expected = lookup.lookup("gpt-5.5").unwrap();
+
+        for id in [
+            "cx/gpt-5.5-xhigh",
+            "cx/gpt-5.5-high",
+            "cx/gpt-5.5-medium",
+            "cx/gpt-5.5-low",
+        ] {
+            let result = lookup
+                .lookup(id)
+                .unwrap_or_else(|| panic!("{id} must resolve"));
+            assert_eq!(result.matched_key, expected.matched_key, "id: {id}");
+            assert_eq!(
+                result.pricing.input_cost_per_token, expected.pricing.input_cost_per_token,
+                "id: {id}"
+            );
+        }
     }
 
     /// Regression (#831): a dataset key that legitimately keeps its own
