@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   SITE_URL,
@@ -8,6 +10,8 @@ import {
   leaderboardUrl,
   profileUrl,
 } from "@/lib/seo/urls";
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("SITE_URL", () => {
   it("matches the metadataBase declared in app/layout.tsx", () => {
@@ -37,6 +41,12 @@ describe("getPublicOrigin", () => {
     vi.stubEnv("APP_URL", "https://runtime.example");
     vi.stubEnv("NEXT_PUBLIC_URL", "https://build.example");
     expect(getPublicOrigin()).toBe("https://runtime.example");
+  });
+
+  it("keeps the frontend environment template aligned with the runtime resolver", () => {
+    const template = readFileSync(resolve(__dirname, "../../.env.example"), "utf8");
+    expect(template).toContain("APP_URL=http://localhost:3000");
+    expect(template).not.toMatch(/^NEXT_PUBLIC_URL=/m);
   });
 });
 
