@@ -1,6 +1,5 @@
-use crate::process_liveness::pid_is_alive;
+use crate::sync_lock::{SyncLockGuard, SyncLockLabels};
 use anyhow::{Context, Result};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -168,7 +167,7 @@ pub fn run_antigravity_sync() -> Result<()> {
     ensure_dir(&cache_dir)?;
     ensure_dir(&sessions_dir)?;
 
-    let _lock = SyncLockGuard::acquire(&cache_dir)?;
+    let _lock = acquire_sync_lock(&cache_dir)?;
 
     let manifest = load_antigravity_manifest()?;
     let connections = detect_antigravity_connections()?;
@@ -370,91 +369,13 @@ fn ensure_config_dir() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-struct SyncLockGuard {
-    _file: std::fs::File,
-}
+const SYNC_LOCK_LABELS: SyncLockLabels = SyncLockLabels {
+    busy: "Another tokscale antigravity sync is in progress",
+    subject: "Antigravity sync lock",
+};
 
-impl SyncLockGuard {
-    /// Take exclusive ownership of the Antigravity sync for as long as the
-    /// returned guard lives.
-    ///
-    /// Ownership is the kernel's exclusive lock on the file, not the bytes
-    /// inside it. The previous protocol created the lock file, then wrote its
-    /// pid, then probed that pid's liveness to decide whether to unlink and
-    /// retry — a read-decide-unlink sequence that is not atomic. Two
-    /// contenders could find the same dead owner and both proceed, a
-    /// contender arriving before the pid was written read an empty file and
-    /// evicted a live owner, and a recycled pid could make a stranger look
-    /// like the owner. None of those are reachable through an OS lock, and
-    /// the kernel releases it on process death, so no stale-lock recovery is
-    /// needed either (#1010).
-    ///
-    /// The lock file is deliberately left on disk. Unlinking it would let a
-    /// contender create a fresh file and lock that instead, which is the same
-    /// hole in a different shape.
-    fn acquire(cache_dir: &Path) -> Result<Self> {
-        if !cache_dir.exists() {
-            std::fs::create_dir_all(cache_dir).with_context(|| {
-                format!(
-                    "Failed to create Antigravity cache directory at {}",
-                    cache_dir.display()
-                )
-            })?;
-        }
-
-        let lock_path = cache_dir.join("sync.lock");
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| {
-                format!(
-                    "Failed to open Antigravity sync lock at {}",
-                    lock_path.display()
-                )
-            })?;
-
-        match file.try_lock_exclusive() {
-            Ok(()) => {}
-            Err(err) if crate::commands::autosubmit::is_lock_contention(&err) => {
-                // Name the owner when the recorded pid is still alive. A pid
-                // left by a crashed run would only mislead, and the lock is
-                // already ours to wait on either way.
-                let owner = read_sync_lock(&lock_path)
-                    .filter(|(pid, _)| pid_is_alive(*pid))
-                    .map(|(pid, _)| format!(" (pid {pid})"))
-                    .unwrap_or_default();
-                anyhow::bail!("Another tokscale antigravity sync is in progress{owner}; aborting");
-            }
-            Err(err) => {
-                return Err(
-                    anyhow::Error::new(err).context("Failed to acquire Antigravity sync lock")
-                );
-            }
-        }
-
-        // Recorded for diagnostics only — the lock above is what excludes.
-        let pid = std::process::id();
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = file.set_len(0);
-        let _ = writeln!(file, "{pid} {timestamp}");
-
-        Ok(SyncLockGuard { _file: file })
-    }
-}
-
-fn read_sync_lock(path: &Path) -> Option<(u32, u64)> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let mut parts = contents.split_whitespace();
-    let pid = parts.next()?.parse::<u32>().ok()?;
-    let timestamp = parts.next()?.parse::<u64>().ok()?;
-    Some((pid, timestamp))
+fn acquire_sync_lock(cache_dir: &Path) -> Result<SyncLockGuard> {
+    SyncLockGuard::acquire(cache_dir, SYNC_LOCK_LABELS)
 }
 
 pub fn load_antigravity_manifest() -> Result<AntigravityManifest> {
@@ -2291,6 +2212,7 @@ fn parse_timestamp(values: &[Option<&Value>]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_lock::read_sync_lock;
     use serial_test::serial;
     use std::ffi::OsString;
 
@@ -3251,7 +3173,7 @@ mod tests {
             .unwrap();
         holder.try_lock_exclusive().unwrap();
 
-        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
+        let err = acquire_sync_lock(&cache_dir).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Another tokscale antigravity sync is in progress"),
@@ -3271,8 +3193,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let cache_dir = temp_dir.path().to_path_buf();
 
-        let guard = SyncLockGuard::acquire(&cache_dir).unwrap();
-        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
+        let guard = acquire_sync_lock(&cache_dir).unwrap();
+        let err = acquire_sync_lock(&cache_dir).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Another tokscale antigravity sync is in progress"),
@@ -3280,8 +3202,7 @@ mod tests {
         );
 
         drop(guard);
-        SyncLockGuard::acquire(&cache_dir)
-            .expect("the lock must be free once the guard is dropped");
+        acquire_sync_lock(&cache_dir).expect("the lock must be free once the guard is dropped");
     }
 
     #[test]
@@ -3291,7 +3212,7 @@ mod tests {
         let cache_dir = temp_dir.path().to_path_buf();
         let lock_path = cache_dir.join("sync.lock");
         {
-            let _guard = SyncLockGuard::acquire(&cache_dir).unwrap();
+            let _guard = acquire_sync_lock(&cache_dir).unwrap();
             assert!(lock_path.exists());
         }
         // The file outlives the guard on purpose: unlinking it would let a
@@ -3314,7 +3235,7 @@ mod tests {
         let lock_path = cache_dir.join("sync.lock");
         std::fs::write(&lock_path, "999999 1776000000").unwrap();
 
-        drop(SyncLockGuard::acquire(&cache_dir).unwrap());
+        drop(acquire_sync_lock(&cache_dir).unwrap());
 
         let (pid, _) = read_sync_lock(&lock_path).expect("readable");
         assert_eq!(pid, std::process::id(), "the new owner must be recorded");
