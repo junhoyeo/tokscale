@@ -1900,7 +1900,20 @@ mod tests {
             std::env::set_var("HOME", temp_home);
             std::env::set_var("XDG_CONFIG_HOME", temp_home.join(".config"));
             std::env::set_var("XDG_CACHE_HOME", temp_home.join(".cache"));
-            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+            // The three above isolate the cache on Unix and none of them reach
+            // it on Windows: `paths::get_config_dir` resolves the Windows root
+            // with `dirs::config_dir()`, a known-folder lookup that reads no
+            // environment variable. Without this line every test here shared
+            // one real `%APPDATA%\tokscale\cache`, so `SourceMessageCache::load`
+            // returned its neighbours' shards along with its own and the entry
+            // counts came out too high. `TOKSCALE_CONFIG_DIR` is the override
+            // paths.rs documents for this case and is consulted first
+            // everywhere; on Unix it names the directory the redirects above
+            // already produced.
+            std::env::set_var(
+                "TOKSCALE_CONFIG_DIR",
+                temp_home.join(".config").join("tokscale"),
+            );
         }
         (prev_home, prev_xdg_config, prev_xdg_cache, prev_override)
     }
