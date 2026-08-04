@@ -1140,11 +1140,10 @@ pub mod sync {
                 std::fs::create_dir_all(cache_dir)?;
             }
 
-            let lock_path = cache_dir.join("sync.lock");
-            let record = publish_legacy_readable_lock(&lock_path)?;
             // Do not range-lock the legacy PID file: on Windows that can
             // make an old reader fail and then unlink the live record.
             let os_path = cache_dir.join("sync.os.lock");
+            let lock_path = cache_dir.join("sync.lock");
             let os_file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -1171,6 +1170,11 @@ pub mod sync {
                     return Err(anyhow::Error::new(e).context("failed to acquire sync lock"));
                 }
             }
+
+            // New-format contenders acquire this companion lock before
+            // publishing the legacy PID record, so a losing contender never
+            // strands a visible lock.
+            let record = publish_legacy_readable_lock(&lock_path)?;
 
             Ok(Self {
                 _os_file: os_file,
@@ -1570,10 +1574,28 @@ pub mod sync {
 
             let guard = SyncLockGuard::acquire(cache_dir).expect("first acquire");
             let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
-            assert!(err.to_string().contains("already exists"));
+            assert!(err.to_string().contains("in progress"));
 
             drop(guard);
             SyncLockGuard::acquire(cache_dir).expect("the lock is free once the guard is dropped");
+        }
+
+        #[test]
+        fn test_losing_contender_leaves_no_orphan_after_release() {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache_dir = tmp.path();
+            let lock_path = cache_dir.join("sync.lock");
+
+            let owner = SyncLockGuard::acquire(cache_dir).unwrap();
+            let err = SyncLockGuard::acquire(cache_dir).unwrap_err();
+            assert!(err.to_string().contains("in progress"));
+            assert!(lock_path.exists(), "only the owner's record is visible");
+
+            drop(owner);
+            assert!(!lock_path.exists(), "owner release removes its record");
+            let successor = SyncLockGuard::acquire(cache_dir).unwrap();
+            drop(successor);
+            assert!(!lock_path.exists(), "no contender record is stranded");
         }
 
         #[test]

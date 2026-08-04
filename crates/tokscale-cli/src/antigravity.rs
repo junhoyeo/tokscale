@@ -477,11 +477,10 @@ impl SyncLockGuard {
             })?;
         }
 
-        let lock_path = cache_dir.join("sync.lock");
-        let record = publish_legacy_readable_lock(&lock_path)?;
         // Keep the OS-held exclusion out of the legacy PID file. On Windows,
         // locking `sync.lock` can make legacy readers fail and unlink it.
         let os_path = cache_dir.join("sync.os.lock");
+        let lock_path = cache_dir.join("sync.lock");
         let os_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -513,6 +512,12 @@ impl SyncLockGuard {
                 );
             }
         }
+
+        // Serialize new-format publication before creating the legacy-visible
+        // record. A contender that loses the OS lock has not created any PID
+        // file to strand, and normal release removes the PID file before
+        // releasing this companion lock.
+        let record = publish_legacy_readable_lock(&lock_path)?;
 
         Ok(SyncLockGuard {
             _cache_lock: cache_lock,
@@ -583,8 +588,9 @@ fn publish_legacy_readable_lock(lock_path: &Path) -> Result<String> {
 
 impl Drop for SyncLockGuard {
     fn drop(&mut self) {
-        // The companion OS lock remains held while deleting. The mutation is
-        // complete, and the record comparison prevents deleting a successor.
+        // The companion OS lock remains held while deleting. New-format
+        // contenders cannot publish until this record has gone, and the
+        // comparison prevents deleting an unexpected successor.
         if std::fs::read_to_string(&self.path).ok().as_deref() == Some(&self.record) {
             let _ = fs::remove_file(&self.path);
         }
@@ -3419,6 +3425,27 @@ mod tests {
         drop(guard);
         SyncLockGuard::acquire(&cache_dir)
             .expect("the lock must be free once the guard is dropped");
+    }
+
+    /// A contender must take the companion lock before publishing the legacy
+    /// PID path. When it loses, no visible record is left behind.
+    #[test]
+    #[serial]
+    fn sync_lock_guard_losing_contender_leaves_no_orphan_after_release() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+        let lock_path = cache_dir.join("sync.lock");
+
+        let owner = SyncLockGuard::acquire(&cache_dir).unwrap();
+        let err = SyncLockGuard::acquire(&cache_dir).unwrap_err();
+        assert!(err.to_string().contains("in progress"));
+        assert!(lock_path.exists(), "only the owner's record is visible");
+
+        drop(owner);
+        assert!(!lock_path.exists(), "owner release removes its record");
+        let successor = SyncLockGuard::acquire(&cache_dir).unwrap();
+        drop(successor);
+        assert!(!lock_path.exists(), "no contender record is stranded");
     }
 
     #[test]
