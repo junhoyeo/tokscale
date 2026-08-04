@@ -10,7 +10,6 @@ services:
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       APP_URL: ${APP_URL:?set APP_URL to the public HTTPS origin}
-      AUTH_SECRET: ${AUTH_SECRET:-}
     ports:
       - "127.0.0.1:3333:3000"
     healthcheck:
