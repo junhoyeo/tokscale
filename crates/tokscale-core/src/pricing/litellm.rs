@@ -53,6 +53,10 @@ impl ModelPricing {
     ) -> Self {
         let valid_rate =
             |rate: Option<f64>| rate.is_some_and(|rate| rate.is_finite() && rate >= 0.0);
+        let valid_or_fallback = |rate: Option<f64>, fallback_rate: Option<f64>| {
+            rate.filter(|rate| rate.is_finite() && *rate >= 0.0)
+                .or_else(|| fallback_rate.filter(|rate| rate.is_finite() && *rate >= 0.0))
+        };
         let mut filled = self.clone();
 
         if usage.input > 0
@@ -60,18 +64,22 @@ impl ModelPricing {
             && valid_rate(fallback.input_cost_per_token)
         {
             filled.input_cost_per_token = fallback.input_cost_per_token;
-            filled.input_cost_per_token_above_128k_tokens = filled
-                .input_cost_per_token_above_128k_tokens
-                .or(fallback.input_cost_per_token_above_128k_tokens);
-            filled.input_cost_per_token_above_200k_tokens = filled
-                .input_cost_per_token_above_200k_tokens
-                .or(fallback.input_cost_per_token_above_200k_tokens);
-            filled.input_cost_per_token_above_256k_tokens = filled
-                .input_cost_per_token_above_256k_tokens
-                .or(fallback.input_cost_per_token_above_256k_tokens);
-            filled.input_cost_per_token_above_272k_tokens = filled
-                .input_cost_per_token_above_272k_tokens
-                .or(fallback.input_cost_per_token_above_272k_tokens);
+            filled.input_cost_per_token_above_128k_tokens = valid_or_fallback(
+                filled.input_cost_per_token_above_128k_tokens,
+                fallback.input_cost_per_token_above_128k_tokens,
+            );
+            filled.input_cost_per_token_above_200k_tokens = valid_or_fallback(
+                filled.input_cost_per_token_above_200k_tokens,
+                fallback.input_cost_per_token_above_200k_tokens,
+            );
+            filled.input_cost_per_token_above_256k_tokens = valid_or_fallback(
+                filled.input_cost_per_token_above_256k_tokens,
+                fallback.input_cost_per_token_above_256k_tokens,
+            );
+            filled.input_cost_per_token_above_272k_tokens = valid_or_fallback(
+                filled.input_cost_per_token_above_272k_tokens,
+                fallback.input_cost_per_token_above_272k_tokens,
+            );
         }
 
         if (usage.output > 0 || usage.reasoning > 0)
@@ -79,18 +87,22 @@ impl ModelPricing {
             && valid_rate(fallback.output_cost_per_token)
         {
             filled.output_cost_per_token = fallback.output_cost_per_token;
-            filled.output_cost_per_token_above_128k_tokens = filled
-                .output_cost_per_token_above_128k_tokens
-                .or(fallback.output_cost_per_token_above_128k_tokens);
-            filled.output_cost_per_token_above_200k_tokens = filled
-                .output_cost_per_token_above_200k_tokens
-                .or(fallback.output_cost_per_token_above_200k_tokens);
-            filled.output_cost_per_token_above_256k_tokens = filled
-                .output_cost_per_token_above_256k_tokens
-                .or(fallback.output_cost_per_token_above_256k_tokens);
-            filled.output_cost_per_token_above_272k_tokens = filled
-                .output_cost_per_token_above_272k_tokens
-                .or(fallback.output_cost_per_token_above_272k_tokens);
+            filled.output_cost_per_token_above_128k_tokens = valid_or_fallback(
+                filled.output_cost_per_token_above_128k_tokens,
+                fallback.output_cost_per_token_above_128k_tokens,
+            );
+            filled.output_cost_per_token_above_200k_tokens = valid_or_fallback(
+                filled.output_cost_per_token_above_200k_tokens,
+                fallback.output_cost_per_token_above_200k_tokens,
+            );
+            filled.output_cost_per_token_above_256k_tokens = valid_or_fallback(
+                filled.output_cost_per_token_above_256k_tokens,
+                fallback.output_cost_per_token_above_256k_tokens,
+            );
+            filled.output_cost_per_token_above_272k_tokens = valid_or_fallback(
+                filled.output_cost_per_token_above_272k_tokens,
+                fallback.output_cost_per_token_above_272k_tokens,
+            );
         }
 
         if usage.cache_read > 0
@@ -98,12 +110,14 @@ impl ModelPricing {
             && valid_rate(fallback.cache_read_input_token_cost)
         {
             filled.cache_read_input_token_cost = fallback.cache_read_input_token_cost;
-            filled.cache_read_input_token_cost_above_200k_tokens = filled
-                .cache_read_input_token_cost_above_200k_tokens
-                .or(fallback.cache_read_input_token_cost_above_200k_tokens);
-            filled.cache_read_input_token_cost_above_272k_tokens = filled
-                .cache_read_input_token_cost_above_272k_tokens
-                .or(fallback.cache_read_input_token_cost_above_272k_tokens);
+            filled.cache_read_input_token_cost_above_200k_tokens = valid_or_fallback(
+                filled.cache_read_input_token_cost_above_200k_tokens,
+                fallback.cache_read_input_token_cost_above_200k_tokens,
+            );
+            filled.cache_read_input_token_cost_above_272k_tokens = valid_or_fallback(
+                filled.cache_read_input_token_cost_above_272k_tokens,
+                fallback.cache_read_input_token_cost_above_272k_tokens,
+            );
         }
 
         if usage.cache_write > 0
@@ -111,9 +125,10 @@ impl ModelPricing {
             && valid_rate(fallback.cache_creation_input_token_cost)
         {
             filled.cache_creation_input_token_cost = fallback.cache_creation_input_token_cost;
-            filled.cache_creation_input_token_cost_above_200k_tokens = filled
-                .cache_creation_input_token_cost_above_200k_tokens
-                .or(fallback.cache_creation_input_token_cost_above_200k_tokens);
+            filled.cache_creation_input_token_cost_above_200k_tokens = valid_or_fallback(
+                filled.cache_creation_input_token_cost_above_200k_tokens,
+                fallback.cache_creation_input_token_cost_above_200k_tokens,
+            );
         }
 
         filled
@@ -197,6 +212,30 @@ mod pricing_row_tests {
         let filled = hinted.with_missing_rates_from(&fallback, &cache_read_usage());
 
         assert_eq!(filled.cache_read_input_token_cost, Some(1.75e-7));
+        assert_eq!(
+            filled.cache_read_input_token_cost_above_200k_tokens,
+            Some(9.9e-7)
+        );
+    }
+
+    #[test]
+    fn invalid_long_context_tiers_fall_back_to_valid_tiers() {
+        let hinted = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            output_cost_per_token: Some(1.4e-5),
+            cache_read_input_token_cost_above_200k_tokens: Some(f64::NAN),
+            ..Default::default()
+        };
+        let fallback = ModelPricing {
+            input_cost_per_token: Some(1.75e-6),
+            output_cost_per_token: Some(1.4e-5),
+            cache_read_input_token_cost: Some(1.75e-7),
+            cache_read_input_token_cost_above_200k_tokens: Some(9.9e-7),
+            ..Default::default()
+        };
+
+        let filled = hinted.with_missing_rates_from(&fallback, &cache_read_usage());
+
         assert_eq!(
             filled.cache_read_input_token_cost_above_200k_tokens,
             Some(9.9e-7)

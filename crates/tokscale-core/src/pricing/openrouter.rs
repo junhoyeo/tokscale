@@ -204,9 +204,15 @@ fn select_endpoint_pricing(
 
     // Cache read and cache write are independent fields, so the endpoint
     // publishing the most of them is the one that leaves the fewest buckets
-    // unpriceable. Ties keep the earliest endpoint.
+    // unpriceable. On an equal count, retain cache-read pricing: it is the
+    // bucket required by Codex usage and must not be lost to an earlier
+    // write-only endpoint.
     matching.into_iter().reduce(|best, candidate| {
-        if published_cache_rates(&candidate) > published_cache_rates(&best) {
+        if published_cache_rates(&candidate) > published_cache_rates(&best)
+            || (published_cache_rates(&candidate) == published_cache_rates(&best)
+                && candidate.cache_read_input_token_cost.is_some()
+                && best.cache_read_input_token_cost.is_none())
+        {
             candidate
         } else {
             best
@@ -454,6 +460,26 @@ mod tests {
 
         assert_eq!(pricing.cache_read_input_token_cost, Some(1.75e-7));
         assert_eq!(pricing.cache_creation_input_token_cost, Some(2.2e-6));
+    }
+
+    #[test]
+    fn cache_read_wins_a_cache_rate_count_tie() {
+        let endpoints = vec![
+            endpoint_with_cache("Azure", "0.00000175", "0.000014", None, Some("0.0000022")),
+            endpoint_with_cache(
+                "Foundry",
+                "0.00000175",
+                "0.000014",
+                Some("0.000000175"),
+                None,
+            ),
+        ];
+
+        let pricing =
+            select_endpoint_pricing(&endpoints, "OpenAI", Some(&listed(1.75e-6, 1.4e-5))).unwrap();
+
+        assert_eq!(pricing.cache_read_input_token_cost, Some(1.75e-7));
+        assert_eq!(pricing.cache_creation_input_token_cost, None);
     }
 
     #[tokio::test]
