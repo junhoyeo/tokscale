@@ -3,7 +3,10 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+// Only the unix-only `headless_capture_*` tests time anything.
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 // ── Fixture helpers ────────────────────────────────────────────────────────
@@ -121,6 +124,18 @@ fn create_temp_fixture_dir() -> TempDir {
     create_temp_fixture_dir_with_pricing_cache(true)
 }
 
+/// The three `headless_capture_*` tests below stand up a fake `codex` on PATH
+/// and are unix-only because the fake is a `#!/bin/sh` script.
+///
+/// Windows has no shebang: `CreateProcess` will not run a `codex` with no
+/// extension, so the child reports `Failed to spawn 'codex': program not
+/// found` and the assertions are about the harness rather than about headless
+/// capture. It is the fixture that cannot cross over, not the feature — a
+/// Windows shim would need a `.cmd` whose slow arm blocks for twenty seconds
+/// and whose kill semantics match what `TOKSCALE_NATIVE_TIMEOUT_MS` expects,
+/// and none of that can be verified from a Unix host. Left as a gap rather
+/// than guessed at, so headless capture stays uncovered on Windows.
+#[cfg(unix)]
 fn create_fake_codex_bin() -> TempDir {
     let tmp = TempDir::new().expect("failed to create fake codex dir");
     let codex_path = tmp.path().join("codex");
@@ -159,6 +174,7 @@ esac
     tmp
 }
 
+#[cfg(unix)]
 fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -183,6 +199,7 @@ fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> 
 }
 
 #[test]
+#[cfg(unix)]
 fn headless_capture_fast_success_does_not_wait_for_timeout() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("success.jsonl");
@@ -201,6 +218,7 @@ fn headless_capture_fast_success_does_not_wait_for_timeout() {
 }
 
 #[test]
+#[cfg(unix)]
 fn headless_capture_fast_nonzero_preserves_exit_code() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("fail.jsonl");
@@ -220,6 +238,7 @@ fn headless_capture_fast_nonzero_preserves_exit_code() {
 }
 
 #[test]
+#[cfg(unix)]
 fn headless_capture_slow_command_times_out() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("slow.jsonl");
@@ -251,6 +270,7 @@ fn create_empty_fixture_dir() -> TempDir {
     tmp
 }
 
+#[cfg(unix)]
 fn create_timezone_boundary_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -298,6 +318,7 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
     tmp
 }
 
+#[cfg(unix)]
 fn create_positive_utc_offset_submit_fixture_dir() -> (TempDir, String) {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -1434,7 +1455,10 @@ fn test_models_with_no_matching_date() {
     );
 }
 
+/// Unix-only: the premise is a host in `America/Los_Angeles`, and `TZ` does not
+/// move `chrono::Local` on Windows. See `graph_day_buckets` for the full note.
 #[test]
+#[cfg(unix)]
 fn test_graph_single_day_filter_uses_local_timezone_boundaries() {
     let tmp = create_timezone_boundary_fixture_dir();
     let output = cmd_with_home(tmp.path())
@@ -1811,7 +1835,11 @@ fn test_submit_cursor_explicit_missing_cache_reports_setup_warning_text() {
         .stderr(predicate::str::contains("tokscale cursor login"));
 }
 
+/// Unix-only: the fixture's expected date is UTC+1 day, which only holds if the
+/// child really runs in `Pacific/Kiritimati`. `TZ` does not move
+/// `chrono::Local` on Windows — see the note on `graph_day_buckets`.
 #[test]
+#[cfg(unix)]
 fn test_submit_dry_run_preserves_local_date_ahead_of_utc() {
     let (tmp, expected_local_date) = create_positive_utc_offset_submit_fixture_dir();
 
@@ -3855,6 +3883,24 @@ fn pin_bucket_timezone_field(base: &Path, json_value: &str) {
 
 /// Day buckets that actually carry messages, as `(date, message_count)`.
 /// The graph zero-fills a calendar, so the empty days carry no signal.
+///
+/// # Why the `TZ`-driven tests below are unix-only
+///
+/// Passing `TZ` to the child moves `chrono::Local` on Unix and does nothing on
+/// Windows, where `Local` reads `GetTimeZoneInformation` — the machine's zone,
+/// which no environment variable overrides. A test whose premise is "run this
+/// from Los Angeles, then from Seoul" therefore runs twice from UTC on a
+/// Windows runner and asserts against buckets the host never produced.
+///
+/// The *product* is fine there, and the Windows leg proves it: auto-pinning
+/// records `Etc/UTC` on the runner, and `bucket_tz::detect_local_iana_name`
+/// declining to pin `Asia/Seoul` while `chrono::Local` says UTC is the
+/// agreement guard doing exactly its job — pinning the detected name over a
+/// disagreeing `Local` is the history re-keying that guard exists to prevent.
+/// Only the mechanism these tests use to pose the question is POSIX.
+///
+/// Tests that pin a zone through settings.json rather than through `TZ` stay
+/// on every platform: the pin outranks the host, which is the whole claim.
 fn graph_day_buckets(base: &Path, timezone: &str) -> Vec<(String, i64)> {
     let output = cmd_with_home(base)
         .env("TZ", timezone)
@@ -3919,6 +3965,7 @@ fn test_pinned_bucket_timezone_survives_a_host_timezone_change() {
 /// Separate homes because the first run on a home pins it; this asserts the
 /// unpinned/first-scan semantics, which are the ones that must not move.
 #[test]
+#[cfg(unix)]
 fn test_unpinned_first_scan_still_buckets_by_the_host_timezone() {
     let los_angeles = create_bucket_timezone_fixture_dir();
     let seoul = create_bucket_timezone_fixture_dir();
@@ -3939,6 +3986,7 @@ fn test_unpinned_first_scan_still_buckets_by_the_host_timezone() {
 /// that run reports. If pinning moved the numbers on the machine doing the
 /// pinning, every user would see a one-off jump on upgrade.
 #[test]
+#[cfg(unix)]
 fn test_first_run_pins_the_host_timezone_without_changing_its_own_output() {
     let tmp = create_bucket_timezone_fixture_dir();
     let settings_path = settings_json_path(tmp.path());
