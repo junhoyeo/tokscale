@@ -109,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           trap 'docker compose logs --no-color || true; docker compose down -v || true' EXIT
-          docker build --build-arg NEXT_PUBLIC_URL=http://localhost:3333 --tag tokscale:latest .
+          docker build --tag tokscale:latest .
           docker compose up -d
           for attempt in {1..30}; do
             if curl --fail --silent --show-error http://localhost:3333/ >/dev/null; then

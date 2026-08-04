@@ -5,7 +5,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
  * - Mutating requests (POST/PATCH/PUT/DELETE) with a mismatched Origin are rejected.
  * - Requests with a valid Bearer token bypass the origin check.
  * - Requests without an Origin header are rejected on mutating cookie sessions (non-browser clients should use Bearer).
- * - The NEXT_PUBLIC_URL origin (self-hosted deployments) is always allowed.
+ * - The APP_URL origin (self-hosted deployments) is always allowed.
  */
 
 const mockState = vi.hoisted(() => {
@@ -200,8 +200,8 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(mockState.getSession).toHaveBeenCalledTimes(1);
   });
 
-  it("allows cookie session from the NEXT_PUBLIC_URL origin (self-hosted deployment)", async () => {
-    vi.stubEnv("NEXT_PUBLIC_URL", "https://tokscale.my-company.example");
+  it("allows cookie session from the APP_URL origin (self-hosted deployment)", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example");
     mockState.getSession.mockResolvedValue(validUser);
 
     const result = await getSessionFromRequest(
@@ -213,8 +213,8 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(mockState.getSession).toHaveBeenCalledTimes(1);
   });
 
-  it("derives the allowed origin from NEXT_PUBLIC_URL with a path or trailing slash", async () => {
-    vi.stubEnv("NEXT_PUBLIC_URL", "https://tokscale.my-company.example/app/");
+  it("derives the allowed origin from APP_URL with a path or trailing slash", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example/app/");
     mockState.getSession.mockResolvedValue(validUser);
 
     const result = await getSessionFromRequest(
@@ -225,8 +225,8 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(result).toEqual(validUser);
   });
 
-  it("still allows the NEXT_PUBLIC_URL origin when CSRF_ALLOWED_ORIGINS is set to other origins", async () => {
-    vi.stubEnv("NEXT_PUBLIC_URL", "https://tokscale.my-company.example");
+  it("still allows the APP_URL origin when CSRF_ALLOWED_ORIGINS is set to other origins", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example");
     vi.stubEnv("CSRF_ALLOWED_ORIGINS", "https://other.example.com");
     mockState.getSession.mockResolvedValue(validUser);
 
@@ -238,8 +238,8 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(result).toEqual(validUser);
   });
 
-  it("keeps rejecting unknown origins when NEXT_PUBLIC_URL is set", async () => {
-    vi.stubEnv("NEXT_PUBLIC_URL", "https://tokscale.my-company.example");
+  it("keeps rejecting unknown origins when APP_URL is set", async () => {
+    vi.stubEnv("APP_URL", "https://tokscale.my-company.example");
     mockState.getSession.mockResolvedValue(validUser);
 
     const result = await getSessionFromRequest(
@@ -250,8 +250,8 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(mockState.getSession).not.toHaveBeenCalled();
   });
 
-  it("does not allowlist the opaque 'null' origin from a non-HTTP NEXT_PUBLIC_URL", async () => {
-    vi.stubEnv("NEXT_PUBLIC_URL", "mailto:admin@example.com");
+  it("does not allowlist the opaque 'null' origin from a non-HTTP APP_URL", async () => {
+    vi.stubEnv("APP_URL", "mailto:admin@example.com");
     mockState.getSession.mockResolvedValue(validUser);
 
     // new URL("mailto:...").origin === "null"; sandboxed iframes send
@@ -264,8 +264,8 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(mockState.getSession).not.toHaveBeenCalled();
   });
 
-  it("ignores a malformed NEXT_PUBLIC_URL and keeps the explicit allowlist working", async () => {
-    vi.stubEnv("NEXT_PUBLIC_URL", "not-a-valid-url");
+  it("ignores a malformed APP_URL and keeps the explicit allowlist working", async () => {
+    vi.stubEnv("APP_URL", "not-a-valid-url");
     mockState.getSession.mockResolvedValue(validUser);
 
     const allowed = await getSessionFromRequest(

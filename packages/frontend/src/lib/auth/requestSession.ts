@@ -13,7 +13,7 @@ function getAllowedOrigins(): string[] {
     ? env.split(",").map((o) => o.trim()).filter(Boolean)
     : [getPublicOrigin(), "http://localhost:3000"];
 
-  // Self-hosted deployments already set NEXT_PUBLIC_URL for OAuth redirects;
+  // Self-hosted deployments set APP_URL for OAuth redirects;
   // the deployment's own origin is always a legitimate request source, so
   // include it whether or not CSRF_ALLOWED_ORIGINS is configured.
   const publicOrigin = getPublicOrigin();

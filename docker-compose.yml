@@ -28,8 +28,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:-http://localhost:3333}
     restart: unless-stopped
     depends_on:
       db:
@@ -42,7 +40,7 @@ services:
       DATABASE_SSL: ${DATABASE_SSL:-false}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
-      NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:-http://localhost:3333}
+      APP_URL: ${APP_URL:-http://localhost:3333}
       AUTH_SECRET: ${AUTH_SECRET:-}
       # CSRF_ALLOWED_ORIGINS: ${CSRF_ALLOWED_ORIGINS}
     ports:

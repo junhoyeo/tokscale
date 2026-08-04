@@ -202,7 +202,6 @@ coverage:  ## Run Rust tests and generate coverage report (requires cargo-tarpau
 .PHONY: docker/build
 docker/build:  ## Build the Docker image for the frontend (no database required)
 	$(DOCKER) build \
-	  --build-arg NEXT_PUBLIC_URL=$${NEXT_PUBLIC_URL:-http://localhost:3333} \
 	  -t tokscale:latest .
 	@echo "Image built: tokscale:latest. Start full stack with: make up"
 

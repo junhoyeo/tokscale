@@ -1,5 +1,7 @@
 import type { MetadataRoute } from "next";
-import { SITE_URL } from "@/lib/seo/urls";
+import { getPublicOrigin } from "@/lib/seo/urls";
+
+export const dynamic = "force-dynamic";
 
 export default function robots(): MetadataRoute.Robots {
   return {
@@ -19,6 +21,6 @@ export default function robots(): MetadataRoute.Robots {
         "/groups/join/",
       ],
     },
-    sitemap: `${SITE_URL}/sitemap.xml`,
+    sitemap: `${getPublicOrigin()}/sitemap.xml`,
   };
 }

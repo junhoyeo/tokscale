@@ -9,7 +9,7 @@ services:
       DATABASE_SSL: ${DATABASE_SSL:-require}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
-      NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:?set NEXT_PUBLIC_URL to the public HTTPS origin}
+      APP_URL: ${APP_URL:?set APP_URL to the public HTTPS origin}
       AUTH_SECRET: ${AUTH_SECRET:-}
     ports:
       - "127.0.0.1:3333:3000"

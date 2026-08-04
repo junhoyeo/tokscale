@@ -16,7 +16,7 @@ const HOSTED_ORIGIN = "https://tokscale.ai";
  * CSRF. A path is intentionally discarded: Tokscale is deployed at an origin,
  * not below a reverse-proxy path prefix.
  */
-export function getPublicOrigin(value = process.env.NEXT_PUBLIC_URL): string {
+export function getPublicOrigin(value = process.env.APP_URL): string {
   if (!value) return HOSTED_ORIGIN;
 
   try {
@@ -44,7 +44,7 @@ export const SITE_URL = getPublicOrigin();
  * `https://tokscale.ai/`; check prod, not dev, if the two ever look different.)
  */
 export function homeUrl(): string {
-  return SITE_URL;
+  return getPublicOrigin();
 }
 
 /**
@@ -60,8 +60,8 @@ export function homeUrl(): string {
  */
 export function leaderboardUrl(view: "users" | "groups" = "users"): string {
   return view === "groups"
-    ? `${SITE_URL}/leaderboard?view=groups`
-    : `${SITE_URL}/leaderboard`;
+    ? `${getPublicOrigin()}/leaderboard?view=groups`
+    : `${getPublicOrigin()}/leaderboard`;
 }
 
 /**
@@ -73,11 +73,11 @@ export function leaderboardUrl(view: "users" | "groups" = "users"): string {
  * a redirect.
  */
 export function profileUrl(username: string): string {
-  return `${SITE_URL}/u/${encodeURIComponent(username)}`;
+  return `${getPublicOrigin()}/u/${encodeURIComponent(username)}`;
 }
 
 export function groupUrl(slug: string): string {
-  return `${SITE_URL}/groups/${encodeURIComponent(slug)}`;
+  return `${getPublicOrigin()}/groups/${encodeURIComponent(slug)}`;
 }
 
 /**
@@ -91,5 +91,5 @@ export const LEGAL_PATHS = ["privacy", "terms", "contact"] as const;
 export type LegalPath = (typeof LEGAL_PATHS)[number];
 
 export function legalUrl(page: LegalPath): string {
-  return `${SITE_URL}/${page}`;
+  return `${getPublicOrigin()}/${page}`;
 }

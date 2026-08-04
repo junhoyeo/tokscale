@@ -124,7 +124,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockState.reset();
-  process.env.NEXT_PUBLIC_URL = "https://tokscale.ai";
+  process.env.APP_URL = "https://tokscale.ai";
 });
 
 describe("GitHub OAuth returnTo safety", () => {

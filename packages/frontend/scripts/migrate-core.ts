@@ -5,6 +5,7 @@
 // entrypoint changes to /app before invoking this).
 import postgres from "postgres";
 import { classifyFailure } from "./migrate-retry";
+import { getDatabaseSslMode } from "../src/lib/db";
 
 const LOCK_KEY = "tokscale_drizzle_migrate";
 const MAX_LOCK_ATTEMPTS = 60;
@@ -19,7 +20,11 @@ export async function runMigrations(opts: {
   databaseUrl: string;
   cwd?: string;
 }): Promise<void> {
-  const sql = postgres(opts.databaseUrl, { max: 1 });
+  const ssl = getDatabaseSslMode();
+  const migrationUrl = new URL(opts.databaseUrl);
+  migrationUrl.searchParams.set("sslmode", ssl === false ? "disable" : "require");
+  const databaseUrl = migrationUrl.toString();
+  const sql = postgres(databaseUrl, { max: 1, ssl });
 
   async function runMigrate(): Promise<{
     ok: boolean;
@@ -31,6 +36,7 @@ export async function runMigrations(opts: {
       stdout: "inherit",
       stderr: "pipe",
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      env: { ...process.env, DATABASE_URL: databaseUrl },
     });
     const stderr = await new Response(proc.stderr).text();
     process.stderr.write(stderr);

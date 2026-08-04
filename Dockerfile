@@ -38,11 +38,6 @@ ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     NODE_OPTIONS="--max-old-space-size=1536"
 
-# Public metadata/OAuth URLs are the only build-time configuration. This is
-# deliberately independent from DATABASE_URL, which stays runtime-only.
-ARG NEXT_PUBLIC_URL=https://tokscale.ai
-ENV NEXT_PUBLIC_URL=${NEXT_PUBLIC_URL}
-
 # Database-backed routes are explicitly dynamic, so the image build is
 # independent of a database. DATABASE_URL is supplied only when the container
 # starts, after the Compose database has passed its healthcheck.

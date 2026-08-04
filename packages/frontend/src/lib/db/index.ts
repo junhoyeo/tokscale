@@ -11,7 +11,7 @@ function getConnectionString(): string {
   return connectionString;
 }
 
-function getSslMode(): "require" | false {
+export function getDatabaseSslMode(): "require" | false {
   const configured = process.env.DATABASE_SSL?.trim().toLowerCase();
 
   if (configured === "false" || configured === "disable") {
@@ -37,7 +37,7 @@ function createDb() {
   return drizzle({
     connection: {
       url: getConnectionString(),
-      ssl: getSslMode(),
+      ssl: getDatabaseSslMode(),
 
       // Serverless-optimized pool settings:
       // Each Vercel function instance gets its own pool. With dozens of

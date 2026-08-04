@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   SITE_URL,
@@ -31,6 +31,12 @@ describe("getPublicOrigin", () => {
   it("falls back to the hosted origin for malformed or non-http URLs", () => {
     expect(getPublicOrigin("not a URL")).toBe("https://tokscale.ai");
     expect(getPublicOrigin("file:///tmp/tokscale")).toBe("https://tokscale.ai");
+  });
+
+  it("uses APP_URL at runtime rather than a build-inlined NEXT_PUBLIC_URL", () => {
+    vi.stubEnv("APP_URL", "https://runtime.example");
+    vi.stubEnv("NEXT_PUBLIC_URL", "https://build.example");
+    expect(getPublicOrigin()).toBe("https://runtime.example");
   });
 });
 
