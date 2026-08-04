@@ -15,6 +15,7 @@ on:
       - "Makefile"
       - "README.md"
       - "docker-compose.yml"
+      - "docker-compose.external-db.yml"
       - "docker-entrypoint.sh"
       - ".github/workflows/frontend_ci.yml"
   pull_request:
@@ -30,6 +31,7 @@ on:
       - "Makefile"
       - "README.md"
       - "docker-compose.yml"
+      - "docker-compose.external-db.yml"
       - "docker-entrypoint.sh"
       - ".github/workflows/frontend_ci.yml"
 
@@ -103,5 +105,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Build self-hosted frontend image offline
-        run: docker build --tag tokscale:self-host-smoke .
+      - name: Build and smoke-test self-hosted frontend image
+        run: |
+          set -euo pipefail
+          trap 'docker compose logs --no-color || true; docker compose down -v || true' EXIT
+          docker build --build-arg NEXT_PUBLIC_URL=http://localhost:3333 --tag tokscale:latest .
+          docker compose up -d
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://localhost:3333/ >/dev/null; then
+              docker compose restart app
+              for restart_attempt in {1..30}; do
+                if curl --fail --silent --show-error http://localhost:3333/ >/dev/null; then
+                  exit 0
+                fi
+                sleep 2
+              done
+              exit 1
+            fi
+            sleep 2
+          done
+          exit 1

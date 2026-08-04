@@ -18,6 +18,8 @@ import LeaderboardClient from "./LeaderboardClient";
 import GroupsBrowser from "./GroupsBrowser";
 import ViewSelector, { type LeaderboardView } from "./ViewSelector";
 
+export const dynamic = "force-dynamic";
+
 function isMissingDatabaseUrl(error: unknown): boolean {
   return error instanceof Error && error.message === "DATABASE_URL environment variable is not set";
 }

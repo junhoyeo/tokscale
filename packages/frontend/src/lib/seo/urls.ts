@@ -6,9 +6,33 @@
  * that doesn't match the page's own canonical is a conflicting signal, and the
  * page gets dropped rather than arbitrated.
  *
- * Must stay in sync with `metadataBase` in app/layout.tsx.
+ * Must stay in sync with `metadataBase` in app/layout.tsx and the auth
+ * redirect/CSRF origin resolver.
  */
-export const SITE_URL = "https://tokscale.ai";
+const HOSTED_ORIGIN = "https://tokscale.ai";
+
+/**
+ * Resolve the public http(s) origin once for metadata, sitemap, OAuth and
+ * CSRF. A path is intentionally discarded: Tokscale is deployed at an origin,
+ * not below a reverse-proxy path prefix.
+ */
+export function getPublicOrigin(value = process.env.NEXT_PUBLIC_URL): string {
+  if (!value) return HOSTED_ORIGIN;
+
+  try {
+    const url = new URL(value);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return url.origin;
+    }
+  } catch {
+    // Fall through to the hosted default rather than emitting unsafe redirects
+    // or invalid canonical URLs from a malformed environment value.
+  }
+
+  return HOSTED_ORIGIN;
+}
+
+export const SITE_URL = getPublicOrigin();
 
 /**
  * The bare origin, with no trailing slash, which is what both consumers emit

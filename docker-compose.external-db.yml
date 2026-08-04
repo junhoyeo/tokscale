@@ -1,0 +1,20 @@
+services:
+  app:
+    # Build first with `make docker/build`, then provide DATABASE_URL for a
+    # managed PostgreSQL service through .env or the deployment secret store.
+    image: tokscale:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to the managed PostgreSQL URL}
+      DATABASE_SSL: ${DATABASE_SSL:-require}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:?set NEXT_PUBLIC_URL to the public HTTPS origin}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+    ports:
+      - "127.0.0.1:3333:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12

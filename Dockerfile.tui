@@ -25,11 +25,17 @@ FROM alpine:3.20 AS runner
 # Runtime deps: ncurses for TUI rendering, ca-certs for HTTPS calls
 RUN apk add --no-cache ncurses ca-certificates libgcc
 
+RUN addgroup -S -g 1000 tokscale && adduser -S -u 1000 -G tokscale -h /home/tokscale tokscale
+
 COPY --from=builder /tokscale /usr/local/bin/tokscale
 
-# The TUI reads from the host via bind mounts; these dirs are mount points only
-VOLUME ["/root/.claude", "/root/.config/tokscale", "/root/.cache/tokscale"]
+# The TUI reads host session data through Compose bind mounts. The config and
+# cache paths are the only writable mounts because the CLI persists settings
+# and its own cache there.
 
-ENV TERM=xterm-256color
+ENV TERM=xterm-256color \
+    HOME=/home/tokscale
+
+USER tokscale
 
 ENTRYPOINT ["tokscale"]

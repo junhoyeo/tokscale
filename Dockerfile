@@ -38,6 +38,11 @@ ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     NODE_OPTIONS="--max-old-space-size=1536"
 
+# Public metadata/OAuth URLs are the only build-time configuration. This is
+# deliberately independent from DATABASE_URL, which stays runtime-only.
+ARG NEXT_PUBLIC_URL=https://tokscale.ai
+ENV NEXT_PUBLIC_URL=${NEXT_PUBLIC_URL}
+
 # Database-backed routes are explicitly dynamic, so the image build is
 # independent of a database. DATABASE_URL is supplied only when the container
 # starts, after the Compose database has passed its healthcheck.
@@ -47,30 +52,35 @@ RUN bun run build
 FROM oven/bun:1-alpine AS runner
 WORKDIR /app
 
+RUN addgroup -S tokscale && adduser -S -G tokscale -h /home/tokscale tokscale
+
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0
+    HOSTNAME=0.0.0.0 \
+    HOME=/home/tokscale
 
 # next standalone bundles server.js + required node_modules under /app
-COPY --from=builder /repo/packages/frontend/.next/standalone ./
-COPY --from=builder /repo/packages/frontend/.next/static      ./packages/frontend/.next/static
-COPY --from=builder /repo/packages/frontend/public            ./packages/frontend/public
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/.next/standalone ./
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/.next/static      ./packages/frontend/.next/static
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/public            ./packages/frontend/public
 
 # drizzle-kit + migration files for the entrypoint
-COPY --from=builder /repo/packages/frontend/drizzle.config.ts  ./packages/frontend/drizzle.config.ts
-COPY --from=builder /repo/packages/frontend/src/lib/db         ./packages/frontend/src/lib/db
-COPY --from=builder /repo/packages/frontend/scripts/migrate-docker.ts ./packages/frontend/scripts/migrate-docker.ts
-COPY --from=builder /repo/packages/frontend/scripts/migrate-core.ts   ./packages/frontend/scripts/migrate-core.ts
-COPY --from=builder /repo/packages/frontend/scripts/migrate-retry.ts  ./packages/frontend/scripts/migrate-retry.ts
-COPY --from=deps    /repo/packages/frontend/node_modules      ./packages/frontend/node_modules
-COPY --from=deps    /repo/node_modules                        ./node_modules
-COPY package.json ./
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/drizzle.config.ts  ./packages/frontend/drizzle.config.ts
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/src/lib/db         ./packages/frontend/src/lib/db
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/scripts/migrate-docker.ts ./packages/frontend/scripts/migrate-docker.ts
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/scripts/migrate-core.ts   ./packages/frontend/scripts/migrate-core.ts
+COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/scripts/migrate-retry.ts  ./packages/frontend/scripts/migrate-retry.ts
+COPY --chown=tokscale:tokscale --from=deps    /repo/packages/frontend/node_modules      ./packages/frontend/node_modules
+COPY --chown=tokscale:tokscale --from=deps    /repo/node_modules                        ./node_modules
+COPY --chown=tokscale:tokscale package.json ./
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 3000
+
+USER tokscale
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "packages/frontend/server.js"]

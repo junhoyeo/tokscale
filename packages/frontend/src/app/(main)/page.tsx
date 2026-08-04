@@ -5,6 +5,11 @@ import { getStargazersCount } from "@/lib/github";
 import { getLeaderboardData, type LeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import { homeUrl } from "@/lib/seo/urls";
 
+// This page queries the leaderboard. Keep it runtime-rendered so the
+// self-hosted image can build without a database while static routes remain
+// pre-rendered for the hosted site.
+export const dynamic = "force-dynamic";
+
 // Declared per-page rather than on the root layout: `alternates.canonical` is
 // inherited by every nested route, so putting it in app/layout.tsx would point
 // every page on the site at the home page.

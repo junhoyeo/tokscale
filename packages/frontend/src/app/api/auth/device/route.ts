@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db, deviceCodes } from "@/lib/db";
 import { generateDeviceCode, generateUserCode } from "@/lib/auth/utils";
+import { getPublicOrigin } from "@/lib/seo/urls";
 
 const DEVICE_CODE_EXPIRY_SECONDS = 900; // 15 minutes
 const POLL_INTERVAL_SECONDS = 5;
@@ -23,7 +24,7 @@ export async function POST(request: Request) {
       expiresAt,
     });
 
-    const baseUrl = process.env.NEXT_PUBLIC_URL || "http://localhost:3000";
+    const baseUrl = getPublicOrigin();
 
     return NextResponse.json({
       deviceCode,

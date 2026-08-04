@@ -1,4 +1,5 @@
 import { getSession, getSessionFromHeader, type SessionUser } from "./session";
+import { getPublicOrigin } from "@/lib/seo/urls";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -10,27 +11,14 @@ function getAllowedOrigins(): string[] {
   const env = process.env.CSRF_ALLOWED_ORIGINS;
   const origins = env
     ? env.split(",").map((o) => o.trim()).filter(Boolean)
-    : ["https://tokscale.ai", "http://localhost:3000"];
+    : [getPublicOrigin(), "http://localhost:3000"];
 
   // Self-hosted deployments already set NEXT_PUBLIC_URL for OAuth redirects;
   // the deployment's own origin is always a legitimate request source, so
   // include it whether or not CSRF_ALLOWED_ORIGINS is configured.
-  const publicUrl = process.env.NEXT_PUBLIC_URL;
-  if (publicUrl) {
-    try {
-      const url = new URL(publicUrl);
-      // Only http(s) URLs have a real origin. Anything else (mailto:,
-      // file:, ...) yields the opaque origin "null", and allowlisting the
-      // literal string "null" would accept Origin: null requests from
-      // sandboxed iframes - a CSRF hole.
-      if (url.protocol === "http:" || url.protocol === "https:") {
-        if (!origins.includes(url.origin)) {
-          origins.push(url.origin);
-        }
-      }
-    } catch {
-      // Malformed NEXT_PUBLIC_URL; ignore and rely on the explicit list.
-    }
+  const publicOrigin = getPublicOrigin();
+  if (!origins.includes(publicOrigin)) {
+    origins.push(publicOrigin);
   }
 
   return origins;

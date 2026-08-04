@@ -28,6 +28,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_URL: ${NEXT_PUBLIC_URL:-http://localhost:3333}
     restart: unless-stopped
     depends_on:
       db:
@@ -45,6 +47,11 @@ services:
       # CSRF_ALLOWED_ORIGINS: ${CSRF_ALLOWED_ORIGINS}
     ports:
       - "127.0.0.1:3333:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   tui:
     build:
@@ -53,19 +60,23 @@ services:
     profiles: [tui]
     stdin_open: true
     tty: true
+    user: "${TOKSCALE_UID:-1000}:${TOKSCALE_GID:-1000}"
+    environment:
+      HOME: /home/tokscale
     volumes:
-      # tokscale config and cache (read-write so settings persist across runs)
-      - ${HOME}/.config/tokscale:/root/.config/tokscale
-      - ${HOME}/.cache/tokscale:/root/.cache/tokscale
+      # These are the only writable mounts: the CLI's own settings and cache.
+      # `make tui` creates them as the invoking host user before Compose starts.
+      - ${HOME}/.config/tokscale:/home/tokscale/.config/tokscale
+      - ${HOME}/.cache/tokscale:/home/tokscale/.cache/tokscale
       # Client data directories — add or remove mounts for the clients you use.
       # All paths are read-only; the TUI only reads session data.
-      - ${HOME}/.claude:/root/.claude:ro
+      - ${HOME}/.claude:/home/tokscale/.claude:ro
       # VS Code extensions (Cline / Roo / Claude Dev) — Linux path
-      - ${HOME}/.config/Code/User/globalStorage:/root/.config/Code/User/globalStorage:ro
+      - ${HOME}/.config/Code/User/globalStorage:/home/tokscale/.config/Code/User/globalStorage:ro
       # Cursor
-      - ${HOME}/.config/Cursor/User/globalStorage:/root/.config/Cursor/User/globalStorage:ro
+      - ${HOME}/.config/Cursor/User/globalStorage:/home/tokscale/.config/Cursor/User/globalStorage:ro
       # Zed
-      - ${HOME}/.local/share/zed:/root/.local/share/zed:ro
+      - ${HOME}/.local/share/zed:/home/tokscale/.local/share/zed:ro
 
 volumes:
   postgres_data:

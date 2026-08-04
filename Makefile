@@ -202,12 +202,14 @@ coverage:  ## Run Rust tests and generate coverage report (requires cargo-tarpau
 .PHONY: docker/build
 docker/build:  ## Build the Docker image for the frontend (no database required)
 	$(DOCKER) build \
+	  --build-arg NEXT_PUBLIC_URL=$${NEXT_PUBLIC_URL:-http://localhost:3333} \
 	  -t tokscale:latest .
 	@echo "Image built: tokscale:latest. Start full stack with: make up"
 
 .PHONY: tui
 tui:  ## Run the tokscale TUI in a container (builds image if needed)
-	$(COMPOSE) --profile tui run --rm tui
+	mkdir -p "$$HOME/.config/tokscale" "$$HOME/.cache/tokscale"
+	TOKSCALE_UID=$$(id -u) TOKSCALE_GID=$$(id -g) $(COMPOSE) --profile tui run --rm tui
 
 .PHONY: tui/build
 tui/build:  ## Build only the TUI container image

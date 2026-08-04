@@ -9,6 +9,7 @@ import { sanitizeAuthReturnTo } from "@/lib/auth/returnTo";
 import { createSession, setSessionCookie } from "@/lib/auth/session";
 import { db, users } from "@/lib/db";
 import { eq } from "drizzle-orm";
+import { getPublicOrigin } from "@/lib/seo/urls";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -16,7 +17,7 @@ export async function GET(request: Request) {
   const state = searchParams.get("state");
   const error = searchParams.get("error");
 
-  const baseUrl = process.env.NEXT_PUBLIC_URL || "http://localhost:3000";
+  const baseUrl = getPublicOrigin();
 
   // Handle OAuth errors
   if (error) {

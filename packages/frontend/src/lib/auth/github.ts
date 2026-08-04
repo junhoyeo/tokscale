@@ -1,7 +1,8 @@
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID!;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET!;
-const NEXT_PUBLIC_URL = process.env.NEXT_PUBLIC_URL || "http://localhost:3000";
-const GITHUB_REDIRECT_URI = `${NEXT_PUBLIC_URL}/api/auth/github/callback`;
+import { getPublicOrigin } from "@/lib/seo/urls";
+
+const GITHUB_REDIRECT_URI = `${getPublicOrigin()}/api/auth/github/callback`;
 
 export interface GitHubUser {
   id: number;

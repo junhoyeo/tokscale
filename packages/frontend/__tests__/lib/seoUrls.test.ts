@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   SITE_URL,
+  getPublicOrigin,
   groupUrl,
   homeUrl,
   leaderboardUrl,
@@ -17,6 +18,19 @@ describe("SITE_URL", () => {
 
   it("has no trailing slash, so `${SITE_URL}/path` never doubles it", () => {
     expect(SITE_URL.endsWith("/")).toBe(false);
+  });
+});
+
+describe("getPublicOrigin", () => {
+  it("normalizes a self-hosted public URL to its http(s) origin", () => {
+    expect(getPublicOrigin("https://tokscale.example.com/a/path/")).toBe(
+      "https://tokscale.example.com"
+    );
+  });
+
+  it("falls back to the hosted origin for malformed or non-http URLs", () => {
+    expect(getPublicOrigin("not a URL")).toBe("https://tokscale.ai");
+    expect(getPublicOrigin("file:///tmp/tokscale")).toBe("https://tokscale.ai");
   });
 });
 

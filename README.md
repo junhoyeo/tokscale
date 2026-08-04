@@ -1234,6 +1234,8 @@ make tui/build   # build once
 make tui         # launch
 ```
 
+`make tui` runs the container with your current host UID and GID, creates only `~/.config/tokscale` and `~/.cache/tokscale` if needed, and mounts those two directories read-write. Session-data mounts stay read-only, so the container cannot create root-owned files in your client directories. If you call Compose directly instead of `make tui`, set `TOKSCALE_UID=$(id -u)` and `TOKSCALE_GID=$(id -g)` and create those two writable directories yourself.
+
 **Other common targets:**
 
 ```bash
@@ -1254,7 +1256,7 @@ export DATABASE_URL=postgresql://myuser:mypass@db:5432/mydb
 
 The defaults (`tokscale`/`tokscale`/`tokscale`) are for local dev only.
 
-**Public deployments** — this Compose file binds both ports to loopback and is intended to sit behind a reverse proxy that terminates TLS. Set `NEXT_PUBLIC_URL` to the public HTTPS URL before `make up` (for example, `https://tokscale.example.com`), configure that URL in the proxy, and keep `DATABASE_SSL=false` only for the bundled local Postgres service. When using a managed database, remove the `db` service, provide its `DATABASE_URL`, and set `DATABASE_SSL=require`. Keep `AUTH_SECRET` and GitHub OAuth credentials in a protected `.env` file or your deployment secret store; the sample defaults intentionally do not enable OAuth.
+**Public deployments** — this Compose file binds both ports to loopback and is intended to sit behind a reverse proxy that terminates TLS. Set `NEXT_PUBLIC_URL` to the public HTTPS origin before `make docker/build` (for example, `https://tokscale.example.com`) and configure that URL in the proxy; it drives OAuth redirects, CSRF defaults, canonical metadata, sitemap, and robots. Keep `DATABASE_SSL=false` only for the bundled local Postgres service. For a managed database, build the image with that same `NEXT_PUBLIC_URL`, put `DATABASE_URL`, `DATABASE_SSL=require`, `NEXT_PUBLIC_URL`, `AUTH_SECRET`, and optional GitHub OAuth credentials in a protected `.env`/secret store, then run `docker compose -f docker-compose.external-db.yml up -d`. That file has no `db` service or local-database dependency. The sample defaults intentionally do not enable OAuth.
 
 ### How to Run (without containers)
 
