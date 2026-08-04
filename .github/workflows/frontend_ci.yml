@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &frontend_paths
       - "packages/frontend/**"
       - "!packages/frontend/**/*.md"
       - "crates/tokscale-core/src/clients.rs"
@@ -15,15 +15,7 @@ on:
       - ".github/workflows/frontend_ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "packages/frontend/**"
-      - "!packages/frontend/**/*.md"
-      - "crates/tokscale-core/src/clients.rs"
-      - ".github/assets/**"
-      - ".npmrc"
-      - "package.json"
-      - "bun.lock"
-      - ".github/workflows/frontend_ci.yml"
+    paths: *frontend_paths
 
 permissions:
   contents: read

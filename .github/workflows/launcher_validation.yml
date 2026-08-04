@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &launcher_paths
       - "packages/cli/bin.js"
       - "packages/cli/src/**"
       - "packages/cli/tsconfig.json"
@@ -23,23 +23,7 @@ on:
       - "crates/**"
   pull_request:
     branches: [main]
-    paths:
-      - "packages/cli/bin.js"
-      - "packages/cli/src/**"
-      - "packages/cli/tsconfig.json"
-      - "packages/cli/bunfig.toml"
-      - "packages/cli/package.json"
-      - "packages/tokscale/bin.js"
-      - "packages/tokscale/package.json"
-      - "packages/cli-*/package.json"
-      - "scripts/test-package-launchers.sh"
-      - ".github/workflows/launcher_validation.yml"
-      - ".npmrc"
-      - "package.json"
-      - "bun.lock"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
+    paths: *launcher_paths
 
 permissions:
   contents: read

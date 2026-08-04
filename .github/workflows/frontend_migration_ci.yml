@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &frontend_migration_paths
       - "package.json"
       - ".npmrc"
       - "bun.lock"
@@ -15,15 +15,7 @@ on:
       - ".github/workflows/frontend_migration_ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "package.json"
-      - ".npmrc"
-      - "bun.lock"
-      - "packages/frontend/package.json"
-      - "packages/frontend/drizzle.config.ts"
-      - "packages/frontend/scripts/check-migrations.ts"
-      - "packages/frontend/src/lib/db/**"
-      - ".github/workflows/frontend_migration_ci.yml"
+    paths: *frontend_migration_paths
 
 permissions:
   contents: read

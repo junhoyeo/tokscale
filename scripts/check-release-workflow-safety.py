@@ -217,6 +217,64 @@ def uncommented_lines(lines: list[str]) -> list[str]:
     return [line for line in lines if not line.lstrip().startswith("#")]
 
 
+def named_step_block(job_lines: list[str], step_name: str) -> list[str]:
+    lines = uncommented_lines(job_lines)
+    for index, line in enumerate(lines):
+        match = re.match(r"(\s*)-\s+name:\s*(.+?)\s*$", line)
+        if not match or strip_yaml_scalar(match.group(2)) != step_name:
+            continue
+
+        step_indent = len(match.group(1))
+        end = len(lines)
+        for child_index in range(index + 1, len(lines)):
+            child = strip_yaml_comment(lines[child_index])
+            if not child.strip():
+                continue
+            child_indent = len(child) - len(child.lstrip(" "))
+            if child_indent < step_indent or (
+                child_indent == step_indent and re.match(r"\s*-\s+", child)
+            ):
+                end = child_index
+                break
+        return lines[index:end]
+
+    return []
+
+
+def step_run_block(step_lines: list[str]) -> list[str]:
+    for index, line in enumerate(step_lines):
+        match = re.match(r"(\s*)run:\s*[|>][-+]?\s*$", strip_yaml_comment(line))
+        if not match:
+            continue
+
+        run_indent = len(match.group(1))
+        run_lines: list[str] = []
+        for child in step_lines[index + 1 :]:
+            content = strip_yaml_comment(child)
+            if not content.strip():
+                continue
+            child_indent = len(content) - len(content.lstrip(" "))
+            if child_indent <= run_indent:
+                break
+            run_lines.append(content.strip())
+        return run_lines
+
+    return []
+
+
+def step_has_property(step_lines: list[str], property_name: str) -> bool:
+    if not step_lines:
+        return False
+    match = re.match(r"(\s*)-\s+", step_lines[0])
+    if not match:
+        return False
+    property_indent = len(match.group(1)) + 2
+    return any(
+        re.match(rf"\s{{{property_indent}}}{re.escape(property_name)}:\s*", line)
+        for line in uncommented_lines(step_lines[1:])
+    )
+
+
 def yaml_list_scalars(lines: list[str]) -> set[str]:
     values: set[str] = set()
     for line in lines:
@@ -266,13 +324,28 @@ def main() -> None:
     errors: list[str] = []
 
     publish_bump = uncommented_lines(job_block(publish_lines, "bump-versions"))
-    default_branch_gate = (
+    default_branch_step = named_step_block(publish_bump, "Require the default branch")
+    default_branch_env = (
         "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
         "RELEASE_REF_NAME: ${{ github.ref_name }}",
         "RELEASE_REF_TYPE: ${{ github.ref_type }}",
-        'if [[ "$RELEASE_REF_TYPE" != "branch" || "$RELEASE_REF_NAME" != "$DEFAULT_BRANCH" ]]; then',
     )
-    if not all(block_contains(publish_bump, snippet) for snippet in default_branch_gate):
+    default_branch_env_block = mapping_block(default_branch_step, "env", 8)
+    default_branch_run = step_run_block(default_branch_step)
+    guard = 'if [[ "$RELEASE_REF_TYPE" != "branch" || "$RELEASE_REF_NAME" != "$DEFAULT_BRANCH" ]]; then'
+    try:
+        guard_index = default_branch_run.index(guard)
+        exit_index = default_branch_run.index("exit 1", guard_index + 1)
+        fi_index = default_branch_run.index("fi", exit_index + 1)
+        gate_aborts = guard_index == 0 and guard_index < exit_index < fi_index
+    except ValueError:
+        gate_aborts = False
+    if (
+        not all(block_contains(default_branch_env_block, snippet) for snippet in default_branch_env)
+        or step_has_property(default_branch_step, "if")
+        or step_has_property(default_branch_step, "continue-on-error")
+        or not gate_aborts
+    ):
         errors.append("publish workflow must reject non-default branch dispatches")
 
     native_env = top_level_env(native_lines)

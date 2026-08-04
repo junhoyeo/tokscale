@@ -4,18 +4,14 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &test_coverage_paths
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/test_coverage.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/test_coverage.yml'
+    paths: *test_coverage_paths
 
 env:
   CARGO_TERM_COLOR: always
@@ -102,9 +98,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: coverage-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: tests-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            coverage-${{ runner.os }}-cargo-
+            tests-${{ runner.os }}-cargo-
 
       # `--no-fail-fast` because cargo otherwise stops at the first test
       # binary that fails and never runs the rest. That is precisely how #997

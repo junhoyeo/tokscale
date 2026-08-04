@@ -4,16 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &python_bridge_paths
       - "scripts/9router_tokscale_bridge_gjc.py"
       - "scripts/test_9router_tokscale_bridge_gjc.py"
       - ".github/workflows/python_bridge_ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "scripts/9router_tokscale_bridge_gjc.py"
-      - "scripts/test_9router_tokscale_bridge_gjc.py"
-      - ".github/workflows/python_bridge_ci.yml"
+    paths: *python_bridge_paths
 
 permissions:
   contents: read

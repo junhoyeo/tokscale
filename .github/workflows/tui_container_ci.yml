@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &tui_container_paths
       - ".dockerignore"
       - "Dockerfile.tui"
+      - "Makefile"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
@@ -15,15 +16,7 @@ on:
       - ".github/workflows/tui_container_ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - ".dockerignore"
-      - "Dockerfile.tui"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "docker-compose.yml"
-      - "scripts/test-tui-mounts.sh"
-      - ".github/workflows/tui_container_ci.yml"
+    paths: *tui_container_paths
 
 permissions:
   contents: read
@@ -44,4 +37,7 @@ jobs:
         run: bash scripts/test-tui-mounts.sh
 
       - name: Build TUI image
-        run: docker build --file Dockerfile.tui --tag tokscale-tui:self-host-smoke .
+        run: make tui/build
+
+      - name: Smoke-test TUI image entrypoint
+        run: docker run --rm tokscale-tui:latest --no-spinner --help

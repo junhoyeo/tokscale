@@ -187,6 +187,77 @@ PY
   grep -q "publish workflow must reject non-default branch dispatches" "${output}"
 }
 
+test_rejects_default_branch_gate_without_failure() {
+  local work="${TMP_DIR}/non-failing-default-branch-gate"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace("            exit 1\n", "            echo rejected\n", 1)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/non-failing-default-branch-gate-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a non-failing default-branch gate" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must reject non-default branch dispatches" "${output}"
+}
+
+test_rejects_conditional_default_branch_gate_step() {
+  local work="${TMP_DIR}/conditional-default-branch-gate"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "      - name: Require the default branch\n",
+    "      - name: Require the default branch\n        if: false\n",
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/conditional-default-branch-gate-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a conditional default-branch gate" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must reject non-default branch dispatches" "${output}"
+}
+
+test_rejects_ignored_default_branch_gate_failure() {
+  local work="${TMP_DIR}/ignored-default-branch-gate"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "      - name: Require the default branch\n",
+    "      - name: Require the default branch\n        continue-on-error: true\n",
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/ignored-default-branch-gate-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject an ignored default-branch gate failure" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must reject non-default branch dispatches" "${output}"
+}
+
 test_accepts_workflows_without_android_platform() {
   local work="${TMP_DIR}/without-android"
   write_good_workflows "${work}"
@@ -683,6 +754,9 @@ PY
 
 test_accepts_matching_publish_and_native_workflows
 test_rejects_publish_without_default_branch_gate
+test_rejects_default_branch_gate_without_failure
+test_rejects_conditional_default_branch_gate_step
+test_rejects_ignored_default_branch_gate_failure
 test_accepts_workflows_without_android_platform
 test_accepts_yaml_comments_and_manifest_path_quote_styles
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
