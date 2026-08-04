@@ -68,6 +68,7 @@ vi.mock("@/lib/db/usernameLookup", () => ({
 }));
 vi.mock("drizzle-orm", () => ({ sql: state.sql }));
 let getLeaderboardData: (typeof import("../../src/lib/leaderboard/getLeaderboard"))["getLeaderboardData"];
+let getUserRank: (typeof import("../../src/lib/leaderboard/getLeaderboard"))["getUserRank"];
 function text(value: unknown): string {
   if (!value || typeof value !== "object") return String(value ?? "");
   const q = value as { strings?: string[]; values?: unknown[] };
@@ -84,7 +85,7 @@ function query() {
 }
 beforeAll(
   async () =>
-    ({ getLeaderboardData } =
+    ({ getLeaderboardData, getUserRank } =
       await import("../../src/lib/leaderboard/getLeaderboard")),
 );
 beforeEach(() => state.reset());
@@ -137,6 +138,65 @@ describe("all-time leaderboard aggregate query", () => {
     expect(query()).toContain("FROM (\n    SELECT s.user_id");
     expect(query()).toContain("AS stats");
     expect(query()).toContain("WHERE leaderboard_hidden = false");
+  });
+
+  it("aggregates duplicate submission rows into one ranked user before counting", async () => {
+    state.results.push([
+      {
+        users: [
+          {
+            rank: 1,
+            userId: "alice",
+            username: "alice",
+            displayName: null,
+            avatarUrl: null,
+            totalTokens: 300,
+            totalCost: 3,
+          },
+        ],
+        totalUsers: 1,
+        totalTokens: 300,
+        totalCost: 3,
+        uniqueUsers: 1,
+      },
+    ]);
+    const data = await getLeaderboardData("all");
+    expect(data).toMatchObject({
+      users: [{ username: "alice", rank: 1, totalTokens: 300 }],
+      pagination: { totalUsers: 1 },
+      stats: { uniqueUsers: 1 },
+    });
+    expect(query()).toContain("SUM(s.total_tokens) AS total_tokens");
+    expect(query()).toContain("GROUP BY s.user_id");
+    expect(query()).toContain("COUNT(*) FROM (");
+  });
+
+  it("returns one all-time user rank after aggregating that user's submissions", async () => {
+    state.results.push([
+      {
+        users: [
+          {
+            rank: 1,
+            userId: "alice",
+            username: "alice",
+            displayName: null,
+            avatarUrl: null,
+            totalTokens: 300,
+            totalCost: 3,
+          },
+        ],
+        totalUsers: 1,
+        totalTokens: 850,
+        totalCost: 10,
+        uniqueUsers: 3,
+      },
+    ]);
+    await expect(getUserRank("alice")).resolves.toMatchObject({
+      username: "alice",
+      rank: 1,
+      totalTokens: 300,
+    });
+    expect(query()).toContain("SUM(s.total_tokens) AS total_tokens");
   });
 
   it("does not interpret literal percent or underscore directives as wildcards", async () => {

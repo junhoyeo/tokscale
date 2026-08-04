@@ -298,16 +298,18 @@ async function fetchAllTimeLeaderboardData(
     : sql``;
   const globalStatsBase = sql`
     SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
-      s.total_tokens, CAST(s.total_cost AS DECIMAL(18,4)) AS total_cost
+      SUM(s.total_tokens) AS total_tokens, SUM(CAST(s.total_cost AS DECIMAL(18,4))) AS total_cost
     FROM submissions s
     INNER JOIN users u ON s.user_id = u.id
+    GROUP BY s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden
   `;
   const base = sql`
     SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
-      s.total_tokens, CAST(s.total_cost AS DECIMAL(18,4)) AS total_cost
+      SUM(s.total_tokens) AS total_tokens, SUM(CAST(s.total_cost AS DECIMAL(18,4))) AS total_cost
     FROM submissions s
     INNER JOIN users u ON s.user_id = u.id
     WHERE TRUE ${sourceFilter}
+    GROUP BY s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden
   `;
   const result = await db.execute<LeaderboardQueryResult>(
     resultQuery(
@@ -416,8 +418,9 @@ async function fetchUserRank(
   if (!user || user.leaderboardHidden) return null;
   const base = sql`
         SELECT s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden,
-          s.total_tokens, CAST(s.total_cost AS DECIMAL(18,4)) AS total_cost
+          SUM(s.total_tokens) AS total_tokens, SUM(CAST(s.total_cost AS DECIMAL(18,4))) AS total_cost
         FROM submissions s INNER JOIN users u ON s.user_id = u.id
+        GROUP BY s.user_id, u.username, u.display_name, u.avatar_url, u.leaderboard_hidden
       `;
   const result = await db.execute<LeaderboardQueryResult>(
     resultQuery(base, 1, 1, sortBy, "", false, user.username),
