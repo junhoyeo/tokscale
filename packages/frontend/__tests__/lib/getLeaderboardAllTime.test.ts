@@ -83,6 +83,12 @@ function text(value: unknown): string {
 function query() {
   return state.queries.map(text).join("\n");
 }
+function finalQuery() {
+  return text(state.queries.at(-1));
+}
+function occurrences(value: string, needle: string) {
+  return value.split(needle).length - 1;
+}
 beforeAll(
   async () =>
     ({ getLeaderboardData, getUserRank } =
@@ -138,6 +144,7 @@ describe("all-time leaderboard aggregate query", () => {
     expect(query()).toContain("FROM (\n    SELECT s.user_id");
     expect(query()).toContain("AS stats");
     expect(query()).toContain("WHERE leaderboard_hidden = false");
+    expect(occurrences(finalQuery(), "unnest(s.sources_used)")).toBe(1);
   });
 
   it("aggregates duplicate submission rows into one ranked user before counting", async () => {

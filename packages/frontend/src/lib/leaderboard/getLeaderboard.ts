@@ -200,12 +200,13 @@ function resultQuery(
   text: string,
   sequentialRanks: boolean,
   exactUsername?: string,
-  statsBase: ReturnType<typeof sql> = base,
+  statsBase?: ReturnType<typeof sql>,
 ): ReturnType<typeof sql> {
   const offset = (page - 1) * limit;
   const primary = sortBy === "cost" ? sql`total_cost` : sql`total_tokens`;
   const secondary = sortBy === "cost" ? sql`total_tokens` : sql`total_cost`;
   const search = userTextCondition(text);
+  const statSource = statsBase ? sql`(${statsBase}) AS stats` : sql`aggregated`;
   return sql`
     WITH aggregated AS (${base}),
     rankable AS (
@@ -226,9 +227,9 @@ function resultQuery(
     SELECT
       COALESCE((SELECT json_agg(json_build_object('rank', rank, 'userId', user_id, 'username', username, 'displayName', display_name, 'avatarUrl', avatar_url, 'totalTokens', total_tokens, 'totalCost', total_cost) ORDER BY rank ASC, ${secondary} DESC, LOWER(username) ASC, user_id ASC) FROM paged), '[]'::json) AS users,
       COALESCE((SELECT filtered_users FROM filtered LIMIT 1), 0)::int AS "totalUsers",
-      COALESCE((SELECT SUM(total_tokens) FROM (${statsBase}) AS stats), 0) AS "totalTokens",
-      COALESCE((SELECT SUM(total_cost) FROM (${statsBase}) AS stats), 0) AS "totalCost",
-      COALESCE((SELECT COUNT(*) FROM (${statsBase}) AS stats), 0)::int AS "uniqueUsers"
+      COALESCE((SELECT SUM(total_tokens) FROM ${statSource}), 0) AS "totalTokens",
+      COALESCE((SELECT SUM(total_cost) FROM ${statSource}), 0) AS "totalCost",
+      COALESCE((SELECT COUNT(*) FROM ${statSource}), 0)::int AS "uniqueUsers"
   `;
 }
 

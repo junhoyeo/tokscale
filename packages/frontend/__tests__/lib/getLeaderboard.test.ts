@@ -66,6 +66,9 @@ function text(value: unknown): string {
 function allSql() {
   return state.queries.map(text).join("\n");
 }
+function finalSql() {
+  return text(state.queries.at(-1));
+}
 function row(
   users: unknown,
   stats = { totalUsers: 0, totalTokens: 0, totalCost: 0, uniqueUsers: 0 },
@@ -105,6 +108,7 @@ describe("period leaderboard aggregate query", () => {
     );
     expect(query).toContain("LIMIT 1 OFFSET 1");
     expect(data.users).toMatchObject([{ username: "bravo", rank: 2 }]);
+    expect(finalSql().match(/FROM daily_breakdown/g)).toHaveLength(1);
   });
 
   it("keeps hidden users in totals while excluding them before rank and page", async () => {
