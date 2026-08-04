@@ -509,9 +509,8 @@ describe("POST /api/submit timezone re-split vs monotonic merge (#960)", () => {
     // Phase 4a records the unguarded observation for the moved day only. The
     // Seoul day is not written by this payload, but that does not establish it
     // as absent: an earlier observation for the cell could remain in the table.
-    // Assert on calendar-date binds only (`YYYY-MM-DD`), not on `reported_at`
-    // ISO timestamps that can collide with the fixture dates when the suite
-    // runs on that UTC day.
+    // Assert the exact calendar-date bind set separately from other string
+    // parameters such as the `reported_at` ISO timestamp.
     const shadowSqls = executedSqlArgs.filter((arg) => {
       const parts: string[] = [];
       collectStrings(arg, parts);

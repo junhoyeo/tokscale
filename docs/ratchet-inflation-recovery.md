@@ -321,10 +321,6 @@ value served is unchanged. In exchange:
   the recorded deltas agree within tolerance, for a stated share of users, over
   a stated window. "Coverage exists" is a much weaker claim than "the numbers
   match".
-- **Missing observations remain ambiguous.** The current per-cell LWW table
-  records only explicit reports; it cannot prove a missing cell was zeroed or
-  outside a partial scan.
-
 ### The table cannot be seeded from `daily_breakdown` — the warm-up is forced
 
 This is the part that makes dual mode mandatory rather than merely prudent, and
@@ -891,21 +887,25 @@ rows once authoritative snapshots exist.
 
 The census settled some of this. Revised standing:
 
-**Ship Phase 3 (pin the bucket key).** 197 of 650 measurable devices show
+**Phase 3 is shipped (pin the bucket key).** 197 of 650 measurable devices show
 inflation that scan windowing does not explain, so the mechanism is active and
 still producing new damage every time someone rescans from another zone. Phase 3
 is CLI-only, has no server dependency, and is the sole change that removes the
 cause rather than cleaning up after it. Nothing else here is worth doing first.
 
-**Ship Phase 1 (populate only).** Its justification is now stronger than when it
-was written, not weaker. The active-time census answered incidence but not
+**Phase 1 is shipped (populate only).** Its justification is now stronger than
+when it was written, not weaker. The active-time census answered incidence but not
 magnitude, because `total_active_time_ms` only exists on recent CLIs — the 650
 visible devices hold ~0.17% of site-wide tokens, so the accounts that actually
 matter are invisible to it. Phase 1 writes a per-device **token** high-water on
 every submit, which is the only way to measure that population. It reads
 nothing, so it cannot regress anything.
 
-**Phases 2, 4, 5 and 6 stay gated**, now on Phase 1's token census specifically
+**Phase 4a is shipped as inert telemetry only.** It records explicit per-cell
+observations, not authoritative scan snapshots. It cannot support zero-out or
+recovery until a future protocol supplies coverage plus generations/tombstones.
+
+**Phases 2, 4b, 5 and 6 stay gated**, now on Phase 1's token census specifically
 rather than on "a census" generally. Do not build them against the active-time
 numbers above; those are an incidence signal on an unrepresentative slice, not a
 magnitude estimate.
