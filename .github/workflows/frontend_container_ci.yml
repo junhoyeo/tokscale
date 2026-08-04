@@ -7,7 +7,6 @@ on:
     paths:
       - ".dockerignore"
       - "Dockerfile"
-      - ".npmrc"
       - "package.json"
       - "bun.lock"
       - "packages/*/package.json"
@@ -26,7 +25,6 @@ on:
     paths:
       - ".dockerignore"
       - "Dockerfile"
-      - ".npmrc"
       - "package.json"
       - "bun.lock"
       - "packages/*/package.json"

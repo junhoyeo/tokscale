@@ -7,7 +7,6 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".npmrc"
       - "packages/cli/package.json"
       - "packages/tokscale/package.json"
       - "packages/cli-*/package.json"
@@ -30,7 +29,6 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".npmrc"
       - "packages/cli/package.json"
       - "packages/tokscale/package.json"
       - "packages/cli-*/package.json"
