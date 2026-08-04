@@ -1,5 +1,5 @@
 import { getSession, getSessionFromHeader, type SessionUser } from "./session";
-import { getPublicOrigin } from "@/lib/seo/urls";
+import { getConfiguredPublicOrigin, getPublicOrigin } from "@/lib/seo/urls";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -13,12 +13,11 @@ function getAllowedOrigins(): string[] {
     ? env.split(",").map((o) => o.trim()).filter(Boolean)
     : [getPublicOrigin(), "http://localhost:3000"];
 
-  // Self-hosted deployments set APP_URL for OAuth redirects;
-  // the deployment's own origin is always a legitimate request source, so
-  // include it whether or not CSRF_ALLOWED_ORIGINS is configured.
-  const publicOrigin = getPublicOrigin();
-  if (!origins.includes(publicOrigin)) {
-    origins.push(publicOrigin);
+  // An explicit allowlist should not be widened by the hosted fallback. Add
+  // only an explicitly configured valid APP_URL in that mode.
+  const configuredOrigin = getConfiguredPublicOrigin();
+  if (configuredOrigin && !origins.includes(configuredOrigin)) {
+    origins.push(configuredOrigin);
   }
 
   return origins;

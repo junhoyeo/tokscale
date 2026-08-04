@@ -8,7 +8,6 @@ import { getSession } from '@/lib/auth/session';
 import { getModerationNotice } from '@/lib/moderation/notice';
 import ProfilePageClient, { type ProfileData } from './ProfilePageClient';
 
-export const revalidate = 60;
 export const dynamic = "force-dynamic";
 
 const PROFILE_PERIODS = ["all", "week", "month"] as const;

@@ -43,6 +43,15 @@ describe("getPublicOrigin", () => {
     expect(getPublicOrigin()).toBe("https://runtime.example");
   });
 
+  it("uses localhost by default for development and hosted origin for production", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.unstubAllEnvs();
+    vi.stubEnv("NODE_ENV", "development");
+    expect(getPublicOrigin()).toBe("http://localhost:3000");
+    vi.stubEnv("NODE_ENV", "production");
+    expect(getPublicOrigin()).toBe("https://tokscale.ai");
+  });
+
   it("keeps the frontend environment template aligned with the runtime resolver", () => {
     const template = readFileSync(resolve(__dirname, "../../.env.example"), "utf8");
     expect(template).toContain("APP_URL=http://localhost:3000");

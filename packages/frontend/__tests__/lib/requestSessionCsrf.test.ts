@@ -279,6 +279,22 @@ describe("getSessionFromRequest — CSRF origin check (B6)", () => {
     expect(rejected).toBeNull();
   });
 
+  it("does not append the hosted fallback to an explicit allowlist", async () => {
+    vi.stubEnv("APP_URL", "not-a-valid-url");
+    vi.stubEnv("CSRF_ALLOWED_ORIGINS", "https://other.example.com");
+    mockState.getSession.mockResolvedValue(validUser);
+
+    const hosted = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://tokscale.ai" })
+    );
+    expect(hosted).toBeNull();
+
+    const explicit = await getSessionFromRequest(
+      makeRequest("POST", { Origin: "https://other.example.com" })
+    );
+    expect(explicit).toEqual(validUser);
+  });
+
   it("ignores Authorization headers when bearer auth is disabled and still uses valid cookies", async () => {
     mockState.getSessionFromHeader.mockResolvedValue({
       id: "token-user",

@@ -10,14 +10,15 @@
  * redirect/CSRF origin resolver.
  */
 const HOSTED_ORIGIN = "https://tokscale.ai";
+const LOCAL_ORIGIN = "http://localhost:3000";
 
 /**
  * Resolve the public http(s) origin once for metadata, sitemap, OAuth and
  * CSRF. A path is intentionally discarded: Tokscale is deployed at an origin,
  * not below a reverse-proxy path prefix.
  */
-export function getPublicOrigin(value = process.env.APP_URL): string {
-  if (!value) return HOSTED_ORIGIN;
+export function getConfiguredPublicOrigin(value = process.env.APP_URL): string | undefined {
+  if (!value) return undefined;
 
   try {
     const url = new URL(value);
@@ -29,7 +30,12 @@ export function getPublicOrigin(value = process.env.APP_URL): string {
     // or invalid canonical URLs from a malformed environment value.
   }
 
-  return HOSTED_ORIGIN;
+  return undefined;
+}
+
+export function getPublicOrigin(value = process.env.APP_URL): string {
+  return getConfiguredPublicOrigin(value)
+    ?? (process.env.NODE_ENV === "development" ? LOCAL_ORIGIN : HOSTED_ORIGIN);
 }
 
 export const SITE_URL = getPublicOrigin();
