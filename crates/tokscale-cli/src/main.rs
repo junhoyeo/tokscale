@@ -5488,9 +5488,11 @@ fn report_unpriced_submission_exclusions(
     use colored::Colorize;
 
     for row in excluded {
-        let remaining_usage_message = has_remaining_usage
-            .then_some(" Remaining priced usage will be submitted.")
-            .unwrap_or_default();
+        let remaining_usage_message = if has_remaining_usage {
+            " Remaining priced usage will be submitted."
+        } else {
+            ""
+        };
         println!(
             "{}",
             format!(
