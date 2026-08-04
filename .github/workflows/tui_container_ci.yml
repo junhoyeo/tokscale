@@ -37,7 +37,7 @@ jobs:
         run: bash scripts/test-tui-mounts.sh
 
       - name: Build TUI image
-        run: make tui/build
+        run: make DOCKER=docker tui/build
 
       - name: Smoke-test TUI image entrypoint
         run: docker run --rm tokscale-tui:latest --no-spinner --help
