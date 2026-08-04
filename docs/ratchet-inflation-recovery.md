@@ -638,8 +638,9 @@ PRIMARY KEY (submitted_device_id, date, client)
 Last-write-wins, no `GREATEST`, no merge, no fold normalisation — each write
 records the latest explicit value for that one cell, which is the one thing the
 system currently throws away. This is a pure upsert alongside the existing
-write, inside the same transaction. It cannot regress anything, because nothing
-reads it.
+write, inside the same transaction. It cannot change served totals while nothing
+reads it, but it is still a mandatory transactional write and can affect submit
+availability if it fails.
 
 Sized at roughly one extra `daily_breakdown`, and bounded the same way: one row
 per device per day per client, overwritten rather than accumulated.
