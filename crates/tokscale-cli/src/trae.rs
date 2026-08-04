@@ -1462,11 +1462,11 @@ pub mod sync {
         // Liveness probe coverage moved to `crate::process_liveness`, which
         // now owns the single implementation both sync locks share.
 
-        /// A lock file left behind by a crashed run must not block anyone:
-        /// the kernel drops the lock when its owner dies, so the leftover
-        /// bytes are inert and the next sync takes the file over.
+        /// A visible lock record left behind by a crashed run fails closed.
+        /// The next sync preserves it until the user confirms no sync is
+        /// active and removes the exact reported path.
         #[test]
-        fn test_acquire_takes_over_a_lock_file_nobody_holds() {
+        fn test_acquire_refuses_a_lock_file_left_by_a_crashed_run() {
             let tmp = tempfile::tempdir().unwrap();
             let cache_dir = tmp.path();
             std::fs::write(cache_dir.join("sync.lock"), "0 1\n").unwrap();
