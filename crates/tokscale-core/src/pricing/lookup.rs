@@ -53,12 +53,22 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
 // opus-fast key, or `gemini-default` eroding to `gemini` and landing on a
 // native-audio preview key), so such a match is never trustworthy.
 //
-// Generic English words ("model", "router") are blocked for the same reason:
-// they carry no model identity, yet substring-match real priced keys
-// (`azure_ai/model_router`, `kilo/switchpoint/router`). Without this guard an
-// id whose only fuzzy-eligible remnant after suffix stripping is the word
-// `model` (e.g. `model-zero-usage-v1` -> stripped `model`) misprices at the
-// router key's rate. See `fuzzy_match_does_not_resolve_generic_model_token`.
+// Generic English words ("model", "router", "default") are blocked for the same
+// reason: they carry no model identity, yet substring-match real priced keys
+// (`azure_ai/model_router`, `kilo/switchpoint/router`, `fireworks-ai-default`).
+// Without this guard an id whose only fuzzy-eligible remnant after suffix
+// stripping is the word `model` (e.g. `model-zero-usage-v1` -> stripped
+// `model`) misprices at the router key's rate. See
+// `fuzzy_match_does_not_resolve_generic_model_token`.
+//
+// `default` is the same failure with a live victim: the generic routing label
+// `gemini-default` strips to `default`, which fuzzy-hits LiteLLM's real
+// `fireworks-ai-default` row. That row prices at 0.0/0.0, and
+// `ModelPricing::covers_usage` treats an explicit zero as a real rate, so the
+// label looked *priced* — enough to slip past
+// `exclude_generic_unpriced_submission_messages` and be submitted at
+// Fireworks AI's rates. A Google routing label is not a Fireworks model.
+// See `fuzzy_match_does_not_resolve_generic_default_token`.
 const FUZZY_BLOCKLIST: &[&str] = &[
     "auto",
     "mini",
@@ -69,6 +79,7 @@ const FUZZY_BLOCKLIST: &[&str] = &[
     "gemini",
     "model",
     "router",
+    "default",
 ];
 
 const MAX_LOOKUP_CACHE_ENTRIES: usize = 512;
@@ -3281,6 +3292,81 @@ mod tests {
         assert_eq!(
             lookup2.lookup("model-router").unwrap().matched_key,
             "azure/model-router"
+        );
+    }
+
+    // Regression: `gemini-default` is a generic routing label — it names which
+    // router served the request, never which model did — so it must stay
+    // unpriced and be excluded from submission. Its fuzzy-eligible remnant
+    // after prefix stripping is the bare word `default`, which substring-hits
+    // LiteLLM's real `fireworks-ai-default` row.
+    //
+    // That row is priced 0.0/0.0, and `covers_usage` counts an explicit zero as
+    // a real rate, so before `default` joined the FUZZY_BLOCKLIST the label
+    // looked priced and `exclude_generic_unpriced_submission_messages` let it
+    // through — a Google routing label submitted at Fireworks AI's rates.
+    // Verified against the live LiteLLM dataset: `fireworks-ai-default` is a
+    // real key with input and output cost 0.0.
+    #[test]
+    fn fuzzy_match_does_not_resolve_generic_default_token() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "fireworks-ai-default".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        // The bare token must not resolve.
+        assert!(lookup.lookup("default").is_none());
+        // Nor the routing label that strips down to it, with or without the
+        // provider hint the submission path passes.
+        assert!(lookup.lookup("gemini-default").is_none());
+        assert!(lookup
+            .lookup_with_provider("gemini-default", Some("google"))
+            .is_none());
+
+        // But an EXACT key match is still honored — `fireworks-ai-default` is a
+        // real id in the dataset, not a fuzzy remnant.
+        assert_eq!(
+            lookup.lookup("fireworks-ai-default").unwrap().matched_key,
+            "fireworks-ai-default"
+        );
+    }
+
+    // The blocklist is consulted with the *query* remnant, so blocking
+    // `default` must not stop a query from matching INTO a dataset key that
+    // merely ends in `@default`. LiteLLM ships seven of those
+    // (`vertex_ai/claude-*@default`), and they are ordinary priced models.
+    #[test]
+    fn blocking_the_default_token_still_matches_vertex_default_suffixed_keys() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "vertex_ai/claude-opus-4-7@default".into(),
+            ModelPricing {
+                input_cost_per_token: Some(5e-06),
+                output_cost_per_token: Some(2.5e-05),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        assert_eq!(
+            lookup
+                .lookup("vertex_ai/claude-opus-4-7@default")
+                .unwrap()
+                .matched_key,
+            "vertex_ai/claude-opus-4-7@default"
+        );
+        assert_eq!(
+            lookup
+                .lookup("claude-opus-4-7@default")
+                .unwrap()
+                .matched_key,
+            "vertex_ai/claude-opus-4-7@default"
         );
     }
 
