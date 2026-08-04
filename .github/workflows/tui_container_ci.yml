@@ -1,0 +1,47 @@
+name: TUI Container CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".dockerignore"
+      - "Dockerfile.tui"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "docker-compose.yml"
+      - "scripts/test-tui-mounts.sh"
+      - ".github/workflows/tui_container_ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".dockerignore"
+      - "Dockerfile.tui"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "docker-compose.yml"
+      - "scripts/test-tui-mounts.sh"
+      - ".github/workflows/tui_container_ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tui-container-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tui-container:
+    name: TUI Container
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Verify TUI default mount safety
+        run: bash scripts/test-tui-mounts.sh
+
+      - name: Build TUI image
+        run: docker build --file Dockerfile.tui --tag tokscale-tui:self-host-smoke .

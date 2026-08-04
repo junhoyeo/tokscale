@@ -3,43 +3,34 @@ name: Test & Coverage
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'packages/cli/package.json'
-      - 'packages/tokscale/package.json'
-      - 'packages/cli-*/package.json'
-      - 'scripts/*.sh'
-      - 'scripts/*.py'
-      - '.github/workflows/build-native.yml'
-      - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'packages/cli/package.json'
-      - 'packages/tokscale/package.json'
-      - 'packages/cli-*/package.json'
-      - 'scripts/*.sh'
-      - 'scripts/*.py'
-      - '.github/workflows/build-native.yml'
-      - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
 
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
+concurrency:
+  group: test-coverage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -47,15 +38,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Verify version coherence
-        run: bash scripts/check-version-coherence.sh
-      - name: Run release helper tests
-        run: |
-          bash scripts/test-calculate-release-version.sh
-          bash scripts/test-check-version-coherence.sh
-          bash scripts/test-npm-release-state.sh
-          bash scripts/test-prepare-release-provenance.sh
-          bash scripts/test-release-workflow-safety.sh
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
@@ -91,8 +73,8 @@ jobs:
   #
   # This must not become permanent: an advisory job nobody reads is how #997
   # happened. Flip `continue-on-error` off as soon as #1014 closes.
-  coverage:
-    name: Code Coverage
+  tests:
+    name: Tests
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
@@ -104,8 +86,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
 
-    permissions:
-      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -134,12 +114,37 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features --no-fail-fast
 
+  coverage:
+    name: Coverage Report
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: coverage-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            coverage-${{ runner.os }}-cargo-
+
       - name: Install cargo-tarpaulin
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage report
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           cargo tarpaulin \
             --workspace \
@@ -151,10 +156,9 @@ jobs:
             --verbose
 
       - name: Extract coverage percentage
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         id: coverage
         run: |
-          COVERAGE=$(cat ./coverage/tarpaulin-report.json | jq -r '
+          COVERAGE=$(jq -r '
             [.files[]] |
             (map(.covered) | add) as $total_covered |
             (map(.coverable) | add) as $total_coverable |
@@ -163,29 +167,27 @@ jobs:
             else
               0
             end
-          ')
-          COVERAGE_INT=$(printf "%.0f" $COVERAGE)
-          echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
-          echo "percentage_int=$COVERAGE_INT" >> $GITHUB_OUTPUT
+          ' ./coverage/tarpaulin-report.json)
+          COVERAGE_INT=$(printf "%.0f" "$COVERAGE")
+          echo "percentage=$COVERAGE" >> "$GITHUB_OUTPUT"
+          echo "percentage_int=$COVERAGE_INT" >> "$GITHUB_OUTPUT"
           echo "Coverage: $COVERAGE%"
           
           # Determine badge color
-          if [ $COVERAGE_INT -gt 80 ]; then
-            echo "color=green" >> $GITHUB_OUTPUT
-          elif [ $COVERAGE_INT -gt 60 ]; then
-            echo "color=yellow" >> $GITHUB_OUTPUT
-          elif [ $COVERAGE_INT -gt 40 ]; then
-            echo "color=orange" >> $GITHUB_OUTPUT
+          if [ "$COVERAGE_INT" -gt 80 ]; then
+            echo "color=green" >> "$GITHUB_OUTPUT"
+          elif [ "$COVERAGE_INT" -gt 60 ]; then
+            echo "color=yellow" >> "$GITHUB_OUTPUT"
+          elif [ "$COVERAGE_INT" -gt 40 ]; then
+            echo "color=orange" >> "$GITHUB_OUTPUT"
           else
-            echo "color=red" >> $GITHUB_OUTPUT
+            echo "color=red" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create badges directory
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: mkdir -p .github/badges
 
       - name: Generate coverage badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: emibcn/badge-action@v2.0.4
         with:
           label: 'coverage'
@@ -194,14 +196,13 @@ jobs:
           path: .github/badges/coverage.svg
 
       - name: Commit coverage badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add .github/badges/coverage.svg
           git diff --staged --quiet && exit 0
           git commit -m "ci: update coverage badge [skip ci]"
-          for i in 1 2 3; do
+          for _ in 1 2 3; do
             git push && exit 0
             git pull --rebase -X theirs origin main || exit 1
           done
@@ -209,7 +210,7 @@ jobs:
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v6
-        if: "!cancelled() && matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
+        if: "!cancelled()"
         with:
           name: coverage-report
           path: ./coverage/

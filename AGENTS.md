@@ -197,7 +197,7 @@ Release version is stored in the Rust workspace and the npm package manifests, a
 
 ### CI-Only Workflow
 
-**`.github/workflows/build-native.yml`** — Runs on PRs touching `crates/tokscale-cli/**`. Builds all 8 native targets to verify compilation. Does not publish.
+**`.github/workflows/build-native.yml`** — Runs on PRs that affect the Rust workspace, CLI platform manifests, or native build workflow. Builds the configured native target matrix to verify compilation. Does not publish.
 
 ---
 

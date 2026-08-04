@@ -1,0 +1,80 @@
+name: Frontend Container CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".dockerignore"
+      - "Dockerfile"
+      - ".npmrc"
+      - "package.json"
+      - "bun.lock"
+      - "packages/*/package.json"
+      - "packages/frontend/**"
+      - "!packages/frontend/**/*.md"
+      - "!packages/frontend/**/*.test.ts"
+      - "!packages/frontend/**/*.spec.ts"
+      - "!packages/frontend/__tests__/**"
+      - "docker-compose.yml"
+      - "docker-compose.external-db.yml"
+      - "docker-entrypoint.sh"
+      - "scripts/test-self-host-runtime.sh"
+      - ".github/workflows/frontend_container_ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".dockerignore"
+      - "Dockerfile"
+      - ".npmrc"
+      - "package.json"
+      - "bun.lock"
+      - "packages/*/package.json"
+      - "packages/frontend/**"
+      - "!packages/frontend/**/*.md"
+      - "!packages/frontend/**/*.test.ts"
+      - "!packages/frontend/**/*.spec.ts"
+      - "!packages/frontend/__tests__/**"
+      - "docker-compose.yml"
+      - "docker-compose.external-db.yml"
+      - "docker-entrypoint.sh"
+      - "scripts/test-self-host-runtime.sh"
+      - ".github/workflows/frontend_container_ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-container-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend-container:
+    name: Frontend Container
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build and smoke-test self-hosted frontend image
+        run: |
+          set -euo pipefail
+          trap 'docker compose logs --no-color || true; docker compose down -v || true' EXIT
+          docker build --tag tokscale:latest .
+          APP_URL=http://runtime.example docker compose up -d
+          for _ in {1..30}; do
+            if curl --fail --silent --show-error http://localhost:3333/ >/dev/null; then
+              docker compose restart app
+              for _ in {1..30}; do
+                if curl --fail --silent --show-error http://localhost:3333/ >/dev/null; then
+                  bash scripts/test-self-host-runtime.sh http://localhost:3333 http://runtime.example
+                  APP_URL=https://runtime.example DATABASE_URL=postgresql://example.invalid/tokscale docker compose -f docker-compose.external-db.yml config -q
+                  exit 0
+                fi
+                sleep 2
+              done
+              exit 1
+            fi
+            sleep 2
+          done
+          exit 1

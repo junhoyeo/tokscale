@@ -265,6 +265,16 @@ def main() -> None:
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
     errors: list[str] = []
 
+    publish_bump = uncommented_lines(job_block(publish_lines, "bump-versions"))
+    default_branch_gate = (
+        "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+        "RELEASE_REF_NAME: ${{ github.ref_name }}",
+        "RELEASE_REF_TYPE: ${{ github.ref_type }}",
+        'if [[ "$RELEASE_REF_TYPE" != "branch" || "$RELEASE_REF_NAME" != "$DEFAULT_BRANCH" ]]; then',
+    )
+    if not all(block_contains(publish_bump, snippet) for snippet in default_branch_gate):
+        errors.append("publish workflow must reject non-default branch dispatches")
+
     native_env = top_level_env(native_lines)
     for key in REQUIRED_ENV_KEYS:
         if key not in native_env:

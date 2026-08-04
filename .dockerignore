@@ -13,6 +13,7 @@ target/
 # Test and dev files
 **/*.test.ts
 **/*.spec.ts
+**/__tests__/
 **/coverage/
 **/.nyc_output/
 

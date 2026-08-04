@@ -105,6 +105,17 @@ EOF_YAML
 name: Publish
 
 jobs:
+  bump-versions:
+    steps:
+      - name: Require the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [[ "$RELEASE_REF_TYPE" != "branch" || "$RELEASE_REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+            exit 1
+          fi
   build-cli-binary:
     needs: bump-versions
     uses: ./.github/workflows/build-native.yml
@@ -149,6 +160,31 @@ test_accepts_matching_publish_and_native_workflows() {
   )
 
   grep -q "Release workflow safety OK" "${TMP_DIR}/good-output.txt"
+}
+
+test_rejects_publish_without_default_branch_gate() {
+  local work="${TMP_DIR}/missing-default-branch-gate"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}\n",
+    "",
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-default-branch-gate-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a missing default-branch gate" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must reject non-default branch dispatches" "${output}"
 }
 
 test_accepts_workflows_without_android_platform() {
@@ -646,6 +682,7 @@ PY
 }
 
 test_accepts_matching_publish_and_native_workflows
+test_rejects_publish_without_default_branch_gate
 test_accepts_workflows_without_android_platform
 test_accepts_yaml_comments_and_manifest_path_quote_styles
 test_reads_workflows_as_utf8_when_locale_is_non_utf8

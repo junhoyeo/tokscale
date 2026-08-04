@@ -23,7 +23,7 @@ Prerequisites: a stable Rust toolchain (`rustup` recommended) and [Bun](https://
 
 Run `make help` for the full target list.
 
-CI runs format, Clippy, and Rust tests on Linux, then builds the supported release targets separately. Frontend CI runs Vitest, migration replay, and the type check; it also runs when `crates/tokscale-core/src/clients.rs` or a GitHub CDN asset changes, so cross-registry client checks cannot be skipped by a Rust-only integration PR. A clean local `cargo fmt`, `cargo clippy`, and `cargo test` is the baseline for a reviewable PR.
+CI routes changes to the smallest relevant checks: Rust format, Clippy, and tests; release-script validation; frontend tests and migration replay; package launcher smoke tests; Python bridge tests; and separate self-hosted frontend/TUI container builds. A clean local `cargo fmt`, `cargo clippy`, and `cargo test` is the baseline for a reviewable Rust PR.
 
 ## Repository layout
 

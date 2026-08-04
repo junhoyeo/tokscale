@@ -1,0 +1,42 @@
+name: Python Bridge CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/9router_tokscale_bridge_gjc.py"
+      - "scripts/test_9router_tokscale_bridge_gjc.py"
+      - ".github/workflows/python_bridge_ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/9router_tokscale_bridge_gjc.py"
+      - "scripts/test_9router_tokscale_bridge_gjc.py"
+      - ".github/workflows/python_bridge_ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-bridge-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bridge-tests:
+    name: Python Bridge Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependency
+        run: python -m pip install pytest
+
+      - name: Run bridge tests
+        run: python -m pytest scripts/test_9router_tokscale_bridge_gjc.py
